@@ -1,0 +1,20 @@
+{
+	"compilerOptions": {
+		"allowSyntheticDefaultImports": true,
+		"downlevelIteration": true,
+		"jsx": "react",
+		"jsxFactory": "Roact.createElement",
+		"jsxFragmentFactory": "Roact.Fragment",
+		"experimentalDecorators": true,
+		"module": "commonjs",
+		"moduleResolution": "Node",
+		"noLib": true,
+		"resolveJsonModule": true,
+		"strict": true,
+		"target": "ESNext",
+		"stripInternal": true,
+		"moduleDetection": "force",
+		"incremental": false,
+		"declaration": true,
+	}
+}

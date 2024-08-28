@@ -1,0 +1,22 @@
+*.tsbuildinfo
+*.tgz
+**/node_modules
+**/out
+/include
+flamework.build
+
+# Nx
+.nx/cache
+.nx/workspace-data
+
+# Copied prior to publishing
+packages/*/README.md
+
+# Yarn
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions

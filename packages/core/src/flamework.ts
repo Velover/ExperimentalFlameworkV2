@@ -1,0 +1,58 @@
+import { t } from "@rbxts/t";
+import { Modding } from "./modding";
+import { Reflect } from "./reflect";
+import { AbstractConstructor, IntrinsicSymbolId } from "./utility/constructors";
+import { ModuleBuilder } from "./module/moduleBuilder";
+
+export namespace Flamework {
+	export function createModule() {
+		return new ModuleBuilder();
+	}
+
+	/** @hidden */
+	export function _implements<T>(object: unknown, id: string): object is T {
+		return Reflect.getMetadatas<string[]>(object as object, "flamework:implements").some((impl) =>
+			impl.includes(id),
+		);
+	}
+
+	/**
+	 * Retrieve the identifier for the specified type.
+	 *
+	 * @metadata macro {@link id intrinsic-inline}
+	 */
+	export declare function id<T>(id?: IntrinsicSymbolId<T>): string;
+
+	/**
+	 * Check if the constructor implements the specified interface.
+	 *
+	 * @metadata macro {@link _implements intrinsic-flamework-rewrite}
+	 */
+	export declare function implements<T>(object: AbstractConstructor, id?: IntrinsicSymbolId<T>): boolean;
+
+	/**
+	 * Check if object implements the specified interface.
+	 *
+	 * @metadata macro {@link _implements intrinsic-flamework-rewrite}
+	 */
+	export declare function implements<T>(object: unknown, id?: IntrinsicSymbolId<T>): object is T;
+
+	/**
+	 * Hash a function using the method used internally by Flamework.
+	 * If a context is provided, then Flamework will create a new hash
+	 * if the specified string does not have one in that context.
+	 * @param str The string to hash
+	 * @param context A scope for the hash
+	 * @metadata macro {@link meta intrinsic-inline}
+	 */
+	export declare function hash<T extends string, C extends string = never>(meta?: Modding.Hash<T, C>): string;
+
+	/**
+	 * Creates a type guard from any arbitrary type.
+	 *
+	 * @metadata macro
+	 */
+	export function createGuard<T>(meta?: Modding.Generic<T, "guard">): t.check<T> {
+		return meta!;
+	}
+}

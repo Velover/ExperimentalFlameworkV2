@@ -1,0 +1,25 @@
+{
+	"$schema": "./node_modules/nx/schemas/nx-schema.json",
+	"defaultBase": "master",
+	"targetDefaults": {
+		"build": {
+			"dependsOn": [
+				"^build"
+			]
+		}
+	},
+	"plugins": [
+		{
+			"plugin": "@nx/eslint/plugin",
+			"options": {
+				"targetName": "lint"
+			}
+		}
+	],
+	"release": {
+		"projects": ["packages/*"],
+		"version": {
+			"preVersionCommand": "yarn run prepare:publish"
+		}
+	}
+}

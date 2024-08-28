@@ -1,0 +1,33 @@
+{
+  "name": "@flamework/components",
+  "version": "2.0.0-alpha.0",
+  "main": "out/init.lua",
+  "types": "out/index.d.ts",
+  "scripts": {
+    "prepare": "rbxtsc",
+    "build": "rbxtsc",
+    "watch": "rbxtsc -w"
+  },
+  "files": [
+    "out",
+    "flamework.build"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@flamework/core": "*"
+  },
+  "devDependencies": {
+    "@flamework/core": "workspace:packages/core",
+    "@rbxts/compiler-types": "^2.2.0-types.0",
+    "@rbxts/types": "^1.0.662",
+    "rbxts-transformer-flamework": "workspace:packages/transformer"
+  },
+  "dependencies": {
+    "@rbxts/maid": "^1.0.0-ts.1",
+    "@rbxts/services": "^1.1.5",
+    "@rbxts/signal": "^1.0.3",
+    "@rbxts/t": "^2.1.4"
+  }
+}

@@ -1,0 +1,658 @@
+import { Flamework, OnStart, Provider, Reflect } from "@flamework/core";
+import {
+	CollectionService,
+	ReplicatedStorage,
+	RunService,
+	ServerStorage,
+	StarterGui,
+	StarterPack,
+	StarterPlayer,
+} from "@rbxts/services";
+import { t } from "@rbxts/t";
+import { BaseComponent, ComponentMetadata, SYMBOL_ATTRIBUTE_HANDLERS } from "./baseComponent";
+import { ComponentTracker } from "./componentTracker";
+import {
+	AbstractConstructor,
+	AbstractConstructorRef,
+	Constructor,
+	ConstructorRef,
+	getIdFromSpecifier,
+	getParentConstructor,
+	safeCall,
+} from "./utility";
+import Maid from "@rbxts/maid";
+import Signal from "@rbxts/signal";
+import type { ComponentModuleConfig } from "./componentModule";
+import { ComponentStreamingMode, type ComponentConfig } from "./decorator";
+import type { Module } from "@flamework/core/out/module/module";
+
+interface ComponentInfo {
+	ctor: Constructor<BaseComponent>;
+	componentDependencies: Constructor[];
+	identifier: string;
+	config: ComponentConfig;
+	polymorphicIds: string[];
+}
+
+const DEFAULT_ANCESTOR_BLACKLIST = [ServerStorage, ReplicatedStorage, StarterPack, StarterGui, StarterPlayer];
+
+/**
+ * This class is responsible for loading and managing
+ * all components in the game.
+ */
+@Provider()
+export class Components {
+	private components = new Map<Constructor, ComponentInfo>();
+	private classParentCache = new Map<AbstractConstructor, readonly AbstractConstructor[]>();
+
+	private activeComponents = new Map<Instance, Map<unknown, BaseComponent>>();
+	private activeInheritedComponents = new Map<Instance, Map<string, Set<BaseComponent>>>();
+	private reverseComponentsMapping = new Map<string, Set<BaseComponent>>();
+
+	private trackers = new Map<Constructor, ComponentTracker>();
+	private componentWaiters = new Map<Instance, Map<Constructor, Set<(value: unknown) => void>>>();
+	private componentCleanup = new Map<BaseComponent, Maid>();
+
+	private componentAddedListeners = new Map<string, Signal<(value: never, instance: Instance) => void>>();
+	private componentRemovedListeners = new Map<string, Signal<(value: never, instance: Instance) => void>>();
+
+	private module!: Module;
+	private componentsIdMapping;
+
+	private getComponentsIdMapping() {
+		const mapping = new Map<string, Constructor>();
+		for (const component of this.config.components) {
+			mapping.set(Reflect.getMetadata(component, "identifier")!, component);
+		}
+		return mapping;
+	}
+
+	constructor(private config: ComponentModuleConfig) {
+		const components = new Map<Constructor, ComponentInfo>();
+
+		this.componentsIdMapping = this.getComponentsIdMapping();
+		this.components = components;
+
+		for (const ctor of config.components) {
+			if (ctor === undefined) {
+				continue;
+			}
+
+			const identifier = Reflect.getMetadata<string>(ctor, "identifier")!;
+			const componentDependencies = new Array<Constructor>();
+			const parameters = Reflect.getMetadata<string[]>(ctor, "flamework:parameters");
+			if (parameters) {
+				for (const dependency of parameters) {
+					const object = this.componentsIdMapping.get(dependency);
+					if (object !== undefined) {
+						componentDependencies.push(object);
+					}
+				}
+			}
+
+			const componentConfig = Reflect.getMetadata<ComponentConfig>(ctor, "flamework:componentConfig");
+			components.set(ctor, {
+				ctor: ctor as Constructor<BaseComponent>,
+				config: componentConfig || {},
+				polymorphicIds: this.getPolymorphicIds(ctor),
+				componentDependencies,
+				identifier,
+			});
+		}
+	}
+
+	/** @internal */
+	public parentPostIgnite(module: Module) {
+		this.module = module;
+
+		for (const [, { config, ctor }] of this.components) {
+			const ancestorBlacklist = config.ancestorBlacklist ?? DEFAULT_ANCESTOR_BLACKLIST;
+			const ancestorWhitelist = config.ancestorWhitelist;
+
+			if (config.tag !== undefined) {
+				const tracker = this.getComponentTracker(ctor);
+				const predicate = this.getConfigValue(ctor, "predicate");
+
+				const listener = (isQualified: boolean, instance: Instance) => {
+					if (isQualified) {
+						this.addComponent(instance, ctor, true);
+					} else {
+						this.removeComponent(instance, ctor);
+					}
+				};
+
+				const instanceAdded = (instance: Instance) => {
+					if (predicate !== undefined && !predicate(instance)) {
+						return;
+					}
+
+					const isWhitelisted = ancestorWhitelist?.some((ancestor) => instance.IsDescendantOf(ancestor));
+					if (isWhitelisted === false) return;
+
+					const isBlacklisted = ancestorBlacklist.some((ancestor) => instance.IsDescendantOf(ancestor));
+					if (isBlacklisted && isWhitelisted === undefined) return;
+
+					tracker.trackInstance(instance, listener);
+					tracker.setHasTag(instance, true);
+				};
+
+				CollectionService.GetInstanceAddedSignal(config.tag).Connect(instanceAdded);
+				CollectionService.GetInstanceRemovedSignal(config.tag).Connect((instance) => {
+					tracker.untrackInstance(instance, listener);
+					tracker.setHasTag(instance, false);
+					this.removeComponent(instance, ctor);
+				});
+
+				for (const instance of CollectionService.GetTagged(config.tag)) {
+					safeCall(
+						[`[Flamework] Failed to instantiate '${ctor}' for`, instance, `[${instance.GetFullName()}]`],
+						() => instanceAdded(instance),
+						false,
+					);
+				}
+			}
+		}
+	}
+
+	private getComponentTracker(component: Constructor) {
+		const existingTracker = this.trackers.get(component);
+		if (existingTracker) return existingTracker;
+
+		const componentInfo = this.components.get(component);
+		assert(componentInfo, "Provided component does not exist");
+
+		const instanceGuard = this.getConfigValue(component, "instanceGuard");
+		const dependencies = new Array<ComponentTracker>();
+
+		for (const dependency of componentInfo.componentDependencies) {
+			dependencies.push(this.getComponentTracker(dependency));
+		}
+
+		const streamingMode = componentInfo.config.streamingMode ?? ComponentStreamingMode.Default;
+		const tracker = new ComponentTracker(componentInfo.identifier, {
+			tag: componentInfo.config.tag,
+			typeGuard: instanceGuard,
+			typeGuardPoll:
+				(streamingMode === ComponentStreamingMode.Contextual && RunService.IsClient()) ||
+				streamingMode === ComponentStreamingMode.Watching,
+			typeGuardPollAtomic: streamingMode !== ComponentStreamingMode.Contextual,
+			warningTimeout: componentInfo.config.warningTimeout,
+			dependencies,
+		});
+
+		this.trackers.set(component, tracker);
+		return tracker;
+	}
+
+	private getOrderedParents(ctor: AbstractConstructor, omitBaseComponent = true) {
+		const cache = this.classParentCache.get(ctor);
+		if (cache) return cache;
+
+		const classes = [ctor];
+		let nextParent: AbstractConstructor | undefined = ctor;
+		while ((nextParent = getParentConstructor(nextParent)) !== undefined) {
+			if (!omitBaseComponent || nextParent !== BaseComponent) {
+				classes.push(nextParent);
+			}
+		}
+
+		this.classParentCache.set(ctor, classes);
+		return classes;
+	}
+
+	private getAttributeGuards(ctor: AbstractConstructor) {
+		const attributes = new Map<string, t.check<unknown>>();
+		const metadata = this.components.get(ctor as Constructor);
+		if (metadata) {
+			if (metadata.config.attributes !== undefined) {
+				for (const [attribute, guard] of pairs(metadata.config.attributes)) {
+					attributes.set(attribute as string, guard);
+				}
+			}
+			const parentCtor = getmetatable(ctor) as { __index?: AbstractConstructor };
+			if (parentCtor.__index !== undefined) {
+				for (const [attribute, guard] of this.getAttributeGuards(parentCtor.__index)) {
+					if (!attributes.has(attribute)) {
+						attributes.set(attribute, guard);
+					}
+				}
+			}
+		}
+		return attributes;
+	}
+
+	private getAttributes(instance: Instance, componentInfo: ComponentInfo, guards: Map<string, t.check<unknown>>) {
+		const attributes = instance.GetAttributes() as Map<string, unknown>;
+		const newAttributes = new Map<string, unknown>();
+		const defaults = this.getConfigValue(componentInfo.ctor, "defaults");
+
+		for (const [key, guard] of pairs(guards)) {
+			const attribute = attributes.get(key);
+			if (!guard(attribute)) {
+				if (defaults?.[key] !== undefined) {
+					newAttributes.set(key, defaults[key]);
+					instance.SetAttribute(key, defaults[key] as never);
+				} else {
+					throw `${instance.GetFullName()} has invalid attribute '${key}' for '${componentInfo.identifier}'`;
+				}
+			} else {
+				newAttributes.set(key, attribute);
+			}
+		}
+
+		return newAttributes;
+	}
+
+	private getConfigValue<T extends keyof ComponentConfig>(ctor: AbstractConstructor, key: T): ComponentConfig[T] {
+		const metadata = this.components.get(ctor as Constructor);
+		if (metadata) {
+			if (metadata.config[key] !== undefined) {
+				return metadata.config[key];
+			}
+			const parentCtor = getmetatable(ctor) as { __index?: AbstractConstructor };
+			if (parentCtor.__index !== undefined) {
+				return this.getConfigValue(parentCtor.__index, key);
+			}
+		}
+	}
+
+	private setupComponent(
+		instance: Instance,
+		attributes: Map<string, unknown>,
+		component: BaseComponent,
+		{ ctor }: ComponentInfo,
+	) {
+		if (Flamework.implements<OnStart>(component)) {
+			safeCall(
+				[`[Flamework] Component '${ctor}' failed to start for`, instance, `[${instance.GetFullName()}]`],
+				() => component.onStart(),
+			);
+		}
+
+		const maid = new Maid();
+		this.componentCleanup.set(component, maid);
+
+		const refreshAttributes = this.getConfigValue(ctor, "refreshAttributes");
+		if (refreshAttributes === undefined || refreshAttributes) {
+			const attributeCache = table.clone(attributes);
+			const attributeGuards = this.getAttributeGuards(ctor);
+			for (const [attribute, guard] of pairs(attributeGuards)) {
+				if (typeIs(attribute, "string")) {
+					maid.GiveTask(
+						instance.GetAttributeChangedSignal(attribute).Connect(() => {
+							const signal = component[SYMBOL_ATTRIBUTE_HANDLERS].get(attribute);
+							const value = instance.GetAttribute(attribute);
+							const attributes = component.attributes as Map<string, unknown>;
+							if (guard(value)) {
+								attributes.set(attribute, value);
+								signal?.Fire(value, attributeCache.get(attribute));
+								attributeCache.set(attribute, value);
+							}
+						}),
+					);
+				}
+			}
+		}
+
+		const instanceWaiters = this.componentWaiters.get(instance);
+		const componentWaiters = instanceWaiters?.get(ctor);
+		if (componentWaiters) {
+			instanceWaiters!.delete(ctor);
+
+			if (instanceWaiters!.size() === 0) {
+				this.componentWaiters.delete(instance);
+			}
+
+			for (const waiter of componentWaiters) {
+				waiter(component);
+			}
+		}
+	}
+
+	private addIdMapping(value: BaseComponent, id: string, inheritedComponents: Map<string, Set<BaseComponent>>) {
+		let instances = inheritedComponents.get(id);
+		if (!instances) inheritedComponents.set(id, (instances = new Set()));
+
+		let inheritedLookup = this.reverseComponentsMapping.get(id);
+		if (!inheritedLookup) this.reverseComponentsMapping.set(id, (inheritedLookup = new Set()));
+
+		instances.add(value);
+		inheritedLookup.add(value);
+	}
+
+	private removeIdMapping(instance: Instance, value: BaseComponent, id: string) {
+		const inheritedComponents = this.activeInheritedComponents.get(instance);
+		if (!inheritedComponents) return;
+
+		const instances = inheritedComponents.get(id);
+		if (!instances) return;
+
+		const inheritedLookup = this.reverseComponentsMapping.get(id);
+		if (!inheritedLookup) return;
+
+		instances.delete(value);
+		inheritedLookup.delete(value);
+
+		if (inheritedLookup.size() === 0) {
+			this.reverseComponentsMapping.delete(id);
+		}
+
+		if (instances.size() === 0) {
+			inheritedComponents.delete(id);
+		}
+
+		if (inheritedComponents.size() === 0) {
+			this.activeInheritedComponents.delete(instance);
+		}
+	}
+
+	private canCreateComponentEager(instance: Instance, component: Constructor) {
+		const componentInfo = this.components.get(component);
+		if (!componentInfo) return false;
+
+		const tag = componentInfo.config.tag;
+		if (tag !== undefined && instance.Parent && CollectionService.HasTag(instance, tag)) {
+			const tracker = this.getComponentTracker(component);
+			return tracker.checkInstance(instance);
+		}
+	}
+
+	private getDependencyResolutionOptions(componentInfo: ComponentInfo, instance: Instance, attributes: unknown) {
+		return {
+			overrideDependency: (id: string) => {
+				if (id === Flamework.id<ComponentMetadata>()) {
+					return identity<ComponentMetadata>({ instance, attributes });
+				}
+
+				const dependency = this.componentsIdMapping.get(id);
+				if (dependency !== undefined) {
+					const component = this.getComponent(instance, dependency);
+					if (component === undefined) {
+						const name = instance.GetFullName();
+						throw `Could not resolve component '${id}' while constructing '${componentInfo.identifier}' (${name})`;
+					}
+
+					return component;
+				}
+			},
+		};
+	}
+
+	private getPolymorphicIds(component: AbstractConstructor) {
+		const ids = new Array<string>();
+
+		for (const parentClass of this.getOrderedParents(component)) {
+			const parentId = Reflect.getOwnMetadata<string>(parentClass, "identifier");
+			if (parentId === undefined) continue;
+
+			ids.push(parentId);
+		}
+
+		const implementedList = Reflect.getMetadatas<string[]>(component, "flamework:implements");
+		for (const implemented of implementedList) {
+			for (const id of implemented) {
+				ids.push(id);
+			}
+		}
+
+		return ids;
+	}
+
+	private getComponentFromSpecifier<T extends AbstractConstructorRef<unknown>>(componentSpecifier?: T) {
+		return typeIs(componentSpecifier, "string")
+			? (this.componentsIdMapping.get(componentSpecifier) as object as Extract<T, AbstractConstructor>)
+			: (componentSpecifier as Extract<T, AbstractConstructor>);
+	}
+
+	/**
+	 * This returns the specified component associated with the instance.
+	 *
+	 * The specified type must be exact and not a lifecycle event or superclass. If you want to
+	 * query for lifecycle events or superclasses, you should use the `getComponents` method.
+	 *
+	 * @metadata macro
+	 */
+	getComponent<T extends object>(instance: Instance, componentSpecifier?: ConstructorRef<T>): T | undefined {
+		const component = this.getComponentFromSpecifier(componentSpecifier);
+		assert(component, `Could not find component from specifier: ${componentSpecifier}`);
+
+		const activeComponents = this.activeComponents.get(instance);
+		if (activeComponents) {
+			const activeComponent = activeComponents.get(component);
+			if (activeComponent) {
+				return activeComponent as T;
+			}
+		}
+
+		if (this.canCreateComponentEager(instance, component)) {
+			return this.addComponent(instance, component, true);
+		}
+	}
+
+	/**
+	 * This returns all components associated with the instance that extend or implement the specified type.
+	 *
+	 * For example, `getComponents<OnTick>` will retrieve all components that subscribe to the OnTick lifecycle event.
+	 *
+	 * @metadata macro
+	 */
+	getComponents<T extends object>(instance: Instance, componentSpecifier?: AbstractConstructorRef<T>): T[] {
+		const componentIdentifier = getIdFromSpecifier(componentSpecifier);
+		if (componentIdentifier === undefined) return [];
+
+		const activeComponents = this.activeInheritedComponents.get(instance);
+		if (!activeComponents) return [];
+
+		const componentsSet = activeComponents.get(componentIdentifier);
+		if (!componentsSet) return [];
+
+		return [...componentsSet] as never;
+	}
+
+	/** @internal */
+	addComponent<T>(instance: Instance, componentSpecifier: Constructor<T>, skipInstanceCheck: true): T;
+
+	/**
+	 * Adds the specified component to the instance.
+	 * The specified class must be exact and cannot be a lifecycle event or superclass.
+	 *
+	 * @metadata macro
+	 */
+	addComponent<T>(instance: Instance, componentSpecifier?: ConstructorRef<T>): T;
+	addComponent<T extends BaseComponent>(
+		instance: Instance,
+		componentSpecifier?: Constructor<T> | string,
+		skipInstanceCheck?: boolean,
+	) {
+		const component = this.getComponentFromSpecifier(componentSpecifier);
+		assert(component, `Could not find component from specifier: ${componentSpecifier}`);
+
+		const componentInfo = this.components.get(component);
+		assert(componentInfo, "Provided componentSpecifier does not exist");
+
+		const attributeGuards = this.getAttributeGuards(component);
+		const attributes = this.getAttributes(instance, componentInfo, attributeGuards);
+
+		if (skipInstanceCheck !== true) {
+			const instanceGuard = this.getConfigValue(component, "instanceGuard");
+			if (instanceGuard !== undefined) {
+				assert(
+					instanceGuard(instance),
+					`${instance.GetFullName()} did not pass instance guard check for '${componentInfo.identifier}'`,
+				);
+			}
+		}
+
+		let activeComponents = this.activeComponents.get(instance);
+		if (!activeComponents) this.activeComponents.set(instance, (activeComponents = new Map()));
+
+		let inheritedComponents = this.activeInheritedComponents.get(instance);
+		if (!inheritedComponents) this.activeInheritedComponents.set(instance, (inheritedComponents = new Map()));
+
+		const existingComponent = activeComponents.get(component);
+		if (existingComponent !== undefined) return existingComponent;
+
+		const resolutionOptions = this.getDependencyResolutionOptions(componentInfo, instance, attributes);
+		const componentInstance = this.module.createClassInstance(component, resolutionOptions);
+		activeComponents.set(component, componentInstance);
+
+		for (const id of componentInfo.polymorphicIds) {
+			this.addIdMapping(componentInstance, id, inheritedComponents);
+		}
+
+		this.setupComponent(instance, attributes, componentInstance, componentInfo);
+
+		for (const id of componentInfo.polymorphicIds) {
+			const signal = this.componentAddedListeners.get(id);
+			if (signal) {
+				signal.Fire(componentInstance as never, instance);
+			}
+		}
+
+		return componentInstance;
+	}
+
+	/**
+	 * Removes the specified component from this instance.
+	 * The specified class must be exact and cannot be a lifecycle event or superclass.
+	 *
+	 * @metadata macro
+	 */
+	removeComponent<T extends object>(instance: Instance, componentSpecifier?: ConstructorRef<T>) {
+		const component = this.getComponentFromSpecifier(componentSpecifier);
+		assert(component, `Could not find component from specifier: ${componentSpecifier}`);
+
+		const componentInfo = this.components.get(component);
+		assert(componentInfo, "Provided componentSpecifier does not exist");
+
+		const activeComponents = this.activeComponents.get(instance);
+		if (!activeComponents) return;
+
+		const existingComponent = activeComponents.get(component);
+		if (!existingComponent) return;
+
+		for (const id of componentInfo.polymorphicIds) {
+			const signal = this.componentRemovedListeners.get(id);
+			if (signal) {
+				signal.Fire(existingComponent as never, instance);
+			}
+		}
+
+		this.module.removeClassInstance(existingComponent);
+
+		existingComponent.destroy();
+		activeComponents.delete(component);
+
+		for (const id of componentInfo.polymorphicIds) {
+			this.removeIdMapping(instance, existingComponent, id);
+		}
+
+		if (activeComponents.size() === 0) {
+			this.activeComponents.delete(instance);
+		}
+
+		const maid = this.componentCleanup.get(existingComponent);
+		this.componentCleanup.delete(existingComponent);
+
+		if (maid !== undefined) {
+			maid.Destroy();
+		}
+	}
+
+	/**
+	 * This returns all components, across all instances, which extend or implement the specified type.
+	 *
+	 * For example, `getAllComponents<OnTick>` will retrieve all components that subscribe to the OnTick lifecycle event.
+	 *
+	 * @metadata macro
+	 */
+	getAllComponents<T extends object>(componentSpecifier?: AbstractConstructorRef<T>): T[] {
+		const componentIdentifier = getIdFromSpecifier(componentSpecifier);
+		if (componentIdentifier === undefined) return [];
+
+		const reverseMapping = this.reverseComponentsMapping.get(componentIdentifier);
+		if (!reverseMapping) return [];
+
+		return [...reverseMapping] as never;
+	}
+
+	/**
+	 * This returns a promise which will fire when the specified component is added.
+	 * This will first call `getComponent` which means it can resolve instantly and will also
+	 * have the eager loading capabilities of `getComponent`.
+	 *
+	 * This only fires once and should be cancelled to avoid memory leaks if the Promise is discarded prior to being invoked.
+	 *
+	 * @metadata macro
+	 */
+	waitForComponent<T extends object>(instance: Instance, componentSpecifier?: ConstructorRef<T>): Promise<T> {
+		const component = this.getComponentFromSpecifier(componentSpecifier);
+		assert(component, `Could not find component from specifier: ${componentSpecifier}`);
+
+		return new Promise((resolve, _, onCancel) => {
+			const existingComponent = this.getComponent(instance, componentSpecifier);
+			if (existingComponent !== undefined) return resolve(existingComponent);
+
+			let instanceWaiters = this.componentWaiters.get(instance);
+			if (!instanceWaiters) this.componentWaiters.set(instance, (instanceWaiters = new Map()));
+
+			let componentWaiters = instanceWaiters.get(component);
+			if (!componentWaiters) instanceWaiters.set(component, (componentWaiters = new Set()));
+
+			onCancel(() => {
+				componentWaiters!.delete(resolve as never);
+
+				if (componentWaiters!.size() === 0) {
+					instanceWaiters!.delete(component);
+				}
+
+				if (instanceWaiters!.size() === 0) {
+					this.componentWaiters.delete(instance);
+				}
+			});
+
+			componentWaiters.add(resolve as never);
+		});
+	}
+
+	/**
+	 * This function listens for the specified component type to be added to any instance.
+	 *
+	 * This function also supports polymorphism, which means you can listen for specific interfaces or superclasses.
+	 *
+	 * @metadata macro
+	 */
+	onComponentAdded<T extends object>(
+		callback: (value: T, instance: Instance) => void,
+		componentSpecifier?: AbstractConstructorRef<T>,
+	) {
+		const componentId = getIdFromSpecifier(componentSpecifier);
+		assert(componentId !== undefined);
+
+		let signal = this.componentAddedListeners.get(componentId);
+		if (!signal) this.componentAddedListeners.set(componentId, (signal = new Signal()));
+
+		return signal.Connect(callback);
+	}
+
+	/**
+	 * This function listens for the specified component type to be removed from any instance.
+	 * The callback is invoked before the component's `destroy` method is called.
+	 *
+	 * This function also supports polymorphism, which means you can listen for specific interfaces or superclasses.
+	 *
+	 * @metadata macro
+	 */
+	onComponentRemoved<T extends object>(
+		callback: (value: T, instance: Instance) => void,
+		componentSpecifier?: AbstractConstructorRef<T>,
+	) {
+		const componentId = getIdFromSpecifier(componentSpecifier);
+		assert(componentId !== undefined);
+
+		let signal = this.componentRemovedListeners.get(componentId);
+		if (!signal) this.componentRemovedListeners.set(componentId, (signal = new Signal()));
+
+		return signal.Connect(callback);
+	}
+}

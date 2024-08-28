@@ -1,0 +1,15 @@
+{
+	"extends": "../../tsconfig.roblox-ts.json",
+	"compilerOptions": {
+		"typeRoots": ["./node_modules/@rbxts", "./node_modules/@flamework"],
+		"rootDir": "src",
+		"outDir": "out",
+		"plugins": [
+			{
+				"transform": "rbxts-transformer-flamework",
+				"$rbxpackmode$": true,
+				"hashPrefix": "$c"
+			}
+		]
+	}
+}
