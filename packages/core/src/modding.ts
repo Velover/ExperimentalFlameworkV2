@@ -84,11 +84,34 @@ export namespace Modding {
 	export type CallerMany<M extends keyof CallerMetadata> = Modding.Many<{ [k in M]: Caller<k> }>;
 
 	/**
+	 * Creates an injectable type that can be used to modify dependency injection behavior.
+	 */
+	export type Injectable<C extends { type: unknown; id?: unknown; metadata?: unknown[] }> = C["type"] & {
+		/** @hidden @deprecated */
+		_flamework_injectable: C;
+	};
+
+	/**
 	 * An internal type for intrinsic user macro metadata.
 	 *
 	 * @hidden
 	 */
 	export type Intrinsic<N extends string, M extends unknown[], T = symbol> = T & { _flamework_intrinsic: [N, ...M] };
+
+	/**
+	 * Information about an injected dependency.
+	 */
+	export interface DependencyInfo {
+		/**
+		 * The ID used to resolve this dependency.
+		 */
+		id: string;
+
+		/**
+		 * Metadata provided by the injectable type.
+		 */
+		metadata?: unknown[];
+	}
 
 	interface CallerMetadata {
 		/**
@@ -134,5 +157,15 @@ export namespace Modding {
 		 * A generated guard for the type.
 		 */
 		guard: t.check<T>;
+
+		/**
+		 * The dependency injection info.
+		 */
+		dependency: DependencyInfo;
+
+		/**
+		 * The dependency injection info, or the ID there is no metadata.
+		 */
+		dependencyConcise: string | DependencyInfo;
 	}
 }

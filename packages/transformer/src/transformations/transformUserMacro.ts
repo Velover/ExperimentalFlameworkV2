@@ -91,6 +91,39 @@ export function transformUserMacro(
 	}
 }
 
+export function getDependencyInjectionMetadata(state: TransformState, node: ts.Node, type: ts.Type, concise = false) {
+	const id = getTypeUid(state, type, node);
+	const metadata = getInjectableMetadata(state, type)?.map((v) => {
+		return transformUserMacroType(state, node, v);
+	});
+
+	if (concise && !metadata) {
+		return f.string(id);
+	} else {
+		const object = {} as Record<string, f.ConvertableExpression>;
+		object.id = id;
+		if (metadata) {
+			object.metadata = metadata ? f.array(metadata) : undefined!;
+		}
+		return f.object(object);
+	}
+}
+
+function getInjectableMetadata(state: TransformState, type: ts.Type) {
+	const injectableConfig = state.typeChecker.getTypeOfPropertyOfType(type, "_flamework_injectable");
+	if (injectableConfig) {
+		const reflect = state.typeChecker.getTypeOfPropertyOfType(injectableConfig, "metadata");
+		if (reflect && isTupleType(state, reflect)) {
+			return reflect.typeArguments;
+		}
+	}
+}
+
+function transformUserMacroType(state: TransformState, node: ts.Node, type: ts.Type) {
+	const macro = getUserMacroOfMany(state, node, type);
+	return buildUserMacro(state, node, macro);
+}
+
 function isUndefinedArgument(argument: ts.Node | undefined) {
 	return argument ? f.is.identifier(argument) && argument.text === "undefined" : true;
 }
@@ -127,7 +160,7 @@ function getLabels(state: TransformState, type: ts.Type): UserMacro {
 	};
 }
 
-function buildUserMacro(state: TransformState, node: ts.Expression, macro: UserMacro): ts.AsExpression {
+function buildUserMacro(state: TransformState, node: ts.Node, macro: UserMacro): ts.AsExpression {
 	if (macro.kind === "generic") {
 		const metadata = getGenericMetadata(macro);
 		if (metadata) {
@@ -184,6 +217,10 @@ function buildUserMacro(state: TransformState, node: ts.Expression, macro: UserM
 		if (macro.metadata === "text") {
 			return f.string(state.typeChecker.typeToString(macro.target));
 		}
+
+		if (macro.metadata === "dependency" || macro.metadata === "dependencyConcise") {
+			return getDependencyInjectionMetadata(state, node, macro.target, macro.metadata === "dependencyConcise");
+		}
 	}
 
 	function getCallerMetadata(macro: UserMacro & { kind: "caller" }) {
@@ -211,7 +248,7 @@ function buildUserMacro(state: TransformState, node: ts.Expression, macro: UserM
 	}
 }
 
-function buildIntrinsicMacro(state: TransformState, node: ts.Expression, macro: UserMacro & { kind: "intrinsic" }) {
+function buildIntrinsicMacro(state: TransformState, node: ts.Node, macro: UserMacro & { kind: "intrinsic" }) {
 	if (macro.id === "pathglob") {
 		const [pathType] = macro.inputs;
 		if (!pathType) {
@@ -293,7 +330,7 @@ function getMetadataFromType(metadataType: ts.Type) {
 	}
 }
 
-function getUserMacroOfMany(state: TransformState, node: ts.Expression, target: ts.Type): UserMacro | undefined {
+function getUserMacroOfMany(state: TransformState, node: ts.Node, target: ts.Type): UserMacro {
 	const basicUserMacro = getBasicUserMacro(state, node, target);
 	if (basicUserMacro) {
 		return basicUserMacro;
@@ -309,7 +346,6 @@ function getUserMacroOfMany(state: TransformState, node: ts.Expression, target: 
 
 		for (const member of state.typeChecker.getTypeArguments(target)) {
 			const userMacro = getUserMacroOfMany(state, node, member);
-			if (!userMacro) return;
 
 			userMacros.push(userMacro);
 		}
@@ -330,8 +366,6 @@ function getUserMacroOfMany(state: TransformState, node: ts.Expression, target: 
 			}
 
 			const userMacro = getUserMacroOfMany(state, node, member);
-			if (!userMacro) return;
-
 			userMacros.push(userMacro);
 		}
 
@@ -344,11 +378,9 @@ function getUserMacroOfMany(state: TransformState, node: ts.Expression, target: 
 
 		for (const member of target.getProperties()) {
 			const memberType = state.typeChecker.getTypeOfPropertyOfType(target, member.name);
-			if (!memberType) return;
+			if (!memberType) continue;
 
 			const userMacro = getUserMacroOfMany(state, node, memberType);
-			if (!userMacro) return;
-
 			userMacros.set(member.name, userMacro);
 		}
 
@@ -376,7 +408,7 @@ function getUserMacroOfMany(state: TransformState, node: ts.Expression, target: 
 	Diagnostics.error(node, `Unknown type '${target.checker.typeToString(target)}' encountered`);
 }
 
-function getBasicUserMacro(state: TransformState, node: ts.Expression, target: ts.Type): UserMacro | undefined {
+function getBasicUserMacro(state: TransformState, node: ts.Node, target: ts.Type): UserMacro | undefined {
 	const genericMetadata = state.typeChecker.getTypeOfPropertyOfType(target, "_flamework_macro_generic");
 	if (genericMetadata) {
 		const targetType = state.typeChecker.getTypeOfPropertyOfType(genericMetadata, "0");

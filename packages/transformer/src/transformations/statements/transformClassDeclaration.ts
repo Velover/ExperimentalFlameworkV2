@@ -8,6 +8,7 @@ import { buildGuardFromType } from "../../util/functions/buildGuardFromType";
 import { getNodeUid, getSymbolUid, getTypeUid } from "../../util/uid";
 import { updateComponentConfig } from "../macros/updateComponentConfig";
 import type { ClassInfo } from "../../types/classes";
+import { getDependencyInjectionMetadata } from "../transformUserMacro";
 
 export function transformClassDeclaration(state: TransformState, node: ts.ClassDeclaration) {
 	const symbol = state.getSymbol(node);
@@ -101,6 +102,7 @@ function generateMethodMetadata(state: TransformState, metadata: NodeMetadata, m
 	const parameters = new Array<string>();
 	const parameterNames = new Array<string>();
 	const parameterGuards = new Array<ts.Expression>();
+	const dependencies = new Array<ts.Expression>();
 
 	for (const parameter of method.parameters) {
 		if (metadata.isRequested("flamework:parameters")) {
@@ -127,6 +129,11 @@ function generateMethodMetadata(state: TransformState, metadata: NodeMetadata, m
 			const guard = buildGuardFromType(state, parameter, type);
 			parameterGuards.push(guard);
 		}
+
+		if (metadata.isRequested("flamework:dependencies")) {
+			const type = state.typeChecker.getTypeAtLocation(parameter);
+			dependencies.push(getDependencyInjectionMetadata(state, parameter, type));
+		}
 	}
 
 	if (parameters.length > 0) {
@@ -139,6 +146,10 @@ function generateMethodMetadata(state: TransformState, metadata: NodeMetadata, m
 
 	if (parameterGuards.length > 0) {
 		fields.push(["flamework:parameter_guards", parameterGuards]);
+	}
+
+	if (dependencies.length > 0) {
+		fields.push(["flamework:dependencies", dependencies]);
 	}
 
 	return fields;

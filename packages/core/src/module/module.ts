@@ -13,7 +13,11 @@ export interface Module {
 	 *
 	 * @internal
 	 */
-	tryResolveDependency: (id: string, requestingModule?: Module, requestingOrigin?: object) => unknown;
+	tryResolveDependency: (
+		info: Modding.DependencyInfo,
+		requestingModule?: Module,
+		requestingOrigin?: object,
+	) => unknown;
 
 	/**
 	 * Initializes all providers, nested modules and invokes the hooks.
@@ -40,7 +44,7 @@ export interface Module {
 	getModuleState: () => ModuleState;
 
 	/** @metadata macro */
-	resolveDependency: <T = unknown>(id?: string | Modding.Generic<T, "id">) => T;
+	resolveDependency: <T = unknown>(info?: string | Modding.Generic<T, "dependencyConcise">) => T;
 
 	/**
 	 * Returns all providers that implement the specified interface.
@@ -75,7 +79,7 @@ interface InstanceCreationConfig {
 	 *
 	 * If this function returns `undefined`, then dependency resolution will fallback to the module's resolution.
 	 */
-	overrideDependency?: (id: string) => unknown;
+	overrideDependency?: (info: Modding.DependencyInfo) => unknown;
 }
 
 interface ImportedHooks extends HookContext {
@@ -102,6 +106,7 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 
 	const temporaryInstances = new Set<object>();
 	const importedHookTypesCached = new Map<HookType, ImportedHooks[]>();
+	const cachedDependencyInfo = new Map<string, Modding.DependencyInfo>();
 
 	const submodules = state.include.map((state) => {
 		const existingModule = context.modules.get(state);
@@ -136,6 +141,21 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		}
 
 		moduleInitState = to;
+	};
+
+	const getDependencyInfoFromConcise = (dependency?: string | Modding.DependencyInfo) => {
+		assert(dependency !== undefined);
+
+		if (typeIs(dependency, "string")) {
+			let metadata = cachedDependencyInfo.get(dependency);
+			if (!metadata) {
+				cachedDependencyInfo.set(dependency, (metadata = { id: dependency }));
+			}
+
+			return metadata;
+		}
+
+		return dependency;
 	};
 
 	const getHookType = (hookType: HookType) => {
@@ -201,11 +221,14 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		}
 	};
 
-	const instantiateClassWithDependencies = (constructor: Constructor, resolve?: (id: string) => unknown) => {
-		const parameters = Reflect.getMetadata<string[]>(constructor, "flamework:parameters") ?? [];
+	const instantiateClassWithDependencies = (
+		constructor: Constructor,
+		resolve?: (info: Modding.DependencyInfo) => unknown,
+	) => {
+		const dependencies = Reflect.getMetadata<Modding.DependencyInfo[]>(constructor, "flamework:dependencies") ?? [];
 		const resolvedParameters = new Array<defined>();
-		for (const parameter of parameters) {
-			resolvedParameters.push(resolve?.(parameter) ?? resolveDependencyWithOrigin(parameter, constructor));
+		for (const dependency of dependencies) {
+			resolvedParameters.push(resolve?.(dependency) ?? resolveDependencyWithOrigin(dependency, constructor));
 		}
 
 		return new constructor(...(resolvedParameters as never[]));
@@ -213,27 +236,27 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 
 	const getModuleState: Module["getModuleState"] = () => state;
 
-	const tryResolveDependency: Module["tryResolveDependency"] = (id, requestingModule, requestingOrigin) => {
+	const tryResolveDependency: Module["tryResolveDependency"] = (info, requestingModule, requestingOrigin) => {
 		if (moduleInitState <= ModuleInitState.PreIgniting) {
-			error(`module is in pre-ignite phase, dependency cannot be resolved: ${id}`);
+			error(`module is in pre-ignite phase, dependency cannot be resolved: ${info.id}`);
 		}
 
-		const instantiatedProvider = instantiatedProviders.get(id);
+		const instantiatedProvider = instantiatedProviders.get(info.id);
 		if (instantiatedProvider !== undefined) {
 			return instantiatedProvider;
 		}
 
 		// The ModuleInstantiation type always refers to the current module instantiation.
-		if (id === MODULE_ID) {
+		if (info.id === MODULE_ID) {
 			return module;
 		}
 
-		const moduleProvider = state.providers.find((v) => v.injectionId === id);
+		const moduleProvider = state.providers.find((v) => v.injectionId === info.id);
 		if (moduleProvider) {
 			const config = moduleProvider.config;
 			if (config.type === "class") {
 				const instantiatedProvider = instantiateClassWithDependencies(config.value as Constructor);
-				instantiatedProviders.set(id, instantiatedProvider);
+				instantiatedProviders.set(info.id, instantiatedProvider);
 				registerClassInterfaces(instantiatedProvider);
 
 				return instantiatedProvider;
@@ -241,20 +264,25 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 				// Function providers are not cached.
 				// It is up to the provider to decide whether to cache dependency resolution, based on the injection context.
 				return config.callback({
-					injectionId: id,
+					injectionId: info.id,
+					dependencyInfo: info,
 					sourceModule: module,
 					targetModule: requestingModule ?? module,
 					origin: requestingOrigin,
 				});
 			} else if (config.type === "alias") {
-				return tryResolveDependency(config.injectionId, requestingModule, requestingOrigin);
+				return tryResolveDependency(
+					getDependencyInfoFromConcise(config.injectionId),
+					requestingModule,
+					requestingOrigin,
+				);
 			}
 		}
 
 		for (const submodule of submodules) {
 			// We only want to resolve module IDs if they are explicitly exported.
-			if (submodule.getModuleState().exportedProviders.has(id)) {
-				const moduleProvider = submodule.tryResolveDependency(id, module, requestingOrigin);
+			if (submodule.getModuleState().exportedProviders.has(info.id)) {
+				const moduleProvider = submodule.tryResolveDependency(info, module, requestingOrigin);
 				if (moduleProvider !== undefined) {
 					return moduleProvider;
 				}
@@ -262,19 +290,19 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		}
 	};
 
-	const resolveDependencyWithOrigin = <T>(id: string, requestingOrigin?: object): T => {
-		const dependency = tryResolveDependency(id, undefined, requestingOrigin);
+	const resolveDependencyWithOrigin = <T>(info: Modding.DependencyInfo, requestingOrigin?: object): T => {
+		const dependency = tryResolveDependency(info, undefined, requestingOrigin);
 		if (dependency === undefined) {
-			error(`module could not resolve dependency '${id}'`);
+			error(`module could not resolve dependency '${info.id}'`);
 		}
 
 		return dependency as T;
 	};
 
-	const resolveDependency: Module["resolveDependency"] = (id) => {
-		assert(id !== undefined);
+	const resolveDependency: Module["resolveDependency"] = (info) => {
+		assert(info !== undefined);
 
-		return resolveDependencyWithOrigin(id);
+		return resolveDependencyWithOrigin(getDependencyInfoFromConcise(info));
 	};
 
 	const getInterfaces: Module["getInterfaces"] = (id) => {

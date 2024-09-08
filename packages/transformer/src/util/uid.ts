@@ -7,6 +7,7 @@ import { getDeclarationName } from "./functions/getDeclarationName";
 import { getPackageJson } from "./functions/getPackageJson";
 import { isDefinedType } from "./functions/isDefinedType";
 import { isPathDescendantOfAny } from "./functions/isPathDescendantOf";
+import { assert } from "./functions/assert";
 
 /**
  * Format the internal id to be shorter, remove `out` part of path, and use hashPrefix.
@@ -102,6 +103,19 @@ export function getSymbolUid(state: TransformState, symbol: ts.Symbol, trace?: t
 export function getTypeUid(state: TransformState, type: ts.Type, trace: ts.Node): string;
 export function getTypeUid(state: TransformState, type: ts.Type, trace?: ts.Node): string | undefined;
 export function getTypeUid(state: TransformState, type: ts.Type, trace?: ts.Node) {
+	const injectableConfig = state.typeChecker.getTypeOfPropertyOfType(type, "_flamework_injectable");
+	if (injectableConfig) {
+		const idOverride = state.typeChecker.getTypeOfPropertyOfType(injectableConfig, "id");
+		if (idOverride) {
+			return getTypeUid(state, idOverride, trace);
+		}
+
+		const originalType = state.typeChecker.getTypeOfPropertyOfType(injectableConfig, "type");
+		assert(originalType !== undefined && originalType !== type, "malformed injectable type");
+
+		return getTypeUid(state, originalType, trace);
+	}
+
 	if (type.symbol) {
 		return getSymbolUid(state, type.symbol, trace);
 	} else if (isDefinedType(type)) {

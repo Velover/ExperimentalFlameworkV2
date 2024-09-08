@@ -1,4 +1,4 @@
-import { Flamework, OnStart, Provider, Reflect } from "@flamework/core";
+import { Flamework, OnStart, Provider, Reflect, type Modding } from "@flamework/core";
 import {
 	CollectionService,
 	ReplicatedStorage,
@@ -359,17 +359,17 @@ export class Components {
 
 	private getDependencyResolutionOptions(componentInfo: ComponentInfo, instance: Instance, attributes: unknown) {
 		return {
-			overrideDependency: (id: string) => {
-				if (id === Flamework.id<ComponentMetadata>()) {
+			overrideDependency: (info: Modding.DependencyInfo) => {
+				if (info.id === Flamework.id<ComponentMetadata>()) {
 					return identity<ComponentMetadata>({ instance, attributes });
 				}
 
-				const dependency = this.componentsIdMapping.get(id);
+				const dependency = this.componentsIdMapping.get(info.id);
 				if (dependency !== undefined) {
 					const component = this.getComponent(instance, dependency);
 					if (component === undefined) {
 						const name = instance.GetFullName();
-						throw `Could not resolve component '${id}' while constructing '${componentInfo.identifier}' (${name})`;
+						throw `Could not resolve component '${info.id}' while constructing '${componentInfo.identifier}' (${name})`;
 					}
 
 					return component;

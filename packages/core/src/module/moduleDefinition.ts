@@ -1,3 +1,4 @@
+import type { Modding } from "../modding";
 import { createModuleInstantiation, type Module } from "./module";
 import type { HookConfig } from "./moduleHooks";
 
@@ -53,6 +54,11 @@ export type InjectionContext = {
 	 * This is the ID of the dependency being requested.
 	 */
 	injectionId: string;
+
+	/**
+	 * This is the dependency info for the requested dependency.
+	 */
+	dependencyInfo: Modding.DependencyInfo;
 
 	/**
 	 * This is the module that this provider is registered in.
