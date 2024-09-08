@@ -6,7 +6,8 @@ import path from "path";
  * @param dirPath A path to a directory.
  */
 export function isPathDescendantOf(filePath: string, dirPath: string) {
-	return dirPath === filePath || !path.relative(dirPath, filePath).startsWith("..");
+	const relative = path.relative(dirPath, filePath);
+	return dirPath === filePath || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 /**
