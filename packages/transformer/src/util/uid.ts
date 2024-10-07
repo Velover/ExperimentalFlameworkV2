@@ -1,6 +1,6 @@
 import path from "path";
 import ts from "typescript";
-import { Diagnostics } from "../classes/diagnostics";
+import { DiagnosticError, Diagnostics } from "../classes/diagnostics";
 import { TransformState } from "../classes/transformState";
 import { f } from "./factory";
 import { getDeclarationName } from "./functions/getDeclarationName";
@@ -34,7 +34,7 @@ function getShortId(state: TransformState, node: ts.Declaration, hashPrefix = st
 	return hashPrefix ? `${state.config.hashPrefix}:${shortId}` : shortId;
 }
 
-export function getInternalId(state: TransformState, node: ts.NamedDeclaration) {
+function getInternalId(state: TransformState, node: ts.NamedDeclaration) {
 	const filePath = state.getSourceFile(node).fileName;
 	const fullName = getDeclarationName(node);
 	const { directory, result } = getPackageJson(path.dirname(filePath));
@@ -57,7 +57,7 @@ export function getInternalId(state: TransformState, node: ts.NamedDeclaration) 
 	};
 }
 
-export function getDeclarationUid(state: TransformState, node: ts.NamedDeclaration) {
+function getDeclarationUid(state: TransformState, node: ts.NamedDeclaration) {
 	const { isPackage, internalId } = getInternalId(state, node);
 	const id = state.buildInfo.getIdentifierFromInternal(internalId);
 	if (id) return id;
@@ -88,15 +88,78 @@ export function getDeclarationUid(state: TransformState, node: ts.NamedDeclarati
 	return newId;
 }
 
+function findValidDeclaration(symbol: ts.Symbol, trace?: ts.Node): ts.NamedDeclaration | undefined {
+	const usableDeclarations = new Array<ts.NamedDeclaration>();
+
+	for (const declaration of symbol.declarations ?? []) {
+		if (ts.isTypeLiteralNode(declaration) || ts.isTypeAliasDeclaration(declaration)) {
+			const typeAlias = ts.findAncestor(declaration, ts.isTypeAliasDeclaration);
+			if (typeAlias) {
+				usableDeclarations.push(typeAlias);
+				continue;
+			}
+		}
+
+		if (ts.isInterfaceDeclaration(declaration)) {
+			usableDeclarations.push(declaration);
+			continue;
+		}
+
+		if (ts.isClassDeclaration(declaration)) {
+			usableDeclarations.push(declaration);
+			continue;
+		}
+
+		if (ts.isFunctionDeclaration(declaration)) {
+			usableDeclarations.push(declaration);
+			continue;
+		}
+	}
+
+	if (usableDeclarations.length <= 1) {
+		return usableDeclarations[0];
+	}
+
+	const classesOnly = usableDeclarations.filter(ts.isClassDeclaration);
+	if (classesOnly.length === 1) {
+		return classesOnly[0];
+	}
+
+	if (trace) {
+		const diagnostic = Diagnostics.createDiagnostic(
+			trace,
+			ts.DiagnosticCategory.Error,
+			`There are multiple possible IDs for this symbol: ${symbol.name}`,
+		);
+
+		for (const declaration of usableDeclarations) {
+			ts.addRelatedInfo(
+				diagnostic,
+				Diagnostics.createDiagnostic(
+					declaration.name ?? declaration,
+					ts.DiagnosticCategory.Message,
+					"This is a valid declaration with a unique ID.",
+				),
+			);
+		}
+
+		throw new DiagnosticError(diagnostic);
+	}
+}
+
 export function getSymbolUid(state: TransformState, symbol: ts.Symbol, trace: ts.Node): string;
 export function getSymbolUid(state: TransformState, symbol: ts.Symbol, trace?: ts.Node): string | undefined;
 export function getSymbolUid(state: TransformState, symbol: ts.Symbol, trace?: ts.Node) {
-	if (symbol.valueDeclaration) {
-		return getDeclarationUid(state, symbol.valueDeclaration);
-	} else if (symbol.declarations?.[0]) {
-		return getDeclarationUid(state, symbol.declarations[0]);
-	} else if (trace) {
-		Diagnostics.error(trace, `Could not find UID for symbol "${symbol.name}"`);
+	if (!symbol.declarations) {
+		if (trace) {
+			Diagnostics.error(trace, `This symbol does not have any ID: "${symbol.name}"`);
+		}
+		return;
+	}
+
+	const validDeclaration = findValidDeclaration(symbol, trace);
+	if (validDeclaration) {
+		return getDeclarationUid(state, validDeclaration);
 	}
 }
 

@@ -86,7 +86,7 @@ export namespace Modding {
 	/**
 	 * Creates an injectable type that can be used to modify dependency injection behavior.
 	 */
-	export type Injectable<C extends { type: unknown; id?: unknown; metadata?: unknown[] }> = C["type"] & {
+	export type Injectable<C extends { type: unknown; id?: unknown; metadata?: unknown[] }> = RealType<C["type"]> & {
 		/** @hidden @deprecated */
 		_flamework_injectable: C;
 	};
@@ -112,6 +112,9 @@ export namespace Modding {
 		 */
 		metadata?: unknown[];
 	}
+
+	// This is used so that nested `Modding.Injectable` calls are treated correctly.
+	type RealType<T> = T extends { _flamework_injectable: { type: infer R } } ? RealType<R> : T;
 
 	interface CallerMetadata {
 		/**

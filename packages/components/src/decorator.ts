@@ -104,9 +104,9 @@ export interface ComponentConfig {
  *
  * @metadata reflect identifier flamework:implements flamework:parameters injectable intrinsic-component-decorator
  */
-export const Component = (opts?: ComponentConfig) => {
+export function Component(opts?: ComponentConfig) {
 	return (object: object) => {
 		Reflect.defineMetadata(object, "flamework:component", true);
 		Reflect.defineMetadata(object, "flamework:componentConfig", opts);
 	};
-};
+}
