@@ -1,7 +1,7 @@
 import { t } from "@rbxts/t";
 import { Modding } from "./modding";
 import { Reflect } from "./reflect";
-import { AbstractConstructor, IntrinsicSymbolId } from "./utility/constructors";
+import { AbstractConstructor } from "./utility/constructors";
 import { ModuleBuilder } from "./module/moduleBuilder";
 import { PluginBuilder } from "./plugin/pluginBuilder";
 import type { ModuleDefinition } from "./module/moduleDefinition";
@@ -35,21 +35,21 @@ export namespace Flamework {
 	 *
 	 * @metadata macro {@link id intrinsic-inline}
 	 */
-	export declare function id<T>(id?: IntrinsicSymbolId<T>): string;
+	export declare function id<T>(id?: Modding.Generic<T, "id">): string;
 
 	/**
 	 * Check if the constructor implements the specified interface.
 	 *
 	 * @metadata macro {@link _implements intrinsic-flamework-rewrite}
 	 */
-	export declare function implements<T>(object: AbstractConstructor, id?: IntrinsicSymbolId<T>): boolean;
+	export declare function implements<T>(object: AbstractConstructor, id?: Modding.Generic<T, "id">): boolean;
 
 	/**
 	 * Check if object implements the specified interface.
 	 *
 	 * @metadata macro {@link _implements intrinsic-flamework-rewrite}
 	 */
-	export declare function implements<T>(object: unknown, id?: IntrinsicSymbolId<T>): object is T;
+	export declare function implements<T>(object: unknown, id?: Modding.Generic<T, "id">): object is T;
 
 	/**
 	 * Hash a function using the method used internally by Flamework.
