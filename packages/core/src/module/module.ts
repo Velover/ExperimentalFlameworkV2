@@ -1,8 +1,9 @@
 import { Flamework } from "../flamework";
 import { Modding } from "../modding";
-import { ProviderDecoratorConfig } from "../provider";
+import { PluginState, type InterfaceConfiguration, type InterfaceContext } from "../plugin/pluginDefinition";
 import { Reflect } from "../reflect";
 import type { Constructor } from "../utility/constructors";
+import { convertConciseDependencyInfo } from "../utility/convertConciseDependencyInfo";
 import { getClassImplements } from "../utility/getClassImplements";
 import type { ModuleState } from "./moduleDefinition";
 import { HookType, type HookConfig, type HookContext } from "./moduleHooks";
@@ -26,20 +27,6 @@ export interface Module {
 	 */
 	ignite: () => Module;
 
-	/**
-	 * Returns all registered or imported interfaces from this module.
-	 *
-	 * @internal
-	 */
-	resolveImportedInterfaces: () => Set<string>;
-
-	/**
-	 * Returns all registered or imported hooks from this module.
-	 *
-	 * @internal
-	 */
-	resolveImportedHooks: (targetModule: Module) => Array<ImportedHooks>;
-
 	/** @internal */
 	getModuleState: () => ModuleState;
 
@@ -47,19 +34,9 @@ export interface Module {
 	resolveDependency: <T = unknown>(info?: string | Modding.Generic<T, "dependencyConcise">) => T;
 
 	/**
-	 * Returns all providers that implement the specified interface.
-	 *
-	 * @metadata macro
-	 */
-	getInterfaces: <T>(id?: string | Modding.Generic<T, "id">) => T[];
-
-	getInterfaceAdded: <T>(callback: (value: T) => void, id?: string | Modding.Generic<T, "id">) => () => void;
-	getInterfaceRemoved: <T>(callback: (value: T) => void, id?: string | Modding.Generic<T, "id">) => () => void;
-
-	/**
 	 * Terminates this module.
 	 *
-	 * This will trigger the `HookType.Terminated` hook.
+	 * This will trigger the `HookType.Extinguished` hook.
 	 */
 	extinguish: () => void;
 
@@ -70,7 +47,6 @@ export interface Module {
 
 interface ModuleContext {
 	modules: Map<ModuleState, Module>;
-	transient?: boolean;
 }
 
 interface InstanceCreationConfig {
@@ -86,6 +62,10 @@ interface ImportedHooks extends HookContext {
 	hook: HookConfig;
 }
 
+interface ImportedInterfaces extends InterfaceContext {
+	configuration: InterfaceConfiguration<unknown>;
+}
+
 enum ModuleInitState {
 	Created,
 	PreIgniting,
@@ -99,39 +79,14 @@ const MODULE_ID = Flamework.id<Module>();
 
 export function createModuleInstantiation(state: ModuleState, context: ModuleContext): Module {
 	const instantiatedProviders = new Map<string, defined>();
-	const importedInterfaces = table.clone(state.interfaces);
-	const interfaces = new Map<string, defined[]>();
-	const interfaceAddedConnections = new Map<string, Set<(value: never) => void>>();
-	const interfaceRemovedConnections = new Map<string, Set<(value: never) => void>>();
+	const importedInterfaces = new Map<string, ImportedInterfaces>();
+	const importedHooks = new Array<ImportedHooks>();
 
+	const plugins = new Map<PluginState, Module>();
+	const submodules = new Array<Module>();
 	const temporaryInstances = new Set<object>();
-	const importedHookTypesCached = new Map<HookType, ImportedHooks[]>();
-	const cachedDependencyInfo = new Map<string, Modding.DependencyInfo>();
 
-	const submodules = state.include.map((state) => {
-		const existingModule = context.modules.get(state);
-		if (existingModule) {
-			return existingModule;
-		}
-
-		// Modules will register themselves into the context.
-		return createModuleInstantiation(state, {
-			modules: context.modules,
-			transient: state.transient,
-		});
-	});
-
-	let importedHooksCached: ImportedHooks[] | undefined;
 	let moduleInitState = ModuleInitState.Created;
-
-	for (const module of submodules) {
-		const state = module.getModuleState();
-		for (const moduleInterface of module.resolveImportedInterfaces()) {
-			if (state.exportedInterfaces.has(moduleInterface)) {
-				importedInterfaces.add(moduleInterface);
-			}
-		}
-	}
 
 	const switchInitState = (from: ModuleInitState, to: ModuleInitState) => {
 		if (moduleInitState !== from) {
@@ -143,81 +98,70 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		moduleInitState = to;
 	};
 
-	const getDependencyInfoFromConcise = (dependency?: string | Modding.DependencyInfo) => {
-		assert(dependency !== undefined);
-
-		if (typeIs(dependency, "string")) {
-			let metadata = cachedDependencyInfo.get(dependency);
-			if (!metadata) {
-				cachedDependencyInfo.set(dependency, (metadata = { id: dependency }));
+	const setupIncludedModules = () => {
+		for (const submodule of state.include) {
+			const existingModule = context.modules.get(submodule);
+			if (existingModule) {
+				submodules.push(existingModule);
+				continue;
 			}
 
-			return metadata;
-		}
+			const module = createModuleInstantiation(submodule, context);
+			submodules.push(module);
 
-		return dependency;
+			context.modules.set(state, module);
+		}
+	};
+
+	const setupPlugins = () => {
+		for (const pluginState of state.plugins) {
+			const pluginModule = createModuleInstantiation(pluginState.module, context);
+
+			for (const [interfaceId, configuration] of pluginState.interfaces) {
+				importedInterfaces.set(interfaceId, {
+					configuration,
+					interfaceId,
+					sourceModule: pluginModule,
+					targetModule: module,
+				});
+			}
+
+			for (const hook of pluginState.hooks) {
+				importedHooks.push({
+					hook: hook,
+					sourceModule: pluginModule,
+					targetModule: module,
+				});
+			}
+
+			submodules.push(pluginModule);
+			plugins.set(pluginState, pluginModule);
+		}
 	};
 
 	const getHookType = (hookType: HookType) => {
-		const importedHooks = (importedHooksCached ??= resolveImportedHooks(module));
-
-		let cachedHooks = importedHookTypesCached.get(hookType);
-		if (!cachedHooks) {
-			importedHookTypesCached.set(
-				hookType,
-				(cachedHooks = importedHooks.filter((v) => v.hook.type === hookType)),
-			);
-		}
-
-		return cachedHooks;
+		return importedHooks.filter((v) => v.hook.type === hookType);
 	};
 
 	const registerClassInterfaces = (instance: object) => {
-		// This caches the provider based on its implemented interfaces.
-		// This makes querying interfaces much cheaper.
 		for (const id of getClassImplements(instance)) {
-			let providerInterface = interfaces.get(id);
-			if (!providerInterface) {
-				interfaces.set(id, (providerInterface = []));
+			const importedInterface = importedInterfaces.get(id);
+			if (!importedInterface) {
+				continue;
 			}
 
-			if (!providerInterface.includes(instance)) {
-				providerInterface.push(instance);
-			}
-
-			const addedCallbacks = interfaceAddedConnections.get(id);
-			if (addedCallbacks) {
-				for (const callback of addedCallbacks) {
-					task.spawn(callback, instance as never);
-				}
-			}
+			importedInterface.configuration.onAdded?.(importedInterface, instance);
 		}
 	};
 
 	const unregisterClassInterfaces = (instance: object) => {
-		// This caches the provider based on its implemented interfaces.
-		// This makes querying interfaces much cheaper.
 		for (const id of getClassImplements(instance)) {
-			let providerInterface = interfaces.get(id);
-			if (!providerInterface) {
-				interfaces.set(id, (providerInterface = []));
+			const importedInterface = importedInterfaces.get(id);
+			if (!importedInterface) {
+				continue;
 			}
 
-			const index = providerInterface.indexOf(instance);
-			if (index !== -1) {
-				providerInterface.unorderedRemove(index);
-			}
-
-			if (providerInterface.size() === 0) {
-				interfaces.delete(id);
-			}
-
-			const removedCallbacks = interfaceRemovedConnections.get(id);
-			if (removedCallbacks) {
-				for (const callback of removedCallbacks) {
-					task.spawn(callback, instance as never);
-				}
-			}
+			importedInterface.configuration.onRemoved?.(importedInterface, instance);
 		}
 	};
 
@@ -272,7 +216,7 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 				});
 			} else if (config.type === "alias") {
 				return tryResolveDependency(
-					getDependencyInfoFromConcise(config.injectionId),
+					convertConciseDependencyInfo(config.injectionId),
 					requestingModule,
 					requestingOrigin,
 				);
@@ -302,69 +246,7 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 	const resolveDependency: Module["resolveDependency"] = (info) => {
 		assert(info !== undefined);
 
-		return resolveDependencyWithOrigin(getDependencyInfoFromConcise(info));
-	};
-
-	const getInterfaces: Module["getInterfaces"] = (id) => {
-		assert(id !== undefined);
-		assert(importedInterfaces.has(id), "the specified interface is not imported in this module");
-
-		return (interfaces.get(id) as never[]) ?? [];
-	};
-
-	const getInterfaceAdded: Module["getInterfaceAdded"] = (callback, id) => {
-		assert(id !== undefined);
-
-		let connections = interfaceAddedConnections.get(id);
-		if (!connections) interfaceAddedConnections.set(id, (connections = new Set()));
-
-		connections.add(callback);
-
-		return () => connections!.delete(callback);
-	};
-
-	const getInterfaceRemoved: Module["getInterfaceRemoved"] = (callback, id) => {
-		assert(id !== undefined);
-
-		let connections = interfaceRemovedConnections.get(id);
-		if (!connections) interfaceRemovedConnections.set(id, (connections = new Set()));
-
-		connections.add(callback);
-
-		return () => connections!.delete(callback);
-	};
-
-	const resolveImportedInterfaces: Module["resolveImportedInterfaces"] = () => {
-		return importedInterfaces;
-	};
-
-	const resolveImportedHooks: Module["resolveImportedHooks"] = (targetModule: Module) => {
-		const importedHooks = new Array<ImportedHooks>();
-
-		// Including a module also implicitly includes its registered hooks and lifecycle events.
-		for (const submodule of submodules) {
-			// Modules don't currently support selective hook exports.
-			// Alternatively, we could have `exportHook(HookConfig)` for export-only hooks
-			if (submodule.getModuleState().exportedHooks) {
-				for (const hook of submodule.resolveImportedHooks(targetModule)) {
-					importedHooks.push({
-						hook: hook.hook,
-						sourceModule: hook.sourceModule,
-						targetModule,
-					});
-				}
-			}
-		}
-
-		for (const hook of state.hooks) {
-			importedHooks.push({
-				hook,
-				sourceModule: module,
-				targetModule,
-			});
-		}
-
-		return importedHooks;
+		return resolveDependencyWithOrigin(convertConciseDependencyInfo(info));
 	};
 
 	const createClassInstance: Module["createClassInstance"] = (constructor, config) => {
@@ -386,9 +268,10 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 			return module;
 		}
 
-		switchInitState(ModuleInitState.Created, ModuleInitState.PreIgniting);
+		setupIncludedModules();
+		setupPlugins();
 
-		assert(!state.transient || context.transient, "transient modules cannot be ignited");
+		switchInitState(ModuleInitState.Created, ModuleInitState.PreIgniting);
 
 		// We initialize any nested modules first.
 		// They are isolated and so we don't have to worry about side effects besides exports.
@@ -438,20 +321,11 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		getModuleState,
 		tryResolveDependency,
 		resolveDependency,
-		getInterfaces,
-		getInterfaceAdded,
-		getInterfaceRemoved,
 		createClassInstance,
 		removeClassInstance,
 		ignite,
 		extinguish,
-		resolveImportedInterfaces,
-		resolveImportedHooks,
 	};
-
-	if (!state.transient) {
-		context.modules.set(state, module);
-	}
 
 	return module;
 }

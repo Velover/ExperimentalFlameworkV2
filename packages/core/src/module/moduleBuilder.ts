@@ -3,30 +3,75 @@ import { ModuleDefinition, ModuleState, ProviderConfig } from "./moduleDefinitio
 import { getClassesInPath } from "../utility/getClassesInPath";
 import { Reflect } from "../reflect";
 import type { Constructor } from "../utility/constructors";
-import type { HookConfig } from "./moduleHooks";
+import type { WritableState } from "../utility/writable";
+import type { PluginDefinition } from "../plugin/pluginDefinition";
 
 type GenericId<T> = string | Modding.Generic<T, "id">;
 type MultipleIDs<T> = string[] | Modding.Many<(T extends T ? Modding.Generic<T, "id"> : never)[]>;
 
 export class ModuleBuilder {
-	private module: ModuleState = {
-		providers: [],
-		include: [],
-		hooks: [],
-		exportedHooks: false,
-		exportedProviders: new Set(),
-		exportedInterfaces: new Set(),
-		interfaces: new Set(),
-		transient: false,
-	};
+	/** A global count of the number of module builders. Used to disambiguate identical module debug names. */
+	private static moduleCount = 0;
 
+	private moduleIndex = ModuleBuilder.moduleCount++;
+	private module: WritableState<ModuleState>;
+
+	constructor() {
+		this.module = {
+			debugName: "Anonymous",
+			providers: [],
+			include: [],
+			plugins: [],
+			exportedProviders: new Set(),
+		};
+	}
+
+	/**
+	 * Includes a plugin into this module.
+	 *
+	 * A plugin is a normal module except it can modify modules it is included on.
+	 */
+	public includePlugin(plugin: PluginDefinition) {
+		this.module.plugins.push(plugin.getPluginState());
+
+		return this;
+	}
+
+	/**
+	 * Includes a module into this module.
+	 *
+	 * This will allow you to access this module's exports.
+	 * Included modules are shared across all modules under the root module.
+	 */
 	public includeModule(module: ModuleDefinition) {
 		this.module.include.push(module.getModuleState());
 
 		return this;
 	}
 
-	/** @metadata macro */
+	/**
+	 * Sets the debug name for this module.
+	 *
+	 * if a number is provided, a debug name will be generated using the debug info at the level (relative to the caller.)
+	 */
+	public setDebugName(debugNameOrLevel: string | number) {
+		if (typeIs(debugNameOrLevel, "string")) {
+			this.module.debugName = debugNameOrLevel;
+		} else {
+			const [source, line] = debug.info(debugNameOrLevel + 1, "sl");
+			this.module.debugName = `${this.moduleIndex}+${source.match("(%w+)$")[0] ?? source}:${line}`;
+		}
+
+		return this;
+	}
+
+	/**
+	 * Register all providers under the specified path and its descendants.
+	 *
+	 * The providers must be exported.
+	 *
+	 * @metadata macro
+	 */
 	public registerProviders<T extends string>(_stringPath: T, path?: Modding.Intrinsic<"path", [T], string[][]>) {
 		assert(path);
 
@@ -40,7 +85,11 @@ export class ModuleBuilder {
 		return this;
 	}
 
-	/** @metadata macro */
+	/**
+	 * Register a new provider.
+	 *
+	 * @metadata macro
+	 */
 	public registerProvider<T>(providerConfig: ProviderConfig, injectionId?: GenericId<T>) {
 		assert(injectionId !== undefined);
 
@@ -62,30 +111,24 @@ export class ModuleBuilder {
 		return this;
 	}
 
-	/** Shorthand for registering class constructors using their generated ID. */
+	/**
+	 * Register a new class provider.
+	 *
+	 * This is just a shorthand for `registerProvider` which uses the generated `identifier` from the class.
+	 */
 	public registerClassProvider(provider: Constructor) {
 		const providerId = Reflect.getMetadata<string>(provider, "identifier");
 		return this.registerProvider({ type: "class", value: provider }, providerId);
 	}
 
-	/** @metadata macro */
-	public registerInterfaces<T>(ids?: MultipleIDs<T>) {
-		assert(ids !== undefined);
-
-		for (const id of ids) {
-			this.module.interfaces.add(id);
-		}
-
-		return this;
-	}
-
-	public registerHook(hookConfig: HookConfig) {
-		this.module.hooks.push(hookConfig);
-
-		return this;
-	}
-
-	/** @metadata macro */
+	/**
+	 * Export the specified providers from this module.
+	 * You can specify multiple providers at one time using union syntax.
+	 *
+	 * Exporting providers allows them to be accessed when this module is included in another module.
+	 *
+	 * @metadata macro
+	 */
 	public exportProviders<T>(injectionIds?: MultipleIDs<T>) {
 		assert(injectionIds !== undefined);
 
@@ -100,39 +143,6 @@ export class ModuleBuilder {
 		return this;
 	}
 
-	/** @metadata macro */
-	public exportInterfaces<T>(injectionIds?: MultipleIDs<T>) {
-		assert(injectionIds !== undefined);
-
-		for (const injectionId of injectionIds) {
-			if (this.module.exportedInterfaces.has(injectionId)) {
-				warn(`module already exports the provider '${injectionId}'`);
-			}
-
-			this.module.exportedInterfaces.add(injectionId);
-		}
-
-		return this;
-	}
-
-	/**
-	 * Exports all hooks defined in this module.
-	 */
-	public exportHooks() {
-		this.module.exportedHooks = true;
-
-		return this;
-	}
-
-	/**
-	 * Converts this into a transient module.
-	 */
-	public transient() {
-		this.module.transient = true;
-
-		return this;
-	}
-
 	/**
 	 * An easy way to apply a function to the builder without breaking chaining.
 	 */
@@ -140,6 +150,9 @@ export class ModuleBuilder {
 		return callback(this);
 	}
 
+	/**
+	 * Finalizes this module.
+	 */
 	public build() {
 		return new ModuleDefinition(this.module);
 	}

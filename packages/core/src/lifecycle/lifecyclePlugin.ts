@@ -4,12 +4,19 @@ import type { Module } from "../module/module";
 import { HookType } from "../module/moduleHooks";
 import { Provider } from "../provider";
 import type { OnExtinguished, OnPhysics, OnRender, OnStart, OnTick } from "./lifecycleInterfaces";
-import type { Modding } from "../modding";
 import { recycleThread } from "../utility/recycleThread";
 import { Reflect } from "../reflect";
+import { PluginBuilder } from "../plugin/pluginBuilder";
+import type { InterfaceConfiguration } from "../plugin/pluginDefinition";
 
 @Provider()
 class LifecycleProvider {
+	public onStart = new Set<OnStart>();
+	public onTick = new Set<OnTick>();
+	public onPhysics = new Set<OnPhysics>();
+	public onRender = new Set<OnRender>();
+	public onExtinguished = new Set<OnExtinguished>();
+
 	private moduleConnections = new Map<Module, RBXScriptConnection[]>();
 	private isProfiling = RunService.IsStudio();
 
@@ -28,26 +35,11 @@ class LifecycleProvider {
 		return recycleThread(callback);
 	}
 
-	/** @metadata macro */
-	private getLifecycleSet<T>(module: Module, id?: Modding.Generic<T, "id">) {
-		const set = new Set<T>();
-
-		for (const item of module.getInterfaces(id)) {
-			set.add(item);
-		}
-
-		module.getInterfaceAdded((item) => set.add(item), id);
-		module.getInterfaceRemoved((item) => set.delete(item), id);
-
-		return set;
-	}
-
 	public postIgnite(module: Module) {
-		// TODO: this needs to support adding/removing instances
-		const onStart = module.getInterfaces<OnStart>();
-		const onTick = this.getLifecycleSet<OnTick>(module);
-		const onPhysics = this.getLifecycleSet<OnPhysics>(module);
-		const onRender = this.getLifecycleSet<OnRender>(module);
+		const onStart = this.onStart;
+		const onTick = this.onTick;
+		const onPhysics = this.onPhysics;
+		const onRender = this.onRender;
 
 		for (const provider of onStart) {
 			task.spawn(() => provider.onStart());
@@ -90,13 +82,22 @@ class LifecycleProvider {
 			}
 		}
 
-		for (const provider of module.getInterfaces<OnExtinguished>()) {
+		for (const provider of this.onExtinguished) {
 			provider.onExtinguished();
 		}
 	}
 }
 
-export const LifecycleModule = new ModuleBuilder()
+function createLifecycleSet<T>(get: (provider: LifecycleProvider) => Set<T>): InterfaceConfiguration<T> {
+	return {
+		onAdded: (ctx, value) => get(ctx.sourceModule.resolveDependency<LifecycleProvider>()).add(value),
+		onRemoved: (ctx, value) => get(ctx.sourceModule.resolveDependency<LifecycleProvider>()).delete(value),
+	};
+}
+
+const lifecycleModule = new ModuleBuilder().setDebugName(1).registerClassProvider(LifecycleProvider).build();
+
+export const LifecyclePlugin = new PluginBuilder(lifecycleModule)
 	// Hooks
 	.registerHook({
 		type: HookType.PostIgnite,
@@ -112,12 +113,11 @@ export const LifecycleModule = new ModuleBuilder()
 			lifecycleProvider.extinguished(context.targetModule);
 		},
 	})
-	.exportHooks()
-
-	// Providers
-	.registerClassProvider(LifecycleProvider)
 
 	// Lifecycle events
-	.registerInterfaces<OnStart | OnTick | OnPhysics | OnRender | OnExtinguished>()
-	.exportInterfaces<OnStart | OnTick | OnPhysics | OnRender | OnExtinguished>()
+	.registerInterface(createLifecycleSet((p) => p.onStart))
+	.registerInterface(createLifecycleSet((p) => p.onTick))
+	.registerInterface(createLifecycleSet((p) => p.onRender))
+	.registerInterface(createLifecycleSet((p) => p.onPhysics))
+	.registerInterface(createLifecycleSet((p) => p.onExtinguished))
 	.build();

@@ -3,5 +3,5 @@ export type { OnPhysics, OnRender, OnStart, OnTick } from "./lifecycle/lifecycle
 export { Reflect } from "./reflect";
 export { Modding } from "./modding";
 export { Flamework } from "./flamework";
-export { LifecycleModule } from "./lifecycle/lifecycleModule";
+export { LifecyclePlugin } from "./lifecycle/lifecyclePlugin";
 export { Provider } from "./provider";

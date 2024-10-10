@@ -1,32 +1,23 @@
 import type { Modding } from "../modding";
+import type { PluginState } from "../plugin/pluginDefinition";
 import { createModuleInstantiation, type Module } from "./module";
-import type { HookConfig } from "./moduleHooks";
 
 /** The configuration of the module. */
 export interface ModuleState {
-	/** Contains all the included providers, as well as their configuration. */
-	providers: ModuleProvider[];
+	/** The debug name of this module. */
+	readonly debugName: string;
 
-	/** Contains all the registered hooks. */
-	hooks: HookConfig[];
+	/** Contains all the included providers, as well as their configuration. */
+	readonly providers: readonly ModuleProvider[];
 
 	/** Contains all the included modules. */
-	include: ModuleState[];
+	readonly include: readonly ModuleState[];
 
-	/** Contains all the registered interfaces. */
-	interfaces: Set<string>;
+	/** Contains all the included plugins. */
+	readonly plugins: readonly PluginState[];
 
 	/** Contains all the exported providers */
-	exportedProviders: Set<string>;
-
-	/** Contains all the exported interfaces */
-	exportedInterfaces: Set<string>;
-
-	/** Determines whether the defined hooks are exported. */
-	exportedHooks: boolean;
-
-	/** Determines whether this module is transient. */
-	transient: boolean;
+	readonly exportedProviders: ReadonlySet<string>;
 }
 
 export class ModuleDefinition {

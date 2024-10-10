@@ -3,10 +3,24 @@ import { Modding } from "./modding";
 import { Reflect } from "./reflect";
 import { AbstractConstructor, IntrinsicSymbolId } from "./utility/constructors";
 import { ModuleBuilder } from "./module/moduleBuilder";
+import { PluginBuilder } from "./plugin/pluginBuilder";
+import type { ModuleDefinition } from "./module/moduleDefinition";
 
 export namespace Flamework {
+	/**
+	 * Creates a new Module which is the core functionality of Flamework.
+	 */
 	export function createModule() {
-		return new ModuleBuilder();
+		return new ModuleBuilder().setDebugName(2);
+	}
+
+	/**
+	 * Creates a new Plugin. The passed in ModuleDefiniton will be used for the plugin's environment.
+	 *
+	 * Plugins are special types of Modules which allow you to add interfaces, hooks, etc to modules.
+	 */
+	export function createPlugin(module: ModuleDefinition) {
+		return new PluginBuilder(module);
 	}
 
 	/** @hidden */
