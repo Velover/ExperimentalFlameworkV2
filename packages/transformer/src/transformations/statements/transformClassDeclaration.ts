@@ -5,7 +5,7 @@ import { NodeMetadata } from "../../classes/nodeMetadata";
 import { TransformState } from "../../classes/transformState";
 import { f } from "../../util/factory";
 import { buildGuardFromType } from "../../util/functions/buildGuardFromType";
-import { getNodeUid, getSymbolUid, getTypeUid } from "../../util/uid";
+import { getNodeTypeUid, getSymbolUid, getTypeUid } from "../../util/uid";
 import { updateComponentConfig } from "../macros/updateComponentConfig";
 import type { ClassInfo } from "../../types/classes";
 import { getDependencyInjectionMetadata } from "../transformUserMacro";
@@ -62,13 +62,8 @@ function generateFieldMetadata(state: TransformState, metadata: NodeMetadata, fi
 	const type = state.typeChecker.getTypeAtLocation(field);
 
 	if (metadata.isRequested("flamework:type")) {
-		if (!field.type) {
-			const id = getTypeUid(state, type, field.name ?? field);
-			fields.push(["flamework:type", id]);
-		} else {
-			const id = getNodeUid(state, field.type);
-			fields.push(["flamework:type", id]);
-		}
+		const id = getTypeUid(state, type, field.name ?? field);
+		fields.push(["flamework:type", id]);
 	}
 
 	if (metadata.isRequested("flamework:guard")) {
@@ -85,13 +80,8 @@ function generateMethodMetadata(state: TransformState, metadata: NodeMetadata, m
 	if (!baseSignature) return [];
 
 	if (metadata.isRequested("flamework:return_type")) {
-		if (!method.type) {
-			const id = getTypeUid(state, baseSignature.getReturnType(), method.name ?? method);
-			fields.push(["flamework:return_type", id]);
-		} else {
-			const id = getNodeUid(state, method.type);
-			fields.push(["flamework:return_type", id]);
-		}
+		const id = getTypeUid(state, baseSignature.getReturnType(), method.name ?? method);
+		fields.push(["flamework:return_type", id]);
 	}
 
 	if (metadata.isRequested("flamework:return_guard")) {
@@ -106,14 +96,9 @@ function generateMethodMetadata(state: TransformState, metadata: NodeMetadata, m
 
 	for (const parameter of method.parameters) {
 		if (metadata.isRequested("flamework:parameters")) {
-			if (parameter.type) {
-				const id = getNodeUid(state, parameter.type);
-				parameters.push(id);
-			} else {
-				const type = state.typeChecker.getTypeAtLocation(parameter);
-				const id = getTypeUid(state, type, parameter);
-				parameters.push(id);
-			}
+			const type = state.typeChecker.getTypeAtLocation(parameter);
+			const id = getTypeUid(state, type, parameter);
+			parameters.push(id);
 		}
 
 		if (metadata.isRequested("flamework:parameter_names")) {
@@ -193,7 +178,7 @@ function generateClassMetadata(
 	// Flamework decorators always generate the identifier field,
 	// but the new decorator system does not require the identifier metadata to be specified.
 	if (classInfo.containsLegacyDecorator || metadata.isRequested("identifier")) {
-		fields.push(["identifier", getNodeUid(state, node)]);
+		fields.push(["identifier", getNodeTypeUid(state, node)]);
 	}
 
 	const constructor = node.members.find((x): x is ts.ConstructorDeclaration => f.is.constructor(x));
@@ -207,7 +192,7 @@ function generateClassMetadata(
 			if (clause.token !== ts.SyntaxKind.ImplementsKeyword) continue;
 
 			for (const type of clause.types) {
-				implementClauses.push(f.string(getNodeUid(state, type)));
+				implementClauses.push(f.string(getNodeTypeUid(state, type)));
 			}
 		}
 

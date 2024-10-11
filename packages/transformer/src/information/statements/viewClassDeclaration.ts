@@ -4,12 +4,12 @@ import { TransformState } from "../../classes/transformState";
 import { ClassInfo } from "../../types/classes";
 import { DecoratorInfo } from "../../types/decorators";
 import { f } from "../../util/factory";
-import { getNodeUid, getSymbolUid } from "../../util/uid";
+import { getNodeTypeUid, getSymbolUid } from "../../util/uid";
 import { NodeMetadata } from "../../classes/nodeMetadata";
 
 export function viewClassDeclaration(state: TransformState, node: ts.ClassDeclaration) {
 	const symbol = state.getSymbol(node);
-	const internalId = getNodeUid(state, node);
+	const internalId = getNodeTypeUid(state, node);
 
 	if (!node.name || !symbol) return;
 

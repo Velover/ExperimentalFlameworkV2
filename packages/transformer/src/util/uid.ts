@@ -2,7 +2,6 @@ import path from "path";
 import ts from "typescript";
 import { DiagnosticError, Diagnostics } from "../classes/diagnostics";
 import { TransformState } from "../classes/transformState";
-import { f } from "./factory";
 import { getDeclarationName } from "./functions/getDeclarationName";
 import { getPackageJson } from "./functions/getPackageJson";
 import { isDefinedType } from "./functions/isDefinedType";
@@ -194,23 +193,7 @@ export function getTypeUid(state: TransformState, type: ts.Type, trace?: ts.Node
 	}
 }
 
-export function getNodeUid(state: TransformState, node: ts.Node): string {
-	if (f.is.namedDeclaration(node)) {
-		return getDeclarationUid(state, node);
-	}
-
-	// resolve type aliases to the alias declaration
-	if (f.is.referenceType(node)) {
-		return getNodeUid(state, node.typeName);
-	} else if (f.is.queryType(node)) {
-		return getNodeUid(state, node.exprName);
-	}
-
-	const symbol = state.getSymbol(node);
-	if (symbol) {
-		return getSymbolUid(state, symbol, node);
-	}
-
+export function getNodeTypeUid(state: TransformState, node: ts.Node): string {
 	const type = state.typeChecker.getTypeAtLocation(node);
 	return getTypeUid(state, type, node);
 }

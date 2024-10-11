@@ -9,7 +9,8 @@ import {
 } from "./middleware/types";
 import { createNetworkingEvent } from "./events/createNetworkingEvent";
 import { createNetworkingFunction } from "./functions/createNetworkingFunction";
-import { IntrinsicDeclaration, NetworkUnreliable } from "./types";
+import { NetworkUnreliable } from "./types";
+import type { Modding } from "@flamework/core";
 
 export namespace Networking {
 	/**
@@ -18,7 +19,7 @@ export namespace Networking {
 	 * @param clientMiddleware Middleware for client events
 	 * @metadata macro
 	 */
-	export function createEvent<S, C>(name?: IntrinsicDeclaration): GlobalEvent<S, C> {
+	export function createEvent<S, C>(name?: Modding.Caller<"uuid">): GlobalEvent<S, C> {
 		return createNetworkingEvent(name!);
 	}
 
@@ -28,7 +29,7 @@ export namespace Networking {
 	 * @param clientMiddleware Middleware for client events
 	 * @metadata macro
 	 */
-	export function createFunction<S, C>(name?: IntrinsicDeclaration): GlobalFunction<S, C> {
+	export function createFunction<S, C>(name?: Modding.Caller<"uuid">): GlobalFunction<S, C> {
 		return createNetworkingFunction(name!);
 	}
 

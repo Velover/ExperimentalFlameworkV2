@@ -9,7 +9,6 @@ import { NodeMetadata } from "../classes/nodeMetadata";
 import { buildPathGlobIntrinsic, buildPathIntrinsic } from "./macros/intrinsics/paths";
 import { validateParameterConstIntrinsic } from "./macros/intrinsics/parameters";
 import {
-	buildDeclarationUidIntrinsic,
 	transformNetworkingMiddlewareIntrinsic,
 	transformObfuscatedObjectIntrinsic,
 	transformShuffleArrayIntrinsic,
@@ -305,10 +304,6 @@ function buildIntrinsicMacro(state: TransformState, node: ts.Node, macro: UserMa
 		}
 
 		return buildTupleGuardsIntrinsic(state, node, tupleType);
-	}
-
-	if (macro.id === "declaration-uid") {
-		return buildDeclarationUidIntrinsic(state, node);
 	}
 
 	throw `Unexpected intrinsic ID '${macro.id}' with ${macro.inputs.length} inputs`;

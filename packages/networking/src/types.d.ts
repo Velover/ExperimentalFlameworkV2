@@ -46,7 +46,4 @@ export type IntrinsicObfuscateArray<T, V = T> = Modding.Intrinsic<"shuffle-array
 /** @hidden Intrinsic feature not intended for users */
 export type IntrinsicTupleGuards<T> = Modding.Intrinsic<"tuple-guards", [T], GuardType>;
 
-/** @hidden Intrinsic feature not intended for users */
-export type IntrinsicDeclaration = Modding.Intrinsic<"declaration-uid", [], string>;
-
 type GuardType = [t.check<unknown>[], t.check<unknown> | undefined];

@@ -4,7 +4,6 @@ import assert from "assert";
 import { f } from "../../../util/factory";
 import { Diagnostics } from "../../../classes/diagnostics";
 import { UserMacro } from "../../transformUserMacro";
-import { getNodeUid } from "../../../util/uid";
 
 /**
  * Obfuscates the names of events provided in networking middleware.
@@ -89,18 +88,4 @@ export function transformShuffleArrayIntrinsic(state: TransformState, macro: Use
 	if (macro.kind === "many" && Array.isArray(macro.members)) {
 		macro.members = state.obfuscateArray(macro.members) as UserMacro[];
 	}
-}
-
-/**
- * Gets the ID of the macro's containing statement (e.g its variable.)
- *
- * This should eventually be replaced with a field in `Modding.Caller`
- */
-export function buildDeclarationUidIntrinsic(state: TransformState, node: ts.Node) {
-	const parentDeclaration = ts.findAncestor(node, f.is.namedDeclaration);
-	if (!parentDeclaration) {
-		Diagnostics.error(node, "This function must be under a variable declaration.");
-	}
-
-	return f.string(getNodeUid(state, parentDeclaration));
 }
