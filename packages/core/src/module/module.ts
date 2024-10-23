@@ -45,8 +45,21 @@ export interface Module {
 	removeClassInstance: (instance: object) => void;
 }
 
+/**
+ * A dependency injection alias for a plugin's parent.
+ */
+export interface PluginModule extends Module {}
+
 interface ModuleContext {
+	/**
+	 * The store of included modules.
+	 */
 	modules: Map<ModuleState, Module>;
+
+	/**
+	 * The parent of this plugin, as plugins are created per-module.
+	 */
+	pluginParent?: Module;
 }
 
 interface InstanceCreationConfig {
@@ -76,6 +89,7 @@ enum ModuleInitState {
 }
 
 const MODULE_ID = Flamework.id<Module>();
+const PLUGIN_MODULE_ID = Flamework.id<PluginModule>();
 
 export function createModuleInstantiation(state: ModuleState, context: ModuleContext): Module {
 	const instantiatedProviders = new Map<string, defined>();
@@ -115,7 +129,10 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 
 	const setupPlugins = () => {
 		for (const pluginState of state.plugins) {
-			const pluginModule = createModuleInstantiation(pluginState.module, context);
+			const pluginModule = createModuleInstantiation(pluginState.module, {
+				modules: context.modules,
+				pluginParent: module,
+			});
 
 			for (const [interfaceId, configuration] of pluginState.interfaces) {
 				importedInterfaces.set(interfaceId, {
@@ -193,6 +210,11 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		// The ModuleInstantiation type always refers to the current module instantiation.
 		if (info.id === MODULE_ID) {
 			return module;
+		}
+
+		if (info.id === PLUGIN_MODULE_ID) {
+			assert(context.pluginParent !== undefined, "PluginModule is only available in plugins");
+			return context.pluginParent;
 		}
 
 		const moduleProvider = state.providers.find((v) => v.injectionId === info.id);

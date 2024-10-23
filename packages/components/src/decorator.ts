@@ -102,7 +102,7 @@ export interface ComponentConfig {
 /**
  * Register a class as a Component.
  *
- * @metadata reflect identifier flamework:implements flamework:parameters injectable intrinsic-component-decorator
+ * @metadata reflect identifier flamework:implements flamework:dependencies injectable intrinsic-component-decorator
  */
 export function Component(opts?: ComponentConfig) {
 	return (object: object) => {

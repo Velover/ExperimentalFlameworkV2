@@ -24,7 +24,7 @@ import Maid from "@rbxts/maid";
 import Signal from "@rbxts/signal";
 import type { ComponentModuleConfig } from "./componentModule";
 import { ComponentStreamingMode, type ComponentConfig } from "./decorator";
-import type { Module } from "@flamework/core/out/module/module";
+import type { PluginModule } from "@flamework/core/out/module/module";
 
 interface ComponentInfo {
 	ctor: Constructor<BaseComponent>;
@@ -56,7 +56,6 @@ export class Components {
 	private componentAddedListeners = new Map<string, Signal<(value: never, instance: Instance) => void>>();
 	private componentRemovedListeners = new Map<string, Signal<(value: never, instance: Instance) => void>>();
 
-	private module!: Module;
 	private componentsIdMapping;
 
 	private getComponentsIdMapping() {
@@ -67,7 +66,10 @@ export class Components {
 		return mapping;
 	}
 
-	constructor(private config: ComponentModuleConfig) {
+	constructor(
+		private module: PluginModule,
+		private config: ComponentModuleConfig,
+	) {
 		const components = new Map<Constructor, ComponentInfo>();
 
 		this.componentsIdMapping = this.getComponentsIdMapping();
@@ -102,9 +104,7 @@ export class Components {
 	}
 
 	/** @internal */
-	public parentPostIgnite(module: Module) {
-		this.module = module;
-
+	public startCollectionService() {
 		for (const [, { config, ctor }] of this.components) {
 			const ancestorBlacklist = config.ancestorBlacklist ?? DEFAULT_ANCESTOR_BLACKLIST;
 			const ancestorWhitelist = config.ancestorWhitelist;

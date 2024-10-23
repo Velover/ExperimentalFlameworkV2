@@ -1,4 +1,4 @@
-import { Flamework, Reflect, Modding, LifecycleModule } from "@flamework/core";
+import { Flamework, Reflect, Modding, LifecyclePlugin } from "@flamework/core";
 import { getClassesInPath } from "@flamework/core/out/utility/getClassesInPath";
 import type { Constructor } from "./utility";
 import { Components } from "./components";
@@ -9,12 +9,11 @@ export interface ComponentModuleConfig {
 	components: Constructor[];
 }
 
-export class ComponentModule {
-	public static createModule() {
-		return new ComponentModule();
+export class ComponentPlugin {
+	public static createPlugin() {
+		return new ComponentPlugin();
 	}
 
-	private module = Flamework.createModule();
 	private config: ComponentModuleConfig = {
 		components: [],
 	};
@@ -40,21 +39,21 @@ export class ComponentModule {
 	}
 
 	public build() {
-		return this.module
-			.transient()
-			.includeModule(LifecycleModule)
+		const pluginModule = Flamework.createModule()
+			.includePlugin(LifecyclePlugin)
 			.registerProvider<ComponentModuleConfig>({ type: "function", callback: () => this.config })
 			.registerClassProvider(Components)
+			.exportProviders<Components>()
+			.build();
+
+		return Flamework.createPlugin(pluginModule)
 			.registerHook({
 				type: HookType.PostIgnite,
 				callback: (context) => {
-					if (context.sourceModule !== context.targetModule) {
-						context.sourceModule.resolveDependency<Components>().parentPostIgnite(context.targetModule);
-					}
+					// Wait until the parent module has ignited.
+					context.sourceModule.resolveDependency<Components>().startCollectionService();
 				},
 			})
-			.exportHooks()
-			.exportProviders<Components>()
 			.build();
 	}
 }
