@@ -16,6 +16,7 @@ import {
 import { buildTupleGuardsIntrinsic } from "./macros/intrinsics/guards";
 import { isTupleType } from "../util/functions/isTupleType";
 import { inlineMacroIntrinsic } from "./macros/intrinsics/inlining";
+import { addLeadingComment } from "../util/functions/addLeadingComment";
 
 export function transformUserMacro(
 	state: TransformState,
@@ -199,6 +200,30 @@ function buildUserMacro(state: TransformState, node: ts.Node, macro: UserMacro):
 		);
 	} else if (macro.kind === "intrinsic") {
 		return f.asNever(buildIntrinsicMacro(state, node, macro));
+	} else if (macro.kind === "sharedRef") {
+		const result = buildUserMacro(state, node, macro.value);
+		if (ts.isSimpleInlineableExpression(result.expression)) {
+			return result;
+		}
+
+		const nextStatement = ts.findAncestor(node, f.is.statement);
+		if (nextStatement && f.is.file(nextStatement.parent)) {
+			// We are already at the next root, so we don't need to create temporaries.
+			return result;
+		}
+
+		const line = ts.getLineOfLocalPosition(node.getSourceFile(), node.getStart());
+		const uniqueName = f.identifier(`${getNodeDebugName(state, node)}_${line + 1}`, true);
+		const comment = ts.factory.createEmptyStatement();
+		const variable = f.variableStatement(uniqueName, result);
+
+		addLeadingComment(comment, ` Flamework hoisted this macro's metadata (${uniqueName.text}) to the file root.`);
+		addLeadingComment(variable, ` Flamework user macro metadata (line ${line + 1})`);
+
+		state.nextRootStatements.push(variable);
+		state.prereq(comment);
+
+		return f.asNever(uniqueName);
 	}
 
 	return f.asNever(f.nil());
@@ -324,6 +349,15 @@ function getUserMacroOfMany(state: TransformState, node: ts.Node, target: ts.Typ
 	const manyMetadata = state.typeChecker.getTypeOfPropertyOfType(target, "_flamework_macro_many");
 	if (manyMetadata) {
 		return getUserMacroOfMany(state, node, manyMetadata);
+	}
+
+	const sharedRefMetadata = state.typeChecker.getTypeOfPropertyOfType(target, "_flamework_macro_shared_ref");
+	if (sharedRefMetadata) {
+		return {
+			kind: "sharedRef",
+			type: sharedRefMetadata,
+			value: getUserMacroOfMany(state, node, sharedRefMetadata),
+		};
 	}
 
 	if (isTupleType(state, target)) {
@@ -508,6 +542,17 @@ function getParameterCount(state: TransformState, signature: ts.Signature) {
 	return length;
 }
 
+function getNodeDebugName(state: TransformState, node: ts.Node) {
+	if (f.is.call(node)) {
+		const symbol = state.getSymbol(node.expression);
+		if (symbol) {
+			return symbol.name;
+		}
+	}
+
+	return `macro`;
+}
+
 export type UserMacro =
 	| {
 			kind: "generic";
@@ -530,4 +575,9 @@ export type UserMacro =
 			kind: "intrinsic";
 			id: string;
 			inputs: ts.Type[];
+	  }
+	| {
+			kind: "sharedRef";
+			type: ts.Type;
+			value: UserMacro;
 	  };

@@ -28,6 +28,15 @@ export namespace Modding {
 	};
 
 	/**
+	 * This API allows you to share the generated metadata across every invocation of a specific call-site.
+	 *
+	 * This can be used to implement caching, and avoid allocation overhead for large metadata.
+	 */
+	export type SharedRef<T> = T & {
+		/** @hidden */ _flamework_macro_shared_ref: T;
+	};
+
+	/**
 	 * Hashes a string literal type (such as an event name) under Flamework's {@link Many `Many`} API.
 	 *
 	 * The second type argument, `C`, is for providing a context to the hashing which will generate new hashes

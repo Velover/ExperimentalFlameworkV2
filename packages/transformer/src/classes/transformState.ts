@@ -103,6 +103,7 @@ export class TransformState {
 	public isGame: boolean;
 
 	public isUserMacroCache = new Map<ts.Symbol, boolean>();
+	public nextRootStatements = new Array<ts.Statement>();
 
 	private setupBuildInfo() {
 		let baseBuildInfo = BuildInfo.fromDirectory(this.currentDirectory);

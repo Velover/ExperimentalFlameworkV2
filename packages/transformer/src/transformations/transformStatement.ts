@@ -4,6 +4,7 @@ import { catchDiagnostic } from "../util/diagnosticsUtils";
 import { getNodeList } from "../util/functions/getNodeList";
 import { transformClassDeclaration } from "./statements/transformClassDeclaration";
 import { transformNode } from "./transformNode";
+import { f } from "../util/factory";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const TRANSFORMERS = new Map<ts.SyntaxKind, (state: TransformState, node: any) => ts.Statement | ts.Statement[]>([
@@ -20,6 +21,13 @@ export function transformStatement(state: TransformState, statement: ts.Statemen
 
 			return ts.visitEachChild(statement, (newNode) => transformNode(state, newNode), state.context);
 		});
+
+		if (f.is.file(statement.parent)) {
+			const nextRootStatements = state.nextRootStatements;
+			state.nextRootStatements = [];
+
+			return [...nextRootStatements, ...prereqs, ...getNodeList(node)];
+		}
 
 		return [...prereqs, ...getNodeList(node)];
 	});
