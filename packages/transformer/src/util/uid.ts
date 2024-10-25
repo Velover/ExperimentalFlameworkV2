@@ -184,10 +184,6 @@ export function getTypeUid(state: TransformState, type: ts.Type, trace?: ts.Node
 		return `$p:defined`;
 	} else if (type.flags & ts.TypeFlags.Intrinsic) {
 		return `$p:${(type as ts.IntrinsicType).intrinsicName}`;
-	} else if (type.flags & ts.TypeFlags.NumberLiteral) {
-		return `$pn:${(type as ts.NumberLiteralType).value}`;
-	} else if (type.flags & ts.TypeFlags.StringLiteral) {
-		return `$ps:${(type as ts.StringLiteralType).value}`;
 	} else if (trace) {
 		Diagnostics.error(trace, `Could not find UID for type "${type.checker.typeToString(type)}"`);
 	}
