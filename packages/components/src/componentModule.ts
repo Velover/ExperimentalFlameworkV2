@@ -14,6 +14,15 @@ export class ComponentPlugin {
 		return new ComponentPlugin();
 	}
 
+	/**
+	 * This is a shorthand for creating a default components plugin.
+	 *
+	 * @metadata macro
+	 */
+	public static fromPath<T extends string>(_stringPath: T, path?: Modding.Intrinsic<"path", [T], string[][]>) {
+		return this.createPlugin().registerComponents(_stringPath, path).build();
+	}
+
 	private config: ComponentModuleConfig = {
 		components: [],
 	};
