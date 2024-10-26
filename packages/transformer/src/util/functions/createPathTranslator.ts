@@ -1,7 +1,7 @@
 import path from "path";
 import ts from "typescript";
-import { PathTranslator } from "../../classes/pathTranslator";
 import { assert } from "./assert";
+import { PathTranslator } from "@roblox-ts/path-translator";
 
 function findAncestorDir(dirs: Array<string>) {
 	dirs = dirs.map(path.normalize).map((v) => (v.endsWith(path.sep) ? v : v + path.sep));

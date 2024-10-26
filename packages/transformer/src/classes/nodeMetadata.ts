@@ -3,10 +3,24 @@ import { f } from "../util/factory";
 import { TransformState } from "./transformState";
 
 export class NodeMetadata {
+	private static metadataCache = new Map<ts.Node, NodeMetadata>();
+
 	public static fromSymbol(state: TransformState, symbol: ts.Symbol) {
 		if (symbol.valueDeclaration) {
-			return new NodeMetadata(state, symbol.valueDeclaration);
+			return NodeMetadata.fromCache(state, symbol.valueDeclaration);
 		}
+	}
+
+	public static fromCache(state: TransformState, node: ts.Node) {
+		const existing = NodeMetadata.metadataCache.get(node);
+		if (existing) {
+			return existing;
+		}
+
+		const metadata = new NodeMetadata(state, node);
+		NodeMetadata.metadataCache.set(node, metadata);
+
+		return metadata;
 	}
 
 	private set = new Set<string>();
@@ -105,7 +119,7 @@ export class NodeMetadata {
 		}
 	}
 
-	constructor(state: TransformState, node: ts.Node) {
+	private constructor(state: TransformState, node: ts.Node) {
 		this.parse(state, node);
 	}
 

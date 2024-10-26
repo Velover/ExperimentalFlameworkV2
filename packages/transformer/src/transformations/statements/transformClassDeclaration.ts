@@ -11,12 +11,13 @@ export function transformClassDeclaration(state: TransformState, node: ts.ClassD
 	const symbol = state.getSymbol(node);
 	if (!symbol || !node.name) return state.transform(node);
 
-	const classInfo = state.classes.get(symbol);
-	if (!classInfo) return state.transform(node);
+	const metadata = NodeMetadata.fromCache(state, node);
+	if (!hasReflectMetadata(state, node, metadata)) {
+		return state.transform(node);
+	}
 
 	const importIdentifier = state.addFileImport(state.getSourceFile(node), "@flamework/core", "Reflect");
 	const reflectStatements = new Array<ts.Statement>();
-	const metadata = new NodeMetadata(state, node);
 
 	reflectStatements.push(...convertReflectionToStatements(generateClassMetadata(state, metadata, node)));
 	validateConstraintMetadata(state, node, metadata);
@@ -169,7 +170,7 @@ function generateClassMetadata(state: TransformState, metadata: NodeMetadata, no
 function getNodeReflection(
 	state: TransformState,
 	node: ts.ClassDeclaration | ts.ClassElement,
-	metadata = new NodeMetadata(state, node),
+	metadata = NodeMetadata.fromCache(state, node),
 ) {
 	if (f.is.methodDeclaration(node)) {
 		return generateMethodMetadata(state, metadata, node);
@@ -207,4 +208,19 @@ function updateClass(state: TransformState, node: ts.ClassDeclaration, staticSta
 		node.typeParameters,
 		node.modifiers?.map((v) => state.transformNode(v)),
 	);
+}
+
+function hasReflectMetadata(state: TransformState, declaration: ts.ClassDeclaration, metadata: NodeMetadata) {
+	if (metadata.isRequested("reflect")) {
+		return true;
+	}
+
+	for (const member of declaration.members) {
+		const metadata = NodeMetadata.fromCache(state, member);
+		if (metadata.isRequested("reflect")) {
+			return true;
+		}
+	}
+
+	return false;
 }

@@ -4,11 +4,10 @@ import path from "path";
 import { transformFile } from "./transformations/transformFile";
 import { TransformerConfig, TransformState } from "./classes/transformState";
 import { Logger } from "./classes/logger";
-import { viewFile } from "./information/viewFile";
 import { f } from "./util/factory";
 import chalk from "chalk";
-import { PKG_VERSION } from "./classes/pathTranslator/constants";
 import { emitTypescriptMismatch } from "./util/functions/emitTypescriptMismatch";
+import { PKG_VERSION } from "./util/constants";
 
 export default function (program: ts.Program, config?: TransformerConfig) {
 	return (context: ts.TransformationContext): ((file: ts.SourceFile) => ts.Node) => {
@@ -16,8 +15,6 @@ export default function (program: ts.Program, config?: TransformerConfig) {
 		f.setFactory(context.factory);
 
 		const state = new TransformState(program, context, config ?? {});
-		let hasCollectedInformation = false;
-
 		const projectFlameworkVersion = state.buildInfo.getFlameworkVersion();
 		if (projectFlameworkVersion !== PKG_VERSION) {
 			Logger.writeLine(
@@ -51,18 +48,7 @@ export default function (program: ts.Program, config?: TransformerConfig) {
 				}
 			}
 
-			if (!hasCollectedInformation) {
-				hasCollectedInformation = true;
-
-				program.getSourceFiles().forEach((file) => {
-					if (file.isDeclarationFile && !state.shouldViewFile(file)) return;
-
-					viewFile(state, file);
-				});
-			}
-
-			const result = transformFile(state, file);
-			return result;
+			return transformFile(state, file);
 		};
 	};
 }

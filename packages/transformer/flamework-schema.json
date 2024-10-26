@@ -3,21 +3,6 @@
 	"$id": "#root",
 	"type": "object",
 	"properties": {
-		"config": {
-			"$id": "config",
-			"type": "object",
-			"properties": {
-				"logLevel": {
-					"enum": ["none", "verbose"]
-				},
-				"profiling": {
-					"type": "boolean"
-				},
-				"disableDependencyWarnings": {
-					"type": "boolean"
-				}
-			}
-		},
 		"globs": {
 			"$id": "globs",
 			"type": "object",
@@ -74,40 +59,8 @@
 				"metadata": {
 					"type": "object",
 					"properties": {
-						"config": {
-							"$ref": "config"
-						},
 						"globs": {
 							"$ref": "globs"
-						}
-					}
-				},
-				"classes": {
-					"type": "array",
-					"items": {
-						"type": "object",
-						"properties": {
-							"filePath": {
-								"type": "string"
-							},
-							"internalId": {
-								"type": "string"
-							},
-							"decorators": {
-								"type": "array",
-								"items": {
-									"type": "object",
-									"properties": {
-										"name": {
-											"type": "string"
-										},
-										"internalId": {
-											"type": "string"
-										}
-									}
-								}
-							}
-
 						}
 					}
 				}

@@ -3,24 +3,11 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { v4 as uuid } from "uuid";
-import { PKG_VERSION } from "./pathTranslator/constants";
 import { isPathDescendantOf } from "../util/functions/isPathDescendantOf";
-import { FlameworkConfig } from "./transformState";
 import { validateSchema } from "../util/schema";
-
-interface BuildDecorator {
-	name: string;
-	internalId: string;
-}
-
-interface BuildClass {
-	filePath: string;
-	internalId: string;
-	decorators: Array<BuildDecorator>;
-}
+import { PKG_VERSION } from "../util/constants";
 
 interface FlameworkMetadata {
-	config?: FlameworkConfig;
 	globs?: {
 		paths?: Record<string, string[]>;
 		origins?: Record<string, string[]>;
@@ -35,7 +22,6 @@ export interface FlameworkBuildInfo {
 	metadata?: FlameworkMetadata;
 	stringHashes?: { [key: string]: string };
 	identifiers: { [key: string]: string };
-	classes?: Array<BuildClass>;
 }
 
 export class BuildInfo {
@@ -175,14 +161,6 @@ export class BuildInfo {
 		this.identifiersLookup.set(id, internalId);
 	}
 
-	addBuildClass(classInfo: BuildClass) {
-		if (this.getBuildClass(classInfo.internalId))
-			throw new Error(`Attempt to overwrite ${classInfo.internalId} class`);
-
-		if (!this.buildInfo.classes) this.buildInfo.classes = [];
-		this.buildInfo.classes.push(classInfo);
-	}
-
 	getBuildInfoFromFile(fileName: string): BuildInfo | undefined {
 		for (const build of this.buildInfos) {
 			if (isPathDescendantOf(fileName, path.dirname(build.buildInfoPath))) {
@@ -239,14 +217,6 @@ export class BuildInfo {
 				return child;
 			}
 		}
-	}
-
-	/**
-	 * Sets configuration which will be exposed at runtime.
-	 */
-	setConfig(value: FlameworkConfig | undefined) {
-		this.buildInfo.metadata ??= {};
-		this.buildInfo.metadata.config = value;
 	}
 
 	/**
@@ -307,16 +277,6 @@ export class BuildInfo {
 		for (const build of this.buildInfos) {
 			const subId = build.getIdentifierFromInternal(id);
 			if (subId) return subId;
-		}
-	}
-
-	getBuildClass(internalId: string): BuildClass | undefined {
-		const buildClass = this.buildInfo.classes?.find((x) => x.internalId === internalId);
-		if (buildClass) return buildClass;
-
-		for (const build of this.buildInfos) {
-			const subClass = build.getBuildClass(internalId);
-			if (subClass) return subClass;
 		}
 	}
 

@@ -25,7 +25,7 @@ export function transformUserMacro(
 	signature: ts.Signature,
 ): ts.Expression | undefined {
 	const signatureDeclaration = signature.getDeclaration();
-	const nodeMetadata = new NodeMetadata(state, signatureDeclaration);
+	const nodeMetadata = NodeMetadata.fromCache(state, signatureDeclaration);
 	const args = node.arguments ? [...node.arguments] : [];
 	const parameters = new Map<number, UserMacro>();
 

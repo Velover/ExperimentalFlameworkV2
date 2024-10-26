@@ -7,7 +7,7 @@ import { Diagnostics } from "../../classes/diagnostics";
 export function validateConstraintMetadata(
 	state: TransformState,
 	node: ts.ClassDeclaration | ts.ClassElement,
-	metadata = new NodeMetadata(state, node),
+	metadata = NodeMetadata.fromCache(state, node),
 ) {
 	if (!node.name) {
 		return [];

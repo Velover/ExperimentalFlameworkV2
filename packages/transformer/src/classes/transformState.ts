@@ -10,29 +10,16 @@ import { BuildInfo } from "./buildInfo";
 import { Logger } from "./logger";
 import { f } from "../util/factory";
 import { isPathDescendantOf } from "../util/functions/isPathDescendantOf";
-import { ClassInfo } from "../types/classes";
 import { isCleanBuildDirectory } from "../util/functions/isCleanBuildDirectory";
 import { parseCommandLine } from "../util/functions/parseCommandLine";
 import { createPathTranslator } from "../util/functions/createPathTranslator";
 import { arePathsEqual } from "../util/functions/arePathsEqual";
 import { NodeMetadata } from "./nodeMetadata";
 import { RbxPath, RojoResolver } from "@roblox-ts/rojo-resolver";
-import { PathTranslator } from "./pathTranslator";
 import { assert } from "../util/functions/assert";
-import { getSchemaErrors, validateSchema } from "../util/schema";
 import { shuffle } from "../util/functions/shuffle";
 import glob from "glob";
-
-const IGNORE_RBXTS_REGEX = /node_modules\/@rbxts\/(compiler-types|types)\/.*\.d\.ts$/;
-
-/**
- * Runtime configuration exposed via `flamework.json`
- */
-export interface FlameworkConfig {
-	logLevel?: "none" | "verbose";
-	profiling?: boolean;
-	disableDependencyWarnings?: boolean;
-}
+import type { PathTranslator } from "@roblox-ts/path-translator";
 
 export interface TransformerConfig {
 	/**
@@ -91,8 +78,6 @@ export class TransformState {
 	public rootDirs = this.options.rootDirs ? this.options.rootDirs : [this.srcDir];
 	public typeChecker = this.program.getTypeChecker();
 
-	public classes = new Map<ts.Symbol, ClassInfo>();
-
 	public rojoResolver?: RojoResolver;
 	public pathTranslator!: PathTranslator;
 	public buildInfo!: BuildInfo;
@@ -116,23 +101,6 @@ export class TransformState {
 			baseBuildInfo = new BuildInfo(path.join(this.currentDirectory, "flamework.build"));
 		}
 		this.buildInfo = baseBuildInfo;
-		this.buildInfo.setConfig(undefined);
-
-		const configPath = path.join(this.rootDirectory, "flamework.json");
-		if (fs.existsSync(configPath)) {
-			const result = JSON.parse(fs.readFileSync(configPath, { encoding: "ascii" }));
-			if (validateSchema("config", result)) {
-				this.buildInfo.setConfig(result);
-			} else {
-				Logger.error(`Malformed flamework.json`);
-				for (const error of getSchemaErrors()) {
-					Logger.error(
-						`${error.keyword} ${error.instancePath}: ${error.message} ${JSON.stringify(error.params)}`,
-					);
-				}
-				process.exit(1);
-			}
-		}
 
 		const candidates = Cache.buildInfoCandidates ?? [];
 		if (!Cache.buildInfoCandidates) {
@@ -306,19 +274,7 @@ export class TransformState {
 
 		if (this.isGame) {
 			const writtenFiles = new Map<string, string>();
-			const files = ["config.json", "globs.json"];
-
-			const packageConfig = this.buildInfo.getChildrenMetadata("config");
-			const config = this.buildInfo.getMetadata("config");
-			if (config || packageConfig.size > 0) {
-				writtenFiles.set(
-					"config.json",
-					JSON.stringify({
-						game: config,
-						packages: Object.fromEntries(packageConfig),
-					}),
-				);
-			}
+			const files = ["globs.json"];
 
 			const packageGlobs = this.buildInfo.getChildrenMetadata("globs");
 			const globs = this.buildInfo.getMetadata("globs");
@@ -388,7 +344,7 @@ export class TransformState {
 
 		if (symbol.declarations) {
 			for (const declaration of symbol.declarations) {
-				const metadata = new NodeMetadata(this, declaration);
+				const metadata = NodeMetadata.fromCache(this, declaration);
 				if (metadata.isRequested("macro")) {
 					this.isUserMacroCache.set(symbol, true);
 					return true;
@@ -528,37 +484,6 @@ export class TransformState {
 		// Technically this isn't guaranteed to return `T`, and TypeScript 5.0+ updated the signature to disallow this,
 		// but we don't care so we'll just cast it.
 		return ts.visitNode(node, (newNode) => transformNode(this, newNode)) as T;
-	}
-
-	private _shouldViewFile(file: ts.SourceFile) {
-		const fileName = path.posix.normalize(file.fileName);
-		if (IGNORE_RBXTS_REGEX.test(fileName)) return false;
-
-		const buildCandidates = Cache.buildInfoCandidates!;
-		for (const candidate of buildCandidates) {
-			let realPath = Cache.realPath.get(candidate);
-			if (!realPath) Cache.realPath.set(candidate, (realPath = fs.realpathSync(candidate)));
-
-			const candidateDir = path.dirname(realPath);
-			if (
-				isPathDescendantOf(file.fileName, candidateDir) &&
-				!isPathDescendantOf(file.fileName, path.join(candidateDir, "node_modules"))
-			) {
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	shouldViewFile(file: ts.SourceFile) {
-		const cached = Cache.shouldView?.get(file.fileName);
-		if (cached !== undefined) return cached;
-
-		const result = this._shouldViewFile(file);
-		Cache.shouldView.set(file.fileName, result);
-
-		return result;
 	}
 }
 

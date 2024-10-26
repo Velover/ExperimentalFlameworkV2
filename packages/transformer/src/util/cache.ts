@@ -6,9 +6,6 @@ export interface Cache {
 	rojoResolver?: RojoResolver;
 	buildInfoCandidates?: string[];
 	isInitialCompile: boolean;
-	shouldView: Map<string, boolean>;
-	realPath: Map<string, string>;
-	moduleResolution: Map<string, string | false>;
 	pkgJsonCache: Map<string, PackageJsonResult>;
 }
 
@@ -17,8 +14,5 @@ export interface Cache {
  */
 export const Cache: Cache = {
 	isInitialCompile: true,
-	shouldView: new Map(),
-	realPath: new Map(),
-	moduleResolution: new Map(),
 	pkgJsonCache: new Map(),
 };
