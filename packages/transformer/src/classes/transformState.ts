@@ -346,13 +346,8 @@ export class TransformState {
 	public fileImports = new Map<string, ImportInfo[]>();
 	addFileImport(file: ts.SourceFile, importPath: string, name: string): ts.Identifier {
 		// Flamework itself uses features which require imports, this will rewrite those imports to be valid inside the Flamework package.
-		if (importPath === "@flamework/core" && this.packageName === "@flamework/core") {
-			const fileName = path.basename(file.fileName);
-			if (fileName === "flamework.ts" && name === "Flamework") {
-				return f.identifier("Flamework");
-			}
-
-			const modulePath = path.join(this.rootDirectory, "src", name === "Reflect" ? "reflect" : "flamework");
+		if (importPath === "@flamework/core" && this.packageName === "@flamework/core" && name === "Reflect") {
+			const modulePath = path.join(this.rootDirectory, "src", "reflect");
 			importPath = "./" + path.relative(path.dirname(file.fileName), modulePath) || ".";
 		}
 
