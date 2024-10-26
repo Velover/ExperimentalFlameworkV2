@@ -23,12 +23,6 @@ import type { PathTranslator } from "@roblox-ts/path-translator";
 
 export interface TransformerConfig {
 	/**
-	 * An internal option that should not be used.
-	 * This is used to compile the framework package, turning this on in your game will cause many errors.
-	 */
-	$rbxpackmode$?: boolean;
-
-	/**
 	 * Disables TypeScript's own semantic diagnostics.
 	 * Improves performance, but results in increased risk of incorrect compilation as well as messed up diagnostic spans.
 	 */
@@ -45,13 +39,6 @@ export interface TransformerConfig {
 	 * Defaults to package name.
 	 */
 	hashPrefix?: string;
-
-	/**
-	 * Whether to automatically generate the identifiers for exports.
-	 * This is recommended for packages but it is not recommended to
-	 * enable this in games.
-	 */
-	preloadIds?: boolean;
 
 	/**
 	 * Whether to enable flamework's obfuscation.
@@ -256,7 +243,7 @@ export class TransformState {
 		if (!this.isGame) config.hashPrefix ??= this.packageName;
 		this.buildInfo.setIdentifierPrefix(config.hashPrefix);
 
-		if (config.hashPrefix?.startsWith("$") && !config.$rbxpackmode$) {
+		if (config.hashPrefix?.startsWith("$") && !this.packageName.startsWith("@flamework")) {
 			throw new Error(`The hashPrefix $ is used internally by Flamework`);
 		}
 
@@ -359,7 +346,7 @@ export class TransformState {
 	public fileImports = new Map<string, ImportInfo[]>();
 	addFileImport(file: ts.SourceFile, importPath: string, name: string): ts.Identifier {
 		// Flamework itself uses features which require imports, this will rewrite those imports to be valid inside the Flamework package.
-		if (importPath === "@flamework/core" && this.packageName === "@flamework/core" && this.config.$rbxpackmode$) {
+		if (importPath === "@flamework/core" && this.packageName === "@flamework/core") {
 			const fileName = path.basename(file.fileName);
 			if (fileName === "flamework.ts" && name === "Flamework") {
 				return f.identifier("Flamework");
