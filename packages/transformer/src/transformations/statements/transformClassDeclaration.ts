@@ -1,14 +1,11 @@
-import assert from "assert";
 import ts from "typescript";
-import { Diagnostics } from "../../classes/diagnostics";
 import { NodeMetadata } from "../../classes/nodeMetadata";
 import { TransformState } from "../../classes/transformState";
 import { f } from "../../util/factory";
 import { buildGuardFromType } from "../../util/functions/buildGuardFromType";
-import { getNodeTypeUid, getSymbolUid, getTypeUid } from "../../util/uid";
-import { updateComponentConfig } from "../macros/updateComponentConfig";
-import type { ClassInfo } from "../../types/classes";
+import { getNodeTypeUid, getTypeUid } from "../../util/uid";
 import { getDependencyInjectionMetadata } from "../transformUserMacro";
+import { validateConstraintMetadata } from "../../util/functions/validateConstraintMetadata";
 
 export function transformClassDeclaration(state: TransformState, node: ts.ClassDeclaration) {
 	const symbol = state.getSymbol(node);
@@ -19,11 +16,10 @@ export function transformClassDeclaration(state: TransformState, node: ts.ClassD
 
 	const importIdentifier = state.addFileImport(state.getSourceFile(node), "@flamework/core", "Reflect");
 	const reflectStatements = new Array<ts.Statement>();
-	const decoratorStatements = new Array<ts.Statement>();
 	const metadata = new NodeMetadata(state, node);
 
-	reflectStatements.push(...convertReflectionToStatements(generateClassMetadata(state, classInfo, metadata, node)));
-	decoratorStatements.push(...getDecoratorStatements(state, node, node, metadata));
+	reflectStatements.push(...convertReflectionToStatements(generateClassMetadata(state, metadata, node)));
+	validateConstraintMetadata(state, node, metadata);
 
 	for (const member of node.members) {
 		if (!member.name) {
@@ -36,10 +32,10 @@ export function transformClassDeclaration(state: TransformState, node: ts.ClassD
 		}
 
 		reflectStatements.push(...convertReflectionToStatements(getNodeReflection(state, member) ?? [], propertyName));
-		decoratorStatements.push(...getDecoratorStatements(state, node, member));
+		validateConstraintMetadata(state, member);
 	}
 
-	return [updateClass(state, node, reflectStatements), ...decoratorStatements];
+	return [updateClass(state, node, reflectStatements)];
 
 	function convertReflectionToStatements(metadata: [string, f.ConvertableExpression][], property?: string) {
 		const statements = metadata.map(([name, value]) => {
@@ -140,44 +136,10 @@ function generateMethodMetadata(state: TransformState, metadata: NodeMetadata, m
 	return fields;
 }
 
-function transformDecoratorConfig(
-	state: TransformState,
-	declaration: ts.ClassDeclaration,
-	symbol: ts.Symbol,
-	expr: ts.Expression,
-) {
-	if (!f.is.call(expr)) {
-		return [];
-	}
-
-	const metadata = NodeMetadata.fromSymbol(state, symbol);
-	if (metadata && metadata.isRequested("intrinsic-component-decorator")) {
-		assert(!expr.arguments[0] || f.is.object(expr.arguments[0]));
-
-		const baseConfig = expr.arguments[0] ? expr.arguments[0] : f.object([]);
-		const componentConfig = updateComponentConfig(state, declaration, [...baseConfig.properties]);
-		return [
-			f.update.object(
-				baseConfig,
-				componentConfig.map((v) => (baseConfig.properties.includes(v) ? state.transformNode(v) : v)),
-			),
-		];
-	}
-
-	return expr.arguments.map((v) => state.transformNode(v));
-}
-
-function generateClassMetadata(
-	state: TransformState,
-	classInfo: ClassInfo,
-	metadata: NodeMetadata,
-	node: ts.ClassDeclaration,
-) {
+function generateClassMetadata(state: TransformState, metadata: NodeMetadata, node: ts.ClassDeclaration) {
 	const fields: [string, f.ConvertableExpression][] = [];
 
-	// Flamework decorators always generate the identifier field,
-	// but the new decorator system does not require the identifier metadata to be specified.
-	if (classInfo.containsLegacyDecorator || metadata.isRequested("identifier")) {
+	if (metadata.isRequested("identifier")) {
 		fields.push(["identifier", getNodeTypeUid(state, node)]);
 	}
 
@@ -216,76 +178,6 @@ function getNodeReflection(
 	}
 }
 
-function getDecoratorStatements(
-	state: TransformState,
-	declaration: ts.ClassDeclaration,
-	node: ts.ClassDeclaration | ts.ClassElement,
-	metadata = new NodeMetadata(state, node),
-): ts.Statement[] {
-	if (!node.name) {
-		return [];
-	}
-
-	const isClass = f.is.classDeclaration(node);
-	const symbol = state.getSymbol(node.name);
-	const propertyName = ts.getNameFromPropertyName(node.name);
-	assert(propertyName);
-	assert(symbol);
-	const importIdentifier = state.addFileImport(state.getSourceFile(node), "@flamework/core", "Reflect");
-	const decoratorStatements = new Array<ts.Statement>();
-
-	const decorators = ts.canHaveDecorators(node) ? ts.getDecorators(node) : undefined;
-	if (decorators) {
-		// Decorators apply last->first, so we iterate the decorators in reverse.
-		for (let i = decorators.length - 1; i >= 0; i--) {
-			const decorator = decorators[i];
-			const expr = decorator.expression;
-			const type = state.typeChecker.getTypeAtLocation(expr);
-			if (type.getProperty("_flamework_Decorator")) {
-				const identifier = f.is.call(expr) ? expr.expression : expr;
-				const symbol = state.getSymbol(identifier);
-				assert(symbol);
-				assert(symbol.valueDeclaration);
-
-				const args = transformDecoratorConfig(state, declaration, symbol, expr);
-				const propertyArgs = !f.is.classDeclaration(node)
-					? [propertyName, (node.modifierFlagsCache & ts.ModifierFlags.Static) !== 0]
-					: [];
-
-				decoratorStatements.push(
-					f.statement(
-						f.call(f.field(importIdentifier, "decorate"), [
-							declaration.name!,
-							getSymbolUid(state, symbol, identifier),
-							identifier,
-							[...args],
-							...propertyArgs,
-						]),
-					),
-				);
-			}
-		}
-	}
-
-	const constraintTypes = metadata.getType("constraint");
-	const nodeType = state.typeChecker.getTypeOfSymbolAtLocation(symbol, node);
-	for (const constraintType of constraintTypes ?? []) {
-		if (!state.typeChecker.isTypeAssignableTo(nodeType, constraintType)) {
-			Diagnostics.addDiagnostic(
-				getAssignabilityDiagnostics(
-					node.name ?? node,
-					nodeType,
-					constraintType,
-					metadata.getTrace(constraintType),
-				),
-			);
-		}
-	}
-
-	addSectionComment(decoratorStatements[0], declaration, isClass ? undefined : propertyName, "decorators");
-	return decoratorStatements;
-}
-
 function addSectionComment(
 	node: ts.Node | undefined,
 	declaration: ts.ClassDeclaration,
@@ -300,64 +192,8 @@ function addSectionComment(
 	ts.addSyntheticLeadingComment(node, ts.SyntaxKind.SingleLineCommentTrivia, ` (Flamework) ${elementName} ${label}`);
 }
 
-function formatType(type: ts.Type) {
-	const typeNode = type.checker.typeToTypeNode(
-		type,
-		undefined,
-		ts.NodeBuilderFlags.InTypeAlias | ts.NodeBuilderFlags.IgnoreErrors,
-	)!;
-
-	const printer = ts.createPrinter();
-	return printer.printNode(ts.EmitHint.Unspecified, typeNode, undefined!);
-}
-
-function getAssignabilityDiagnostics(
-	node: ts.Node,
-	sourceType: ts.Type,
-	constraintType: ts.Type,
-	trace?: ts.Node,
-): ts.DiagnosticWithLocation {
-	const diagnostic = Diagnostics.createDiagnostic(
-		node,
-		ts.DiagnosticCategory.Error,
-		`Type '${formatType(sourceType)}' does not satify constraint '${formatType(constraintType)}'`,
-	);
-
-	if (trace) {
-		ts.addRelatedInfo(
-			diagnostic,
-			Diagnostics.createDiagnostic(trace, ts.DiagnosticCategory.Message, "The constraint is defined here."),
-		);
-	}
-
-	return diagnostic;
-}
-
 function updateClass(state: TransformState, node: ts.ClassDeclaration, staticStatements?: ts.Statement[]) {
-	const modifiers = getAllModifiers(node);
-	const members = node.members
-		.map((node) => state.transformNode(node))
-		.map((member) => {
-			// Strip Flamework decorators from members
-			const modifiers = getAllModifiers(member);
-			if (modifiers) {
-				const filteredModifiers = transformModifiers(state, modifiers);
-				if (f.is.propertyDeclaration(member)) {
-					return f.update.propertyDeclaration(member, undefined, undefined, filteredModifiers);
-				} else if (f.is.methodDeclaration(member)) {
-					return f.update.methodDeclaration(
-						member,
-						undefined,
-						undefined,
-						undefined,
-						undefined,
-						filteredModifiers,
-					);
-				}
-			}
-
-			return member;
-		});
+	const members = node.members.map((node) => state.transformNode(node));
 
 	if (staticStatements) {
 		members.push(f.staticBlockDeclaration(staticStatements));
@@ -369,23 +205,6 @@ function updateClass(state: TransformState, node: ts.ClassDeclaration, staticSta
 		members,
 		node.heritageClauses,
 		node.typeParameters,
-		modifiers && transformModifiers(state, modifiers),
+		node.modifiers?.map((v) => state.transformNode(v)),
 	);
-}
-
-function getAllModifiers(node: ts.Node) {
-	return ts.canHaveDecorators(node) || ts.canHaveModifiers(node) ? node.modifiers : undefined;
-}
-
-function transformModifiers(state: TransformState, modifiers: readonly ts.ModifierLike[]) {
-	return modifiers
-		.filter((modifier) => {
-			if (!ts.isDecorator(modifier)) {
-				return true;
-			}
-
-			const type = state.typeChecker.getTypeAtLocation(modifier.expression);
-			return type.getProperty("_flamework_Decorator") === undefined;
-		})
-		.map((decorator) => state.transform(decorator));
 }

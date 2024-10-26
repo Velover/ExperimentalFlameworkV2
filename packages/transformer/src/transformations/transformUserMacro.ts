@@ -17,13 +17,13 @@ import { buildTupleGuardsIntrinsic } from "./macros/intrinsics/guards";
 import { isTupleType } from "../util/functions/isTupleType";
 import { inlineMacroIntrinsic } from "./macros/intrinsics/inlining";
 import { addLeadingComment } from "../util/functions/addLeadingComment";
+import { transformComponentConfig } from "./macros/intrinsics/components";
 
 export function transformUserMacro(
 	state: TransformState,
 	node: ts.NewExpression | ts.CallExpression,
 	signature: ts.Signature,
 ): ts.Expression | undefined {
-	const file = state.getSourceFile(node);
 	const signatureDeclaration = signature.getDeclaration();
 	const nodeMetadata = new NodeMetadata(state, signatureDeclaration);
 	const args = node.arguments ? [...node.arguments] : [];
@@ -58,6 +58,14 @@ export function transformUserMacro(
 		transformNetworkingMiddlewareIntrinsic(state, signature, args, networkingMiddleware);
 	}
 
+	const componentConfigs = nodeMetadata.getSymbol("intrinsic-component-config");
+	if (componentConfigs) {
+		const decoratorParent = ts.findAncestor(node, ts.isDecorator);
+		if (decoratorParent && f.is.classDeclaration(decoratorParent.parent)) {
+			transformComponentConfig(state, decoratorParent.parent, signature, componentConfigs, args);
+		}
+	}
+
 	const inlineIntrinsic = nodeMetadata.getSymbol("intrinsic-inline");
 	if (inlineIntrinsic && inlineIntrinsic.length === 1) {
 		return inlineMacroIntrinsic(signature, args, inlineIntrinsic[0]);
@@ -65,26 +73,10 @@ export function transformUserMacro(
 
 	validateParameterConstIntrinsic(node, signature, nodeMetadata.getSymbol("intrinsic-const") ?? []);
 
-	let name: ts.Expression | undefined;
-
-	const rewrite = nodeMetadata.getSymbol("intrinsic-flamework-rewrite")?.[0];
-	if (rewrite && rewrite.parent) {
-		const namespace = state.addFileImport(file, "@flamework/core", rewrite.parent.name);
-		name = f.elementAccessExpression(namespace, rewrite.name);
-	}
-
-	if (!name) {
-		name = state.transformNode(node.expression);
-	}
-
-	if (nodeMetadata.isRequested("intrinsic-arg-shift")) {
-		args.shift();
-	}
-
 	if (ts.isNewExpression(node)) {
-		return ts.factory.updateNewExpression(node, name, node.typeArguments, args);
+		return ts.factory.updateNewExpression(node, state.transformNode(node.expression), node.typeArguments, args);
 	} else if (ts.isCallExpression(node)) {
-		return ts.factory.updateCallExpression(node, name, node.typeArguments, args);
+		return ts.factory.updateCallExpression(node, state.transformNode(node.expression), node.typeArguments, args);
 	} else {
 		Diagnostics.error(node, `Macro could not be transformed.`);
 	}
