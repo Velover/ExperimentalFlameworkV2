@@ -52,16 +52,6 @@ export namespace Flamework {
 	export declare function implements<T>(object: unknown, id?: Modding.Generic<T, "id">): object is T;
 
 	/**
-	 * Hash a function using the method used internally by Flamework.
-	 * If a context is provided, then Flamework will create a new hash
-	 * if the specified string does not have one in that context.
-	 * @param str The string to hash
-	 * @param context A scope for the hash
-	 * @metadata macro {@link meta intrinsic-inline}
-	 */
-	export declare function hash<T extends string, C extends string = never>(meta?: Modding.Hash<T, C>): string;
-
-	/**
 	 * Creates a type guard from any arbitrary type.
 	 *
 	 * @metadata macro
