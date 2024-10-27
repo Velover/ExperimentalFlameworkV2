@@ -146,9 +146,7 @@ function findValidDeclaration(symbol: ts.Symbol, trace?: ts.Node): ts.NamedDecla
 	}
 }
 
-export function getSymbolUid(state: TransformState, symbol: ts.Symbol, trace: ts.Node): string;
-export function getSymbolUid(state: TransformState, symbol: ts.Symbol, trace?: ts.Node): string | undefined;
-export function getSymbolUid(state: TransformState, symbol: ts.Symbol, trace?: ts.Node) {
+function getSymbolUid(state: TransformState, symbol: ts.Symbol, trace?: ts.Node) {
 	if (!symbol.declarations) {
 		if (trace) {
 			Diagnostics.error(trace, `This symbol does not have any ID: "${symbol.name}"`);
