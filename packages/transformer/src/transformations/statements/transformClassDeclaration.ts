@@ -6,6 +6,7 @@ import { buildGuardFromType } from "../../util/functions/buildGuardFromType";
 import { getNodeTypeUid, getTypeUid } from "../../util/uid";
 import { getDependencyInjectionMetadata } from "../transformUserMacro";
 import { validateConstraintMetadata } from "../../util/functions/validateConstraintMetadata";
+import { Diagnostics } from "../../classes/diagnostics";
 
 export function transformClassDeclaration(state: TransformState, node: ts.ClassDeclaration) {
 	const symbol = state.getSymbol(node);
@@ -32,7 +33,12 @@ export function transformClassDeclaration(state: TransformState, node: ts.ClassD
 			continue;
 		}
 
-		reflectStatements.push(...convertReflectionToStatements(getNodeReflection(state, member) ?? [], propertyName));
+		const reflection = getNodeReflection(state, member) ?? [];
+		if (reflection.length > 0 && ts.hasStaticModifier(member)) {
+			Diagnostics.error(member.name, "Flamework does not support reflection on static members.");
+		}
+
+		reflectStatements.push(...convertReflectionToStatements(reflection, propertyName));
 		validateConstraintMetadata(state, member);
 	}
 
