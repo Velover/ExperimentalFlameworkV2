@@ -76,21 +76,11 @@ export namespace Modding {
 	};
 
 	/**
-	 * Retrieves multiple types of metadata from Flamework's user macros.
-	 */
-	export type GenericMany<T, M extends keyof GenericMetadata<T>> = Modding.Many<{ [k in M]: Generic<T, k> }>;
-
-	/**
 	 * Retrieves metadata about the callsite using Flamework's user macros.
 	 */
 	export type Caller<M extends keyof CallerMetadata> = CallerMetadata[M] & {
 		/** @hidden */ _flamework_macro_caller: M;
 	};
-
-	/**
-	 * Retrieves multiple types of metadata about the callsite using Flamework's user macros.
-	 */
-	export type CallerMany<M extends keyof CallerMetadata> = Modding.Many<{ [k in M]: Caller<k> }>;
 
 	/**
 	 * Creates an injectable type that can be used to modify dependency injection behavior.
