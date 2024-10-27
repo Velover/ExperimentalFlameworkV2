@@ -79,95 +79,95 @@ function generateFieldMetadata(state: TransformState, metadata: NodeMetadata, fi
 
 function generateMethodMetadata(state: TransformState, metadata: NodeMetadata, method: ts.FunctionLikeDeclaration) {
 	const fields = new Array<[string, f.ConvertableExpression]>();
+	fields.push(...generateParametersMetadata(state, metadata, method.parameters));
+
 	const baseSignature = state.typeChecker.getSignatureFromDeclaration(method);
-	if (!baseSignature) return [];
-
-	if (metadata.isRequested("flamework:return_type")) {
-		const id = getTypeUid(state, baseSignature.getReturnType(), method.name ?? method);
-		fields.push(["flamework:return_type", id]);
-	}
-
-	if (metadata.isRequested("flamework:return_guard")) {
-		const guard = buildGuardFromType(state, method.type ?? method, baseSignature.getReturnType());
-		fields.push(["flamework:return_guard", guard]);
-	}
-
-	const parameters = new Array<string>();
-	const parameterNames = new Array<string>();
-	const parameterGuards = new Array<ts.Expression>();
-	const dependencies = new Array<ts.Expression>();
-
-	for (const parameter of method.parameters) {
-		if (metadata.isRequested("flamework:parameters")) {
-			const type = state.typeChecker.getTypeAtLocation(parameter);
-			const id = getTypeUid(state, type, parameter);
-			parameters.push(id);
+	if (baseSignature) {
+		if (metadata.isRequested("flamework:return_type")) {
+			const id = getTypeUid(state, baseSignature.getReturnType(), method.name ?? method);
+			fields.push(["flamework:return_type", id]);
 		}
 
-		if (metadata.isRequested("flamework:parameter_names")) {
-			if (f.is.identifier(parameter.name)) {
-				parameterNames.push(parameter.name.text);
-			} else {
-				parameterNames.push("_binding_");
-			}
+		if (metadata.isRequested("flamework:return_guard")) {
+			const guard = buildGuardFromType(state, method.type ?? method, baseSignature.getReturnType());
+			fields.push(["flamework:return_guard", guard]);
 		}
-
-		if (metadata.isRequested("flamework:parameter_guards")) {
-			const type = state.typeChecker.getTypeAtLocation(parameter);
-			const guard = buildGuardFromType(state, parameter, type);
-			parameterGuards.push(guard);
-		}
-
-		if (metadata.isRequested("flamework:dependencies")) {
-			const type = state.typeChecker.getTypeAtLocation(parameter);
-			dependencies.push(getDependencyInjectionMetadata(state, parameter, type));
-		}
-	}
-
-	if (parameters.length > 0) {
-		fields.push(["flamework:parameters", parameters]);
-	}
-
-	if (parameterNames.length > 0) {
-		fields.push(["flamework:parameter_names", parameterNames]);
-	}
-
-	if (parameterGuards.length > 0) {
-		fields.push(["flamework:parameter_guards", parameterGuards]);
-	}
-
-	if (dependencies.length > 0) {
-		fields.push(["flamework:dependencies", dependencies]);
 	}
 
 	return fields;
 }
 
+function generateParametersMetadata(
+	state: TransformState,
+	metadata: NodeMetadata,
+	parameters: Iterable<ts.ParameterDeclaration>,
+) {
+	const fields = new Array<[string, f.ConvertableExpression]>();
+
+	generateMetadata("flamework:parameters", (param) => {
+		const type = state.typeChecker.getTypeAtLocation(param);
+		return getTypeUid(state, type, param);
+	});
+
+	generateMetadata("flamework:parameter_names", (param) => {
+		return f.is.identifier(param.name) ? param.name.text : "_binding_";
+	});
+
+	generateMetadata("flamework:parameter_guards", (param) => {
+		const type = state.typeChecker.getTypeAtLocation(param);
+		return buildGuardFromType(state, param, type);
+	});
+
+	generateMetadata("flamework:dependencies", (param) => {
+		const type = state.typeChecker.getTypeAtLocation(param);
+		return getDependencyInjectionMetadata(state, param, type);
+	});
+
+	return fields;
+
+	function generateMetadata(name: string, callback: (value: ts.ParameterDeclaration) => f.ConvertableExpression) {
+		if (metadata.isRequested(name)) {
+			const values = new Array<f.ConvertableExpression>();
+
+			for (const parameter of parameters) {
+				values.push(callback(parameter));
+			}
+
+			fields.push([name, values]);
+		}
+	}
+}
+
 function generateClassMetadata(state: TransformState, metadata: NodeMetadata, node: ts.ClassDeclaration) {
+	const symbol = state.getSymbol(node)!;
 	const fields: [string, f.ConvertableExpression][] = [];
 
 	if (metadata.isRequested("identifier")) {
 		fields.push(["identifier", getNodeTypeUid(state, node)]);
 	}
 
-	const constructor = node.members.find((x): x is ts.ConstructorDeclaration => f.is.constructor(x));
-	if (constructor) {
-		fields.push(...generateMethodMetadata(state, metadata, constructor));
-	}
-
-	if (node.heritageClauses) {
+	if (metadata.isRequested("flamework:implements")) {
 		const implementClauses = new Array<ts.StringLiteral>();
-		for (const clause of node.heritageClauses) {
-			if (clause.token !== ts.SyntaxKind.ImplementsKeyword) continue;
 
-			for (const type of clause.types) {
-				implementClauses.push(f.string(getNodeTypeUid(state, type)));
+		if (node.heritageClauses) {
+			for (const clause of node.heritageClauses) {
+				if (clause.token !== ts.SyntaxKind.ImplementsKeyword) {
+					continue;
+				}
+
+				for (const type of clause.types) {
+					implementClauses.push(f.string(getNodeTypeUid(state, type)));
+				}
 			}
 		}
 
-		if (implementClauses.length > 0 && metadata.isRequested("flamework:implements")) {
-			fields.push(["flamework:implements", f.array(implementClauses, false)]);
-		}
+		fields.push(["flamework:implements", f.array(implementClauses, false)]);
+	}
+
+	const [firstSignature] = state.typeChecker.getTypeOfSymbol(symbol).getConstructSignatures();
+	if (firstSignature !== undefined) {
+		const params = firstSignature.parameters.map((v) => v.declarations![0]) as ts.ParameterDeclaration[];
+		fields.push(...generateParametersMetadata(state, metadata, params));
 	}
 
 	return fields;
