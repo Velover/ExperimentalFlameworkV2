@@ -6,7 +6,6 @@ import { transformClassDeclaration } from "./statements/transformClassDeclaratio
 import { transformNode } from "./transformNode";
 import { f } from "../util/factory";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const TRANSFORMERS = new Map<ts.SyntaxKind, (state: TransformState, node: any) => ts.Statement | ts.Statement[]>([
 	[ts.SyntaxKind.ClassDeclaration, transformClassDeclaration],
 ]);

@@ -113,6 +113,6 @@ function getProcessResult(value: unknown) {
 	return value === Skip
 		? NetworkingFunctionError.Cancelled
 		: value === SkipBadRequest
-		? NetworkingFunctionError.BadRequest
-		: true;
+			? NetworkingFunctionError.BadRequest
+			: true;
 }

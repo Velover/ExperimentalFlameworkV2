@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import ts from "typescript";
 import { DiagnosticError, Diagnostics } from "../classes/diagnostics";
 

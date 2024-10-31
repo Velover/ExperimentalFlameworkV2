@@ -6,7 +6,6 @@ import { transformCallExpression } from "./expressions/transformCallExpression";
 import { transformNewExpression } from "./expressions/transformNewExpression";
 import { transformNode } from "./transformNode";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const TRANSFORMERS = new Map<ts.SyntaxKind, (state: TransformState, node: any) => ts.Expression>([
 	[ts.SyntaxKind.CallExpression, transformCallExpression],
 	[ts.SyntaxKind.NewExpression, transformNewExpression],

@@ -66,7 +66,7 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 					id: isSender ? `${receiverPrefix}${effectiveName}` : effectiveName,
 					networkInfo,
 					incomingMiddleware,
-			  })
+				})
 			: undefined;
 
 		const sender = isSender
@@ -89,8 +89,8 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 								} else {
 									resolve(value);
 								}
-						  },
-			  })
+							},
+				})
 			: undefined;
 
 		handler[name as keyof T] = createMethod(config, receiver, sender) as never;
