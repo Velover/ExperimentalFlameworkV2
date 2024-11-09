@@ -19,7 +19,7 @@ export namespace Networking {
 	 * @param clientMiddleware Middleware for client events
 	 * @metadata macro
 	 */
-	export function createEvent<S, C>(name?: Modding.Caller<"uuid">): GlobalEvent<S, C> {
+	export function createEvent<S, C>(name?: Modding.Caller.Uuid): GlobalEvent<S, C> {
 		return createNetworkingEvent(name!);
 	}
 
@@ -29,7 +29,7 @@ export namespace Networking {
 	 * @param clientMiddleware Middleware for client events
 	 * @metadata macro
 	 */
-	export function createFunction<S, C>(name?: Modding.Caller<"uuid">): GlobalFunction<S, C> {
+	export function createFunction<S, C>(name?: Modding.Caller.Uuid): GlobalFunction<S, C> {
 		return createNetworkingFunction(name!);
 	}
 

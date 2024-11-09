@@ -504,7 +504,7 @@ function getUserMacroOfType(state: TransformState, node: ts.Expression, target: 
  * This allows user macros to specify signatures that can accept non-metadata, like in Flamework components.
  * Multiple modding types in a single parameter aren't supported, and Flamework will choose a random one.
  *
- * For example, `string | Modding.Generic<T, "id">`, will generate the ID for `T`, but also allow users to pass in one manually.
+ * For example, `string | Modding.Target.Id<T>`, will generate the ID for `T`, but also allow users to pass in one manually.
  */
 function getUserMacroOfUnion(state: TransformState, node: ts.Expression, target: ts.Type) {
 	if (!target.isUnion()) {

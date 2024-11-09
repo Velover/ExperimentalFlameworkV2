@@ -3,8 +3,8 @@ import { Modding, Reflect } from "@flamework/core";
 export type Constructor<T = object> = new (...args: never[]) => T;
 export type AbstractConstructor<T = object> = abstract new (...args: never[]) => T;
 
-export type ConstructorRef<T> = Constructor<T> | Modding.Generic<T, "id"> | string;
-export type AbstractConstructorRef<T> = AbstractConstructor<T> | Modding.Generic<T, "id"> | string;
+export type ConstructorRef<T> = Constructor<T> | Modding.Target.Id<T> | string;
+export type AbstractConstructorRef<T> = AbstractConstructor<T> | Modding.Target.Id<T> | string;
 
 export function isConstructor(obj: object): obj is Constructor {
 	return "constructor" in obj && "new" in obj;

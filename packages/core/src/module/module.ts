@@ -31,7 +31,7 @@ export interface Module {
 	getModuleState: () => ModuleState;
 
 	/** @metadata macro */
-	resolveDependency: <T = unknown>(info?: string | Modding.Generic<T, "dependencyConcise">) => T;
+	resolveDependency: <T = unknown>(info?: string | Modding.Target.DependencyConcise<T>) => T;
 
 	/**
 	 * Terminates this module.

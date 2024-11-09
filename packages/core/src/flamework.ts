@@ -35,28 +35,28 @@ export namespace Flamework {
 	 *
 	 * @metadata macro {@link id intrinsic-inline}
 	 */
-	export declare function id<T>(id?: Modding.Generic<T, "id">): string;
+	export declare function id<T>(id?: Modding.Target.Id<T>): string;
 
 	/**
 	 * Check if the constructor implements the specified interface.
 	 *
 	 * @metadata macro {@link _implements intrinsic-flamework-rewrite}
 	 */
-	export declare function implements<T>(object: AbstractConstructor, id?: Modding.Generic<T, "id">): boolean;
+	export declare function implements<T>(object: AbstractConstructor, id?: Modding.Target.Id<T>): boolean;
 
 	/**
 	 * Check if object implements the specified interface.
 	 *
 	 * @metadata macro {@link _implements intrinsic-flamework-rewrite}
 	 */
-	export declare function implements<T>(object: unknown, id?: Modding.Generic<T, "id">): object is T;
+	export declare function implements<T>(object: unknown, id?: Modding.Target.Id<T>): object is T;
 
 	/**
 	 * Creates a type guard from any arbitrary type.
 	 *
 	 * @metadata macro
 	 */
-	export function createGuard<T>(meta?: Modding.Generic<T, "guard">): t.check<T> {
+	export function createGuard<T>(meta?: Modding.Target.Guard<T>): t.check<T> {
 		return meta!;
 	}
 }

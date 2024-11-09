@@ -6,8 +6,8 @@ import type { Constructor } from "../utility/constructors";
 import type { WritableState } from "../utility/writable";
 import type { PluginDefinition } from "../plugin/pluginDefinition";
 
-type GenericId<T> = string | Modding.Generic<T, "id">;
-type MultipleIDs<T> = string[] | Modding.Many<(T extends T ? Modding.Generic<T, "id"> : never)[]>;
+type GenericId<T> = string | Modding.Target.Id<T>;
+type MultipleIDs<T> = string[] | Modding.Many<(T extends T ? Modding.Target.Id<T> : never)[]>;
 
 export class ModuleBuilder {
 	/** A global count of the number of module builders. Used to disambiguate identical module debug names. */

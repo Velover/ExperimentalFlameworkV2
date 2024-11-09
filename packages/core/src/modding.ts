@@ -28,61 +28,6 @@ export namespace Modding {
 	};
 
 	/**
-	 * This API allows you to share the generated metadata across every invocation of a specific call-site.
-	 *
-	 * This can be used to implement caching, and avoid allocation overhead for large metadata.
-	 */
-	export type SharedRef<T> = T & {
-		/** @hidden */ _flamework_macro_shared_ref: T;
-	};
-
-	/**
-	 * Hashes a string literal type (such as an event name) under Flamework's {@link Many `Many`} API.
-	 *
-	 * The second type argument, `C`, is for providing a context to the hashing which will generate new hashes
-	 * for strings which already have a hash under another context.
-	 *
-	 * @experimental This API is considered experimental and may change.
-	 */
-	export type Hash<T extends string, C extends string = never> = string & {
-		/** @hidden */ _flamework_macro_hash: [T, C];
-	};
-
-	/**
-	 * This is equivalent to {@link Hash `Hash`} except it will only hash strings when `obfuscation` is turned on.
-	 *
-	 * @experimental This API is considered experimental and may change.
-	 */
-	export type Obfuscate<T extends string, C extends string = never> = string & {
-		/** @hidden */ _flamework_macro_hash: [T, C, true];
-	};
-
-	/**
-	 * Retrieves the labels from this tuple under Flamework's {@link Many `Many`} API.
-	 *
-	 * This can also be used to extract parameter names via `Parameters<T>`
-	 *
-	 * @experimental This API is considered experimental and may change.
-	 */
-	export type TupleLabels<T extends readonly unknown[]> =
-		| (string[] & { /** @hidden */ _flamework_macro_tuple_labels: T })
-		| undefined;
-
-	/**
-	 * Retrieves metadata about the specified type using Flamework's user macros.
-	 */
-	export type Generic<T, M extends keyof GenericMetadata<T>> = GenericMetadata<T>[M] & {
-		/** @hidden */ _flamework_macro_generic: [T, M];
-	};
-
-	/**
-	 * Retrieves metadata about the callsite using Flamework's user macros.
-	 */
-	export type Caller<M extends keyof CallerMetadata> = CallerMetadata[M] & {
-		/** @hidden */ _flamework_macro_caller: M;
-	};
-
-	/**
 	 * Creates an injectable type that can be used to modify dependency injection behavior.
 	 */
 	export type Injectable<C extends { type: unknown; id?: unknown; metadata?: unknown[] }> = RealType<C["type"]> & {
@@ -96,6 +41,121 @@ export namespace Modding {
 	 * @hidden
 	 */
 	export type Intrinsic<N extends string, M extends unknown[], T = symbol> = T & { _flamework_intrinsic: [N, ...M] };
+
+	/**
+	 * This namespace contains types and metadata related to the current macro's callsite.
+	 */
+	export namespace Caller {
+		/**
+		 * Retrieves metadata about the callsite using Flamework's user macros.
+		 */
+		type CallerHelper<U, M extends string> = U & {
+			/** @hidden */ _flamework_macro_caller: M;
+		};
+
+		/**
+		 * The starting line of the expression.
+		 */
+		export type Line = CallerHelper<string, "line">;
+
+		/**
+		 * The char at the start of the expression relative to the starting line.
+		 */
+		export type Character = CallerHelper<string, "character">;
+
+		/**
+		 * The width of the expression.
+		 * This includes the width of multiline statements.
+		 */
+		export type Width = CallerHelper<number, "width">;
+
+		/**
+		 * A unique identifier that can be used to identify exact callsites.
+		 * This can be used for hooks.
+		 */
+		export type Uuid = CallerHelper<string, "uuid">;
+
+		/**
+		 * The source text for the expression.
+		 */
+		export type Text = CallerHelper<string, "text">;
+
+		/**
+		 * This API will generate a constant reference to the nested metadata.
+		 * This means that the same object will be passed in for every invocation of a specific function call.
+		 *
+		 * This can be used to implement caching, and avoid allocation overhead for large metadata.
+		 */
+		export type Constant<T> = T & {
+			/** @hidden */ _flamework_macro_shared_ref: T;
+		};
+	}
+
+	/**
+	 * This namespace contains types that allow you to perform functions or fetch metadata about specific types.
+	 */
+	export namespace Target {
+		type TargetHelper<T, U, M extends string> = U & {
+			/** @hidden */ _flamework_macro_generic: [T, M];
+		};
+
+		/**
+		 * Retrieves the ID from the type.
+		 *
+		 * The ID is a mostly unique identifier meant to identify specific resources in Flamework projects, such as providers.
+		 */
+		export type Id<T> = TargetHelper<T, string, "id">;
+
+		/**
+		 * Retrieves the text of the type, equivalent to what is seen in TypeScript's intellisense.
+		 *
+		 * The resulting text may not be identical as the type inputted as its dependent on how TypeScript renders types.
+		 */
+		export type Text<T> = TargetHelper<T, string, "text">;
+
+		/**
+		 * Retrieves a `t` guard that matches this specific type.
+		 */
+		export type Guard<T> = TargetHelper<T, t.check<T>, "guard">;
+
+		/**
+		 * Retrieves the dependency info for this type, which contains the ID and any metadata included on the type.
+		 */
+		export type Dependency<T> = TargetHelper<T, DependencyInfo, "dependency">;
+
+		/**
+		 * Retrieves the dependency info for this type, which contains the ID and any metadata included on the type.
+		 *
+		 * This is equivalent to the {@link Dependency} type, except it will shorten itself to a string (the type's ID) if possible.
+		 */
+		export type DependencyConcise<T> = TargetHelper<T, DependencyInfo | string, "dependencyConcise">;
+
+		/**
+		 * Retrieves the labels from this tuple under Flamework's {@link Many `Many`} API.
+		 *
+		 * This can also be used to extract parameter names via `Parameters<T>`
+		 */
+		export type Labels<T extends readonly unknown[]> =
+			| (string[] & { /** @hidden */ _flamework_macro_tuple_labels: T })
+			| undefined;
+
+		/**
+		 * Hashes a string literal type (such as an event name) under Flamework's {@link Many `Many`} API.
+		 *
+		 * The second type argument, `C`, is for providing a context to the hashing which will generate new hashes
+		 * for strings which already have a hash under another context.
+		 */
+		export type Hash<T extends string, C extends string = never> = string & {
+			/** @hidden */ _flamework_macro_hash: [T, C];
+		};
+
+		/**
+		 * This is equivalent to {@link Hash `Hash`} except it will only hash strings when `obfuscation` is turned on.
+		 */
+		export type Obfuscate<T extends string, C extends string = never> = string & {
+			/** @hidden */ _flamework_macro_hash: [T, C, true];
+		};
+	}
 
 	/**
 	 * Information about an injected dependency.

@@ -4,7 +4,7 @@ import type { ModuleDefinition, ModuleState } from "../module/moduleDefinition";
 import type { HookConfig } from "../module/moduleHooks";
 import type { WritableState } from "../utility/writable";
 
-type GenericId<T> = string | Modding.Generic<T, "id">;
+type GenericId<T> = string | Modding.Target.Id<T>;
 
 export class PluginBuilder {
 	private plugin: WritableState<PluginState>;

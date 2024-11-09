@@ -187,7 +187,7 @@ export type NamespaceMetadata<R, S> = Modding.Many<{
 	incoming: IntrinsicObfuscate<{ [k in keyof Functions<R>]: IntrinsicTupleGuards<Parameters<R[k]>> }>;
 
 	outgoingIds: ObfuscateNames<keyof Functions<S>>;
-	outgoing: IntrinsicObfuscate<{ [k in keyof Functions<S>]: Modding.Generic<ReturnType<S[k]>, "guard"> }>;
+	outgoing: IntrinsicObfuscate<{ [k in keyof Functions<S>]: Modding.Target.Guard<ReturnType<S[k]>> }>;
 
 	namespaceIds: ObfuscateNames<keyof FunctionNamespaces<R> | keyof FunctionNamespaces<S>>;
 	namespaces: IntrinsicObfuscate<
