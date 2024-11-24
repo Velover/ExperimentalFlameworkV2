@@ -13,17 +13,20 @@ export namespace Modding {
 	 *
 	 * @metadata macro
 	 */
-	export function inspect<T>(value?: Modding.Many<T>): T {
+	export function inspect<T>(value?: Modding.Emit<T>): T {
 		assert(value);
 		return value;
 	}
 
 	/**
-	 * This API allows you to use more complex queries, inspect types, generate arbitrary objects based on types, etc.
+	 * This type emits runtime equivalents of types, such as generating strings from string literal types.
 	 *
-	 * @experimental This API is considered experimental and may change.
+	 * You are able to generate most TS types, including objects and tuples which will generate equivalent objects at runtime.
+	 * Additionally, you can generate unions by using `Array<T>`, which will generate an array where each constituent of `T` is its own element.
+	 *
+	 * This type is primarily used to mark a user macro parameter as metadata, and is not necessary if you use other macro types.
 	 */
-	export type Many<T> = T & {
+	export type Emit<T> = T & {
 		/** @hidden */ _flamework_macro_many: T;
 	};
 
@@ -131,7 +134,7 @@ export namespace Modding {
 		export type DependencyConcise<T> = TargetHelper<T, DependencyInfo | string, "dependencyConcise">;
 
 		/**
-		 * Retrieves the labels from this tuple under Flamework's {@link Many `Many`} API.
+		 * Retrieves the labels from this tuple.
 		 *
 		 * This can also be used to extract parameter names via `Parameters<T>`
 		 */
@@ -140,7 +143,7 @@ export namespace Modding {
 			| undefined;
 
 		/**
-		 * Hashes a string literal type (such as an event name) under Flamework's {@link Many `Many`} API.
+		 * Hashes a string literal type (such as an event name.)
 		 *
 		 * The second type argument, `C`, is for providing a context to the hashing which will generate new hashes
 		 * for strings which already have a hash under another context.

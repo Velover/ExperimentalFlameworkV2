@@ -182,7 +182,7 @@ export type Functions<T> = ExtractMembers<T, Callback>;
 /**
  * We must generate the return type of events separately as Flamework no longer includes all type guards on both server and client.
  */
-export type NamespaceMetadata<R, S> = Modding.Many<{
+export type NamespaceMetadata<R, S> = Modding.Emit<{
 	incomingIds: ObfuscateNames<keyof Functions<R>>;
 	incoming: IntrinsicObfuscate<{ [k in keyof Functions<R>]: IntrinsicTupleGuards<Parameters<R[k]>> }>;
 

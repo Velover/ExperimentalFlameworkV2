@@ -33,7 +33,7 @@ export type FunctionParameters<T> = T extends (...args: infer P) => unknown ? P 
 export type FunctionReturn<T> = T extends (...args: never[]) => infer R ? R : never;
 
 export type ObfuscateNames<T> = IntrinsicObfuscateArray<
-	(T extends T ? Modding.Obfuscate<T & string, "remotes"> : never)[],
+	(T extends T ? Modding.Target.Obfuscate<T & string, "remotes"> : never)[],
 	string[]
 >;
 

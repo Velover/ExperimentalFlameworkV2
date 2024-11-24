@@ -130,7 +130,7 @@ export interface GlobalEvent<S, C> {
 export type EventNamespaces<T> = ExcludeMembers<T, Callback>;
 export type Events<T> = ExtractMembers<T, Callback>;
 
-export type NamespaceMetadata<R, S> = Modding.Many<{
+export type NamespaceMetadata<R, S> = Modding.Emit<{
 	incomingIds: ObfuscateNames<keyof Events<R>>;
 	incoming: IntrinsicObfuscate<{ [k in keyof Events<R>]: IntrinsicTupleGuards<Parameters<Events<R>[k]>> }>;
 	incomingUnreliable: IntrinsicObfuscate<{
