@@ -5,10 +5,11 @@ import { Reflect } from "../reflect";
 import type { Constructor } from "../utility/constructors";
 import { convertConciseDependencyInfo } from "../utility/convertConciseDependencyInfo";
 import { getClassImplements } from "../utility/getClassImplements";
+import type { Destructor, ExtractSingleCallback } from "../utility/types";
 import type { ModuleState } from "./moduleDefinition";
 import { HookType, type HookConfig, type HookContext } from "./moduleHooks";
 
-export interface Module {
+interface InternalModule {
 	/**
 	 * Try to resolve this dependency.
 	 *
@@ -29,8 +30,14 @@ export interface Module {
 
 	/** @internal */
 	getModuleState: () => ModuleState;
+}
 
-	/** @metadata macro */
+export interface Module extends InternalModule {
+	/**
+	 * This function manually fetches a dependency from this module, as opposed to dependency injection.
+	 *
+	 * @metadata macro
+	 */
 	resolveDependency: <T = unknown>(info?: string | Modding.Target.DependencyConcise<T>) => T;
 
 	/**
@@ -39,6 +46,33 @@ export interface Module {
 	 * This will trigger the `HookType.Extinguished` hook.
 	 */
 	extinguish: () => void;
+
+	/**
+	 * Registers a listener for the specified lifecycle event.
+	 * You can optionally provide a function as a shorthand for lifecycle events with a single method.
+	 *
+	 * This function returns a destructor that can be used to disconnect the lifecycle event.
+	 *
+	 * @param value The object that implements the lifecycle event.
+	 * @metadata macro
+	 */
+	listen<T>(this: void, value: T, meta?: Modding.Target.Id<T>): Destructor;
+
+	/**
+	 * Registers a listener for the specified lifecycle event, using a shorthand function.
+	 * This overload can only be used on lifecycle events that have a single method.
+	 *
+	 * This function returns a destructor that can be used to disconnect the lifecycle event.
+	 *
+	 * @param value A shorthand function for the lifecycle event.
+	 * @metadata macro
+	 */
+	listen<T>(
+		this: void,
+		value: ExtractSingleCallback<T>,
+		id?: Modding.Target.Id<T>,
+		name?: Modding.Emit<keyof T>,
+	): Destructor;
 
 	// WIP APIs for creating dependency injected classes and registering them to lifecycle events
 	createClassInstance: <T extends object>(constructor: Constructor<T>, config?: InstanceCreationConfig) => T;
@@ -284,6 +318,37 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		return instance as never;
 	};
 
+	const listen: Module["listen"] = (...[param, metaId, metaKey]) => {
+		assert(metaId !== undefined);
+
+		let listener: object;
+		if (metaKey === undefined) {
+			// Non-shorthand
+			// We create a proxy object so that we have a unique reference for this specific listener.
+			listener = setmetatable({}, { __index: param as never });
+		} else {
+			assert(typeIs(param, "function"));
+
+			listener = {
+				[metaKey as string](...args: unknown[]) {
+					return param(...args);
+				},
+			};
+		}
+
+		// Register the lifecycle event
+		Reflect.defineMetadata(listener, "flamework:implements", [metaId]);
+
+		temporaryInstances.add(listener);
+		registerClassInterfaces(listener);
+
+		return () => {
+			assert(listener !== undefined, "listeners cannot be destructed more than once");
+			removeClassInstance(listener);
+			listener = undefined!;
+		};
+	};
+
 	const ignite: Module["ignite"] = () => {
 		// We're already ignited, so we can ignore repeated calls.
 		if (moduleInitState === ModuleInitState.Ignited) {
@@ -343,6 +408,7 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		getModuleState,
 		tryResolveDependency,
 		resolveDependency,
+		listen,
 		createClassInstance,
 		removeClassInstance,
 		ignite,
