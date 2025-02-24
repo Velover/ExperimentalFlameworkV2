@@ -20,6 +20,7 @@ import { assert } from "../util/functions/assert";
 import { shuffle } from "../util/functions/shuffle";
 import glob from "glob";
 import type { PathTranslator } from "@roblox-ts/path-translator";
+import { createVm, type PluginVm } from "../transformations/plugins/vm";
 
 export interface TransformerConfig {
 	/**
@@ -73,6 +74,7 @@ export class TransformState {
 	public rootDirectory: string;
 	public packageName: string;
 	public isGame: boolean;
+	public pluginVm?: PluginVm;
 
 	public isUserMacroCache = new Map<ts.Symbol, boolean>();
 	public nextRootStatements = new Array<ts.Statement>();
@@ -248,6 +250,8 @@ export class TransformState {
 		}
 
 		Cache.isInitialCompile = false;
+
+		this.pluginVm = createVm(this);
 	}
 
 	getFileId(file: ts.SourceFile) {

@@ -17,7 +17,7 @@
 		}
 	],
 	"release": {
-		"projects": ["packages/*"],
+		"projects": ["packages/*", "!packages/transformer-plugin"],
 		"version": {
 			"preVersionCommand": "yarn run prepare:publish"
 		}

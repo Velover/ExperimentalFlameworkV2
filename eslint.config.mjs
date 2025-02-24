@@ -29,7 +29,7 @@ export default tseslint.config(
 
 	// transformer
 	{
-		files: ["packages/transformer/**/*"],
+		files: ["packages/transformer/**/*", "packages/transformer-plugin/**/*"],
 		rules: {
 			"@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "file", caughtErrors: "none" }],
 			"@typescript-eslint/no-namespace": ["off"],
@@ -38,7 +38,7 @@ export default tseslint.config(
 
 	// roblox-ts packages
 	{
-		ignores: ["packages/transformer/**/*", "eslint.config.mjs", "scripts/**/*"],
+		ignores: ["packages/transformer/**/*", "packages/transformer-plugin/**/*", "eslint.config.mjs", "scripts/**/*"],
 		plugins: {
 			"roblox-ts": fixupPluginRules(eslintPluginRobloxTs),
 		},

@@ -323,6 +323,28 @@ function buildIntrinsicMacro(state: TransformState, node: ts.Node, macro: UserMa
 		return buildTupleGuardsIntrinsic(state, node, tupleType);
 	}
 
+	if (macro.id === "plugin") {
+		const [pluginName, input] = macro.inputs;
+		if (!pluginName || !pluginName.isStringLiteral() || !input) {
+			throw new Error("Invalid plugin input");
+		}
+
+		if (!state.pluginVm) {
+			throw new Error("cannot use plugins without plugin vm");
+		}
+
+		const transform = state.pluginVm.executeMacroType(pluginName.value, input);
+		if (!transform) {
+			throw new Error(`Plugin '${pluginName.value}' does not exist`);
+		}
+
+		if (!ts.isExpression(transform)) {
+			throw new Error(`Plugin '${pluginName.value}' returned non-expression.`);
+		}
+
+		return transform;
+	}
+
 	throw `Unexpected intrinsic ID '${macro.id}' with ${macro.inputs.length} inputs`;
 }
 
