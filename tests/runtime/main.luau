@@ -7,8 +7,9 @@
 	Must be run from the repository root: the harness resolves package output relative to the
 	process working directory.
 
-	The realm is a process argument rather than a runtime toggle because `@Provider` writes its
-	metadata when the decorator evaluates, so each realm needs a fresh module graph.
+	The realm is a process argument rather than a runtime toggle because a realm's module graph
+	caches decisions made at require time, so each one needs a fresh graph. `replication.luau`
+	builds two graphs in a single process instead, which is what real client/server traffic needs.
 ]]
 
 local luneTask = require("@lune/task")
@@ -22,9 +23,11 @@ if realm ~= "Server" and realm ~= "Client" then
 	error("expected realm to be 'Server' or 'Client', got '" .. tostring(realm) .. "'", 0)
 end
 
-roblox.setRealm(realm)
-roblox.install(harness)
-harness.loadPromise()
+local env = roblox.create(realm)
+local context = harness.create()
+
+env.install(context)
+context.loadPromise()
 
 -- roblox-ts's Promise schedules `Promise.delay` on `RunService.Heartbeat`, which is what networking
 -- builds its request timeouts on, so the harness has to drive it. The pump stops once the suites
@@ -33,11 +36,11 @@ local isRunning = true
 luneTask.spawn(function()
 	while isRunning do
 		luneTask.wait()
-		roblox.RunService.Heartbeat:Fire()
+		env.heartbeat()
 	end
 end)
 
-local testing = harness.require("@flamework/testing", "out")
+local testing = context.require("@flamework/testing", "out")
 local suites = testing.suites
 
 local passed = 0

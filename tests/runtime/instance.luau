@@ -304,6 +304,12 @@ function instances.is(value: any): boolean
 	return type(value) == "table" and getmetatable(value) == instanceMeta
 end
 
+--- Routes a remote's outbound calls somewhere, which is how the replication bridge carries traffic
+--- between two graphs. The callback receives (kind, player, packed args).
+function instances.setDelivery(remote: Instance, callback: ((string, any, any) -> ())?)
+	rawset(remote, "_deliver", callback)
+end
+
 function instances.new(className: string, parent: Instance?): Instance
 	local instance = setmetatable({
 		_className = className,
@@ -343,14 +349,24 @@ function instances.new(className: string, parent: Instance?): Instance
 			rawget(instance, "_signals")[name] = signal
 		end
 
+		local function record(kind: string, player: any, args: any)
+			table.insert(sent, { kind = kind, player = player, args = args })
+
+			-- When a replication bridge is attached, the call also crosses to the other graph.
+			local deliver = rawget(instance, "_deliver")
+			if deliver then
+				deliver(kind, player, args)
+			end
+		end
+
 		rawset(instance, "FireServer", function(_self, ...)
-			table.insert(sent, { kind = "FireServer", args = table.pack(...) })
+			record("FireServer", nil, table.pack(...))
 		end)
 		rawset(instance, "FireClient", function(_self, player, ...)
-			table.insert(sent, { kind = "FireClient", player = player, args = table.pack(...) })
+			record("FireClient", player, table.pack(...))
 		end)
 		rawset(instance, "FireAllClients", function(_self, ...)
-			table.insert(sent, { kind = "FireAllClients", args = table.pack(...) })
+			record("FireAllClients", nil, table.pack(...))
 		end)
 	end
 

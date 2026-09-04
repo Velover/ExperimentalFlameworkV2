@@ -5,15 +5,22 @@ import { fileURLToPath } from "url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 /**
- * `@Provider` writes its metadata when the decorator evaluates, so a realm cannot be switched
- * inside a single run -- each one needs a fresh module graph, and therefore a fresh process.
+ * The single-realm suites, once per realm. A realm's module graph caches decisions made at require
+ * time, so each one needs a fresh graph and therefore a fresh process.
+ *
+ * The replication run builds two graphs inside one process instead, and covers the traffic between
+ * them that neither single-realm run can see.
  */
-const REALMS = ["Server", "Client"];
+const RUNS = [
+	["tests/runtime/main.luau", "Server"],
+	["tests/runtime/main.luau", "Client"],
+	["tests/runtime/replication.luau"],
+];
 
 let failed = false;
 
-for (const realm of REALMS) {
-	const result = spawnSync("lune", ["run", "tests/runtime/main.luau", realm], {
+for (const [script, ...args] of RUNS) {
+	const result = spawnSync("lune", ["run", script, ...args], {
 		cwd: root,
 		stdio: "inherit",
 		shell: true,

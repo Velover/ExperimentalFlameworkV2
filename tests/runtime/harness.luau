@@ -9,6 +9,11 @@
 
 	It deliberately implements only what the compiled output actually uses -- `TS.import` and
 	`TS.getModule` -- with the Roblox globals living in `roblox.luau`.
+
+	`harness.create()` returns an independent module graph: its own module cache, globals and
+	Promise implementation. The filesystem tree is shared between graphs because it describes the
+	files on disk, not runtime state. Two graphs is what lets the replication runner hold a server
+	and a client in one process.
 ]]
 
 local fs = require("@lune/fs")
@@ -202,11 +207,6 @@ function harness.virtualNode(name: string, exports: { [string]: any }): Node
 	return node
 end
 
--- Module loading ---------------------------------------------------------------------------------
-
-local loaded: { [string]: any } = {}
-local globals: { [string]: any } = {}
-
 local function resolveFile(path: string): string?
 	if fs.isFile(path .. ".luau") then
 		return path .. ".luau"
@@ -221,144 +221,6 @@ local function resolveFile(path: string): string?
 	end
 
 	return nil
-end
-
-local TS = {}
-
---- roblox-ts's own Promise implementation, loaded from the compiler package so the specs use
---- exactly the Promise the emitted code expects.
----
---- Not loaded at require time: Promise.lua calls `game:GetService` at module scope, and the Roblox
---- globals are not installed until after this module has been required. `harness.loadPromise` must
---- therefore be called once the globals are in place -- reading the file yields, and the first
---- access would otherwise happen inside the `TS.Promise` metamethod, where yielding is not allowed.
-local promiseCache: any = nil
-
-local function getPromise(): any
-	if promiseCache then
-		return promiseCache
-	end
-
-	local promisePath = ROOT .. "/node_modules/roblox-ts/include/Promise.lua"
-	if not fs.isFile(promisePath) then
-		error("harness: roblox-ts's Promise.lua was not found; run `bun install` first", 0)
-	end
-
-	local environment = {}
-	for key, value in globals do
-		environment[key] = value
-	end
-
-	promiseCache = luau.load(fs.readFile(promisePath), {
-		debugName = promisePath,
-		environment = environment,
-	})()
-
-	TS.Promise = promiseCache
-	return promiseCache
-end
-
---- Loads the Promise implementation, which the globals have to be installed for.
-function harness.loadPromise()
-	getPromise()
-end
-
---- Mirrors `RuntimeLib.async`: run the callback on its own coroutine and settle a Promise with the
---- result.
-function TS.async(callback: (...any) -> any)
-	return function(...)
-		local n = select("#", ...)
-		local args = { ... }
-
-		return getPromise().new(function(resolve, reject)
-			coroutine.wrap(function()
-				local ok, result = pcall(callback, table.unpack(args, 1, n))
-				if ok then
-					resolve(result)
-				else
-					reject(result)
-				end
-			end)()
-		end)
-	end
-end
-
-function TS.await(promise: any)
-	local Promise = getPromise()
-	if not Promise.is(promise) then
-		return promise
-	end
-
-	local status, value = promise:awaitStatus()
-	if status == Promise.Status.Resolved then
-		return value
-	elseif status == Promise.Status.Rejected then
-		error(value, 2)
-	end
-
-	error("The awaited Promise was cancelled", 2)
-end
-
-local function loadModule(node: Node?): any
-	if not node then
-		error("harness: attempted to import a nil module", 0)
-	end
-
-	if node.__virtual then
-		return node.__virtual
-	end
-
-	local file = resolveFile(node.__path)
-	if not file and mainOverrides[node] then
-		file = resolveFile(mainOverrides[node])
-	end
-
-	if not file then
-		error("harness: no module at '" .. node.__path .. "'", 0)
-	end
-
-	if loaded[file] ~= nil then
-		return loaded[file]
-	end
-
-	-- Reserve the slot before evaluating so that a cyclic import sees a partial module rather than
-	-- recursing forever, which is what Roblox's own require does.
-	loaded[file] = false
-
-	local environment = { script = node }
-	for key, value in globals do
-		environment[key] = value
-	end
-
-	_G[node] = TS
-
-	local chunk = luau.load(fs.readFile(file), {
-		debugName = file,
-		environment = environment,
-	})
-
-	local result = chunk()
-	loaded[file] = result
-
-	return result
-end
-
---- `TS.import(caller, base, ...parts)` -- resolve `base` plus `parts` and load it.
-function TS.import(_caller: Node, base: Node?, ...: string): any
-	if not base then
-		error("harness: TS.import was given a nil base", 0)
-	end
-
-	local node = base
-	for _, part in { ... } do
-		local child = (node :: any)[part]
-		if not child then
-			error("harness: could not resolve '" .. part .. "' under '" .. node.__path .. "'", 0)
-		end
-		node = child
-	end
-
-	return loadModule(node)
 end
 
 --- Where to look for `@rbxts/*` packages, in order.
@@ -384,47 +246,197 @@ local function resolveExternalPackage(scope: string, name: string): Node?
 	return nil
 end
 
---- `TS.getModule(script, scope, name)` -- resolve a package to its directory node.
-function TS.getModule(_caller: Node, scope: string, name: string): Node
-	local specifier = scope .. "/" .. name
+-- Module graphs ----------------------------------------------------------------------------------
 
-	local virtual = harness.virtualPackages[specifier]
-	if virtual then
-		return virtual
-	end
+--- Creates an independent module graph: its own module cache, globals and Promise.
+function harness.create()
+	local context = {}
 
-	local directory = PACKAGES[specifier]
-	if directory then
-		local node = harness.node(ROOT .. "/" .. directory, name, nil)
-		if not node then
-			error("harness: package '" .. specifier .. "' is not built (missing " .. directory .. ")", 0)
+	local loaded: { [string]: any } = {}
+	local globals: { [string]: any } = {}
+	local TS = {}
+
+	context.globals = globals
+	context.TS = TS
+	context.virtualPackages = {} :: { [string]: Node }
+
+	--- roblox-ts's own Promise implementation, loaded from the compiler package so the specs use
+	--- exactly the Promise the emitted code expects.
+	---
+	--- Not loaded when the graph is created: Promise.lua calls `game:GetService` at module scope,
+	--- so `context.loadPromise` has to be called once the globals are in place. Reading the file
+	--- yields, and the first access would otherwise happen inside a metamethod, where it cannot.
+	local promiseCache: any = nil
+
+	local function getPromise(): any
+		if promiseCache then
+			return promiseCache
 		end
-		return node
+
+		local promisePath = ROOT .. "/node_modules/roblox-ts/include/Promise.lua"
+		if not fs.isFile(promisePath) then
+			error("harness: roblox-ts's Promise.lua was not found; run `bun install` first", 0)
+		end
+
+		local environment = {}
+		for key, value in globals do
+			environment[key] = value
+		end
+
+		promiseCache = luau.load(fs.readFile(promisePath), {
+			debugName = promisePath,
+			environment = environment,
+		})()
+
+		TS.Promise = promiseCache
+		return promiseCache
 	end
 
-	local external = resolveExternalPackage(scope, name)
-	if external then
-		return external
+	--- Loads the Promise implementation, which the globals have to be installed for.
+	function context.loadPromise()
+		getPromise()
 	end
 
-	error("harness: could not resolve package '" .. specifier .. "'", 0)
+	--- Mirrors `RuntimeLib.async`: run the callback on its own coroutine and settle a Promise with
+	--- the result.
+	function TS.async(callback: (...any) -> any)
+		return function(...)
+			local n = select("#", ...)
+			local args = { ... }
+
+			return getPromise().new(function(resolve, reject)
+				coroutine.wrap(function()
+					local ok, result = pcall(callback, table.unpack(args, 1, n))
+					if ok then
+						resolve(result)
+					else
+						reject(result)
+					end
+				end)()
+			end)
+		end
+	end
+
+	function TS.await(promise: any)
+		local Promise = getPromise()
+		if not Promise.is(promise) then
+			return promise
+		end
+
+		local status, value = promise:awaitStatus()
+		if status == Promise.Status.Resolved then
+			return value
+		elseif status == Promise.Status.Rejected then
+			error(value, 2)
+		end
+
+		error("The awaited Promise was cancelled", 2)
+	end
+
+	local function loadModule(node: Node?): any
+		if not node then
+			error("harness: attempted to import a nil module", 0)
+		end
+
+		if node.__virtual then
+			return node.__virtual
+		end
+
+		local file = resolveFile(node.__path)
+		if not file and mainOverrides[node] then
+			file = resolveFile(mainOverrides[node])
+		end
+
+		if not file then
+			error("harness: no module at '" .. node.__path .. "'", 0)
+		end
+
+		if loaded[file] ~= nil then
+			return loaded[file]
+		end
+
+		-- Reserve the slot before evaluating so that a cyclic import sees a partial module rather
+		-- than recursing forever, which is what Roblox's own require does.
+		loaded[file] = false
+
+		local environment = { script = node }
+		for key, value in globals do
+			environment[key] = value
+		end
+
+		-- The emitted code captures `_G[script]` into a file-level local as it loads, so setting
+		-- this per graph immediately before loading is enough for two graphs to share the tree.
+		_G[node] = TS
+
+		local chunk = luau.load(fs.readFile(file), {
+			debugName = file,
+			environment = environment,
+		})
+
+		local result = chunk()
+		loaded[file] = result
+
+		return result
+	end
+
+	--- `TS.import(caller, base, ...parts)` -- resolve `base` plus `parts` and load it.
+	function TS.import(_caller: Node, base: Node?, ...: string): any
+		if not base then
+			error("harness: TS.import was given a nil base", 0)
+		end
+
+		local node = base
+		for _, part in { ... } do
+			local child = (node :: any)[part]
+			if not child then
+				error("harness: could not resolve '" .. part .. "' under '" .. node.__path .. "'", 0)
+			end
+			node = child
+		end
+
+		return loadModule(node)
+	end
+
+	--- `TS.getModule(script, scope, name)` -- resolve a package to its directory node.
+	function TS.getModule(_caller: Node, scope: string, name: string): Node
+		local specifier = scope .. "/" .. name
+
+		local virtual = context.virtualPackages[specifier]
+		if virtual then
+			return virtual
+		end
+
+		local directory = PACKAGES[specifier]
+		if directory then
+			local node = harness.node(ROOT .. "/" .. directory, name, nil)
+			if not node then
+				error("harness: package '" .. specifier .. "' is not built (missing " .. directory .. ")", 0)
+			end
+			return node
+		end
+
+		local external = resolveExternalPackage(scope, name)
+		if external then
+			return external
+		end
+
+		error("harness: could not resolve package '" .. specifier .. "'", 0)
+	end
+
+	function context.setGlobal(name: string, value: any)
+		globals[name] = value
+	end
+
+	function context.require(specifier: string, ...: string): any
+		local scope, name = specifier:match("^([^/]+)/(.+)$")
+		return TS.import(nil :: any, TS.getModule(nil :: any, scope :: any, name :: any), ...)
+	end
+
+	return context
 end
-
-harness.virtualPackages = {} :: { [string]: Node }
-harness.TS = TS
-harness.globals = globals
 
 function harness.root(): string
 	return ROOT
-end
-
-function harness.setGlobal(name: string, value: any)
-	globals[name] = value
-end
-
-function harness.require(specifier: string, ...: string): any
-	local scope, name = specifier:match("^([^/]+)/(.+)$")
-	return TS.import(nil :: any, TS.getModule(nil :: any, scope :: any, name :: any), ...)
 end
 
 return harness
