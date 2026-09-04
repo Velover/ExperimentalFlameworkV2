@@ -1,0 +1,24 @@
+{
+  "name": "@flamework/testing",
+  "version": "2.0.0-alpha.0",
+  "private": true,
+  "description": "Runtime specs for Flamework, executed under Lune.",
+  "main": "out/init.luau",
+  "scripts": {
+    "build": "rbxtsc",
+    "watch": "rbxtsc -w"
+  },
+  "devDependencies": {
+    "@rbxts/compiler-types": "^3.0.0-types.0",
+    "@rbxts/types": "^1.0.948",
+    "rbxts-transformer-flamework": "workspace:*",
+    "roblox-ts": "^3.0.0"
+  },
+  "dependencies": {
+    "@flamework/core": "workspace:*",
+    "@flamework/components": "workspace:*",
+    "@flamework/networking": "workspace:*",
+    "@rbxts/t": "^3.1.0",
+    "@rbxts/services": "^1.1.5"
+  }
+}

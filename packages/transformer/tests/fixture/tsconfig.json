@@ -1,0 +1,16 @@
+{
+	"extends": "../../../../tsconfig.roblox-ts.json",
+	"compilerOptions": {
+		"typeRoots": ["./node_modules/@rbxts", "./node_modules/@flamework"],
+		"rootDir": "src",
+		"outDir": "out",
+		"declaration": false,
+		"plugins": [
+			{
+				"transform": "rbxts-transformer-flamework",
+				"hashPrefix": "$f",
+				"plugins": [{ "path": "./fieldInfoPlugin.cjs", "options": { "prefix": "fx" } }]
+			}
+		]
+	}
+}

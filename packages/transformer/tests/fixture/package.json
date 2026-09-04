@@ -1,0 +1,20 @@
+{
+  "name": "@flamework/transformer-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Compilation fixture used by the transformer test suite.",
+  "scripts": {
+    "build": "rbxtsc"
+  },
+  "devDependencies": {
+    "@rbxts/compiler-types": "^3.0.0-types.0",
+    "@rbxts/types": "^1.0.948",
+    "rbxts-transformer-flamework": "workspace:*",
+    "rbxts-transformer-flamework-plugin": "workspace:*",
+    "roblox-ts": "^3.0.0"
+  },
+  "dependencies": {
+    "@flamework/core": "workspace:*",
+    "@rbxts/t": "^3.1.0"
+  }
+}
