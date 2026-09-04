@@ -72,11 +72,10 @@ export class ModuleBuilder {
 	 *
 	 * @metadata macro
 	 */
-	public registerProviders<T extends string>(_stringPath: T, path?: Modding.Intrinsic<"path", [T], string[][]>) {
+	public registerProviders<T extends string>(_stringPath: T, path?: Modding.Intrinsic<"path", [T], string[]>) {
 		assert(path);
 
-		// TODO: `path` intrinsic should return `string[]` instead of `string[][]`
-		const providers = getClassesInPath(path[0]!).filter((v) => Reflect.hasMetadata(v, "flamework:provider"));
+		const providers = getClassesInPath(path).filter((v) => Reflect.hasMetadata(v, "flamework:provider"));
 		for (const provider of providers) {
 			const providerId = Reflect.getMetadata<string>(provider, "identifier");
 			this.registerProvider({ type: "class", value: provider }, providerId);

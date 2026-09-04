@@ -7,7 +7,7 @@ import { convertConciseDependencyInfo } from "../utility/convertConciseDependenc
 import { getClassImplements } from "../utility/getClassImplements";
 import type { Destructor, ExtractSingleCallback } from "../utility/types";
 import type { ModuleState } from "./moduleDefinition";
-import { HookType, type HookConfig, type HookContext } from "./moduleHooks";
+import { HookPriority, HookType, type HookConfig, type HookContext } from "./moduleHooks";
 
 interface InternalModule {
 	/**
@@ -74,8 +74,18 @@ export interface Module extends InternalModule {
 		name?: Modding.Emit<keyof T>,
 	): Destructor;
 
-	// WIP APIs for creating dependency injected classes and registering them to lifecycle events
+	/**
+	 * Constructs a class through this module's dependency injection without registering it as a
+	 * provider, and attaches it to any lifecycle events it implements.
+	 *
+	 * The instance is owned by this module: it is released when {@link extinguish} runs, or earlier
+	 * via {@link removeClassInstance}.
+	 */
 	createClassInstance: <T extends object>(constructor: Constructor<T>, config?: InstanceCreationConfig) => T;
+
+	/**
+	 * Detaches an instance created by {@link createClassInstance} from its lifecycle events.
+	 */
 	removeClassInstance: (instance: object) => void;
 }
 
@@ -132,6 +142,9 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 
 	const plugins = new Map<PluginState, Module>();
 	const submodules = new Array<Module>();
+
+	/** The subset of {@link submodules} this module created, and is therefore responsible for extinguishing. */
+	const ownedSubmodules = new Array<Module>();
 	const temporaryInstances = new Set<object>();
 
 	let moduleInitState = ModuleInitState.Created;
@@ -156,8 +169,11 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 
 			const module = createModuleInstantiation(submodule, context);
 			submodules.push(module);
+			ownedSubmodules.push(module);
 
-			context.modules.set(state, module);
+			// Keyed by the included module's own state, so that every module including it under the
+			// same root resolves to this single instantiation.
+			context.modules.set(submodule, module);
 		}
 	};
 
@@ -186,12 +202,31 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 			}
 
 			submodules.push(pluginModule);
+			ownedSubmodules.push(pluginModule);
 			plugins.set(pluginState, pluginModule);
 		}
 	};
 
 	const getHookType = (hookType: HookType) => {
-		return importedHooks.filter((v) => v.hook.type === hookType);
+		const matching = importedHooks.filter((v) => v.hook.type === hookType);
+
+		// `table.sort` is not stable, so hooks of equal priority are ordered by the position they
+		// were imported at to keep registration order meaningful.
+		const order = new Map<ImportedHooks, number>();
+		matching.forEach((hook, index) => order.set(hook, index));
+
+		matching.sort((a, b) => {
+			const priorityA = a.hook.priority ?? HookPriority.Normal;
+			const priorityB = b.hook.priority ?? HookPriority.Normal;
+
+			if (priorityA !== priorityB) {
+				return priorityA < priorityB;
+			}
+
+			return order.get(a)! < order.get(b)!;
+		});
+
+		return matching;
 	};
 
 	const registerClassInterfaces = (instance: object) => {
@@ -313,9 +348,12 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 	};
 
 	const removeClassInstance: Module["removeClassInstance"] = (instance) => {
+		if (!temporaryInstances.has(instance)) {
+			return;
+		}
+
 		unregisterClassInterfaces(instance);
 		temporaryInstances.delete(instance);
-		return instance as never;
 	};
 
 	const listen: Module["listen"] = (...[param, metaId, metaKey]) => {
@@ -398,7 +436,20 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 			removeClassInstance(temporaryInstance);
 		}
 
+		// Providers register their interfaces when they are instantiated, so they have to be
+		// unregistered too. Without this, a plugin such as the lifecycle plugin keeps holding (and
+		// ticking) providers that belong to an extinguished module.
+		for (const [, provider] of instantiatedProviders) {
+			unregisterClassInterfaces(provider);
+		}
+
 		instantiatedProviders.clear();
+
+		// Modules this one created are owned by it, and so are extinguished with it. Included
+		// modules that were already instantiated elsewhere belong to whoever created them.
+		for (const submodule of ownedSubmodules) {
+			submodule.extinguish();
+		}
 
 		assert(temporaryInstances.size() === 0);
 		switchInitState(ModuleInitState.Extinguishing, ModuleInitState.Extinguished);

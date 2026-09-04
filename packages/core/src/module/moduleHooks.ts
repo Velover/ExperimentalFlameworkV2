@@ -12,7 +12,20 @@ export type HookContext = {
 	targetModule: Module;
 };
 
-export type HookConfig = { [k in HookType]: { type: k; callback: HookCallbacks[k] } }[HookType];
+export type HookConfig = {
+	[k in HookType]: {
+		type: k;
+		callback: HookCallbacks[k];
+
+		/**
+		 * Orders this hook against the other hooks of the same type on the same module.
+		 *
+		 * Lower values run first, and hooks with an equal priority run in registration order.
+		 * Defaults to {@link HookPriority.Normal}.
+		 */
+		priority?: number;
+	};
+}[HookType];
 
 /**
  * These hooks can be used to tap into certain parts of Flamework's lifecycle.
@@ -21,9 +34,10 @@ export type HookConfig = { [k in HookType]: { type: k; callback: HookCallbacks[k
  */
 export enum HookType {
 	/**
-	 * This runs prior to any providers being created.
+	 * Runs after every included module and plugin has ignited, but before any of this module's own
+	 * providers are constructed.
 	 *
-	 * This hook is not very useful at the moment and may be removed.
+	 * This is where a plugin registers state that providers will resolve during construction.
 	 */
 	PreIgnite,
 
@@ -38,13 +52,22 @@ export enum HookType {
 	Extinguished,
 }
 
-// TODO: implement?
-export enum HookPriority {
-	// runs before all included module hooks
-	BeforeIncluded,
-	// runs after all included module hooks
-	Normal,
-}
+/**
+ * Conventional priorities for {@link HookConfig.priority}.
+ *
+ * Any number is accepted; these exist so that plugins can order themselves against each other
+ * without agreeing on magic numbers.
+ */
+export const HookPriority = {
+	/** Runs before hooks that did not specify a priority. */
+	First: -1000,
+
+	/** The default. */
+	Normal: 0,
+
+	/** Runs after hooks that did not specify a priority. */
+	Last: 1000,
+} as const;
 
 export interface HookCallbacks {
 	[HookType.PreIgnite]: (module: HookContext) => void;
