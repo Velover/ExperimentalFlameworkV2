@@ -1,6 +1,6 @@
 # How Flamework works
 
-This is the implementation companion to [usage.md](usage.md). It describes what the transformer
+This is the implementation companion to [the guide](../README.md). It describes what the transformer
 does to your code, what the runtime does with the result, and why the pieces are shaped the way they
 are. Read it if you are changing Flamework, debugging something that only fails at runtime, or
 writing a transformer plugin.
@@ -27,16 +27,16 @@ writing a transformer plugin.
 | `packages/networking` | Remote events and functions. |
 | `packages/testing` | Runtime specs, compiled by `rbxtsc` like any other consumer. |
 
-Build order matters and is fixed in [`scripts/build.mjs`](../scripts/build.mjs): the transformer
+Build order matters and is fixed in [`scripts/build.mjs`](../../scripts/build.mjs): the transformer
 plugin API, then the transformer, then the packages that compile with it. Everything after
 `transformer` is built by `rbxtsc` running the transformer that was just built, so a broken
 transformer breaks the build of everything downstream rather than producing bad output quietly.
 
 ## The transformer
 
-Entry point is [`src/transformer.ts`](../packages/transformer/src/transformer.ts), which roblox-ts
+Entry point is [`src/transformer.ts`](../../packages/transformer/src/transformer.ts), which roblox-ts
 loads as a TypeScript transformer plugin. It builds a `TransformState`
-([`src/classes/transformState.ts`](../packages/transformer/src/classes/transformState.ts)) holding
+([`src/classes/transformState.ts`](../../packages/transformer/src/classes/transformState.ts)) holding
 the program, the type checker, the Rojo resolver, path translation, the build info cache and the
 plugin host, then walks each source file.
 
@@ -55,16 +55,16 @@ Two pieces of state matter while transforming a file:
 
 Because the transformer is authored against a newer TypeScript than roblox-ts bundles, it declares
 the compiler internals it uses itself, in
-[`src/types/tsInternals.d.ts`](../packages/transformer/src/types/tsInternals.d.ts), with the two
+[`src/types/tsInternals.d.ts`](../../packages/transformer/src/types/tsInternals.d.ts), with the two
 non-public `TypeFlags` read through
-[`src/util/tsInternals.ts`](../packages/transformer/src/util/tsInternals.ts). That replaced
+[`src/util/tsInternals.ts`](../../packages/transformer/src/util/tsInternals.ts). That replaced
 `ts-expose-internals`, which stopped tracking TypeScript at 5.6.3 and capped the repo to a 2024
 compiler.
 
 ## Macros
 
 A macro is a function whose declaration carries `@metadata macro` in its JSDoc. When a call to one
-is transformed, [`transformUserMacro.ts`](../packages/transformer/src/transformations/transformUserMacro.ts)
+is transformed, [`transformUserMacro.ts`](../../packages/transformer/src/transformations/transformUserMacro.ts)
 inspects each parameter the caller left out and generates an argument for it.
 
 The parameter's *type* says what to generate. Every macro type is a marker intersection -- a real
@@ -101,7 +101,7 @@ Three details are easy to get wrong when changing this:
 ### Intrinsics
 
 Intrinsics come in two families that are easy to confuse, because both are called intrinsics and
-both live in [`transformations/macros/intrinsics`](../packages/transformer/src/transformations/macros/intrinsics).
+both live in [`transformations/macros/intrinsics`](../../packages/transformer/src/transformations/macros/intrinsics).
 
 **Type intrinsics** are requested by a parameter's type through `Modding.Intrinsic<N, M, T>` and
 dispatched on `macro.id`. They generate the argument:
@@ -128,13 +128,13 @@ how the call itself is emitted:
 
 ## Identifiers and guards
 
-**Identifiers** ([`src/util/uid.ts`](../packages/transformer/src/util/uid.ts)) are how Flamework
+**Identifiers** ([`src/util/uid.ts`](../../packages/transformer/src/util/uid.ts)) are how Flamework
 names a type at runtime: dependency injection keys, component ids, `Flamework.id<T>()`. An id is
 derived from the declaration's file path and name plus a salted hash, with the format controlled by
 `idGenerationMode`: `full` (default), `short`, `tiny` and `obfuscated`. Packages must stay on `full`
 so their ids do not collide with a game's; only game projects should shorten.
 
-**Guards** ([`src/util/functions/buildGuardFromType.ts`](../packages/transformer/src/util/functions/buildGuardFromType.ts))
+**Guards** ([`src/util/functions/buildGuardFromType.ts`](../../packages/transformer/src/util/functions/buildGuardFromType.ts))
 compile a type into a `@rbxts/t` check. Unions become `t.union`, tuples `t.strictArray`, arrays
 `t.array`, objects `t.interface`, literals `t.literal`, and Roblox datatypes map to their `t` alias.
 Types `t` has no alias for compile to `t.typeof("Name")` -- `RBX_TYPES_NEW` is that list, and a type
@@ -151,13 +151,13 @@ Transformer plugins register additional macro types. A plugin is a CommonJS modu
 `registerPlugin`; the transformer loads it with `require` and drains a registry keyed by a global
 symbol, so two copies of `rbxts-transformer-flamework-plugin` still share registrations.
 
-The host ([`transformations/plugins/pluginHost.ts`](../packages/transformer/src/transformations/plugins/pluginHost.ts))
+The host ([`transformations/plugins/pluginHost.ts`](../../packages/transformer/src/transformations/plugins/pluginHost.ts))
 gives plugins two facades rather than raw compiler objects:
 
-- [`typeFacade.ts`](../packages/transformer/src/transformations/plugins/typeFacade.ts) wraps
+- [`typeFacade.ts`](../../packages/transformer/src/transformations/plugins/typeFacade.ts) wraps
   `ts.Type` in a small stable API -- fields, call signatures, union members, literal kinds -- cached
   per type.
-- [`nodeFactory.ts`](../packages/transformer/src/transformations/plugins/nodeFactory.ts) builds
+- [`nodeFactory.ts`](../../packages/transformer/src/transformations/plugins/nodeFactory.ts) builds
   expressions and statements through opaque handles, so a plugin never touches `ts.factory`.
 
 Results are cached per `(macro name, type)` and, unless the result is trivially duplicable, hoisted
@@ -215,7 +215,7 @@ torn down by whichever includer dies first.
 
 ### Reflection
 
-[`reflect.ts`](../packages/core/src/reflect.ts) is a `WeakMap` from object to property to key to
+[`reflect.ts`](../../packages/core/src/reflect.ts) is a `WeakMap` from object to property to key to
 value, with a `NO_PROP_MARKER` for unscoped metadata. `getOwn*` reads one object; the unprefixed
 functions walk the prototype chain via `getmetatable(obj).__index`. `getMetadatas` collects every
 value up the chain, nearest first, which is what makes `flamework:implements` aggregate across a
@@ -232,7 +232,7 @@ registered classes, includes `LifecyclePlugin`, and registers a `PostIgnite` hoo
 `startCollectionService` once the parent module has ignited.
 
 The interesting part is `ComponentTracker`
-([`componentTracker.ts`](../packages/components/src/componentTracker.ts)). Rather than checking
+([`componentTracker.ts`](../../packages/components/src/componentTracker.ts)). Rather than checking
 whether an instance qualifies at a point in time, a tracker holds a set of *unmet criteria* per
 instance -- the tag, the instance guard, and each component dependency -- and notifies its listeners
 whenever that set becomes empty or stops being empty. `Components` registers one listener that adds
@@ -332,7 +332,7 @@ caches realm-dependent decisions at require time.
 - roblox-ts 3.0.0 bundles TypeScript 5.5.3 while the transformer is authored against 5.9.3, so every
   build prints a version warning and compiles with 5.5.3. Harmless -- the declared internals exist in
   both -- but it means the transformer is not actually exercised against the compiler it targets.
-- There is no v1 → v2 migration codemod; see the end of [usage.md](usage.md) for the manual mapping.
+- There is no v1 → v2 migration codemod; see [migrating from v1](../guide/10-migrating-from-v1.md).
 - `scripts/copy-readme.mjs` copies the root README into every package at publish time, and the root
   README now documents the monorepo's development workflow rather than the framework.
 - The plugin host loads plugins with `require` at transform time. A plugin that throws takes the

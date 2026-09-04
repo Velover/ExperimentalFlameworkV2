@@ -136,5 +136,5 @@ users get a real TypeScript diagnostic with a source span rather than a stack tr
   an error rather than a silent override.
 
 A complete worked example lives in
-[`packages/transformer/tests/fixture/fieldInfoPlugin.cjs`](../packages/transformer/tests/fixture/fieldInfoPlugin.cjs),
+[`packages/transformer/tests/fixture/fieldInfoPlugin.cjs`](../../packages/transformer/tests/fixture/fieldInfoPlugin.cjs),
 which is also the fixture the plugin test suite asserts against.

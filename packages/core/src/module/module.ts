@@ -152,7 +152,7 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 	const switchInitState = (from: ModuleInitState, to: ModuleInitState) => {
 		if (moduleInitState !== from) {
 			error(
-				`module is in invalid state when transitiong to '${ModuleInitState[to]}', got '${ModuleInitState[moduleInitState]}' when '${ModuleInitState[from]}' was expected.`,
+				`module is in invalid state when transitioning to '${ModuleInitState[to]}', got '${ModuleInitState[moduleInitState]}' when '${ModuleInitState[from]}' was expected.`,
 			);
 		}
 
