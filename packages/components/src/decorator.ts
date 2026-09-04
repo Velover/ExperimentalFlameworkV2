@@ -102,7 +102,10 @@ export interface ComponentConfig {
 /**
  * Register a class as a Component.
  *
- * @metadata reflect identifier flamework:implements flamework:dependencies injectable
+ * `flamework:parameters` is what `Components` reads to discover which of a component's constructor
+ * dependencies are themselves components, so that its tracker can wait for them.
+ *
+ * @metadata reflect identifier flamework:implements flamework:dependencies flamework:parameters injectable
  * @metadata macro {@link opts intrinsic-const} {@link opts intrinsic-component-config}
  */
 export function Component(opts?: ComponentConfig) {

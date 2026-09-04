@@ -24,7 +24,7 @@ import Maid from "@rbxts/maid";
 import Signal from "@rbxts/signal";
 import type { ComponentModuleConfig } from "./componentModule";
 import { ComponentStreamingMode, type ComponentConfig } from "./decorator";
-import type { PluginModule } from "@flamework/core/out/module/module";
+import type { PluginModule } from "@flamework/core";
 
 interface ComponentInfo {
 	ctor: Constructor<BaseComponent>;

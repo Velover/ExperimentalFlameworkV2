@@ -1,9 +1,7 @@
-import { Flamework, Reflect, Modding, LifecyclePlugin } from "@flamework/core";
-import { getClassesInPath } from "@flamework/core/out/utility/getClassesInPath";
+import { Flamework, Reflect, Modding, LifecyclePlugin, getClassesInPath, HookType } from "@flamework/core";
 import type { Constructor } from "./utility";
 import { Components } from "./components";
 import { BaseComponent } from "./baseComponent";
-import { HookType } from "@flamework/core/out/module/moduleHooks";
 
 export interface ComponentModuleConfig {
 	components: Constructor[];
@@ -19,7 +17,7 @@ export class ComponentPlugin {
 	 *
 	 * @metadata macro
 	 */
-	public static fromPath<T extends string>(_stringPath: T, path?: Modding.Intrinsic<"path", [T], string[][]>) {
+	public static fromPath<T extends string>(_stringPath: T, path?: Modding.Intrinsic<"path", [T], string[]>) {
 		return this.createPlugin().registerComponents(_stringPath, path).build();
 	}
 
@@ -36,10 +34,10 @@ export class ComponentPlugin {
 	}
 
 	/** @metadata macro */
-	public registerComponents<T extends string>(_stringPath: T, path?: Modding.Intrinsic<"path", [T], string[][]>) {
+	public registerComponents<T extends string>(_stringPath: T, path?: Modding.Intrinsic<"path", [T], string[]>) {
 		assert(path !== undefined);
 
-		const components = getClassesInPath(path[0]).filter((v) => Reflect.hasMetadata(v, "flamework:component"));
+		const components = getClassesInPath(path).filter((v) => Reflect.hasMetadata(v, "flamework:component"));
 		for (const component of components) {
 			this.config.components.push(component as Constructor<BaseComponent>);
 		}
