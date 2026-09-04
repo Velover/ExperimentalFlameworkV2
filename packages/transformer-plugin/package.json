@@ -2,20 +2,17 @@
   "name": "rbxts-transformer-flamework-plugin",
   "version": "2.0.0-alpha.0",
   "description": "A module for creating Flamework transformer plugins.",
-  "main": "out/plugin/index.js",
+  "main": "out/index.js",
   "scripts": {
     "build": "tsc",
-    "watch": "tsc -w",
-    "prepare": "tsc"
+    "watch": "tsc -w"
   },
   "files": [
-    "out",
-    "index.d.ts"
+    "out"
   ],
-  "dependencies": {
-    "isolated-vm": "5.0.3"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^16.11.1"
-  }
+  },
+  "types": "out/index.d.ts"
 }

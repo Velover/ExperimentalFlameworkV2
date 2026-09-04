@@ -8,7 +8,10 @@ export default tseslint.config(
 	eslintConfigPrettier,
 	eslintPluginPrettierRecommended,
 	...tseslint.configs.recommended,
-	{ ignores: ["**/out/**/*", ".yarn/**/*"] },
+	{
+		// The fixture is compiled by rbxtsc inside the transformer test suite, not linted as source.
+		ignores: ["**/out/**/*", "**/node_modules/**/*", "**/*.tsbuildinfo", "packages/transformer/tests/fixture/**/*"],
+	},
 	{
 		rules: {
 			"prettier/prettier": [

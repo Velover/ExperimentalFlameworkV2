@@ -4,7 +4,6 @@
   "main": "out/init.lua",
   "types": "out/index.d.ts",
   "scripts": {
-    "prepare": "rbxtsc",
     "build": "rbxtsc",
     "watch": "rbxtsc -w"
   },
@@ -20,9 +19,10 @@
     "access": "public"
   },
   "devDependencies": {
-    "@rbxts/compiler-types": "^2.3.0-types.2",
-    "@rbxts/types": "^1.0.799",
-    "rbxts-transformer-flamework": "workspace:packages/transformer"
+    "@rbxts/compiler-types": "^3.0.0-types.0",
+    "@rbxts/types": "^1.0.948",
+    "rbxts-transformer-flamework": "workspace:*",
+    "roblox-ts": "^3.0.0"
   },
   "dependencies": {
     "@rbxts/maid": "^1.0.0-ts.1",

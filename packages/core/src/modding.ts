@@ -139,8 +139,7 @@ export namespace Modding {
 		 * This can also be used to extract parameter names via `Parameters<T>`
 		 */
 		export type Labels<T extends readonly unknown[]> =
-			| (string[] & { /** @hidden */ _flamework_macro_tuple_labels: T })
-			| undefined;
+			(string[] & { /** @hidden */ _flamework_macro_tuple_labels: T }) | undefined;
 
 		/**
 		 * Hashes a string literal type (such as an event name.)
