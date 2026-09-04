@@ -549,9 +549,16 @@ function getUserMacroOfType(state: TransformState, node: ts.Expression, target: 
 	const manyMetadata = state.typeChecker.getTypeOfPropertyOfType(target, "_flamework_macro_many");
 	if (manyMetadata) {
 		return getUserMacroOfMany(state, node, manyMetadata);
-	} else {
-		return getBasicUserMacro(state, node, target);
 	}
+
+	// The shared-ref marker is only inspected on the way through `getUserMacroOfMany`, so without
+	// this a `Modding.Caller.Constant<T>` parameter that is not wrapped in `Modding.Emit` generates
+	// no argument at all -- the macro silently does not fire and the parameter is nil at runtime.
+	if (state.typeChecker.getTypeOfPropertyOfType(target, "_flamework_macro_shared_ref")) {
+		return getUserMacroOfMany(state, node, target);
+	}
+
+	return getBasicUserMacro(state, node, target);
 }
 
 /**

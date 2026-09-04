@@ -57,14 +57,14 @@ export namespace Modding {
 		};
 
 		/**
-		 * The starting line of the expression.
+		 * The starting line of the expression, starting at 1.
 		 */
-		export type Line = CallerHelper<string, "line">;
+		export type Line = CallerHelper<number, "line">;
 
 		/**
-		 * The char at the start of the expression relative to the starting line.
+		 * The char at the start of the expression relative to the starting line, starting at 1.
 		 */
-		export type Character = CallerHelper<string, "character">;
+		export type Character = CallerHelper<number, "character">;
 
 		/**
 		 * The width of the expression.
