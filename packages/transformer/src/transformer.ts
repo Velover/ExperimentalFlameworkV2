@@ -1,4 +1,4 @@
-import {} from "ts-expose-internals";
+// internals declared locally in src/types/tsInternals.d.ts
 import ts from "typescript";
 import path from "path";
 import { transformFile } from "./transformations/transformFile";

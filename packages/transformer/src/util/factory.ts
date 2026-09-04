@@ -431,8 +431,12 @@ export namespace f {
 
 	// Other
 
-	export function token<T extends ts.SyntaxKind>(kind: T) {
-		return factory.createToken(kind);
+	/**
+	 * `ts.factory.createToken` is a large overload set whose first matching overload wins when the
+	 * kind is generic, so it has to be called through a narrowed signature to return `Token<T>`.
+	 */
+	export function token<T extends ts.SyntaxKind>(kind: T): ts.Token<T> {
+		return (factory.createToken as (kind: T) => ts.Token<T>)(kind);
 	}
 
 	export function modifier<T extends ts.ModifierSyntaxKind>(kind: T) {

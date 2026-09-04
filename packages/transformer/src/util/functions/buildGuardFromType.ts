@@ -5,6 +5,7 @@ import { f } from "../factory";
 import { getDeclarationOfType } from "./getDeclarationOfType";
 import { getInstanceTypeFromType } from "./getInstanceTypeFromType";
 import assert from "assert";
+import { TYPE_FLAG_DISJOINT_DOMAINS } from "../tsInternals";
 
 /**
  * Convert a type into a list of typeguards.
@@ -336,7 +337,7 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 
 		// We find any disjoint types (strings, numbers, etc) as intersections with them are invalid.
 		// Most intersections with disjoint types are used to introduce nominal fields.
-		const disjointType = type.types.find((v) => v.flags & ts.TypeFlags.DisjointDomains);
+		const disjointType = type.types.find((v) => v.flags & TYPE_FLAG_DISJOINT_DOMAINS);
 		if (disjointType) {
 			return buildGuard(disjointType);
 		}
