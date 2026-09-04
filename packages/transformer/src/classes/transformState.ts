@@ -20,9 +20,17 @@ import { assert } from "../util/functions/assert";
 import { shuffle } from "../util/functions/shuffle";
 import glob from "glob";
 import type { PathTranslator } from "@roblox-ts/path-translator";
-import { createVm, type PluginVm } from "../transformations/plugins/vm";
+import { createPluginHost, type PluginHost } from "../transformations/plugins/pluginHost";
 
 export interface TransformerConfig {
+	/**
+	 * Transformer plugins to load, which can register additional macro types.
+	 *
+	 * Each entry is either a module specifier (resolved from the project root) or a path relative
+	 * to the project root, optionally paired with options passed to the plugin as `api.options`.
+	 */
+	plugins?: (string | { path: string; options?: Record<string, unknown> })[];
+
 	/**
 	 * Disables TypeScript's own semantic diagnostics.
 	 * Improves performance, but results in increased risk of incorrect compilation as well as messed up diagnostic spans.
@@ -74,7 +82,7 @@ export class TransformState {
 	public rootDirectory: string;
 	public packageName: string;
 	public isGame: boolean;
-	public pluginVm?: PluginVm;
+	public pluginHost?: PluginHost;
 
 	public isUserMacroCache = new Map<ts.Symbol, boolean>();
 	public nextRootStatements = new Array<ts.Statement>();
@@ -251,7 +259,7 @@ export class TransformState {
 
 		Cache.isInitialCompile = false;
 
-		this.pluginVm = createVm(this);
+		this.pluginHost = createPluginHost(this);
 	}
 
 	getFileId(file: ts.SourceFile) {
