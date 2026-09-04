@@ -28,7 +28,7 @@ export function buildPathGlobIntrinsic(state: TransformState, node: ts.Node, pat
 }
 
 /**
- * Generates a path as an array.
+ * Generates a path as an array of Rojo path segments.
  */
 export function buildPathIntrinsic(state: TransformState, node: ts.Node, pathType: ts.Type) {
 	if (!pathType.isStringLiteral()) {
@@ -44,5 +44,5 @@ export function buildPathIntrinsic(state: TransformState, node: ts.Node, pathTyp
 		Diagnostics.error(node, `Could not find Rojo data for '${pathType.value}'`);
 	}
 
-	return f.array([f.array(rbxPath.map(f.string))]);
+	return f.array(rbxPath.map(f.string));
 }

@@ -44,7 +44,12 @@ export function transformUserMacro(
 		}
 	}
 
-	for (let i = 0; i <= highestParameterIndex; i++) {
+	// Every argument has to be visited, not just the ones up to the last generated parameter:
+	// arguments beyond it can contain macros of their own, and leaving them untransformed emits a
+	// call to a `declare`d function that only fails at runtime. `highestParameterIndex` still
+	// determines how far to pad with `nil` so that a generated parameter lands at the right index.
+	const argumentCount = Math.max(args.length, highestParameterIndex + 1);
+	for (let i = 0; i < argumentCount; i++) {
 		const userMacro = parameters.get(i);
 		if (userMacro) {
 			args[i] = buildUserMacro(state, node, userMacro);
@@ -73,10 +78,27 @@ export function transformUserMacro(
 
 	validateParameterConstIntrinsic(node, signature, nodeMetadata.getSymbol("intrinsic-const") ?? []);
 
+	// `intrinsic-flamework-rewrite` redirects the call to a real implementation, which is how a
+	// `declare`d macro such as `Flamework.implements` reaches `Flamework._implements` at runtime.
+	// Without it the emitted call targets a declaration that has no runtime value.
+	let callee: ts.Expression | undefined;
+
+	const rewrite = nodeMetadata.getSymbol("intrinsic-flamework-rewrite")?.[0];
+	if (rewrite) {
+		if (!rewrite.parent) {
+			Diagnostics.error(node, `The rewrite target '${rewrite.name}' is not declared inside a namespace.`);
+		}
+
+		const namespace = state.addFileImport(state.getSourceFile(node), "@flamework/core", rewrite.parent.name);
+		callee = f.elementAccessExpression(namespace, rewrite.name);
+	}
+
+	callee ??= state.transformNode(node.expression);
+
 	if (ts.isNewExpression(node)) {
-		return ts.factory.updateNewExpression(node, state.transformNode(node.expression), node.typeArguments, args);
+		return ts.factory.updateNewExpression(node, callee, node.typeArguments, args);
 	} else if (ts.isCallExpression(node)) {
-		return ts.factory.updateCallExpression(node, state.transformNode(node.expression), node.typeArguments, args);
+		return ts.factory.updateCallExpression(node, callee, node.typeArguments, args);
 	} else {
 		Diagnostics.error(node, `Macro could not be transformed.`);
 	}
@@ -326,20 +348,30 @@ function buildIntrinsicMacro(state: TransformState, node: ts.Node, macro: UserMa
 	if (macro.id === "plugin") {
 		const [pluginName, input] = macro.inputs;
 		if (!pluginName || !pluginName.isStringLiteral() || !input) {
-			throw new Error("Invalid plugin input");
+			Diagnostics.error(
+				node,
+				'A plugin macro must be declared as `Modding.Intrinsic<"plugin", [id, T], R>` where `id` is a string literal.',
+			);
 		}
 
-		if (!state.pluginVm) {
-			throw new Error("cannot use plugins without plugin vm");
+		if (!state.pluginHost) {
+			Diagnostics.error(
+				node,
+				`The macro type '${pluginName.value}' requires a plugin, but no plugins are configured.`,
+				"Add the plugin to the `plugins` array of the Flamework transformer options in your tsconfig.json.",
+			);
 		}
 
-		const transform = state.pluginVm.executeMacroType(pluginName.value, input);
+		const transform = state.pluginHost.executeMacroType(pluginName.value, input, node);
 		if (!transform) {
-			throw new Error(`Plugin '${pluginName.value}' does not exist`);
-		}
-
-		if (!ts.isExpression(transform)) {
-			throw new Error(`Plugin '${pluginName.value}' returned non-expression.`);
+			const registered = state.pluginHost.getRegisteredMacroTypes();
+			Diagnostics.error(
+				node,
+				`No loaded plugin registered the macro type '${pluginName.value}'.`,
+				registered.length > 0
+					? `Registered macro types: ${registered.join(", ")}`
+					: "No plugin registered any macro types.",
+			);
 		}
 
 		return transform;

@@ -27,7 +27,7 @@ export function buildGuardsFromType(
 }
 
 // This compiles directly to `t.typeof` for any userdata that `t` does not have an alias for, or users might not have yet.
-const RBX_TYPES_NEW = ["buffer"];
+const RBX_TYPES_NEW = ["buffer", "InstanceHandle"];
 
 const RBX_TYPES = [
 	"UDim",
