@@ -4,11 +4,15 @@ Flamework is an extensible framework for roblox-ts designed around portable, iso
 
 ## Documentation
 
-Please refer to the Flamework website for installation and documentation.
+- [docs/usage.md](docs/usage.md) -- modules, providers, plugins, lifecycle events, components,
+  networking and macros, as a v2 consumer uses them.
+- [docs/internals.md](docs/internals.md) -- what the transformer does to your code and what the
+  runtime does with the result.
+- [docs/transformer-plugins.md](docs/transformer-plugins.md) -- writing a transformer plugin.
+
+The Flamework website documents v1, most of which no longer applies:
 
 https://flamework.fireboltofdeath.dev/docs/introduction
-
-For the v2 transformer plugin API, see [docs/transformer-plugins.md](docs/transformer-plugins.md).
 
 ## Development
 
