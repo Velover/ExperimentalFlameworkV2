@@ -39,15 +39,10 @@ export interface CreateFunctionSenderOptions {
 	) => void;
 
 	/**
-	 * Packs the request's argument list. Absent when the project does not enable serialization.
-	 */
-	argsCodec?: Serialization.Codec;
-
-	/**
 	 * Unpacks a successful response's value, carried as a one-element list. Absent when the project
-	 * does not enable serialization.
+	 * does not enable serialization. Requests reach `invoke*` already packed by the transformer.
 	 */
-	resultCodec?: Serialization.Codec;
+	resultDecoder?: Serialization.Decoder;
 
 	/**
 	 * Called when a response cannot be decoded; the request is rejected with `InvalidResult`.
@@ -91,13 +86,13 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 		}
 
 		const rejection = getFunctionError(processResult);
-		if (rejection !== undefined || !options.resultCodec) {
+		if (rejection !== undefined || !options.resultDecoder) {
 			request(response[0], rejection);
 			return;
 		}
 
 		// A successful response carries the packed value: `(buffer, blobs?)`.
-		const decoded = decodeArguments(options.resultCodec, player, response, options.onMalformed);
+		const decoded = decodeArguments(options.resultDecoder, player, response, options.onMalformed);
 		if (!decoded) {
 			request(undefined, NetworkingFunctionError.InvalidResult);
 			return;
@@ -159,13 +154,7 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 	return {
 		invokeServer(...args) {
 			const id = requestInfoClient.nextId++;
-			const codec = options.argsCodec;
-			if (codec) {
-				const [payload, blobs] = codec.encode(args);
-				event.fireServer(id, payload, blobs);
-			} else {
-				event.fireServer(id, ...args);
-			}
+			event.fireServer(id, ...args);
 
 			return createInvocation(undefined, id, requestInfoClient);
 		},
@@ -175,13 +164,7 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 			if (!requestInfo) requestInfoServer.set(player, (requestInfo = createRequestInfo()));
 
 			const id = requestInfoClient.nextId++;
-			const codec = options.argsCodec;
-			if (codec) {
-				const [payload, blobs] = codec.encode(args);
-				event.fireClient(player, id, payload, blobs);
-			} else {
-				event.fireClient(player, id, ...args);
-			}
+			event.fireClient(player, id, ...args);
 
 			return createInvocation(player, id, requestInfo);
 		},

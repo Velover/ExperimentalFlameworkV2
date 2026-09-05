@@ -41,15 +41,11 @@ export interface CreateEventOptions {
 	incomingMiddleware?: MiddlewareFactory<any[], void>[];
 
 	/**
-	 * Packs the argument list of outgoing events into a buffer, plus a blob list when the types call
-	 * for one. Generated from the event's types; absent when the project does not enable serialization.
+	 * Unpacks the argument list of incoming events. Absent when the project does not enable
+	 * serialization. Outgoing lists reach `fire*` already packed: the transformer generates the
+	 * encoding inline at each call site.
 	 */
-	outgoingCodec?: Serialization.Codec;
-
-	/**
-	 * Unpacks the argument list of incoming events. Absent when the project does not enable serialization.
-	 */
-	incomingCodec?: Serialization.Codec;
+	incomingDecoder?: Serialization.Decoder;
 
 	/**
 	 * Called when an incoming payload cannot be decoded; the event is dropped.
@@ -71,17 +67,17 @@ export interface EventInterface {
 const NO_BLOBS = new Array<defined>();
 
 /**
- * The argument list a remote delivered: `args` as they are without a codec, otherwise the buffer and
- * blob list unpacked. `undefined` when the payload was malformed, after reporting it through
+ * The argument list a remote delivered: `args` as they are without a decoder, otherwise the buffer
+ * and blob list unpacked. `undefined` when the payload was malformed, after reporting it through
  * `onMalformed`. Decoding runs under `pcall`: a hostile buffer raises instead of yielding garbage.
  */
 export function decodeArguments(
-	codec: Serialization.Codec | undefined,
+	decoder: Serialization.Decoder | undefined,
 	player: Player | undefined,
 	args: unknown[],
 	onMalformed?: (player: Player | undefined, message: string) => void,
 ): unknown[] | undefined {
-	if (!codec) return args;
+	if (!decoder) return args;
 
 	const [payload, blobs] = args;
 	if (!typeIs(payload, "buffer") || (blobs !== undefined && !typeIs(blobs, "table"))) {
@@ -89,7 +85,7 @@ export function decodeArguments(
 		return undefined;
 	}
 
-	const [ok, result] = pcall(codec.decode, payload, (blobs ?? NO_BLOBS) as Array<defined>);
+	const [ok, result] = pcall(decoder, payload, (blobs ?? NO_BLOBS) as Array<defined>);
 	if (!ok) {
 		onMalformed?.(player, tostring(result));
 		return undefined;
@@ -117,7 +113,7 @@ export function createEvent(options: CreateEventOptions): EventInterface {
 	});
 
 	const receive = (player: Player | undefined, args: unknown[]) => {
-		const decoded = decodeArguments(options.incomingCodec, player, args, options.onMalformed);
+		const decoded = decodeArguments(options.incomingDecoder, player, args, options.onMalformed);
 		if (decoded) {
 			invoke(player, ...decoded);
 		}
@@ -152,33 +148,15 @@ export function createEvent(options: CreateEventOptions): EventInterface {
 		},
 
 		fireServer(...args) {
-			const codec = options.outgoingCodec;
-			if (codec) {
-				const [payload, blobs] = codec.encode(args);
-				remote.FireServer(payload, blobs);
-			} else {
-				remote.FireServer(...args);
-			}
+			remote.FireServer(...args);
 		},
 
 		fireClient(player, ...args) {
-			const codec = options.outgoingCodec;
-			if (codec) {
-				const [payload, blobs] = codec.encode(args);
-				remote.FireClient(player, payload, blobs);
-			} else {
-				remote.FireClient(player, ...args);
-			}
+			remote.FireClient(player, ...args);
 		},
 
 		fireAllClients(...args) {
-			const codec = options.outgoingCodec;
-			if (codec) {
-				const [payload, blobs] = codec.encode(args);
-				remote.FireAllClients(payload, blobs);
-			} else {
-				remote.FireAllClients(...args);
-			}
+			remote.FireAllClients(...args);
 		},
 
 		connectServer(callback) {

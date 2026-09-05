@@ -263,14 +263,19 @@ Networking is two layers, and the split is deliberate:
 
 ### Serialization
 
-With `networking.serialization` enabled in the project config, the `network-serializer` intrinsic in
-the handler metadata resolves to a `Serialization.Codec` per event (an `encode`/`decode` pair for
-its argument tuple) and per function (arguments and, with `Promise<T>` unwrapped, the result as a
-one-element list); otherwise it is `nil` and the transport sends values as they are. `createEvent`
-encodes on `fire*` and decodes, under `pcall`, before the middleware chain, so guards and
-middleware see plain values; a decode failure is reported through `onMalformed` and the event
-dropped. Functions keep the request id and process result as plain arguments and pack only the
-payload after them.
+With `networking.serialization` enabled in the project config, sending and receiving are asymmetric
+on purpose. Sending is a call-site transform (`transformer/src/transformations/transformNetworkingCall.ts`):
+a call to `fire`/`except`/`broadcast`/`invoke`/`invokeWithTimeout` (or the handler's call signature)
+on a member whose type carries the hidden `_flamework_send` marker has its argument list packed
+inline, ahead of the statement, and is rewritten to the member's hidden `_fire`/`_invoke`
+counterpart with `(payload, blobs?)`; `setCallback` on a member with `_flamework_result` gets its
+callback wrapped so a successful result (a Promise's resolved value included) returns `[payload,
+blobs?]`, registered through `_setCallback`. Receiving is metadata: the `network-decoder` intrinsic
+resolves to a decoder function per event and function (arguments, results for `predict`, responses);
+`createEvent` decodes under `pcall` before the middleware chain, so guards and middleware see plain
+values, and a decode failure is reported through `onMalformed`. Functions keep the request id and
+process result as plain arguments and pack only the payload after them. No encoder exists as a
+runtime value; only decoders do, and a decoder is useless for forging traffic.
 
 The generator is `transformer/src/util/functions/buildSerializerFromType.ts`. It classifies a type
 into a kind (number with a width, string with a length prefix, object, union, ...), computes its

@@ -38,13 +38,13 @@ export interface CreateFunctionReceiverOptions {
 	/**
 	 * Unpacks the request's argument list. Absent when the project does not enable serialization.
 	 */
-	argsCodec?: Serialization.Codec;
+	argsDecoder?: Serialization.Decoder;
 
 	/**
-	 * Packs a successful response's value, as a one-element list. Absent when the project does not
-	 * enable serialization.
+	 * Unpacks the results a packed callback returns, so that `predict` resolves with the value itself.
+	 * Absent when the project does not enable serialization.
 	 */
-	resultCodec?: Serialization.Codec;
+	resultDecoder?: Serialization.Decoder;
 
 	/**
 	 * Called when a request cannot be decoded; the caller receives `BadRequest`.
@@ -58,8 +58,9 @@ export interface RequestInfo {
 }
 
 export interface FunctionReceiverInterface {
-	setServerCallback(callback: (player: Player, ...args: unknown[]) => unknown): void;
-	setClientCallback(callback: (...args: unknown[]) => unknown): void;
+	/** `packed`: the callback returns successful results as `[payload, blobs?]`, packed by the transformer. */
+	setServerCallback(callback: (player: Player, ...args: unknown[]) => unknown, packed?: boolean): void;
+	setClientCallback(callback: (...args: unknown[]) => unknown, packed?: boolean): void;
 	invoke(player: Player | undefined, ...args: unknown[]): Promise<unknown>;
 }
 
@@ -72,8 +73,10 @@ export function createFunctionReceiver(options: CreateFunctionReceiverOptions): 
 	});
 
 	let callback: MiddlewareProcessor<unknown[], unknown>;
+	let packedResults = false;
 
-	const setCallback = (newCallback: (...args: never[]) => unknown) => {
+	const setCallback = (newCallback: (...args: never[]) => unknown, packed: boolean) => {
+		packedResults = packed;
 		callback = createMiddlewareProcessor(options.incomingMiddleware, options.networkInfo, (player, ...args) => {
 			if (RunService.IsServer()) {
 				return newCallback(player as never, ...(args as never[]));
@@ -83,11 +86,10 @@ export function createFunctionReceiver(options: CreateFunctionReceiverOptions): 
 		});
 	};
 
-	/** A successful value goes back packed when there is a codec; errors always go back as they are. */
+	/** A packed callback's successful value is `[payload, blobs?]`; errors always go back as they are. */
 	const respond = (player: Player | undefined, id: unknown, processResult: unknown, value?: unknown) => {
-		const codec = options.resultCodec;
-		if (processResult === true && codec) {
-			const [payload, blobs] = codec.encode([value]);
+		if (processResult === true && packedResults) {
+			const [payload, blobs] = value as [buffer, Array<defined> | undefined];
 			event.fireEither(player, id, processResult, payload, blobs);
 		} else {
 			event.fireEither(player, id, processResult, value);
@@ -99,7 +101,7 @@ export function createFunctionReceiver(options: CreateFunctionReceiverOptions): 
 			return event.fireEither(player, id, NetworkingFunctionError.Unprocessed);
 		}
 
-		const decoded = decodeArguments(options.argsCodec, player, args, options.onMalformed);
+		const decoded = decodeArguments(options.argsDecoder, player, args, options.onMalformed);
 		if (!decoded) {
 			return event.fireEither(player, id, NetworkingFunctionError.BadRequest);
 		}
@@ -121,12 +123,12 @@ export function createFunctionReceiver(options: CreateFunctionReceiverOptions): 
 	}
 
 	return {
-		setServerCallback(callback) {
-			setCallback(callback);
+		setServerCallback(callback, packed = false) {
+			setCallback(callback, packed);
 		},
 
-		setClientCallback(callback) {
-			setCallback(callback);
+		setClientCallback(callback, packed = false) {
+			setCallback(callback, packed);
 		},
 
 		invoke(player, ...args) {
@@ -136,7 +138,14 @@ export function createFunctionReceiver(options: CreateFunctionReceiverOptions): 
 
 			return callback(player, ...args).then((value) => {
 				const processResult = getProcessResult(value);
-				return processResult === true ? value : Promise.reject(processResult);
+				if (processResult !== true) return Promise.reject(processResult);
+
+				// A packed callback answered with bytes; a local caller wants the value.
+				const decoder = options.resultDecoder;
+				if (!packedResults || !decoder) return value;
+
+				const [payload, blobs] = value as [buffer, Array<defined> | undefined];
+				return decoder(payload, blobs ?? [])[0];
 			});
 		},
 	};

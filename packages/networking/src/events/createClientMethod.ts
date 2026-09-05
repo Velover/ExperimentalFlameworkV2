@@ -9,6 +9,11 @@ export function createClientMethod(receiver: EventInterface, sender: EventInterf
 			sender.fireServer(...args);
 		},
 
+		// With serialization on, the transformer rewrites every `fire` into this with the packed list.
+		_fire(payload, blobs) {
+			sender.fireServer(payload, blobs);
+		},
+
 		connect(callback) {
 			return receiver.connectClient(callback as never);
 		},

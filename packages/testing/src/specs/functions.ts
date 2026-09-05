@@ -1,4 +1,4 @@
-import { Modding, Serialization } from "@flamework/core";
+import { Flamework, Modding, Serialization } from "@flamework/core";
 import { Networking, NetworkingFunctionError } from "@flamework/networking";
 import { RunService } from "@rbxts/services";
 import { expectDefined, expectEqual, expectRejects, expectResolves, expectTrue, suite } from "../testkit";
@@ -55,8 +55,6 @@ interface Method {
 	predict(...args: unknown[]): Promise<unknown>;
 }
 
-type Handler = { [K in keyof Bidirectional]: Method };
-
 const isServer = RunService.IsServer();
 
 /**
@@ -68,7 +66,7 @@ const RECEIVE_PREFIX = isServer ? "$" : "@";
 const SEND_PREFIX = isServer ? "@" : "$";
 
 /** The player a server-side request is addressed to. Unused on the client. */
-const requester = __harness.newPlayer("Requester");
+const requester = __harness.newPlayer("Requester") as Player;
 
 const badResponses = new Array<defined>();
 GlobalFunctions.registerHandler("onBadResponse", (_player, data) => badResponses.push(data.value as defined));
@@ -81,17 +79,28 @@ const cancelRequest: Networking.FunctionMiddleware<[value: string], string> = ()
 	return () => Networking.Skip;
 };
 
-let handler: Handler | undefined;
+type Name = keyof Bidirectional;
+type ServerFunctions = ReturnType<typeof GlobalFunctions.createServer>;
+type ClientFunctions = ReturnType<typeof GlobalFunctions.createClient>;
 
-function getHandler(): Handler {
-	if (handler !== undefined) {
-		return handler;
+/**
+ * The realm's typed handler. Sends and callbacks go through the real types on purpose: with
+ * serialization on, the transformer packs arguments and results at call sites it can type, and a
+ * widened type would leave them unpacked.
+ */
+let handlers: { server?: ServerFunctions; client?: ClientFunctions } | undefined;
+
+function getHandlers() {
+	if (handlers !== undefined) {
+		return handlers;
 	}
 
 	if (isServer) {
-		handler = GlobalFunctions.createServer({
-			middleware: { transformed: [rewriteArgument], cancelled: [cancelRequest] },
-		}) as never;
+		handlers = {
+			server: GlobalFunctions.createServer({
+				middleware: { transformed: [rewriteArgument], cancelled: [cancelRequest] },
+			}),
+		};
 	} else {
 		// Remotes are created by the server and replicated. Flushing inside the server window wires
 		// the primed handler to the channels a real server would listen on, rather than leaving its
@@ -103,34 +112,79 @@ function getHandler(): Handler {
 			__harness.flush();
 		});
 
-		handler = GlobalFunctions.createClient({
-			middleware: { transformed: [rewriteArgument], cancelled: [cancelRequest] },
-		}) as never;
+		handlers = {
+			client: GlobalFunctions.createClient({
+				middleware: { transformed: [rewriteArgument], cancelled: [cancelRequest] },
+			}),
+		};
 	}
 
 	__harness.flush();
-	return handler!;
+	return handlers;
+}
+
+/**
+ * A member by name through direct property access: the handler's keys are obfuscated, so the
+ * transformer refuses to index it with a variable.
+ */
+function serverMember(server: ServerFunctions, name: Name) {
+	switch (name) {
+		case "echo":
+			return server.echo;
+		case "pending":
+			return server.pending;
+		case "transformed":
+			return server.transformed;
+		case "cancelled":
+			return server.cancelled;
+	}
+}
+
+function clientMember(client: ClientFunctions, name: Name) {
+	switch (name) {
+		case "echo":
+			return client.echo;
+		case "pending":
+			return client.pending;
+		case "transformed":
+			return client.transformed;
+		case "cancelled":
+			return client.cancelled;
+	}
 }
 
 /** Calls a sender with the realm's calling convention. */
-function invoke(method: Method, ...args: unknown[]) {
-	return isServer ? method.invoke(requester, ...args) : method.invoke(...args);
+function invoke(name: Name, value: string) {
+	const { server, client } = getHandlers();
+	return server !== undefined
+		? serverMember(server, name).invoke(requester, value)
+		: clientMember(client!, name).invoke(value);
 }
 
-function invokeWithTimeout(method: Method, timeout: number, ...args: unknown[]) {
-	return isServer
-		? method.invokeWithTimeout(requester, timeout, ...args)
-		: method.invokeWithTimeout(timeout, ...args);
+function invokeWithTimeout(name: Name, timeout: number, value: string) {
+	const { server, client } = getHandlers();
+	return server !== undefined
+		? serverMember(server, name).invokeWithTimeout(requester, timeout, value)
+		: clientMember(client!, name).invokeWithTimeout(timeout, value);
 }
 
-/** Runs a receiver locally, middleware and all. */
-function predict(method: Method, ...args: unknown[]) {
-	return isServer ? method.predict(requester, ...args) : method.predict(...args);
+/** Runs a receiver locally, middleware and all. `predict` takes plain values, so a widened type is fine. */
+function predict(name: Name, ...args: unknown[]) {
+	const { server, client } = getHandlers();
+	const method = (server !== undefined
+		? serverMember(server, name)
+		: clientMember(client!, name)) as unknown as Method;
+	return server !== undefined ? method.predict(requester, ...args) : method.predict(...args);
 }
 
 /** Registers a receiver callback, hiding the player argument the server is handed. */
-function setCallback(method: Method, callback: (value: string) => unknown) {
-	method.setCallback(isServer ? (_player, value) => callback(value as string) : (value) => callback(value as string));
+function setCallback(name: Name, callback: (value: string) => unknown) {
+	const { server, client } = getHandlers();
+	if (server !== undefined) {
+		serverMember(server, name).setCallback((_player, value) => callback(value) as string);
+	} else {
+		clientMember(client!, name).setCallback((value) => callback(value) as string);
+	}
 }
 
 function remoteById(id: string, what: string) {
@@ -149,69 +203,71 @@ function deliver(channel: Instance, ...args: unknown[]) {
 }
 
 /**
- * Wire codecs when the project enables `networking.serialization`, `undefined` otherwise (see the
+ * Decoders when the project enables `networking.serialization`, `undefined` otherwise (see the
  * networking specs). A function request is `(id, ...args)` and a response `(id, result, value)`; with
- * serialization the args or value become `(buffer, blobs?)` after the plain prefix.
+ * serialization the args or value become `(buffer, blobs?)` after the plain prefix. Encoding lives at
+ * call sites only, so simulated traffic is packed with a serializer for the same tuple type.
  * @metadata macro
  */
-function wireCodec<T extends unknown[]>(
-	meta?: Modding.Intrinsic<"network-serializer", [T], Serialization.Codec<T> | undefined>,
-): Serialization.Codec<T> | undefined {
+function wireDecoder<T extends unknown[]>(
+	meta?: Modding.Intrinsic<"network-decoder", [T], Serialization.Decoder<T> | undefined>,
+): Serialization.Decoder<T> | undefined {
 	return meta;
 }
 
+interface Wire<T extends unknown[]> {
+	decode: Serialization.Decoder<T> | undefined;
+	pack: Serialization.Serializer<T>;
+}
+
 const wire = {
-	textArgs: wireCodec<[string]>(),
-	textResult: wireCodec<[string]>(),
-	numberResult: wireCodec<[number]>(),
+	textArgs: { decode: wireDecoder<[string]>(), pack: Flamework.createSerializer<[string]>() },
+	textResult: { decode: wireDecoder<[string]>(), pack: Flamework.createSerializer<[string]>() },
+	numberResult: { decode: wireDecoder<[number]>(), pack: Flamework.createSerializer<[number]>() },
 };
-const SERIALIZED = wire.textArgs !== undefined;
+const SERIALIZED = wire.textArgs.decode !== undefined;
 
 /** Packed values as the remote carries them: the buffer, then the blob list only when the type has blob slots. */
-function packed<T extends unknown[]>(codec: Serialization.Codec<T>, values: T): unknown[] {
-	const [payload, blobs] = codec.encode(values);
+function packed<T extends unknown[]>(wire: Wire<T>, values: T): unknown[] {
+	const [payload, blobs] = wire.pack.serialize(values);
 	return blobs ? [payload, blobs] : [payload];
 }
 
 /** A response value as it travels after the plain `(id, result)` prefix. */
-function onWire<T>(codec: Serialization.Codec<[T]> | undefined, value: T): unknown[] {
-	return codec ? packed<[T]>(codec, [value]) : [value];
+function onWire<T>(wire: Wire<[T]>, value: T): unknown[] {
+	return wire.decode !== undefined ? packed<[T]>(wire, [value]) : [value];
 }
 
 /** A request's argument list as it travels after the plain `id`: spread when not serialized. */
-function onWireArgs<T extends unknown[]>(codec: Serialization.Codec<T> | undefined, args: T): unknown[] {
-	return codec ? packed(codec, args) : args;
+function onWireArgs<T extends unknown[]>(wire: Wire<T>, args: T): unknown[] {
+	return wire.decode !== undefined ? packed(wire, args) : args;
 }
 
 /** The response value that follows `prefix` plain arguments in a recorded message. */
-function fromWire<T>(codec: Serialization.Codec<[T]> | undefined, args: unknown[], prefix: number): T {
-	return codec ? fromWireArgs(codec, args, prefix)[0] : (args[prefix] as T);
+function fromWire<T>(wire: Wire<[T]>, args: unknown[], prefix: number): T {
+	return wire.decode !== undefined ? fromWireArgs(wire, args, prefix)[0] : (args[prefix] as T);
 }
 
 /** The single request argument that follows `prefix` plain arguments in a recorded message. */
-function fromWireArgs<T extends unknown[]>(
-	codec: Serialization.Codec<T> | undefined,
-	args: unknown[],
-	prefix: number,
-): T {
-	if (!codec) return [args[prefix]] as unknown as T;
-	return codec.decode(args[prefix] as buffer, (args[prefix + 1] ?? []) as Array<defined>);
+function fromWireArgs<T extends unknown[]>(wire: Wire<T>, args: unknown[], prefix: number): T {
+	if (wire.decode === undefined) return [args[prefix]] as unknown as T;
+	return wire.decode(args[prefix] as buffer, (args[prefix + 1] ?? []) as Array<defined>);
 }
 
 export = suite("networking functions", [
 	[
 		"rejects an incoming request before a callback is set",
 		() => {
-			const reason = expectRejects(predict(getHandler().pending, "hello"), "request without a callback");
+			const reason = expectRejects(predict("pending", "hello"), "request without a callback");
 			expectEqual(reason, NetworkingFunctionError.Unprocessed, "rejection");
 		},
 	],
 	[
 		"invokes the callback and resolves with its return value",
 		() => {
-			setCallback(getHandler().echo, (value) => `${value}!`);
+			setCallback("echo", (value) => `${value}!`);
 
-			expectEqual(expectResolves(predict(getHandler().echo, "hello")), "hello!", "returned value");
+			expectEqual(expectResolves(predict("echo", "hello")), "hello!", "returned value");
 		},
 	],
 	[
@@ -219,12 +275,12 @@ export = suite("networking functions", [
 		"rejects a request whose arguments fail the generated guards",
 		() => {
 			let called = false;
-			setCallback(getHandler().echo, (value) => {
+			setCallback("echo", (value) => {
 				called = true;
 				return `${value}!`;
 			});
 
-			const reason = expectRejects(predict(getHandler().echo, 42), "request with a bad argument");
+			const reason = expectRejects(predict("echo", 42), "request with a bad argument");
 
 			expectEqual(reason, NetworkingFunctionError.BadRequest, "rejection");
 			expectEqual(called, false, "callback ran");
@@ -233,7 +289,7 @@ export = suite("networking functions", [
 	[
 		"answers a request that arrives over its receive channel",
 		() => {
-			setCallback(getHandler().echo, (value) => `${value}!`);
+			setCallback("echo", (value) => `${value}!`);
 
 			const channel = remoteById(`${RECEIVE_PREFIX}echo`, "echo receive channel");
 			__harness.clearSent(channel);
@@ -254,7 +310,7 @@ export = suite("networking functions", [
 			const channel = remoteById(`${SEND_PREFIX}echo`, "echo send channel");
 			__harness.clearSent(channel);
 
-			const request = invoke(getHandler().echo, "ping");
+			const request = invoke("echo", "ping");
 
 			const sent = __harness.sent(channel);
 			expectEqual(sent.size(), 1, "requests");
@@ -274,7 +330,7 @@ export = suite("networking functions", [
 			const channel = remoteById(`${SEND_PREFIX}echo`, "echo send channel");
 			__harness.clearSent(channel);
 
-			const request = invoke(getHandler().echo, "ping");
+			const request = invoke("echo", "ping");
 			// Serialized, a number's bytes where a string is expected cannot be decoded: still InvalidResult.
 			deliver(channel, __harness.sent(channel)[0].args[0], true, ...onWire(wire.numberResult, 42));
 
@@ -286,7 +342,7 @@ export = suite("networking functions", [
 	[
 		"rejects with Timeout when no response arrives",
 		() => {
-			const request = invokeWithTimeout(getHandler().pending, 0.05, "ping");
+			const request = invokeWithTimeout("pending", 0.05, "ping");
 
 			expectEqual(expectRejects(request, "unanswered request"), NetworkingFunctionError.Timeout, "rejection");
 		},
@@ -300,7 +356,7 @@ export = suite("networking functions", [
 			}
 
 			const leaver = __harness.newPlayer("Leaver");
-			const request = getHandler().pending.invoke(leaver, "ping");
+			const request = getHandlers().server!.pending.invoke(leaver as Player, "ping");
 
 			__harness.removePlayer(leaver);
 
@@ -312,16 +368,12 @@ export = suite("networking functions", [
 		"runs middleware before the callback",
 		() => {
 			let received: string | undefined;
-			setCallback(getHandler().transformed, (value) => {
+			setCallback("transformed", (value) => {
 				received = value;
 				return value;
 			});
 
-			expectEqual(
-				expectResolves(predict(getHandler().transformed, "value")),
-				"value/middleware",
-				"returned value",
-			);
+			expectEqual(expectResolves(predict("transformed", "value")), "value/middleware", "returned value");
 			expectEqual(received, "value/middleware", "value the callback saw");
 		},
 	],
@@ -329,12 +381,12 @@ export = suite("networking functions", [
 		"cancels a request when middleware returns Skip",
 		() => {
 			let called = false;
-			setCallback(getHandler().cancelled, (value) => {
+			setCallback("cancelled", (value) => {
 				called = true;
 				return value;
 			});
 
-			const reason = expectRejects(predict(getHandler().cancelled, "value"), "skipped request");
+			const reason = expectRejects(predict("cancelled", "value"), "skipped request");
 
 			expectEqual(reason, NetworkingFunctionError.Cancelled, "rejection");
 			expectEqual(called, false, "callback ran");
@@ -343,7 +395,7 @@ export = suite("networking functions", [
 	[
 		"uses a separate channel per direction",
 		() => {
-			getHandler();
+			getHandlers();
 
 			const receive = remoteById(`${RECEIVE_PREFIX}echo`, "receive channel");
 			const send = remoteById(`${SEND_PREFIX}echo`, "send channel");

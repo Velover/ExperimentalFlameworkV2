@@ -20,11 +20,12 @@ export namespace Serialization {
 		deserialize: (payload: buffer, blobs?: Array<defined>) => T;
 	}
 
-	/** Encode and decode for a list of values, which is how networking packs an argument list. */
-	export interface Codec<T extends Array<unknown> = Array<unknown>> {
-		encode: (values: T) => LuaTuple<[buffer, Array<defined> | undefined]>;
-		decode: (payload: buffer, blobs: Array<defined>) => T;
-	}
+	/**
+	 * Decodes a packed argument list, which is how networking unpacks what a remote delivered. One is
+	 * generated per event and function; the matching encoding is generated inline at every call
+	 * site, so no encoder exists as a value at runtime.
+	 */
+	export type Decoder<T extends Array<unknown> = Array<unknown>> = (payload: buffer, blobs: Array<defined>) => T;
 
 	// --- brands ------------------------------------------------------------------------------------
 	// A `number & { __brand: "u8" }` (any property name, this literal) is written as one unsigned byte,

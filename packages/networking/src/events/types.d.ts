@@ -1,7 +1,7 @@
 import {
 	FunctionParameters,
 	IntrinsicTupleGuards,
-	IntrinsicNetworkSerializer,
+	IntrinsicNetworkDecoder,
 	IntrinsicObfuscate,
 	NetworkingObfuscationMarker,
 	NetworkUnreliable,
@@ -30,6 +30,17 @@ export interface ServerSender<I extends unknown[]> {
 	 * Sends this request to all connected players.
 	 */
 	broadcast(...args: I): void;
+	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
+	readonly _flamework_send?: I;
+
+	/** @hidden Sends an argument list the transformer already packed. */
+	_fire(players: Player | Player[], payload: buffer, blobs?: Array<defined>): void;
+
+	/** @hidden Sends an argument list the transformer already packed. */
+	_except(players: Player | Player[], payload: buffer, blobs?: Array<defined>): void;
+
+	/** @hidden Sends an argument list the transformer already packed. */
+	_broadcast(payload: buffer, blobs?: Array<defined>): void;
 }
 
 export interface ServerReceiver<I extends unknown[]> {
@@ -43,6 +54,8 @@ export interface ServerReceiver<I extends unknown[]> {
 	 * Fires a server event using player as the sender.
 	 */
 	predict(player: Player, ...args: I): void;
+	/** @hidden Marks a receiver for the transformer. */
+	readonly _flamework_receive?: I;
 }
 
 export interface ClientSender<I extends unknown[]> {
@@ -52,6 +65,11 @@ export interface ClientSender<I extends unknown[]> {
 	 * Sends this request to the server.
 	 */
 	fire(...args: I): void;
+	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
+	readonly _flamework_send?: I;
+
+	/** @hidden Sends an argument list the transformer already packed. */
+	_fire(payload: buffer, blobs?: Array<defined>): void;
 }
 
 export interface ClientReceiver<I extends unknown[]> {
@@ -65,6 +83,8 @@ export interface ClientReceiver<I extends unknown[]> {
 	 * Fires a client event.
 	 */
 	predict(...args: I): void;
+	/** @hidden Marks a receiver for the transformer. */
+	readonly _flamework_receive?: I;
 }
 
 export type ServerHandler<E, R> = NetworkingObfuscationMarker & {
@@ -143,12 +163,12 @@ export type NamespaceMetadata<R, S> = Modding.Emit<{
 		[k in keyof Events<S>]: S[k] extends NetworkUnreliable<unknown> ? true : undefined;
 	}>;
 
-	/** Codecs for each event's argument list, present only with `networking.serialization` on. */
+	/**
+	 * Decoders for each incoming event's argument list, present only with `networking.serialization`
+	 * on. Outgoing lists are packed inline where they are fired; nothing here can encode.
+	 */
 	incomingSerializers: IntrinsicObfuscate<{
-		[k in keyof Events<R>]: IntrinsicNetworkSerializer<Parameters<Events<R>[k]>>;
-	}>;
-	outgoingSerializers: IntrinsicObfuscate<{
-		[k in keyof Events<S>]: IntrinsicNetworkSerializer<Parameters<Events<S>[k]>>;
+		[k in keyof Events<R>]: IntrinsicNetworkDecoder<Parameters<Events<R>[k]>>;
 	}>;
 
 	namespaceIds: ObfuscateNames<keyof EventNamespaces<R> | keyof EventNamespaces<S>>;

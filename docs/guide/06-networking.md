@@ -176,12 +176,23 @@ gets you `Flamework expected this argument to be a literal expression`. The same
 
 With `"networking": { "serialization": true }` in `flamework.config.json`, every event argument list
 and every function request and result is packed into a `buffer` before it leaves and unpacked when
-it arrives. The transformer generates the code for it from the declared types at each
-`createServer` / `createClient` call site, and it is plain buffer code: for
-`(value: number, where: Vector3)` the encoder is `buffer.create(20)` followed by four writes at
-literal offsets, and the decoder four reads. Nothing describes the type in the output, no schema
-table, no runtime library; only the bytes and the code that moves them. Nothing about the API
-changes; the guards still run on what was decoded.
+it arrives, and the code that does it is plain buffer code generated from the declared types.
+
+The encoding is generated **at each call site**: `Events.X.fire(value, where)` compiles to
+`buffer.create(20)`, four writes at literal offsets and `Events.X._fire(payload)`, right where the
+call was. A function callback is wrapped the same way so that its result leaves packed. No encoder
+exists as a value anywhere in the output, so there is nothing for an exploiter to call to forge a
+valid payload; the only way to produce one is the code path that legitimately sends it. Decoding is
+generated once per event and function into the `createServer` / `createClient` metadata, because a
+payload has to be unpacked before the guards and middleware see it. Nothing describes the type in
+the output, no schema table, no runtime library. Nothing about the API changes; the guards still run
+on what was decoded.
+
+Call sites are found by type. Send and register callbacks through the handler's own type
+(`Events.X.fire(...)`, a typed reference to `Events.X`, a helper generic over the event name), not
+through a hand-written interface that widens `fire` to `(...args: unknown[])`: such a call is left
+alone and sends unpacked values, which the peer drops as malformed. `predict` takes plain values
+and needs no typing; `connect` is untouched.
 
 Sizes are what the types say: a `number` is eight bytes, a `boolean` one, an
 `"idle" | "walk" | "run"` one, an object is its fields in name order with nothing spent on names,

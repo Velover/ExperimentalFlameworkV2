@@ -57,25 +57,43 @@ describe("Flamework.createSerializer", () => {
 });
 
 describe("networking serialization", () => {
-	test("attaches encode and decode functions to event metadata when the project enables it", () => {
-		expect(source()).toContain("incomingSerializers = {");
-		expect(source()).toContain("outgoingSerializers = {");
-		expect(source()).toMatch(/ping = \{\s*encode = function\(args\w*\)/);
+	test("keeps only decoders in the handler metadata", () => {
+		expect(source()).not.toContain("encode = function");
+		expect(source()).not.toContain("outgoingSerializers");
+		expect(source()).toMatch(/incomingSerializers = \{\s*ping = \(?function\(buf\w*\)/);
+		expect(source()).toMatch(/incomingResults = \{\s*echo = \(?function\(buf\w*\)/);
+	});
+
+	test("packs event arguments at each call site and sends them through the hidden entry point", () => {
+		expect(source()).toMatch(
+			/local buf\w* = buffer\.create\(8\)\s*buffer\.writef64\(buf\w*, 0, value\)\s*server\.pong:_broadcast\(buf\w*\)/,
+		);
+		expect(source()).toMatch(/server\.pong:_fire\(player, buf\w*\)/);
+		// The handler's call signature is a send too.
+		expect(source()).not.toMatch(/server\.pong\(player/);
+		expect(source()).toMatch(/buffer\.writef32\(buf\w*, 16, where\.Z\)\s*client\.ping:_fire\(buf\w*\)/);
+	});
+
+	test("wraps the packing in a function when the call has no statement of its own", () => {
+		expect(source()).toMatch(
+			/client\.pong:connect\(function\(value\w*\)\s*return \(function\(\)[\s\S]*?buffer\.create\(20\)[\s\S]*?return client\.ping:_fire\(buf\w*\)\s*end\)\(\)/,
+		);
+	});
+
+	test("packs function requests and wraps callbacks so results leave packed", () => {
+		expect(source()).toMatch(/return clientFunctions\.echo:_invoke\(buf\w*\)/);
+		expect(source()).toMatch(/target\w*:_setCallback\(function\(lead\w*, arg\w*\)/);
+		expect(source()).toMatch(
+			/if TS\.Promise\.is\(result\w*\) then\s*return result\w*:andThen\(function\(value\w*\)/,
+		);
+		expect(source()).toMatch(/if result\w* == Networking\.Skip then\s*return result\w*/);
+		expect(source()).toMatch(/return \{ buf\w* \}/);
 	});
 
 	test("lays fixed-size argument lists out at constant offsets", () => {
-		expect(source()).toMatch(/local buf\w* = buffer\.create\(20\)\s*buffer\.writef64\(buf\w*, 0, args\w*\[1\]\)/);
-		expect(source()).toMatch(/buffer\.writef32\(buf\w*, 16, vector3\w*\.Z\)/);
 		expect(source()).toMatch(
 			/Vector3\.new\(buffer\.readf32\(buf\w*, 8\), buffer\.readf32\(buf\w*, 12\), buffer\.readf32\(buf\w*, 16\)\)/,
 		);
 		expect(source()).toMatch(/if buffer\.len\(buf\w*\) ~= 20 then/);
-	});
-
-	test("unwraps Promise return types for function result codecs", () => {
-		expect(source()).toContain("incomingResults = {");
-		expect(source()).toMatch(
-			/incomingResults = \{\s*echo = \{\s*encode = function\(args\w*\)\s*local buf\w* = buffer\.create\(#\(args\w*\[1\]\) \+ 4\)/,
-		);
 	});
 });

@@ -183,6 +183,7 @@ type Kind =
 	| { kind: "union"; alternatives: Alternative[] };
 
 type Shape = ts.Type | Kind;
+type ListKind = Extract<Kind, { kind: "list" }>;
 
 /** A union member; `type` is set when the member is a real type, which a guard may be built from. */
 interface Alternative {
@@ -305,22 +306,25 @@ namespace T {
 // --- entry points -----------------------------------------------------------------------------------
 
 /**
- * One generator per statement: every intrinsic inside the same `createServer`/`createClient` call
- * (each event's arguments, a function's arguments and its result) shares it, so a type they have in
- * common is hoisted once. Hoisted code lands ahead of that statement, which is why sharing stops at
- * the statement boundary.
+ * One generator per file: every intrinsic and call site in it shares the hoisted helpers (a named
+ * type's functions, guards, literal and enum tables), which land at file scope ahead of the root
+ * statement that first needed them.
  */
-const generators = new WeakMap<ts.Node, ReturnType<typeof createSerializerGenerator>>();
+const generators = new WeakMap<ts.SourceFile, ReturnType<typeof createSerializerGenerator>>();
 
 function generatorFor(state: TransformState, node: ts.Node, file: ts.SourceFile) {
-	const scope = ts.findAncestor(node, ts.isStatement) ?? node;
-	let generator = generators.get(scope);
+	let generator = generators.get(file);
 	if (!generator) {
 		generator = createSerializerGenerator(state, file, node);
-		generators.set(scope, generator);
+		generators.set(file, generator);
 	}
 
+	generator.use(node);
 	return generator;
+}
+
+function emitHoisted(state: TransformState, generator: ReturnType<typeof createSerializerGenerator>) {
+	state.nextRootStatements.push(...generator.takeHoisted());
 }
 
 /** `Flamework.createSerializer<T>()`: a `{ serialize, deserialize }` pair for one value. */
@@ -332,7 +336,7 @@ export function buildSerializerFromType(
 ): ts.Expression {
 	const generator = generatorFor(state, node, file);
 	const serializer = generator.buildSerializer(type);
-	state.prereqList(generator.takeHoisted());
+	emitHoisted(state, generator);
 
 	// roblox-ts type-checks the transformed file. The generated functions are typed loosely inside
 	// (`unknown` values with casts); the macro's own return type is what users see.
@@ -340,19 +344,61 @@ export function buildSerializerFromType(
 }
 
 /**
- * Networking: an `{ encode, decode }` pair for an argument list, given its tuple type. Promise
- * elements are unwrapped: a function's resolved value is what crosses the network.
+ * Networking: the decoder for an argument list, given its tuple type: `(payload, blobs) => values`.
+ * Promise elements are unwrapped, since a function's resolved value is what crosses the network.
+ * There is no encoder counterpart as a value; see {@link buildInlineEncoding}.
  */
-export function buildListCodecFromType(
+export function buildDecoderFromType(
 	state: TransformState,
 	node: ts.Node,
 	type: ts.Type,
 	file = state.getSourceFile(node),
 ): ts.Expression {
 	const generator = generatorFor(state, node, file);
-	const codec = generator.buildListCodec(type);
-	state.prereqList(generator.takeHoisted());
-	return f.asNever(codec);
+	const decoder = generator.buildDecoder(type);
+	emitHoisted(state, generator);
+	// A block-bodied arrow cannot be followed by `as` without parentheses.
+	return f.asNever(factory.createParenthesizedExpression(decoder));
+}
+
+/** Statements that pack values into `payload` (and `blobs`, when the types have blob slots). */
+export interface InlineEncoding {
+	statements: ts.Statement[];
+	payload: ts.Identifier;
+	blobs: ts.Identifier | undefined;
+}
+
+/**
+ * Packs an argument list where it is sent. `values` are the call's arguments for the tuple's
+ * elements (a missing optional is `undefined`, extra ones feed the rest element), or the table that
+ * holds them when a spread argument makes their number unknown. Argument expressions must be
+ * identifiers or literals: they are read more than once.
+ */
+export function buildInlineEncoding(
+	state: TransformState,
+	node: ts.Node,
+	type: ts.Type,
+	values: ts.Expression[] | { table: ts.Expression },
+	file = state.getSourceFile(node),
+): InlineEncoding {
+	const generator = generatorFor(state, node, file);
+	const encoding = generator.encodeList(type, values);
+	emitHoisted(state, generator);
+	return encoding;
+}
+
+/** Packs one value as a one-element list, which is how a function's result travels. */
+export function buildInlineValueEncoding(
+	state: TransformState,
+	node: ts.Node,
+	type: ts.Type,
+	value: ts.Expression,
+	file = state.getSourceFile(node),
+): InlineEncoding {
+	const generator = generatorFor(state, node, file);
+	const encoding = generator.encodeValue(type, value);
+	emitHoisted(state, generator);
+	return encoding;
 }
 
 /** Unwraps `Promise<T>` to `T`. */
@@ -367,8 +413,9 @@ export function unwrapPromise(state: TransformState, type: ts.Type): ts.Type {
 
 // --- generator --------------------------------------------------------------------------------------
 
-export function createSerializerGenerator(state: TransformState, file: ts.SourceFile, diagnosticNode: ts.Node) {
+export function createSerializerGenerator(state: TransformState, file: ts.SourceFile, initialNode: ts.Node) {
 	const typeChecker = state.typeChecker;
+	let diagnosticNode = initialNode;
 	const resolve = (name: string) => typeChecker.resolveName(name, undefined, ts.SymbolFlags.Type, false);
 
 	const kinds = new Map<ts.Type, Kind>();
@@ -388,7 +435,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	const enumTables = new Map<string, ts.Identifier>();
 	const literalTables = new Map<Kind, { list: ts.Identifier; index: ts.Identifier }>();
 
-	return { buildSerializer, buildListCodec, takeHoisted };
+	return { buildSerializer, buildDecoder, encodeList, encodeValue, use, takeHoisted };
+
+	/** Points diagnostics at the intrinsic or call site being built. */
+	function use(node: ts.Node) {
+		diagnosticNode = node;
+	}
 
 	/** Hoisted statements added since the last call, in an order that keeps every reference in scope. */
 	function takeHoisted(): ts.Statement[] {
@@ -435,34 +487,76 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		]);
 	}
 
-	function buildListCodec(type: ts.Type): ts.Expression {
+	function buildDecoder(type: ts.Type): ts.Expression {
 		const list = listOf(type);
 		const layout = layoutOf(list);
-		const args = uid("args");
-		const encode = f.arrowFunction(f.block(encodeBody(list, layout, args)), [
-			f.parameterDeclaration(args, T.array()),
-		]);
-
 		const buf = uid("buf");
 		const blobs = layout.blobs ? uid("blobs") : undefined;
 		const body = new Array<ts.Statement>();
 		const result = decodeBody(list, layout, buf, blobs, body);
 		body.push(f.returnStatement(result));
-		const decode = f.arrowFunction(
+		return f.arrowFunction(
 			f.block(body),
 			blobs
 				? [f.parameterDeclaration(buf, T.buffer()), f.parameterDeclaration(blobs, T.blobs())]
 				: [f.parameterDeclaration(buf, T.buffer())],
 		);
+	}
 
-		return f.object([
-			f.propertyAssignmentDeclaration("encode", encode),
-			f.propertyAssignmentDeclaration("decode", decode),
-		]);
+	function encodeList(type: ts.Type, values: ts.Expression[] | { table: ts.Expression }): InlineEncoding {
+		return encodeElements(listOf(type), values);
+	}
+
+	function encodeValue(type: ts.Type, value: ts.Expression): InlineEncoding {
+		return encodeElements({ kind: "list", elements: [unwrapPromise(state, type)] }, [value]);
+	}
+
+	/**
+	 * Packs a list whose values are known one by one, so a static count of rest values and absent
+	 * optionals fold into the layout: a call with only fixed-size arguments gets a constant buffer size.
+	 */
+	function encodeElements(list: ListKind, values: ts.Expression[] | { table: ts.Expression }): InlineEncoding {
+		const layout = layoutOf(list);
+		const statements = new Array<ts.Statement>();
+		if (!Array.isArray(values)) {
+			const { buf, blobs } = encodeInto(list, layout, values.table, statements);
+			return { statements, payload: buf, blobs };
+		}
+
+		const elementValue = (index: number) => values[index] ?? f.nil();
+		const rest = values.slice(list.elements.length);
+		if (rest.length > 0 && !list.rest) fail("more arguments than the list has elements");
+
+		let size: ts.Expression = num(0);
+		list.elements.forEach((element, index) => {
+			size = add(size, emitSize(element, elementValue(index), statements));
+		});
+		if (list.rest) {
+			size = add(size, 4);
+			for (const value of rest) size = add(size, emitSize(list.rest, value, statements));
+		}
+
+		const buf = uid("buf");
+		statements.push(constDecl(buf, bufferCall("create", [size])));
+		const blobs = layout.blobs ? uid("blobs") : undefined;
+		if (blobs) statements.push(constDecl(blobs, construct("Array", []), T.blobs()));
+
+		const variable = f.is.number(size) ? undefined : uid("o");
+		if (variable) statements.push(letDecl(variable, num(0)));
+
+		const ctx: Ctx = { buf, blobs, cursor: { variable, base: variable, offset: 0 }, out: statements };
+		list.elements.forEach((element, index) => emitWrite(element, elementValue(index), ctx));
+		if (list.rest) {
+			ctx.out.push(f.statement(bufferCall("writeu32", [buf, at(ctx), num(rest.length)])));
+			ctx.cursor.offset += 4;
+			for (const value of rest) emitWrite(list.rest, value, ctx);
+		}
+
+		return { statements, payload: buf, blobs };
 	}
 
 	/** The argument list a tuple type describes, with Promise elements unwrapped. */
-	function listOf(type: ts.Type): Kind {
+	function listOf(type: ts.Type): ListKind {
 		if (!isTupleType(state, type)) {
 			return { kind: "list", elements: [unwrapPromise(state, type)] };
 		}
@@ -491,6 +585,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 */
 	function encodeBody(shape: Shape, layout: Layout, value: ts.Identifier): ts.Statement[] {
 		const body = new Array<ts.Statement>();
+		const { buf, blobs } = encodeInto(shape, layout, value, body);
+		body.push(f.returnStatement(blobs ? f.call("$tuple", [buf, blobs]) : buf));
+		return body;
+	}
+
+	/** The size pass, the buffer, the blob list when the type has blob slots, and the writes. */
+	function encodeInto(shape: Shape, layout: Layout, value: ts.Expression, body: ts.Statement[]) {
 		const size = emitSize(shape, value, body);
 
 		const buf = uid("buf");
@@ -508,8 +609,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			emitWrite(shape, value, { buf, blobs, cursor: { variable, base: variable, offset: 0 }, out: body });
 		}
 
-		body.push(f.returnStatement(blobs ? f.call("$tuple", [buf, blobs]) : buf));
-		return body;
+		return { buf, blobs };
 	}
 
 	/** The reads, ending with a check that the whole buffer was consumed; returns the value. */
@@ -1069,6 +1169,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return id;
 	}
 
+	function isNilLiteral(expression: ts.Expression) {
+		return ts.isIdentifier(expression) && expression.text === "undefined";
+	}
+
 	function isLiteral(expression: ts.Expression) {
 		return f.is.string(expression) || f.is.number(expression) || f.is.bool(expression) || f.is.nil(expression);
 	}
@@ -1102,6 +1206,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "buffer":
 				return add(bufferCall("len", [f.as(value, T.buffer())]), WIDTH_SIZE[kind.length]);
 			case "optional": {
+				if (isNilLiteral(value)) return num(1);
 				const inner = layoutOf(kind.inner);
 				const v = bind(out, value, "v");
 				if (inner.size !== undefined) {
@@ -1327,6 +1432,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				ctx.cursor.offset += 2;
 				return;
 			case "optional": {
+				if (isNilLiteral(value)) {
+					ctx.out.push(f.statement(bufferCall("writeu8", [ctx.buf, at(ctx), num(0)])));
+					ctx.cursor.offset += 1;
+					return;
+				}
+
 				const v = bind(ctx.out, value, "v");
 				ctx.out.push(
 					f.statement(bufferCall("writeu8", [ctx.buf, at(ctx), conditional(notNil(v), num(1), num(0))])),

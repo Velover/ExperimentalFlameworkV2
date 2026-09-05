@@ -47,15 +47,15 @@ export type IntrinsicObfuscateArray<T, V = T> = Modding.Intrinsic<"shuffle-array
 export type IntrinsicTupleGuards<T> = Modding.Intrinsic<"tuple-guards", [T], GuardType>;
 
 /**
- * Encode and decode code for the argument list `T`, generated only when the project's
- * flamework.config.json enables `networking.serialization`; `undefined` otherwise, which sends
- * values as they are.
+ * Decode code for the argument list `T`, generated only when the project's flamework.config.json
+ * enables `networking.serialization`; `undefined` otherwise, which passes values through as they
+ * are. The matching encoding is generated inline at every call site, so no encoder exists at runtime.
  * @hidden Intrinsic feature not intended for users
  */
-export type IntrinsicNetworkSerializer<T extends Array<unknown>> = Modding.Intrinsic<
-	"network-serializer",
+export type IntrinsicNetworkDecoder<T extends Array<unknown>> = Modding.Intrinsic<
+	"network-decoder",
 	[T],
-	Serialization.Codec<T> | undefined
+	Serialization.Decoder<T> | undefined
 >;
 
 type GuardType = [t.check<unknown>[], t.check<unknown> | undefined];

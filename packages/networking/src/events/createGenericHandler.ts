@@ -59,7 +59,7 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 			});
 		};
 
-		const create = (unreliable: boolean, receives: boolean, sends: boolean) => {
+		const create = (unreliable: boolean, receives: boolean) => {
 			return createEvent({
 				reliability: unreliable ? "unreliable" : "reliable",
 				namespace: globalName,
@@ -67,15 +67,14 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 				debugName: name,
 				networkInfo,
 				incomingMiddleware,
-				incomingCodec: receives ? (metadata.incomingSerializers?.[name] as never) : undefined,
-				outgoingCodec: sends ? (metadata.outgoingSerializers?.[name] as never) : undefined,
+				incomingDecoder: receives ? (metadata.incomingSerializers?.[name] as never) : undefined,
 				onMalformed,
 			});
 		};
 
 		const shared = isOutgoingUnreliable === isIncomingUnreliable;
-		const receiver = create(isIncomingUnreliable, true, shared);
-		const sender = shared ? receiver : create(isOutgoingUnreliable, false, true);
+		const receiver = create(isIncomingUnreliable, true);
+		const sender = shared ? receiver : create(isOutgoingUnreliable, false);
 
 		handler[name as keyof T] = method(receiver, sender) as never;
 	}

@@ -80,8 +80,8 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 					id: isSender ? `${receiverPrefix}${effectiveName}` : effectiveName,
 					networkInfo,
 					incomingMiddleware,
-					argsCodec: metadata.incomingSerializers?.[name] as never,
-					resultCodec: metadata.incomingResults?.[name] as never,
+					argsDecoder: metadata.incomingSerializers?.[name] as never,
+					resultDecoder: metadata.incomingResults?.[name] as never,
 					onMalformed,
 				})
 			: undefined;
@@ -92,8 +92,7 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 					debugName: name,
 					id: isReceiver ? `${senderPrefix}${effectiveName}` : effectiveName,
 					networkInfo,
-					argsCodec: metadata.outgoingSerializers?.[name] as never,
-					resultCodec: metadata.outgoingResults?.[name] as never,
+					resultDecoder: metadata.outgoingResults?.[name] as never,
 					// A response that cannot be decoded is a bad response, like one failing the return guard.
 					onMalformed: (player, message) => {
 						if (config.warnOnInvalidGuards) {

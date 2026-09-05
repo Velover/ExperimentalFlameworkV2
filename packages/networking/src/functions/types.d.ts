@@ -3,7 +3,7 @@ import {
 	FunctionParameters,
 	FunctionReturn,
 	IntrinsicTupleGuards,
-	IntrinsicNetworkSerializer,
+	IntrinsicNetworkDecoder,
 	IntrinsicObfuscate,
 	NetworkingObfuscationMarker,
 	ObfuscateNames,
@@ -27,6 +27,14 @@ export interface ServerSender<I extends unknown[], O> {
 	 * @param timeout The maximum time to wait before timing out
 	 */
 	invokeWithTimeout(player: Player, timeout: number, ...args: I): Promise<O>;
+	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
+	readonly _flamework_send?: I;
+
+	/** @hidden Sends an argument list the transformer already packed. */
+	_invoke(player: Player, payload: buffer, blobs?: Array<defined>): Promise<O>;
+
+	/** @hidden Sends an argument list the transformer already packed. */
+	_invokeWithTimeout(player: Player, timeout: number, payload: buffer, blobs?: Array<defined>): Promise<O>;
 }
 
 export interface ServerReceiver<I extends unknown[], O> {
@@ -42,6 +50,14 @@ export interface ServerReceiver<I extends unknown[], O> {
 	 * Invokes a server function using player as the sender.
 	 */
 	predict(player: Player, ...args: I): Promise<O>;
+	/** @hidden Marks a receiver for the transformer, which packs the callback's result at the call site. */
+	readonly _flamework_receive?: I;
+
+	/** @hidden The result type the transformer packs. */
+	readonly _flamework_result?: O;
+
+	/** @hidden Registers a callback whose successful results are already packed as `[payload, blobs?]`. */
+	_setCallback(callback: (player: Player, ...args: never[]) => unknown): void;
 }
 
 export interface ClientSender<I extends unknown[], O> {
@@ -57,6 +73,14 @@ export interface ClientSender<I extends unknown[], O> {
 	 * @param timeout The maximum time to wait before timing out
 	 */
 	invokeWithTimeout(timeout: number, ...args: I): Promise<O>;
+	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
+	readonly _flamework_send?: I;
+
+	/** @hidden Sends an argument list the transformer already packed. */
+	_invoke(payload: buffer, blobs?: Array<defined>): Promise<O>;
+
+	/** @hidden Sends an argument list the transformer already packed. */
+	_invokeWithTimeout(timeout: number, payload: buffer, blobs?: Array<defined>): Promise<O>;
 }
 
 export interface ClientReceiver<I extends unknown[], O> {
@@ -71,6 +95,14 @@ export interface ClientReceiver<I extends unknown[], O> {
 	 * Invokes a client function.
 	 */
 	predict(...args: I): Promise<O>;
+	/** @hidden Marks a receiver for the transformer, which packs the callback's result at the call site. */
+	readonly _flamework_receive?: I;
+
+	/** @hidden The result type the transformer packs. */
+	readonly _flamework_result?: O;
+
+	/** @hidden Registers a callback whose successful results are already packed as `[payload, blobs?]`. */
+	_setCallback(callback: (...args: never[]) => unknown): void;
 }
 
 export type ServerHandler<E, R> = NetworkingObfuscationMarker & {
@@ -190,15 +222,16 @@ export type NamespaceMetadata<R, S> = Modding.Emit<{
 	outgoingIds: ObfuscateNames<keyof Functions<S>>;
 	outgoing: IntrinsicObfuscate<{ [k in keyof Functions<S>]: Modding.Target.Guard<ReturnType<S[k]>> }>;
 
-	/** Codecs for arguments and results, present only with `networking.serialization` on. */
+	/**
+	 * Decoders, present only with `networking.serialization` on: the argument lists of requests this
+	 * realm receives, the results its callbacks return (so `predict` can unpack them) and the
+	 * responses to requests it sends. Requests and results are packed inline where they are produced.
+	 */
 	incomingSerializers: IntrinsicObfuscate<{
-		[k in keyof Functions<R>]: IntrinsicNetworkSerializer<Parameters<R[k]>>;
+		[k in keyof Functions<R>]: IntrinsicNetworkDecoder<Parameters<R[k]>>;
 	}>;
-	incomingResults: IntrinsicObfuscate<{ [k in keyof Functions<R>]: IntrinsicNetworkSerializer<[ReturnType<R[k]>]> }>;
-	outgoingSerializers: IntrinsicObfuscate<{
-		[k in keyof Functions<S>]: IntrinsicNetworkSerializer<Parameters<S[k]>>;
-	}>;
-	outgoingResults: IntrinsicObfuscate<{ [k in keyof Functions<S>]: IntrinsicNetworkSerializer<[ReturnType<S[k]>]> }>;
+	incomingResults: IntrinsicObfuscate<{ [k in keyof Functions<R>]: IntrinsicNetworkDecoder<[ReturnType<R[k]>]> }>;
+	outgoingResults: IntrinsicObfuscate<{ [k in keyof Functions<S>]: IntrinsicNetworkDecoder<[ReturnType<S[k]>]> }>;
 
 	namespaceIds: ObfuscateNames<keyof FunctionNamespaces<R> | keyof FunctionNamespaces<S>>;
 	namespaces: IntrinsicObfuscate<

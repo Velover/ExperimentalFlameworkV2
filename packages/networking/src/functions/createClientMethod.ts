@@ -25,10 +25,26 @@ export function createClientMethod(
 			]);
 		},
 
+		// With serialization on, the transformer rewrites the methods above into these with the packed list.
+		_invoke(payload, blobs) {
+			return this.invokeWithTimeout(config.defaultTimeout, payload, blobs);
+		},
+
+		_invokeWithTimeout(timeout, payload, blobs) {
+			return this.invokeWithTimeout(timeout, payload, blobs);
+		},
+
 		setCallback(callback) {
 			assert(receiver, "This is not a receiver remote.");
 
 			receiver.setClientCallback(callback);
+		},
+
+		// The transformer wraps the callback so its successful results arrive as `[payload, blobs?]`.
+		_setCallback(callback) {
+			assert(receiver, "This is not a receiver remote.");
+
+			receiver.setClientCallback(callback as never, true);
 		},
 
 		predict(...args) {

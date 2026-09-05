@@ -1,4 +1,4 @@
-import { Modding, Serialization } from "@flamework/core";
+import { Flamework, Modding, Serialization } from "@flamework/core";
 import { Networking } from "@flamework/networking";
 import { Players, RunService } from "@rbxts/services";
 import { expectDefined, expectEqual, expectTrue, suite } from "../testkit";
@@ -23,28 +23,38 @@ interface ClientEvents {
 const GlobalEvents = Networking.createEvent<ServerEvents, ClientEvents>();
 
 /**
- * The wire codec for an argument list when the project enables `networking.serialization`, and
- * `undefined` otherwise, so these specs run in either mode and describe what the remote really carries.
+ * The decoder for an argument list when the project enables `networking.serialization`, and
+ * `undefined` otherwise, so these specs run in either mode and describe what the remote really
+ * carries. Encoding lives at call sites only, so the specs pack simulated traffic with a serializer
+ * for the same tuple type, which produces the same bytes.
  * @metadata macro
  */
-function wireCodec<T extends unknown[]>(
-	meta?: Modding.Intrinsic<"network-serializer", [T], Serialization.Codec<T> | undefined>,
-): Serialization.Codec<T> | undefined {
+function wireDecoder<T extends unknown[]>(
+	meta?: Modding.Intrinsic<"network-decoder", [T], Serialization.Decoder<T> | undefined>,
+): Serialization.Decoder<T> | undefined {
 	return meta;
 }
 
-const wire = { number: wireCodec<[number]>(), text: wireCodec<[string]>() };
+interface Wire<T extends unknown[]> {
+	decode: Serialization.Decoder<T> | undefined;
+	pack: Serialization.Serializer<T>;
+}
+
+const wire = {
+	number: { decode: wireDecoder<[number]>(), pack: Flamework.createSerializer<[number]>() },
+	text: { decode: wireDecoder<[string]>(), pack: Flamework.createSerializer<[string]>() },
+};
 
 /** The arguments a recorded message carried, decoded when they went out serialized. */
-function carried<T extends unknown[]>(codec: Serialization.Codec<T> | undefined, message: { args: unknown[] }): T {
-	if (!codec) return message.args as T;
-	return codec.decode(message.args[0] as buffer, (message.args[1] ?? []) as Array<defined>);
+function carried<T extends unknown[]>(wire: Wire<T>, message: { args: unknown[] }): T {
+	if (wire.decode === undefined) return message.args as T;
+	return wire.decode(message.args[0] as buffer, (message.args[1] ?? []) as Array<defined>);
 }
 
 /** Arguments as the other realm would put them on the wire. */
-function onWire<T extends unknown[]>(codec: Serialization.Codec<T> | undefined, ...args: T): unknown[] {
-	if (!codec) return args;
-	const [payload, blobs] = codec.encode(args);
+function onWire<T extends unknown[]>(wire: Wire<T>, ...args: T): unknown[] {
+	if (wire.decode === undefined) return args;
+	const [payload, blobs] = wire.pack.serialize(args);
 	return blobs ? [payload, blobs] : [payload];
 }
 

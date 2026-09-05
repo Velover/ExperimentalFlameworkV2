@@ -42,3 +42,28 @@ export const events = Networking.createEvent<ServerEvents, ClientEvents>();
 export const functions = Networking.createFunction<ServerFunctions, {}>();
 export const server = events.createServer({});
 export const serverFunctions = functions.createServer({});
+export const client = events.createClient({});
+export const clientFunctions = functions.createClient({});
+
+// Call sites: with serialization on, each of these packs its arguments inline.
+export function broadcastPong(value: number) {
+	server.pong.broadcast(value);
+}
+
+export function firePong(player: Player, value: number) {
+	server.pong.fire(player, value);
+	server.pong(player, value + 1);
+}
+
+export function ping(where: Vector3) {
+	client.ping.fire(1, where);
+}
+
+export function echo(value: string) {
+	return clientFunctions.echo.invoke(value);
+}
+
+// An expression-bodied arrow has no statement of its own to put the packing in front of.
+client.pong.connect((value) => client.ping.fire(value, Vector3.zero));
+
+serverFunctions.echo.setCallback((player, value) => Promise.resolve(`${value}!`));
