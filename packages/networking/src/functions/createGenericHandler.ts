@@ -59,6 +59,20 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 			);
 		}
 
+		// A malformed serialized payload is reported like a failed guard, with no argument index.
+		const onMalformed = (player: Player | undefined, message: string) => {
+			if (config.warnOnInvalidGuards) {
+				const sender = player !== undefined ? `'${player}'` : "Server";
+				warn(`${sender} sent a malformed payload for function '${name}': ${message}`);
+			}
+
+			signals.fire("onBadRequest", player ?? Players.LocalPlayer, {
+				networkInfo,
+				argIndex: -1,
+				argValue: message,
+			});
+		};
+
 		const receiver = isReceiver
 			? createFunctionReceiver({
 					namespace: globalName,
@@ -66,6 +80,9 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 					id: isSender ? `${receiverPrefix}${effectiveName}` : effectiveName,
 					networkInfo,
 					incomingMiddleware,
+					argsCodec: metadata.incomingSerializers?.[name] as never,
+					resultCodec: metadata.incomingResults?.[name] as never,
+					onMalformed,
 				})
 			: undefined;
 
@@ -75,6 +92,16 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 					debugName: name,
 					id: isReceiver ? `${senderPrefix}${effectiveName}` : effectiveName,
 					networkInfo,
+					argsCodec: metadata.outgoingSerializers?.[name] as never,
+					resultCodec: metadata.outgoingResults?.[name] as never,
+					// A response that cannot be decoded is a bad response, like one failing the return guard.
+					onMalformed: (player, message) => {
+						if (config.warnOnInvalidGuards) {
+							warn(`Received a malformed response for function '${name}': ${message}`);
+						}
+
+						signals.fire("onBadResponse", player ?? Players.LocalPlayer, { networkInfo, value: message });
+					},
 					responseMiddleware: config.disableIncomingGuards
 						? undefined
 						: (player, value, resolve, reject) => {

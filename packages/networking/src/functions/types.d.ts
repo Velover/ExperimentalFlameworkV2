@@ -3,6 +3,7 @@ import {
 	FunctionParameters,
 	FunctionReturn,
 	IntrinsicTupleGuards,
+	IntrinsicNetworkSerializer,
 	IntrinsicObfuscate,
 	NetworkingObfuscationMarker,
 	ObfuscateNames,
@@ -188,6 +189,16 @@ export type NamespaceMetadata<R, S> = Modding.Emit<{
 
 	outgoingIds: ObfuscateNames<keyof Functions<S>>;
 	outgoing: IntrinsicObfuscate<{ [k in keyof Functions<S>]: Modding.Target.Guard<ReturnType<S[k]>> }>;
+
+	/** Codecs for arguments and results, present only with `networking.serialization` on. */
+	incomingSerializers: IntrinsicObfuscate<{
+		[k in keyof Functions<R>]: IntrinsicNetworkSerializer<Parameters<R[k]>>;
+	}>;
+	incomingResults: IntrinsicObfuscate<{ [k in keyof Functions<R>]: IntrinsicNetworkSerializer<[ReturnType<R[k]>]> }>;
+	outgoingSerializers: IntrinsicObfuscate<{
+		[k in keyof Functions<S>]: IntrinsicNetworkSerializer<Parameters<S[k]>>;
+	}>;
+	outgoingResults: IntrinsicObfuscate<{ [k in keyof Functions<S>]: IntrinsicNetworkSerializer<[ReturnType<S[k]>]> }>;
 
 	namespaceIds: ObfuscateNames<keyof FunctionNamespaces<R> | keyof FunctionNamespaces<S>>;
 	namespaces: IntrinsicObfuscate<

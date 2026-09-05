@@ -1,4 +1,4 @@
-import { Flamework, OnStart, Provider, Reflect, type Modding } from "@flamework/core";
+import { Flamework, OnStart, Provider, Reflect, type Modding, getRuntimeConfig } from "@flamework/core";
 import {
 	CollectionService,
 	ReplicatedStorage,
@@ -36,6 +36,20 @@ interface ComponentInfo {
 
 const DEFAULT_ANCESTOR_BLACKLIST = [ServerStorage, ReplicatedStorage, StarterPack, StarterGui, StarterPlayer];
 
+/** The project-wide default from flamework.config.json, falling back to Flamework's own. */
+function defaultStreamingMode(): ComponentStreamingMode {
+	switch (getRuntimeConfig().components?.streamingMode) {
+		case "Disabled":
+			return ComponentStreamingMode.Disabled;
+		case "Watching":
+			return ComponentStreamingMode.Watching;
+		case "Contextual":
+			return ComponentStreamingMode.Contextual;
+		default:
+			return ComponentStreamingMode.Default;
+	}
+}
+
 /**
  * This class is responsible for loading and managing
  * all components in the game.
@@ -49,12 +63,18 @@ export class Components {
 	private activeInheritedComponents = new Map<Instance, Map<string, Set<BaseComponent>>>();
 	private reverseComponentsMapping = new Map<string, Set<BaseComponent>>();
 
+	/** Components whose constructor is currently running, per instance, to detect cycles. */
+	private constructing = new Map<Instance, Set<Constructor>>();
+
 	private trackers = new Map<Constructor, ComponentTracker>();
 	private componentWaiters = new Map<Instance, Map<Constructor, Set<(value: unknown) => void>>>();
 	private componentCleanup = new Map<BaseComponent, Maid>();
 
 	private componentAddedListeners = new Map<string, Signal<(value: never, instance: Instance) => void>>();
 	private componentRemovedListeners = new Map<string, Signal<(value: never, instance: Instance) => void>>();
+
+	private connections = new Array<RBXScriptConnection>();
+	private isStopped = false;
 
 	private componentsIdMapping;
 
@@ -110,6 +130,7 @@ export class Components {
 			const ancestorWhitelist = config.ancestorWhitelist;
 
 			if (config.tag !== undefined) {
+				const tag = config.tag;
 				const tracker = this.getComponentTracker(ctor);
 				const predicate = this.getConfigValue(ctor, "predicate");
 
@@ -122,6 +143,13 @@ export class Components {
 				};
 
 				const instanceAdded = (instance: Instance) => {
+					// CollectionService signals are deferred in most places, so by the time this runs the tag
+					// can already be gone again (or the instance destroyed). Trusting the event here would
+					// re-qualify the instance and construct a component for an untagged instance.
+					if (instance.Parent === undefined || !CollectionService.HasTag(instance, tag)) {
+						return;
+					}
+
 					if (predicate !== undefined && !predicate(instance)) {
 						return;
 					}
@@ -136,14 +164,22 @@ export class Components {
 					tracker.setHasTag(instance, true);
 				};
 
-				CollectionService.GetInstanceAddedSignal(config.tag).Connect(instanceAdded);
-				CollectionService.GetInstanceRemovedSignal(config.tag).Connect((instance) => {
-					tracker.untrackInstance(instance, listener);
-					tracker.setHasTag(instance, false);
-					this.removeComponent(instance, ctor);
-				});
+				this.connections.push(CollectionService.GetInstanceAddedSignal(tag).Connect(instanceAdded));
+				this.connections.push(
+					CollectionService.GetInstanceRemovedSignal(tag).Connect((instance) => {
+						// The same deferral can deliver a removal for a tag that has since been added back;
+						// that instance keeps its component.
+						if (instance.Parent !== undefined && CollectionService.HasTag(instance, tag)) {
+							return;
+						}
 
-				for (const instance of CollectionService.GetTagged(config.tag)) {
+						tracker.untrackInstance(instance, listener);
+						tracker.setHasTag(instance, false);
+						this.removeComponent(instance, ctor);
+					}),
+				);
+
+				for (const instance of CollectionService.GetTagged(tag)) {
 					safeCall(
 						[`[Flamework] Failed to instantiate '${ctor}' for`, instance, `[${instance.GetFullName()}]`],
 						() => instanceAdded(instance),
@@ -152,6 +188,35 @@ export class Components {
 				}
 			}
 		}
+	}
+
+	/**
+	 * Stops watching CollectionService, destroys every active component and releases the trackers.
+	 *
+	 * Called by the component plugin when the owning module extinguishes, so that a dead module
+	 * neither keeps its components alive nor constructs new ones.
+	 *
+	 * @internal
+	 */
+	public stopCollectionService() {
+		this.isStopped = true;
+
+		for (const connection of this.connections) {
+			connection.Disconnect();
+		}
+		this.connections.clear();
+
+		for (const [instance, active] of [...this.activeComponents]) {
+			for (const [ctor] of [...active]) {
+				this.removeComponent(instance, ctor as Constructor<BaseComponent>);
+			}
+		}
+
+		for (const [, tracker] of this.trackers) {
+			tracker.dispose();
+		}
+		this.trackers.clear();
+		this.componentWaiters.clear();
 	}
 
 	private getComponentTracker(component: Constructor) {
@@ -168,7 +233,7 @@ export class Components {
 			dependencies.push(this.getComponentTracker(dependency));
 		}
 
-		const streamingMode = componentInfo.config.streamingMode ?? ComponentStreamingMode.Default;
+		const streamingMode = componentInfo.config.streamingMode ?? defaultStreamingMode();
 		const tracker = new ComponentTracker(componentInfo.identifier, {
 			tag: componentInfo.config.tag,
 			typeGuard: instanceGuard,
@@ -176,7 +241,7 @@ export class Components {
 				(streamingMode === ComponentStreamingMode.Contextual && RunService.IsClient()) ||
 				streamingMode === ComponentStreamingMode.Watching,
 			typeGuardPollAtomic: streamingMode !== ComponentStreamingMode.Contextual,
-			warningTimeout: componentInfo.config.warningTimeout,
+			warningTimeout: componentInfo.config.warningTimeout ?? getRuntimeConfig().components?.warningTimeout,
 			dependencies,
 		});
 
@@ -350,11 +415,22 @@ export class Components {
 		const componentInfo = this.components.get(component);
 		if (!componentInfo) return false;
 
+		// The predicate gates eager construction too, as it did in v1; otherwise `getComponent`
+		// would construct a component for an instance the predicate rejected.
+		const predicate = this.getConfigValue(component, "predicate");
+		if (predicate !== undefined && !predicate(instance)) {
+			return false;
+		}
+
 		const tag = componentInfo.config.tag;
 		if (tag !== undefined && instance.Parent && CollectionService.HasTag(instance, tag)) {
 			const tracker = this.getComponentTracker(component);
 			return tracker.checkInstance(instance);
 		}
+	}
+
+	private isConstructing(instance: Instance, component: Constructor) {
+		return this.constructing.get(instance)?.has(component) === true;
 	}
 
 	private getDependencyResolutionOptions(componentInfo: ComponentInfo, instance: Instance, attributes: unknown) {
@@ -410,11 +486,18 @@ export class Components {
 	 * The specified type must be exact and not a lifecycle event or superclass. If you want to
 	 * query for lifecycle events or superclasses, you should use the `getComponents` method.
 	 *
+	 * Returns `undefined` while the component is still being constructed, so that a constructor
+	 * asking for its own component sees nothing rather than recursing.
+	 *
 	 * @metadata macro
 	 */
 	getComponent<T extends object>(instance: Instance, componentSpecifier?: ConstructorRef<T>): T | undefined {
 		const component = this.getComponentFromSpecifier(componentSpecifier);
 		assert(component, `Could not find component from specifier: ${componentSpecifier}`);
+
+		if (this.isConstructing(instance, component)) {
+			return undefined;
+		}
 
 		const activeComponents = this.activeComponents.get(instance);
 		if (activeComponents) {
@@ -464,6 +547,10 @@ export class Components {
 		componentSpecifier?: Constructor<T> | string,
 		skipInstanceCheck?: boolean,
 	) {
+		if (this.isStopped) {
+			error("Components has been extinguished along with its module and can no longer create components");
+		}
+
 		const component = this.getComponentFromSpecifier(componentSpecifier);
 		assert(component, `Could not find component from specifier: ${componentSpecifier}`);
 
@@ -492,8 +579,28 @@ export class Components {
 		const existingComponent = activeComponents.get(component);
 		if (existingComponent !== undefined) return existingComponent;
 
+		let constructingSet = this.constructing.get(instance);
+		if (constructingSet?.has(component)) {
+			error(
+				`component '${componentInfo.identifier}' is cyclic: it was requested for ${instance.GetFullName()} while it was already being constructed`,
+			);
+		}
+
+		if (!constructingSet) this.constructing.set(instance, (constructingSet = new Set()));
+		constructingSet.add(component);
+
 		const resolutionOptions = this.getDependencyResolutionOptions(componentInfo, instance, attributes);
-		const componentInstance = this.module.createClassInstance(component, resolutionOptions);
+
+		let componentInstance: BaseComponent;
+		try {
+			componentInstance = this.module.createClassInstance(component, resolutionOptions);
+		} finally {
+			constructingSet.delete(component);
+			if (constructingSet.isEmpty()) {
+				this.constructing.delete(instance);
+			}
+		}
+
 		activeComponents.set(component, componentInstance);
 
 		for (const id of componentInfo.polymorphicIds) {

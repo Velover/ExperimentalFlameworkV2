@@ -1,5 +1,6 @@
+import { Serialization } from "@flamework/core";
 import { RunService } from "@rbxts/services";
-import { createEvent } from "../event/createEvent";
+import { createEvent, decodeArguments } from "../event/createEvent";
 import { NetworkInfo } from "../types";
 import { NetworkingFunctionError } from "./errors";
 import { createMiddlewareProcessor } from "../middleware/createMiddlewareProcessor";
@@ -33,6 +34,22 @@ export interface CreateFunctionReceiverOptions {
 	 * This function will be called when we receive a response, and can be used to resolve or reject values.
 	 */
 	incomingMiddleware?: MiddlewareFactory<any[], any>[];
+
+	/**
+	 * Unpacks the request's argument list. Absent when the project does not enable serialization.
+	 */
+	argsCodec?: Serialization.Codec;
+
+	/**
+	 * Packs a successful response's value, as a one-element list. Absent when the project does not
+	 * enable serialization.
+	 */
+	resultCodec?: Serialization.Codec;
+
+	/**
+	 * Called when a request cannot be decoded; the caller receives `BadRequest`.
+	 */
+	onMalformed?: (player: Player | undefined, message: string) => void;
 }
 
 export interface RequestInfo {
@@ -66,13 +83,29 @@ export function createFunctionReceiver(options: CreateFunctionReceiverOptions): 
 		});
 	};
 
+	/** A successful value goes back packed when there is a codec; errors always go back as they are. */
+	const respond = (player: Player | undefined, id: unknown, processResult: unknown, value?: unknown) => {
+		const codec = options.resultCodec;
+		if (processResult === true && codec) {
+			const [payload, blobs] = codec.encode([value]);
+			event.fireEither(player, id, processResult, payload, blobs);
+		} else {
+			event.fireEither(player, id, processResult, value);
+		}
+	};
+
 	const processRequest = (player: Player | undefined, id: unknown, ...args: unknown[]) => {
 		if (!callback) {
 			return event.fireEither(player, id, NetworkingFunctionError.Unprocessed);
 		}
 
-		callback(player, ...args)
-			.then((value) => event.fireEither(player, id, getProcessResult(value), value))
+		const decoded = decodeArguments(options.argsCodec, player, args, options.onMalformed);
+		if (!decoded) {
+			return event.fireEither(player, id, NetworkingFunctionError.BadRequest);
+		}
+
+		callback(player, ...decoded)
+			.then((value) => respond(player, id, getProcessResult(value), value))
 			.catch((reason) => {
 				warn(`Failed to process request to '${options.debugName}'`);
 				warn(reason);

@@ -10,12 +10,12 @@ interface BaseEvent {
 
 interface BadRequestData extends BaseEvent {
 	/**
-	 * The index of the argument that was incorrect.
+	 * The index of the argument that was incorrect, or -1 when a serialized payload could not be decoded.
 	 */
 	argIndex: number;
 
 	/**
-	 * The value of the argument that was incorrect.
+	 * The value of the argument that was incorrect, or the decoding error for a malformed payload.
 	 */
 	argValue: unknown;
 }

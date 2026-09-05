@@ -5,6 +5,7 @@ import { SignalContainer } from "../util/createSignalContainer";
 import { createGuardMiddleware } from "../middleware/createGuardMiddleware";
 import { EventInterface, createEvent } from "../event/createEvent";
 import { getNamespaceConfig } from "../util/getNamespaceConfig";
+import { Players } from "@rbxts/services";
 
 export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandler<S, R>, S, R>(
 	globalName: string,
@@ -44,7 +45,21 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 			);
 		}
 
-		const create = (unreliable: boolean) => {
+		// A malformed serialized payload is reported like a failed guard, with no argument index.
+		const onMalformed = (player: Player | undefined, message: string) => {
+			if (config.warnOnInvalidGuards) {
+				const sender = player !== undefined ? `'${player}'` : "Server";
+				warn(`${sender} sent a malformed payload for event '${name}': ${message}`);
+			}
+
+			signals.fire("onBadRequest", player ?? Players.LocalPlayer, {
+				networkInfo,
+				argIndex: -1,
+				argValue: message,
+			});
+		};
+
+		const create = (unreliable: boolean, receives: boolean, sends: boolean) => {
 			return createEvent({
 				reliability: unreliable ? "unreliable" : "reliable",
 				namespace: globalName,
@@ -52,11 +67,15 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 				debugName: name,
 				networkInfo,
 				incomingMiddleware,
+				incomingCodec: receives ? (metadata.incomingSerializers?.[name] as never) : undefined,
+				outgoingCodec: sends ? (metadata.outgoingSerializers?.[name] as never) : undefined,
+				onMalformed,
 			});
 		};
 
-		const receiver = create(isIncomingUnreliable);
-		const sender = isOutgoingUnreliable === isIncomingUnreliable ? receiver : create(isOutgoingUnreliable);
+		const shared = isOutgoingUnreliable === isIncomingUnreliable;
+		const receiver = create(isIncomingUnreliable, true, shared);
+		const sender = shared ? receiver : create(isOutgoingUnreliable, false, true);
 
 		handler[name as keyof T] = method(receiver, sender) as never;
 	}

@@ -263,6 +263,24 @@ export class ComponentTracker {
 		listener(tracker.isQualified, instance);
 	}
 
+	/**
+	 * Releases every tracked instance: connections, dependency subscriptions and pending warnings.
+	 */
+	public dispose() {
+		for (const [, tracker] of this.instances) {
+			for (const cleanup of tracker.cleanup) {
+				cleanup();
+			}
+
+			if (tracker.timeoutWarningThread) {
+				task.cancel(tracker.timeoutWarningThread);
+				tracker.timeoutWarningThread = undefined;
+			}
+		}
+
+		this.instances.clear();
+	}
+
 	public untrackInstance(instance: Instance, listener: Listener) {
 		const tracker = this.getInstanceTracker(instance, false);
 		if (tracker) {

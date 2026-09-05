@@ -1,4 +1,4 @@
-import { Modding } from "@flamework/core";
+import { Modding, Serialization } from "@flamework/core";
 import { t } from "@rbxts/t";
 
 export interface NetworkInfo {
@@ -45,5 +45,17 @@ export type IntrinsicObfuscateArray<T, V = T> = Modding.Intrinsic<"shuffle-array
 
 /** @hidden Intrinsic feature not intended for users */
 export type IntrinsicTupleGuards<T> = Modding.Intrinsic<"tuple-guards", [T], GuardType>;
+
+/**
+ * Encode and decode code for the argument list `T`, generated only when the project's
+ * flamework.config.json enables `networking.serialization`; `undefined` otherwise, which sends
+ * values as they are.
+ * @hidden Intrinsic feature not intended for users
+ */
+export type IntrinsicNetworkSerializer<T extends Array<unknown>> = Modding.Intrinsic<
+	"network-serializer",
+	[T],
+	Serialization.Codec<T> | undefined
+>;
 
 type GuardType = [t.check<unknown>[], t.check<unknown> | undefined];

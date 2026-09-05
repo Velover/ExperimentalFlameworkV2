@@ -1,6 +1,7 @@
 import {
 	FunctionParameters,
 	IntrinsicTupleGuards,
+	IntrinsicNetworkSerializer,
 	IntrinsicObfuscate,
 	NetworkingObfuscationMarker,
 	NetworkUnreliable,
@@ -140,6 +141,14 @@ export type NamespaceMetadata<R, S> = Modding.Emit<{
 	outgoingIds: ObfuscateNames<keyof Events<S>>;
 	outgoingUnreliable: IntrinsicObfuscate<{
 		[k in keyof Events<S>]: S[k] extends NetworkUnreliable<unknown> ? true : undefined;
+	}>;
+
+	/** Codecs for each event's argument list, present only with `networking.serialization` on. */
+	incomingSerializers: IntrinsicObfuscate<{
+		[k in keyof Events<R>]: IntrinsicNetworkSerializer<Parameters<Events<R>[k]>>;
+	}>;
+	outgoingSerializers: IntrinsicObfuscate<{
+		[k in keyof Events<S>]: IntrinsicNetworkSerializer<Parameters<Events<S>[k]>>;
 	}>;
 
 	namespaceIds: ObfuscateNames<keyof EventNamespaces<R> | keyof EventNamespaces<S>>;

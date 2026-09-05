@@ -1,5 +1,6 @@
+import { Serialization } from "@flamework/core";
 import { Players, RunService } from "@rbxts/services";
-import { createEvent } from "../event/createEvent";
+import { createEvent, decodeArguments } from "../event/createEvent";
 import { NetworkInfo } from "../types";
 import { NetworkingFunctionError, getFunctionError } from "./errors";
 import { t } from "@rbxts/t";
@@ -36,6 +37,22 @@ export interface CreateFunctionSenderOptions {
 		resolve: (value: unknown) => void,
 		reject: (value: unknown) => void,
 	) => void;
+
+	/**
+	 * Packs the request's argument list. Absent when the project does not enable serialization.
+	 */
+	argsCodec?: Serialization.Codec;
+
+	/**
+	 * Unpacks a successful response's value, carried as a one-element list. Absent when the project
+	 * does not enable serialization.
+	 */
+	resultCodec?: Serialization.Codec;
+
+	/**
+	 * Called when a response cannot be decoded; the request is rejected with `InvalidResult`.
+	 */
+	onMalformed?: (player: Player | undefined, message: string) => void;
 }
 
 export interface RequestInfo {
@@ -56,30 +73,50 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 		networkInfo: options.networkInfo,
 	});
 
-	const processResponse = (requestInfo: RequestInfo, id: unknown, processResult: unknown, result: unknown) => {
+	const processResponse = (
+		player: Player | undefined,
+		requestInfo: RequestInfo,
+		id: unknown,
+		processResult: unknown,
+		...response: unknown[]
+	) => {
 		if (!t.number(id)) {
 			return;
 		}
 
 		const request = requestInfo.requests.get(id);
 		requestInfo.requests.delete(id);
-
-		if (request) {
-			request(result, getFunctionError(processResult));
+		if (!request) {
+			return;
 		}
+
+		const rejection = getFunctionError(processResult);
+		if (rejection !== undefined || !options.resultCodec) {
+			request(response[0], rejection);
+			return;
+		}
+
+		// A successful response carries the packed value: `(buffer, blobs?)`.
+		const decoded = decodeArguments(options.resultCodec, player, response, options.onMalformed);
+		if (!decoded) {
+			request(undefined, NetworkingFunctionError.InvalidResult);
+			return;
+		}
+
+		request(decoded[0], undefined);
 	};
 
 	// We don't need to defer here because we only accept responses to our explicit invocations.
 	const requestInfoServer = new Map<Player, RequestInfo>();
 	const requestInfoClient = createRequestInfo();
 	if (RunService.IsServer()) {
-		event.connectServer((player, id, processResult, result) => {
+		event.connectServer((player, id, processResult, ...response) => {
 			const requestInfo = requestInfoServer.get(player);
 			if (!requestInfo) {
 				return;
 			}
 
-			processResponse(requestInfo, id, processResult, result);
+			processResponse(player, requestInfo, id, processResult, ...response);
 		});
 
 		Players.PlayerRemoving.Connect((player) => {
@@ -94,8 +131,8 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 			}
 		});
 	} else {
-		event.connectClient((id, processResult, result) => {
-			processResponse(requestInfoClient, id, processResult, result);
+		event.connectClient((id, processResult, ...response) => {
+			processResponse(undefined, requestInfoClient, id, processResult, ...response);
 		});
 	}
 
@@ -122,7 +159,13 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 	return {
 		invokeServer(...args) {
 			const id = requestInfoClient.nextId++;
-			event.fireServer(id, ...args);
+			const codec = options.argsCodec;
+			if (codec) {
+				const [payload, blobs] = codec.encode(args);
+				event.fireServer(id, payload, blobs);
+			} else {
+				event.fireServer(id, ...args);
+			}
 
 			return createInvocation(undefined, id, requestInfoClient);
 		},
@@ -132,7 +175,13 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 			if (!requestInfo) requestInfoServer.set(player, (requestInfo = createRequestInfo()));
 
 			const id = requestInfoClient.nextId++;
-			event.fireClient(player, id, ...args);
+			const codec = options.argsCodec;
+			if (codec) {
+				const [payload, blobs] = codec.encode(args);
+				event.fireClient(player, id, payload, blobs);
+			} else {
+				event.fireClient(player, id, ...args);
+			}
 
 			return createInvocation(player, id, requestInfo);
 		},

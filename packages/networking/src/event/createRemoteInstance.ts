@@ -16,13 +16,17 @@ function waitByAttribute(parent: Instance, id: string) {
 	});
 
 	if (!instance) {
-		while (true) {
-			instance = parent.ChildAdded.Wait()[0];
-
-			if (instance.GetAttribute("id") === id) {
-				break;
+		// A connection rather than `ChildAdded.Wait()` in a loop: with deferred signals, children
+		// added while the loop is between waits are never seen, so the wait never ends.
+		const thread = coroutine.running();
+		const connection = parent.ChildAdded.Connect((child) => {
+			if (child.GetAttribute("id") === id) {
+				connection.Disconnect();
+				task.spawn(thread, child);
 			}
-		}
+		});
+
+		instance = coroutine.yield()[0] as Instance;
 	}
 
 	task.cancel(watcherThread);
