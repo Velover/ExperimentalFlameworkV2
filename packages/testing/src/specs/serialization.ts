@@ -85,6 +85,21 @@ class Thing {
 	constructor(public value: number) {}
 }
 
+/** One union over every family of kind: a blob, a datatype, discriminated objects, an array and literals. */
+type Mixed = Instance | Vector3 | { kind: "a"; v: number } | { kind: "b"; s: string } | number[] | "lit" | 5;
+
+/** The stranger shapes: keys that are datatypes or arrays, tuples as values and members, buffers. */
+interface Bizarre {
+	weird: Map<Vector3 | Array<{ id: number }>, Set<CFrame | string>>;
+	matrix: Array<Array<Map<Serialization.u8, [Vector3, ...string[]]>>>;
+	variants: Mixed[];
+	unknownInside: Array<Map<string, unknown>>;
+	setOfTuples: Set<[number, string]>;
+	bytes: buffer;
+	colors: Array<Color3 | BrickColor>;
+	ro: ReadonlyMap<string, ReadonlyArray<ReadonlySet<number>>>;
+}
+
 const payloadSerializer = Flamework.createSerializer<Payload>();
 const compactSerializer = Flamework.createSerializer<Compact>();
 const modeSerializer = Flamework.createSerializer<Mode>();
@@ -100,6 +115,7 @@ const walletSerializer = Flamework.createSerializer<Wallet>();
 const nestedSerializer = Flamework.createSerializer<Nested>();
 const thingSerializer = Flamework.createSerializer<Thing>();
 const varintSerializer = Flamework.createSerializer<Serialization.varint>();
+const bizarreSerializer = Flamework.createSerializer<Bizarre>();
 
 /** Whether decoding raises, which is how a malformed payload is reported. */
 function rejects(run: () => unknown): boolean {
@@ -377,6 +393,87 @@ export = suite("serialization", [
 			const [thingPayload, thingBlobs] = thingSerializer.serialize(thing);
 			expectEqual(buffer.len(thingPayload), 4, "a class instance is one blob slot");
 			expectEqual(thingSerializer.deserialize(thingPayload, thingBlobs), thing, "same instance back");
+		},
+	],
+	[
+		"round-trips bizarre keys, a seven-way union, tuples as members, buffers and readonly collections",
+		() => {
+			const part = new Instance("Folder");
+			const value: Bizarre = {
+				weird: new Map<Vector3 | Array<{ id: number }>, Set<CFrame | string>>([
+					[new Vector3(1, 2, 3), new Set<CFrame | string>([new CFrame(1, 2, 3), "s"])],
+					[[{ id: 9 }], new Set<CFrame | string>(["only"])],
+				]),
+				matrix: [
+					[
+						new Map<Serialization.u8, [Vector3, ...string[]]>([
+							[3 as Serialization.u8, [Vector3.one, "x", "y"]],
+						]),
+					],
+					[],
+				],
+				variants: [part, new Vector3(1, 1, 1), { kind: "a", v: 1 }, { kind: "b", s: "s" }, [1, 2], "lit", 5],
+				unknownInside: [new Map<string, unknown>([["k", { deep: 1 }]])],
+				setOfTuples: new Set<[number, string]>([[1, "a"]]),
+				bytes: buffer.fromstring("hello"),
+				colors: [new Color3(1, 0, 0), new BrickColor(1004)],
+				ro: new Map([["r", [new Set([1, 2])]]]),
+			};
+
+			const [payload, blobs] = bizarreSerializer.serialize(value);
+			expectEqual(blobs?.size(), 2, "the Instance and the unknown travel as blobs");
+			const back = bizarreSerializer.deserialize(payload, blobs);
+
+			expectEqual(back.weird.size(), 2, "map with mixed keys");
+			let vectorKey = false;
+			let arrayKey = false;
+			for (const [key, set] of back.weird) {
+				if (typeIs(key, "Vector3")) {
+					let frame = false;
+					for (const member of set) {
+						if (typeIs(member, "CFrame") && member === new CFrame(1, 2, 3)) frame = true;
+					}
+					vectorKey = key === new Vector3(1, 2, 3) && set.size() === 2 && frame && set.has("s");
+				} else {
+					arrayKey = key.size() === 1 && key[0].id === 9 && set.size() === 1 && set.has("only");
+				}
+			}
+			expectTrue(vectorKey, "Vector3 key with a set of a CFrame and a string");
+			expectTrue(arrayKey, "array-of-objects key");
+
+			const cell = back.matrix[0][0].get(3 as Serialization.u8);
+			expectTrue(
+				cell !== undefined && cell[0] === Vector3.one && cell[1] === "x" && cell[2] === "y",
+				"tuple with rest inside a map",
+			);
+			expectEqual(back.matrix[1].size(), 0, "empty inner array");
+
+			const v = back.variants;
+			expectEqual(v.size(), 7, "every union member");
+			expectEqual(v[0], part, "Instance member");
+			expectEqual(v[1], new Vector3(1, 1, 1), "Vector3 member");
+			expectEqual((v[2] as { kind: string; v: number }).v, 1, "object member a");
+			expectEqual((v[3] as { s: string }).s, "s", "object member b");
+			expectEqual((v[4] as number[])[1], 2, "array member");
+			expectEqual(v[5], "lit", "string literal member");
+			expectEqual(v[6], 5, "number literal member");
+			// Tags follow the written order: Instance 0 ... 5 is the literal group.
+			const [variant] = Flamework.createSerializer<Mixed>().serialize("lit");
+			expectEqual(buffer.readu8(variant, 0), 5, "literal group is the sixth member as written");
+
+			expectEqual(
+				(back.unknownInside[0].get("k") as { deep: number }).deep,
+				1,
+				"unknown inside a map inside an array",
+			);
+			let tuple = false;
+			for (const [n, s] of back.setOfTuples) tuple = n === 1 && s === "a";
+			expectTrue(tuple, "tuple as a set member");
+			expectEqual(buffer.tostring(back.bytes), "hello", "buffer field");
+			expectEqual(back.colors[0], new Color3(1, 0, 0), "Color3 member");
+			const brick = back.colors[1];
+			expectTrue(typeIs(brick, "BrickColor") && brick.Number === 1004, "BrickColor member");
+			expectEqual(back.ro.get("r")?.[0].has(2), true, "readonly collections");
 		},
 	],
 	[

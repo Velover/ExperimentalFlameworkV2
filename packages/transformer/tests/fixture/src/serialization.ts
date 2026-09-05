@@ -25,6 +25,9 @@ interface Node {
 /** Members are numbered as written: Coins is 0 and Items is 1, whatever order TypeScript lists them in. */
 type Wallet = { Coins: number } | { Items: string[] };
 
+/** One union over every family of kind: a blob, a datatype, discriminated objects, an array and literals. */
+type Mixed = Instance | Vector3 | { kind: "a"; v: number } | { kind: "b"; s: string } | number[] | "lit" | 5;
+
 /** Nested collections with Instances as keys, sets of maps, arrays of tuples: nothing here is special. */
 interface Crazy {
 	byPart: Map<Instance, Array<Set<string>>>;
@@ -33,6 +36,15 @@ interface Crazy {
 	tag: `${string}-id`;
 	sortOf: number | string;
 	anything: object;
+	weird: Map<Vector3 | Array<{ id: number }>, Set<CFrame | string>>;
+	matrix: Array<Array<Map<Serialization.u8, [Vector3, ...string[]]>>>;
+	enums: Map<Enum.Material, Array<Enum.KeyCode | undefined>>;
+	variants: Mixed[];
+	unknownInside: Array<Map<string, unknown>>;
+	setOfTuples: Set<[number, string]>;
+	bytes: buffer;
+	colors: Array<Color3 | BrickColor>;
+	ro: ReadonlyMap<string, ReadonlyArray<ReadonlySet<number>>>;
 }
 
 class Thing {

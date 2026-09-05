@@ -78,9 +78,9 @@ describe("Flamework.createSerializer", () => {
 		expect(source()).toMatch(/elseif v\w*\.Items ~= nil then\s*buffer\.writeu8\(buf\w*, o\w*, 1\)/);
 		expect(source()).toMatch(/if tag\w* == 0 then\s*local Coins\w* = buffer\.readf64/);
 		expect(source()).not.toMatch(/t\.interface\(\{\s*Coins/);
-		// `number | string` as written: the number first.
-		expect(source()).toMatch(/if typeof\(v\w*\) == "number" then\s*buffer\.writeu8\(buf\w*, o\w*, 0\)/);
-		expect(source()).toMatch(/elseif typeof\(v\w*\) == "string" then\s*buffer\.writeu8\(buf\w*, o\w*, 1\)/);
+		// `number | string` as written: the number first. Primitives are tested with `type`, the fast path.
+		expect(source()).toMatch(/if type\(v\w*\) == "number" then\s*buffer\.writeu8\(buf\w*, o\w*, 0\)/);
+		expect(source()).toMatch(/elseif type\(v\w*\) == "string" then\s*buffer\.writeu8\(buf\w*, o\w*, 1\)/);
 	});
 
 	test("nests collections freely and sends classes, `object` and Instance keys as blobs", () => {
@@ -92,6 +92,22 @@ describe("Flamework.createSerializer", () => {
 		expect(source()).toMatch(/set\w*\[text\w*\] = true/);
 		// Set<Map<string, number[]>>
 		expect(source()).toMatch(/set\w*\[map\w*\] = true/);
+	});
+
+	test("tells the members of a union over every family of kind apart without a guard where it can", () => {
+		// Instance | Vector3 | { kind: "a" } | { kind: "b" } | number[] | "lit" | 5, numbered as written.
+		expect(source()).toMatch(/if typeof\(v\w*\) == "Instance" then\s*buffer\.writeu8\(buf\w*, o\w*, 0\)/);
+		expect(source()).toMatch(/elseif typeof\(v\w*\) == "Vector3" then\s*buffer\.writeu8\(buf\w*, o\w*, 1\)/);
+		// Objects next to non-tables are only indexed once the value is known to be a table, and the
+		// chain stays flat: no temporaries, since the value is a const by the time the macros see it.
+		expect(source()).toMatch(
+			/elseif type\(v\w*\) == "table" and v\w*\.kind == "a" then\s*buffer\.writeu8\(buf\w*, o\w*, 2\)/,
+		);
+		expect(source()).toMatch(/elseif type\(v\w*\) == "table" and v\w*\.kind == "b" then/);
+		expect(source()).not.toMatch(/local _v_/);
+		expect(source()).not.toMatch(/_condition/);
+		// A map key that is a datatype or an array of objects.
+		expect(source()).toMatch(/if typeof\(key\w*\) == "Vector3" then/);
 	});
 
 	test("refuses hostile counts and trailing bytes", () => {

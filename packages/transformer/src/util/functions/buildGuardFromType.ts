@@ -336,7 +336,17 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 		}
 
 		if (type.flags & ts.TypeFlags.TemplateLiteral) {
-			fail(`Flamework encountered a template literal which is unsupported: ${type.checker.typeToString(type)}`);
+			// `${string}-id` becomes an anchored Lua pattern: the literal parts verbatim, each placeholder
+			// matching anything, which is as much as a runtime check can tell about the placeholders.
+			const template = type as ts.TemplateLiteralType;
+			const escape = (text: string) => text.replace(/[%^$().[\]*+\-?]/g, (char) => `%${char}`);
+			const pattern = `^${template.texts.map(escape).join(".*")}$`;
+			return f.call(f.field(tId, "match"), [f.string(pattern)]);
+		}
+
+		// `Uppercase<T>` and friends are strings with a shape no runtime check can see.
+		if (type.flags & ts.TypeFlags.StringMapping) {
+			return f.field(tId, "string");
 		}
 
 		const symbol = type.getSymbol();
@@ -569,8 +579,14 @@ export function simplifyUnion(type: ts.UnionType) {
 	}
 
 	for (const [symbol, set] of possibleEnums) {
-		// Add 1 to account for GetEnumItems()
-		if (set.size + 1 === symbol.exports?.size) {
+		// Every item of the enum is present. The namespace also exports `GetEnumItems` and, for some
+		// enums, alias constants (`KeyCode.Unknown` is `None`), so only the item interfaces are counted.
+		let items = 0;
+		symbol.exports?.forEach((member) => {
+			if (member.flags & ts.SymbolFlags.Interface) items++;
+		});
+
+		if (set.size === items) {
 			enums.push(symbol.name);
 		} else {
 			for (const type of set) {

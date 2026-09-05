@@ -217,14 +217,16 @@ function transformReceiverCallback(
 
 	// A Promise is followed; its value is packed once it resolves.
 	const value = f.identifier("value", true);
-	const packLater = f.arrowFunction(f.block(packResult(state, node, fnType, value)), [f.parameterDeclaration(value)]);
+	const packLater = f.arrowFunction(f.block(packResult(state, node, fnType, value, true)), [
+		f.parameterDeclaration(value),
+	]);
 	body.push(
 		ts.factory.createIfStatement(
 			f.call(f.propertyAccessExpression(f.identifier("Promise"), f.identifier("is")), [result]),
 			f.block([f.returnStatement(f.call(f.propertyAccessExpression(result, f.identifier("then")), [packLater]))]),
 		),
 	);
-	body.push(...packResult(state, node, fnType, result));
+	body.push(...packResult(state, node, fnType, result, false));
 
 	const wrapper = f.arrowFunction(f.block(body), parameters);
 	const call = f.call(f.propertyAccessExpression(boundTarget, f.identifier("_setCallback")), [wrapper]);
@@ -240,10 +242,11 @@ function packResult(
 	node: ts.CallExpression,
 	fnType: ts.Type,
 	value: ts.Identifier,
+	isParameter: boolean,
 ): ts.Statement[] {
 	const networking = state.addFileImport(state.getSourceFile(node), "@flamework/networking", "Networking");
 	const skip = f.propertyAccessExpression(networking, f.identifier("Skip"));
-	const encoding = buildInlineResultEncoding(state, node, fnType, value);
+	const encoding = buildInlineResultEncoding(state, node, fnType, value, isParameter);
 	const packed = packedArguments(encoding);
 
 	return [

@@ -245,9 +245,10 @@ const conditional = (condition: ts.Expression, whenTrue: ts.Expression, whenFals
 		whenFalse,
 	);
 const raise = (message: string) => f.statement(f.call("error", [f.string(message)]));
-const typeOfIs = (value: ts.Expression, name: string) => equals(f.call("typeOf", [value]), f.string(name));
-const construct = (name: string, args: ts.Expression[]) =>
-	factory.createNewExpression(f.identifier(name), undefined, args);
+/** `typeIs(v, name)`: roblox-ts emits `type(v) == name` for primitives and `typeof(v) == name` otherwise, with no temporaries. */
+const typeOfIs = (value: ts.Expression, name: string) => f.call("typeIs", [value, f.string(name)]);
+const construct = (name: string, args: ts.Expression[], typeArguments?: ts.TypeNode[]) =>
+	factory.createNewExpression(f.identifier(name), typeArguments, args);
 
 /** A literal expression as text, for comparing and ordering literals. */
 function printLiteral(expression: ts.Expression): string {
@@ -423,15 +424,20 @@ export function buildResultDecoderFromType(
 	return f.asNever(factory.createParenthesizedExpression(decoder));
 }
 
-/** Packs a function's result as a one-element list; see {@link buildResultDecoderFromType}. */
+/**
+ * Packs a function's result as a one-element list; see {@link buildResultDecoderFromType}. `value`
+ * is flagged as a parameter when it is one, so the generated code copies it before any macro sees it.
+ */
 export function buildInlineResultEncoding(
 	state: TransformState,
 	node: ts.Node,
 	fn: ts.Type,
-	value: ts.Expression,
+	value: ts.Identifier,
+	isParameter: boolean,
 	file = state.getSourceFile(node),
 ): InlineEncoding {
 	const generator = generatorFor(state, node, file);
+	if (isParameter) generator.markParameter(value);
 	const encoding = generator.encodeList(resultOf(state, generator, fn, node), [value]);
 	emitHoisted(state, generator);
 	return encoding;
@@ -495,7 +501,33 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	const unionNodes = new Map<ts.Type, ts.UnionTypeNode>();
 	let varint: Varint | undefined;
 
-	return { buildSerializer, buildDecoder, encodeList, use, hint, takeHoisted };
+	/**
+	 * Parameters of the generated functions. roblox-ts copies a parameter into a temporary wherever one
+	 * of its macros (`typeIs`, `Map.get`, `Array.push`) takes it, and then everything after it in the
+	 * call too; a `const` copy of our own passes straight through, so {@link bind} makes one.
+	 */
+	const parameters = new Set<ts.Identifier>();
+
+	return { buildSerializer, buildDecoder, encodeList, use, hint, markParameter, takeHoisted };
+
+	/** A fresh identifier declared as a parameter of a generated function. */
+	function parameter(hint: string): ts.Identifier {
+		const id = uid(hint);
+		parameters.add(id);
+		return id;
+	}
+
+	/** Marks an identifier declared as a parameter by the caller; see {@link bind}. */
+	function markParameter(id: ts.Identifier) {
+		parameters.add(id);
+	}
+
+	/** Whether an identifier from user code names a parameter, which roblox-ts treats as mutable. */
+	function isParameterReference(id: ts.Identifier): boolean {
+		if (parameters.has(id)) return true;
+		const declaration = typeChecker.getSymbolAtLocation(id)?.valueDeclaration;
+		return declaration !== undefined && ts.isParameter(declaration);
+	}
 
 	/** Points diagnostics at the intrinsic or call site being built. */
 	function use(node: ts.Node) {
@@ -529,7 +561,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	function buildSerializer(type: ts.Type): ts.Expression {
 		const layout = layoutOf(type);
-		const value = uid("v");
+		const value = parameter("v");
 		const serialize = f.arrowFunction(f.block(encodeBody(type, layout, value)), [
 			f.parameterDeclaration(value, T.unknown()),
 		]);
@@ -1285,7 +1317,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const kind = describe(type);
 		trail.push(type);
 
-		const value = uid("v");
+		const value = parameter("v");
 		const sizeBody = new Array<ts.Statement>();
 		const size = emitSize(kind, value, sizeBody);
 		sizeBody.push(f.returnStatement(size));
@@ -1365,11 +1397,14 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		let entry = literalTables.get(kind);
 		if (!entry) {
 			entry = { list: uid("literals"), index: uid("literalIndex") };
+			// The key type is spelled out: inferred from the pairs, TypeScript would pick the first literal's
+			// type (`"lit"`, or one EnumItem interface) and reject the others.
+			const pairs = kind.values.map((value, index) => f.array([value, num(index)], false));
 			tables.push(
 				constDecl(entry.list, f.array(kind.values, false), T.blobs()),
 				constDecl(
 					entry.index,
-					construct("Map", [f.array(kind.values.map((value, index) => f.array([value, num(index)], false)))]),
+					construct("Map", [f.array(pairs)], [T.defined(), T.number()]),
 					f.referenceType("Map", [T.defined(), T.number()]),
 				),
 			);
@@ -1677,9 +1712,16 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return child.out;
 	}
 
+	/**
+	 * A value as a local: identifiers and casts of identifiers are returned as they are, except for a
+	 * parameter, which is copied so that the macros it reaches see a `const` (see {@link parameters}).
+	 */
 	function bind(out: ts.Statement[], value: ts.Expression, hint: string, type?: ts.TypeNode): ts.Expression {
-		if (f.is.identifier(value) && !type) return value;
-		if (!type && ts.isAsExpression(value) && f.is.identifier(value.expression)) return value;
+		if (!type) {
+			if (f.is.identifier(value) && !isParameterReference(value)) return value;
+			if (ts.isAsExpression(value) && f.is.identifier(value.expression)) return value;
+		}
+
 		const id = uid(hint);
 		out.push(constDecl(id, value, type));
 		return id;
@@ -1892,7 +1934,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				return;
 			case "literals": {
 				const { index } = literalTablesFor(kind);
-				const slot = bind(ctx.out, f.call(prop(index, "get"), [f.as(value, T.defined())]), "index");
+				const v = bind(ctx.out, value, "v");
+				const slot = bind(ctx.out, f.call(prop(index, "get"), [f.as(v, T.defined())]), "index");
 				ctx.out.push(ifStatement(isNil(slot), [raise("value is not one of the literals its type allows")]));
 				const width = kind.values.length > 0xff ? "u16" : "u8";
 				ctx.out.push(f.statement(bufferCall(`write${width}`, [ctx.buf, at(ctx), slot])));
