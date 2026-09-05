@@ -25,13 +25,14 @@ export function createClientMethod(
 			]);
 		},
 
-		// With serialization on, the transformer rewrites the methods above into these with the packed list.
-		_invoke(payload, blobs) {
-			return this.invokeWithTimeout(config.defaultTimeout, payload, blobs);
+		// With serialization on, the transformer rewrites the methods above into these with the packed
+		// list: `(payload, blobs?)`, or nothing at all for a list that carries nothing.
+		_invoke(...packed) {
+			return this.invokeWithTimeout(config.defaultTimeout, ...packed);
 		},
 
-		_invokeWithTimeout(timeout, payload, blobs) {
-			return this.invokeWithTimeout(timeout, payload, blobs);
+		_invokeWithTimeout(timeout, ...packed) {
+			return this.invokeWithTimeout(timeout, ...packed);
 		},
 
 		setCallback(callback) {

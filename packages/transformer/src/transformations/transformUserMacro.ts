@@ -16,8 +16,8 @@ import {
 import { buildTupleGuardsIntrinsic } from "./macros/intrinsics/guards";
 import {
 	buildDecoderFromType,
+	buildResultDecoderFromType,
 	buildSerializerFromType,
-	unwrapPromise,
 } from "../util/functions/buildSerializerFromType";
 import { isTupleType } from "../util/functions/isTupleType";
 import { inlineMacroIntrinsic } from "./macros/intrinsics/inlining";
@@ -359,13 +359,14 @@ function buildIntrinsicMacro(state: TransformState, node: ts.Node, macro: UserMa
 			throw new Error(`Invalid intrinsic usage`);
 		}
 
-		return buildSerializerFromType(state, node, unwrapPromise(state, type));
+		return buildSerializerFromType(state, node, type);
 	}
 
-	// Networking metadata: the decoder for an argument list, only built when the project enables
-	// serialization so it costs nothing otherwise. `nil` tells the runtime to pass values through. The
-	// matching encoding is generated at each call site (see transformNetworkingCall).
-	if (macro.id === "network-decoder") {
+	// Networking metadata: the decoder for an argument list (or, given a function type, for its
+	// result), only built when the project enables serialization so it costs nothing otherwise. `nil`
+	// tells the runtime to pass values through. The matching encoding is generated at each call site
+	// (see transformNetworkingCall).
+	if (macro.id === "network-decoder" || macro.id === "network-result-decoder") {
 		const [type] = macro.inputs;
 		if (!type) {
 			throw new Error(`Invalid intrinsic usage`);
@@ -375,7 +376,9 @@ function buildIntrinsicMacro(state: TransformState, node: ts.Node, macro: UserMa
 			return f.nil();
 		}
 
-		return buildDecoderFromType(state, node, type);
+		return macro.id === "network-decoder"
+			? buildDecoderFromType(state, node, type)
+			: buildResultDecoderFromType(state, node, type);
 	}
 
 	if (macro.id === "plugin") {

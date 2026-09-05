@@ -26,6 +26,13 @@ const GlobalFunctions = Networking.createFunction<Bidirectional, Bidirectional>(
 /** A second global whose remotes nothing else touches, used by the cross-realm pairing case. */
 const PairedFunctions = Networking.createFunction<{ pair(value: string): string }, { pair(value: string): string }>();
 
+/** A raw function's requests and results travel as they are, whether or not the project serializes. */
+interface RawBidirectional {
+	rawEcho: Networking.Raw<(value: string) => string>;
+}
+
+const RawFunctions = Networking.createFunction<RawBidirectional, RawBidirectional>();
+
 declare const __harness: {
 	// Function-typed properties rather than methods: roblox-ts emits `:` calls for methods, which
 	// would pass `__harness` itself as the first argument.
@@ -403,6 +410,48 @@ export = suite("networking functions", [
 			expectTrue(receive !== send, "distinct channels");
 			expectEqual(receive.Name, "echo", "receive channel name");
 			expectEqual(send.Name, "echo", "send channel name");
+		},
+	],
+	[
+		"leaves a raw function's requests and results as they are",
+		() => {
+			let raw: ReturnType<typeof RawFunctions.createServer> | ReturnType<typeof RawFunctions.createClient>;
+			if (isServer) {
+				raw = RawFunctions.createServer({});
+				raw.rawEcho.setCallback((_player, value) => `${value}!`);
+			} else {
+				__harness.asRealm("Server", () => {
+					RawFunctions.createServer({});
+					__harness.flush();
+				});
+				raw = RawFunctions.createClient({});
+				raw.rawEcho.setCallback((value) => `${value}!`);
+			}
+			__harness.flush();
+
+			// A request arrives with a plain value and is answered with one.
+			const receive = remoteById(`${RECEIVE_PREFIX}rawEcho`, "rawEcho receive channel");
+			__harness.clearSent(receive);
+			deliver(receive, 7, "ping");
+
+			const answered = __harness.sent(receive);
+			expectEqual(answered.size(), 1, "responses");
+			expectEqual(answered[0].args[1], true, "process result");
+			expectEqual(answered[0].args[2], "ping!", "returned value on the wire");
+
+			// A request leaves with a plain value and resolves with the plain response.
+			const send = remoteById(`${SEND_PREFIX}rawEcho`, "rawEcho send channel");
+			__harness.clearSent(send);
+			const request = isServer
+				? (raw as ReturnType<typeof RawFunctions.createServer>).rawEcho.invoke(requester, "ping")
+				: (raw as ReturnType<typeof RawFunctions.createClient>).rawEcho.invoke("ping");
+
+			const sent = __harness.sent(send);
+			expectEqual(sent.size(), 1, "requests");
+			expectEqual(sent[0].args[1], "ping", "argument on the wire");
+
+			deliver(send, sent[0].args[0], true, "pong");
+			expectEqual(expectResolves(request), "pong", "resolved value");
 		},
 	],
 	[

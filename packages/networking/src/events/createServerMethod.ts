@@ -30,17 +30,18 @@ export function createServerMethod(receiver: EventInterface, sender: EventInterf
 			}
 		},
 
-		// With serialization on, the transformer rewrites the methods above into these with the packed list.
-		_fire(players, payload, blobs) {
-			this.fire(players, payload, blobs);
+		// With serialization on, the transformer rewrites the methods above into these with the packed
+		// list: `(payload, blobs?)`, or nothing at all for a list that carries nothing.
+		_fire(players, ...packed) {
+			this.fire(players, ...packed);
 		},
 
-		_broadcast(payload, blobs) {
-			this.broadcast(payload, blobs);
+		_broadcast(...packed) {
+			this.broadcast(...packed);
 		},
 
-		_except(players, payload, blobs) {
-			this.except(players, payload, blobs);
+		_except(players, ...packed) {
+			this.except(players, ...packed);
 		},
 
 		connect(callback) {

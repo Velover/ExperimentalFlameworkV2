@@ -7,6 +7,9 @@ interface ServerEvents {
 	setScore(score: number): void;
 	rename(name: string): void;
 
+	/** Carries nothing, so with serialization on it sends no payload at all. */
+	bump(): void;
+
 	/** A nested namespace, which gets its own remote named after the path to it. */
 	stats: { report(value: number): void };
 }
@@ -16,6 +19,9 @@ interface ClientEvents {
 
 	/** Declared unreliable, so it gets an `UnreliableRemoteEvent` on a separate channel. */
 	tick: Networking.Unreliable<(value: number) => void>;
+
+	/** Declared raw: its arguments travel as they are whether or not the project serializes. */
+	raw: Networking.RawReliable<(value: number) => void>;
 
 	stats: { report(value: number): void };
 }
@@ -336,6 +342,65 @@ export = suite("networking", [
 			const remote = expectDefined(__harness.findRemoteById("unreliable:tick"), "unreliable remote");
 			expectEqual(remote.ClassName, "UnreliableRemoteEvent", "remote class");
 			expectEqual(__harness.findRemoteById("tick"), undefined, "reliable channel");
+		},
+	],
+	[
+		"sends nothing for an event without arguments and accepts it bare",
+		() => {
+			let received = 0;
+
+			if (RunService.IsServer()) {
+				const server = GlobalEvents.createServer({});
+				server.bump.connect(() => received++);
+				__harness.flush();
+
+				const remote = expectDefined(__harness.findRemote("bump"), "bump remote");
+				(
+					remote as unknown as { OnServerEvent: { Fire(this: unknown, ...args: unknown[]): void } }
+				).OnServerEvent.Fire(__harness.newPlayer("Bumper"));
+
+				expectEqual(received, 1, "accepted messages");
+			} else {
+				primeRemotes();
+				const client = GlobalEvents.createClient({});
+				client.bump.fire();
+
+				const remote = expectDefined(__harness.findRemote("bump"), "bump remote");
+				const sent = __harness.sent(remote);
+				expectEqual(sent.size(), 1, "sent messages");
+				expectEqual(sent[0].args.size(), 0, "arguments on the wire");
+			}
+		},
+	],
+	[
+		"leaves a raw event's arguments as they are",
+		() => {
+			const received = new Array<number>();
+
+			if (RunService.IsServer()) {
+				const server = GlobalEvents.createServer({});
+				const remote = expectDefined(__harness.findRemote("raw"), "raw remote");
+				__harness.clearSent(remote);
+
+				server.raw.broadcast(42);
+
+				const sent = __harness.sent(remote);
+				expectEqual(sent.size(), 1, "sent messages");
+				expectEqual(sent[0].args[0], 42, "argument on the wire");
+			} else {
+				primeRemotes();
+				const client = GlobalEvents.createClient({});
+				client.raw.connect((value) => received.push(value));
+				__harness.flush();
+
+				const remote = expectDefined(__harness.findRemote("raw"), "raw remote");
+				(
+					remote as unknown as { OnClientEvent: { Fire(this: unknown, ...args: unknown[]): void } }
+				).OnClientEvent.Fire(42);
+
+				expectEqual(received.size(), 1, "accepted messages");
+				expectEqual(received[0], 42, "received value");
+			}
 		},
 	],
 ]);

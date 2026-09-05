@@ -25,13 +25,14 @@ export function createServerMethod(
 			]);
 		},
 
-		// With serialization on, the transformer rewrites the methods above into these with the packed list.
-		_invoke(player, payload, blobs) {
-			return this.invokeWithTimeout(player, config.defaultTimeout, payload, blobs);
+		// With serialization on, the transformer rewrites the methods above into these with the packed
+		// list: `(payload, blobs?)`, or nothing at all for a list that carries nothing.
+		_invoke(player, ...packed) {
+			return this.invokeWithTimeout(player, config.defaultTimeout, ...packed);
 		},
 
-		_invokeWithTimeout(player, timeout, payload, blobs) {
-			return this.invokeWithTimeout(player, timeout, payload, blobs);
+		_invokeWithTimeout(player, timeout, ...packed) {
+			return this.invokeWithTimeout(player, timeout, ...packed);
 		},
 
 		setCallback(callback) {

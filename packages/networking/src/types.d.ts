@@ -20,6 +20,12 @@ export interface NetworkInfo {
 
 export type NetworkUnreliable<T> = T & { _flamework_unreliable: never };
 
+/**
+ * Marks an event or function whose values travel as they are, outside serialization: the transformer
+ * leaves its call sites alone and the metadata carries no decoder for it.
+ */
+export type NetworkRaw<T> = T & { _flamework_raw: never };
+
 export interface NetworkingObfuscationMarker {
 	/**
 	 * An internal marker type used to signify to Flamework to obfuscate access expressions.
@@ -56,6 +62,17 @@ export type IntrinsicNetworkDecoder<T extends Array<unknown>> = Modding.Intrinsi
 	"network-decoder",
 	[T],
 	Serialization.Decoder<T> | undefined
+>;
+
+/**
+ * Decode code for the result of the function type `F`, carried as a one-element list. Takes the
+ * function type rather than its return type so that the return type as declared is known.
+ * @hidden Intrinsic feature not intended for users
+ */
+export type IntrinsicNetworkResultDecoder<F> = Modding.Intrinsic<
+	"network-result-decoder",
+	[F],
+	Serialization.Decoder | undefined
 >;
 
 type GuardType = [t.check<unknown>[], t.check<unknown> | undefined];

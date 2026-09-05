@@ -9,7 +9,7 @@ import {
 } from "./middleware/types";
 import { createNetworkingEvent } from "./events/createNetworkingEvent";
 import { createNetworkingFunction } from "./functions/createNetworkingFunction";
-import { NetworkUnreliable } from "./types";
+import { NetworkRaw, NetworkUnreliable } from "./types";
 import type { Modding } from "@flamework/core";
 
 export namespace Networking {
@@ -44,6 +44,22 @@ export namespace Networking {
 	 * This will only work on remote events.
 	 */
 	export type Unreliable<T> = NetworkUnreliable<T>;
+
+	/**
+	 * Sends this event's arguments as they are, bypassing `networking.serialization` for this event
+	 * alone. The generated guards still run on what arrives.
+	 */
+	export type RawReliable<T> = NetworkRaw<T>;
+
+	/**
+	 * An unreliable event whose arguments bypass serialization; see {@link RawReliable}.
+	 */
+	export type RawUnreliable<T> = NetworkUnreliable<NetworkRaw<T>>;
+
+	/**
+	 * A function whose requests and results bypass serialization; see {@link RawReliable}.
+	 */
+	export type Raw<T> = NetworkRaw<T>;
 
 	/**
 	 * A function that generates an event middleware.

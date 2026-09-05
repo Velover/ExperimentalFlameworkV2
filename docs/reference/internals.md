@@ -281,10 +281,19 @@ The generator is `transformer/src/util/functions/buildSerializerFromType.ts`. It
 into a kind (number with a width, string with a length prefix, object, union, ...), computes its
 layout (fixed size or not, minimum size, whether it has blob slots) and then emits three things:
 a size expression, writes and reads. A cursor folds constant offsets at compile time and only
-materialises a position variable where a variable-size value forces one. Blobs are addressed by an
-index written into the buffer, never by their position in the list. `core/src/serialization/types.ts`
-holds only types: the brands and the `Serializer`/`Codec` shapes. `Flamework.createSerializer<T>()`
-exposes the same generator through the `serializer` intrinsic.
+materialises a position variable where a variable-size value forces one. Counts and lengths are
+LEB128 varints through three helpers (`vsize`, `vwrite`, `vread`) hoisted once per file. Blobs are
+addressed by a u32 index written into the buffer, never by their position in the list; what counts
+as a blob is decided structurally (declared by `@rbxts/types`, a `_nominal_` marker, `unknown`,
+`object`, a class, an empty object type), not by a list of names. Union members are numbered in
+the order they were written: the generator keeps the `UnionTypeNode` it saw a union declared with
+(an alias's declaration, or the first property, parameter or type argument) and reads the member
+order off it, since TypeScript's own order is by internal type id. Result decoders take the
+function type (`network-result-decoder`) so the declared return type node is available for that.
+Members declared `Networking.Raw*` get handler types without the hidden markers and `undefined`
+decoders through a type-level conditional. `core/src/serialization/types.ts` holds only types: the
+brands and the `Serializer`/`Decoder` shapes. `Flamework.createSerializer<T>()` exposes the same
+generator through the `serializer` intrinsic.
 
 ### Remote ids
 

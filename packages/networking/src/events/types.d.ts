@@ -4,6 +4,7 @@ import {
 	IntrinsicNetworkDecoder,
 	IntrinsicObfuscate,
 	NetworkingObfuscationMarker,
+	NetworkRaw,
 	NetworkUnreliable,
 	ObfuscateNames,
 } from "../types";
@@ -11,7 +12,11 @@ import { EventNetworkingEvents } from "../handlers";
 import { EventMiddleware } from "../middleware/types";
 import { Modding } from "@flamework/core";
 
-export interface ServerSender<I extends unknown[]> {
+/**
+ * A sender declared `Networking.RawReliable` / `RawUnreliable`: its arguments travel as they are.
+ * Without the hidden marker below, no call site packs them and the peer runs no decoder.
+ */
+export interface RawServerSender<I extends unknown[]> {
 	(player: Player | Player[], ...args: I): void;
 
 	/**
@@ -30,20 +35,23 @@ export interface ServerSender<I extends unknown[]> {
 	 * Sends this request to all connected players.
 	 */
 	broadcast(...args: I): void;
+}
+
+export interface ServerSender<I extends unknown[]> extends RawServerSender<I> {
 	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
 	readonly _flamework_send?: I;
 
-	/** @hidden Sends an argument list the transformer already packed. */
-	_fire(players: Player | Player[], payload: buffer, blobs?: Array<defined>): void;
+	/** @hidden Sends an argument list the transformer already packed; nothing when the list carries nothing. */
+	_fire(players: Player | Player[], payload?: buffer, blobs?: Array<defined>): void;
 
-	/** @hidden Sends an argument list the transformer already packed. */
-	_except(players: Player | Player[], payload: buffer, blobs?: Array<defined>): void;
+	/** @hidden Sends an argument list the transformer already packed; nothing when the list carries nothing. */
+	_except(players: Player | Player[], payload?: buffer, blobs?: Array<defined>): void;
 
-	/** @hidden Sends an argument list the transformer already packed. */
-	_broadcast(payload: buffer, blobs?: Array<defined>): void;
+	/** @hidden Sends an argument list the transformer already packed; nothing when the list carries nothing. */
+	_broadcast(payload?: buffer, blobs?: Array<defined>): void;
 }
 
-export interface ServerReceiver<I extends unknown[]> {
+export interface RawServerReceiver<I extends unknown[]> {
 	/**
 	 * Connect to this networking event.
 	 * @param callback The callback that will be fired
@@ -54,25 +62,31 @@ export interface ServerReceiver<I extends unknown[]> {
 	 * Fires a server event using player as the sender.
 	 */
 	predict(player: Player, ...args: I): void;
+}
+
+export interface ServerReceiver<I extends unknown[]> extends RawServerReceiver<I> {
 	/** @hidden Marks a receiver for the transformer. */
 	readonly _flamework_receive?: I;
 }
 
-export interface ClientSender<I extends unknown[]> {
+export interface RawClientSender<I extends unknown[]> {
 	(...args: I): void;
 
 	/**
 	 * Sends this request to the server.
 	 */
 	fire(...args: I): void;
+}
+
+export interface ClientSender<I extends unknown[]> extends RawClientSender<I> {
 	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
 	readonly _flamework_send?: I;
 
-	/** @hidden Sends an argument list the transformer already packed. */
-	_fire(payload: buffer, blobs?: Array<defined>): void;
+	/** @hidden Sends an argument list the transformer already packed; nothing when the list carries nothing. */
+	_fire(payload?: buffer, blobs?: Array<defined>): void;
 }
 
-export interface ClientReceiver<I extends unknown[]> {
+export interface RawClientReceiver<I extends unknown[]> {
 	/**
 	 * Connect to this networking event.
 	 * @param callback The callback that will be fired
@@ -83,21 +97,36 @@ export interface ClientReceiver<I extends unknown[]> {
 	 * Fires a client event.
 	 */
 	predict(...args: I): void;
+}
+
+export interface ClientReceiver<I extends unknown[]> extends RawClientReceiver<I> {
 	/** @hidden Marks a receiver for the transformer. */
 	readonly _flamework_receive?: I;
 }
 
 export type ServerHandler<E, R> = NetworkingObfuscationMarker & {
-	[k in keyof Events<E>]: ServerSender<FunctionParameters<E[k]>>;
-} & { [k in keyof Events<R>]: ServerReceiver<FunctionParameters<R[k]>> } & {
+	[k in keyof Events<E>]: E[k] extends NetworkRaw<unknown>
+		? RawServerSender<FunctionParameters<E[k]>>
+		: ServerSender<FunctionParameters<E[k]>>;
+} & {
+	[k in keyof Events<R>]: R[k] extends NetworkRaw<unknown>
+		? RawServerReceiver<FunctionParameters<R[k]>>
+		: ServerReceiver<FunctionParameters<R[k]>>;
+} & {
 	[k in keyof EventNamespaces<E>]: ServerHandler<E[k], k extends keyof R ? R[k] : {}>;
 } & {
 	[k in keyof EventNamespaces<R>]: ServerHandler<k extends keyof E ? E[k] : {}, R[k]>;
 };
 
 export type ClientHandler<E, R> = NetworkingObfuscationMarker & {
-	[k in keyof Events<E>]: ClientSender<FunctionParameters<E[k]>>;
-} & { [k in keyof Events<R>]: ClientReceiver<FunctionParameters<R[k]>> } & {
+	[k in keyof Events<E>]: E[k] extends NetworkRaw<unknown>
+		? RawClientSender<FunctionParameters<E[k]>>
+		: ClientSender<FunctionParameters<E[k]>>;
+} & {
+	[k in keyof Events<R>]: R[k] extends NetworkRaw<unknown>
+		? RawClientReceiver<FunctionParameters<R[k]>>
+		: ClientReceiver<FunctionParameters<R[k]>>;
+} & {
 	[k in keyof EventNamespaces<E>]: ClientHandler<E[k], k extends keyof R ? R[k] : {}>;
 } & {
 	[k in keyof EventNamespaces<R>]: ClientHandler<k extends keyof E ? E[k] : {}, R[k]>;
@@ -165,10 +194,13 @@ export type NamespaceMetadata<R, S> = Modding.Emit<{
 
 	/**
 	 * Decoders for each incoming event's argument list, present only with `networking.serialization`
-	 * on. Outgoing lists are packed inline where they are fired; nothing here can encode.
+	 * on, and absent for raw events and for lists that carry nothing. Outgoing lists are packed
+	 * inline where they are fired; nothing here can encode.
 	 */
 	incomingSerializers: IntrinsicObfuscate<{
-		[k in keyof Events<R>]: IntrinsicNetworkDecoder<Parameters<Events<R>[k]>>;
+		[k in keyof Events<R>]: R[k] extends NetworkRaw<unknown>
+			? undefined
+			: IntrinsicNetworkDecoder<Parameters<Events<R>[k]>>;
 	}>;
 
 	namespaceIds: ObfuscateNames<keyof EventNamespaces<R> | keyof EventNamespaces<S>>;

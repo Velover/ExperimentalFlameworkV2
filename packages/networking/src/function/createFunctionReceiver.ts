@@ -86,9 +86,12 @@ export function createFunctionReceiver(options: CreateFunctionReceiverOptions): 
 		});
 	};
 
-	/** A packed callback's successful value is `[payload, blobs?]`; errors always go back as they are. */
+	/**
+	 * A packed callback's successful value is `[payload, blobs?]`, or nothing at all when the result
+	 * type carries nothing (`void`); errors always go back as they are.
+	 */
 	const respond = (player: Player | undefined, id: unknown, processResult: unknown, value?: unknown) => {
-		if (processResult === true && packedResults) {
+		if (processResult === true && packedResults && value !== undefined) {
 			const [payload, blobs] = value as [buffer, Array<defined> | undefined];
 			event.fireEither(player, id, processResult, payload, blobs);
 		} else {

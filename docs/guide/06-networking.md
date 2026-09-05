@@ -195,18 +195,50 @@ alone and sends unpacked values, which the peer drops as malformed. `predict` ta
 and needs no typing; `connect` is untouched.
 
 Sizes are what the types say: a `number` is eight bytes, a `boolean` one, an
-`"idle" | "walk" | "run"` one, an object is its fields in name order with nothing spent on names,
-a `Vector3` is three floats. Widths come from brands: `Serialization.u8`, `i16`, `f32` and friends
-from `@flamework/core` are `number & { __brand: "u8" }`-style types, and any brand with one of
-those literal names counts, so existing branded types keep working. `Serialization.string8` /
-`string16` shorten a string's length prefix from four bytes to one or two.
+`"idle" | "walk" | "run"` one, an object is its fields in declaration order with nothing spent on
+names, a `Vector3` is three floats. Counts and lengths (arrays, sets, maps, strings, buffers) are
+varints: one byte below 128, two below 16384, up to five. Widths come from brands:
+`Serialization.u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `f32`, `f64` and `varint` from
+`@flamework/core` are `number & { __brand: "u8" }`-style types, and any brand with one of those
+literal names counts, so existing branded types keep working. `Serialization.string8` / `string16`
+/ `string32` (and `buffer16` / `buffer32`) give a string or buffer a fixed-width length instead.
 
-Values with no buffer representation travel alongside it: Instances, `unknown`, EnumItems and the
-Roblox datatypes without a layout ride in a blob list. The buffer holds each one's index in that
-list, so a nil where an Instance was expected costs two bytes and shifts nothing; the receiving
-guard rejects it like any other wrong value. The blob list is `nil` when the types have no such
-values and a table (possibly empty) when they do. Functions, Promises, classes and symbols are
-compile errors, with the path through the type in the message.
+A union member costs one tag byte, and the tag is the member's position as written:
+`{ Coins: number } | { Items: string[] }` is 0 for Coins and 1 for Items, `number | string` is 0
+for the number. Object members are told apart by a shared discriminant (`kind: "a"` against
+`kind: "b"`) or by a key only one of them has, so no guard is generated for them. A union with
+more than 255 members travels whole, as a blob.
+
+Values with no buffer representation travel alongside it: Instances, `unknown`, `object`,
+`defined`, class instances, EnumItems and the Roblox datatypes without a layout (anything roblox-ts
+declares, or anything with a `_nominal_` marker) ride in a blob list. The buffer holds each one's
+index in that list as a u32, so a nil where an Instance was expected costs four bytes and shifts
+nothing; the receiving guard rejects it like any other wrong value. The blob list is `nil` when the
+types have no such values and a table (possibly empty) when they do. Collections nest freely: a
+`Map<Instance, Array<Set<string>>>` is a varint count of blob keys, each followed by its array.
+Only what a remote cannot carry at all is a compile error, with the path through the type in the
+message: functions, Promises outside a function's result, symbols, bigint, `never`, and `LuaTuple`
+(several values at runtime, not a table; declare a tuple type such as `[A, B]` instead).
+
+An argument list that carries nothing (`bump(): void`) sends nothing: no buffer is allocated on
+either side, and the remote fires with no arguments at all.
+
+### Opting out per event
+
+```ts
+interface ClientEvents {
+    position: Networking.RawUnreliable<(position: Vector3) => void>;
+    chat: Networking.RawReliable<(text: string) => void>;
+}
+
+interface ServerFunctions {
+    lookup: Networking.Raw<(id: string) => Entry | undefined>;
+}
+```
+
+A raw member's values travel as they are, with the generated guards still running on arrival.
+Use it for events whose payload is already a buffer of your own, or to compare the two on the wire.
+`RawUnreliable` also puts the event on an `UnreliableRemoteEvent`, like `Unreliable`.
 
 A payload that cannot be decoded (truncated, wrong shape, hostile) is dropped and reported through
 `onBadRequest` with `argIndex: -1`; a function reply that cannot be decoded rejects with

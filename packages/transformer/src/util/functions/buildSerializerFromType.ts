@@ -24,30 +24,52 @@ import { isArrayType, isTupleType } from "./isTupleType";
  * missing or invalid value never shifts the others.
  *
  * Wire format, in bytes:
- * - numbers: 8 (f64) unless branded (`u8` .. `f64`); booleans 1
- * - strings and buffers: length prefix (4, or 1 / 2 with the `u8_string` / `u16_string` brands) + bytes
+ * - numbers: 8 (f64) unless branded (`u8` .. `f64`, or `varint` for a LEB128 unsigned integer); booleans 1
+ * - strings and buffers: varint length + bytes (a fixed 1 / 2 / 4 with the `u8_string` .. `u32_buffer` brands)
  * - literal unions: a 1-byte index (2 past 255 members); a single literal costs nothing
  * - optionals: 1 presence byte, then the value when present
- * - arrays, sets, maps and tuple rest elements: u32 count + elements
- * - unions: u8 member index + the member; objects: fields in name order, nothing spent on names
+ * - arrays, sets, maps and tuple rest elements: varint count + elements
+ * - unions: u8 member index + the member, members numbered in the order they were written, so
+ *   `number | string` is 0 for the number and 1 for the string; past 255 members the union is a
+ *   blob. Objects: fields in declaration order, nothing spent on names
  * - Vector3 12, Vector2 8, Vector3int16 6, Vector2int16 4, Color3 12, UDim 8, UDim2 16, NumberRange 8,
- *   Rect 16, BrickColor 2, CFrame 48 (its twelve components), EnumItems 2 (their `Value`), blobs 2
+ *   Rect 16, BrickColor 2, CFrame 48 (its twelve components), EnumItems 2 (their `Value`), blobs 4
  *
- * Named types with a variable size are hoisted into `s_` (size), `w_` (write) and `r_` (read)
- * functions ahead of the statement, once per statement, which is also how recursive types work.
- * Fixed-size types are always inlined.
+ * A varint is 1 byte below 128, 2 below 16384, and so on up to 5; the three helpers that handle it
+ * are hoisted once per file. Named types with a variable size are hoisted into `s_` (size), `w_`
+ * (write) and `r_` (read) functions ahead of the statement, once per statement, which is also how
+ * recursive types work. Fixed-size types are always inlined.
+ *
+ * What goes in the blob list: everything declared by roblox-ts's Roblox types (Instances, EnumItem,
+ * Font, RBXScriptSignal, ...) unless it has a layout above, anything with a `_nominal_` marker,
+ * `unknown`, `any`, `object`, `defined`, empty object types and class instances. Only what a remote
+ * cannot carry at all is a compile error: functions, Promises outside a function result, symbols,
+ * bigint, `never`, template literals and `LuaTuple` (several values at runtime, not a table).
  */
 
 type Width = "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "f32" | "f64";
-type LengthWidth = "u8" | "u16" | "u32";
+/** A length prefix: a varint (`v`) by default, or the fixed width a brand asks for. */
+type LengthWidth = "v" | "u8" | "u16" | "u32";
+type FixedLengthWidth = Exclude<LengthWidth, "v">;
 
 const WIDTH_SIZE: Record<Width, number> = { u8: 1, i8: 1, u16: 2, i16: 2, u32: 4, i32: 4, f32: 4, f64: 8 };
-const LENGTH_MAX: Record<LengthWidth, number> = { u8: 0xff, u16: 0xffff, u32: 0xffffffff };
+const LENGTH_MAX: Record<FixedLengthWidth, number> = { u8: 0xff, u16: 0xffff, u32: 0xffffffff };
+const lengthMin = (width: LengthWidth) => (width === "v" ? 1 : WIDTH_SIZE[width]);
 
 /** `number & { <anything>: "<brand>" }` selects a width; the property name does not matter. */
 const NUMBER_BRANDS = new Set<string>(Object.keys(WIDTH_SIZE));
+const VARINT_BRAND = "varint";
 const STRING_BRANDS: Record<string, LengthWidth> = { u8_string: "u8", u16_string: "u16", u32_string: "u32" };
 const BUFFER_BRANDS: Record<string, LengthWidth> = { u16_buffer: "u16", u32_buffer: "u32" };
+
+/** A blob's 1-based index in the blob list, 0 for nil. */
+const BLOB_SIZE = 4;
+const VARINT_MAX_BYTES = 5;
+/** Counts of zero-size elements cannot be bounded by the bytes left, so they get a plain cap. */
+const ZERO_SIZE_COUNT_MAX = 0xffff;
+
+/** Where roblox-ts declares the Roblox API: everything in there without a layout travels as a blob. */
+const ROBLOX_TYPES = /[\\/]@rbxts[\\/]types[\\/]/;
 
 /** Roblox datatypes with a buffer representation: the fields written, in constructor order. */
 const DATATYPES: Record<string, Array<[Width, string[]]>> = {
@@ -99,62 +121,6 @@ const DATATYPES: Record<string, Array<[Width, string[]]>> = {
 
 const CFRAME_COMPONENTS = 12;
 
-/** Roblox types that travel alongside the buffer. */
-const BLOB_TYPES = new Set([
-	"Instance",
-	"InstanceHandle",
-	"EnumItem",
-	"NumberSequence",
-	"NumberSequenceKeypoint",
-	"ColorSequence",
-	"ColorSequenceKeypoint",
-	"Font",
-	"Ray",
-	"Random",
-	"Axes",
-	"Faces",
-	"DockWidgetPluginGuiInfo",
-	"TweenInfo",
-	"PhysicalProperties",
-	"Region3",
-	"Region3int16",
-	"RaycastParams",
-	"OverlapParams",
-	"RaycastResult",
-	"PathWaypoint",
-	"DateTime",
-	"Content",
-	"SharedTable",
-	"RBXScriptConnection",
-	"RBXScriptSignal",
-]);
-
-/** Blob types whose `typeof` name can tell them apart inside a union. */
-const TYPEOF_NAMES = new Set([
-	"NumberSequence",
-	"NumberSequenceKeypoint",
-	"ColorSequence",
-	"ColorSequenceKeypoint",
-	"Font",
-	"Ray",
-	"Random",
-	"Axes",
-	"Faces",
-	"TweenInfo",
-	"PhysicalProperties",
-	"Region3",
-	"Region3int16",
-	"RaycastParams",
-	"OverlapParams",
-	"RaycastResult",
-	"PathWaypoint",
-	"DateTime",
-	"Content",
-	"SharedTable",
-	"RBXScriptConnection",
-	"RBXScriptSignal",
-]);
-
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
 const MALFORMED = "malformed payload";
 
@@ -164,6 +130,7 @@ const MALFORMED = "malformed payload";
  */
 type Kind =
 	| { kind: "number"; width: Width }
+	| { kind: "varint" }
 	| { kind: "boolean" }
 	| { kind: "string"; length: LengthWidth }
 	| { kind: "buffer"; length: LengthWidth }
@@ -184,6 +151,11 @@ type Kind =
 
 type Shape = ts.Type | Kind;
 type ListKind = Extract<Kind, { kind: "list" }>;
+type UnionKind = Extract<Kind, { kind: "union" }>;
+type ObjectKind = Extract<Kind, { kind: "object" }>;
+
+/** Kinds whose values are Luau tables, which can be indexed without a `typeof` check first. */
+const TABLE_KINDS = new Set<Kind["kind"]>(["object", "map", "array", "set", "list"]);
 
 /** A union member; `type` is set when the member is a real type, which a guard may be built from. */
 interface Alternative {
@@ -221,6 +193,13 @@ interface Hoisted {
 	write: ts.Identifier;
 	read: ts.Identifier;
 	layout: Layout;
+}
+
+/** The per-file varint helpers: `vsize(n)`, `vwrite(buf, o, n) -> o` and `vread(buf, o) -> n, o`. */
+interface Varint {
+	size: ts.Identifier;
+	write: ts.Identifier;
+	read: ts.Identifier;
 }
 
 function isKind(shape: Shape): shape is Kind {
@@ -269,6 +248,37 @@ const raise = (message: string) => f.statement(f.call("error", [f.string(message
 const typeOfIs = (value: ts.Expression, name: string) => equals(f.call("typeOf", [value]), f.string(name));
 const construct = (name: string, args: ts.Expression[]) =>
 	factory.createNewExpression(f.identifier(name), undefined, args);
+
+/** A literal expression as text, for comparing and ordering literals. */
+function printLiteral(expression: ts.Expression): string {
+	if (f.is.string(expression)) return JSON.stringify(expression.text);
+	if (f.is.number(expression)) return expression.text;
+	if (ts.isPrefixUnaryExpression(expression)) return `-${printLiteral(expression.operand)}`;
+	if (expression.kind === ts.SyntaxKind.TrueKeyword) return "true";
+	if (expression.kind === ts.SyntaxKind.FalseKeyword) return "false";
+	return `#${expression.kind}`;
+}
+
+/** A byte total under construction: the constants fold into one literal, the terms keep their order. */
+class Sum {
+	private constant = 0;
+	private readonly terms = new Array<ts.Expression>();
+
+	add(part: ts.Expression | number) {
+		if (typeof part === "number") this.constant += part;
+		else if (f.is.number(part)) this.constant += Number(part.text);
+		else this.terms.push(part);
+	}
+
+	build(): ts.Expression {
+		let total: ts.Expression | undefined;
+		for (const term of this.terms) {
+			total = total ? f.binary(total, ts.SyntaxKind.PlusToken, term) : term;
+		}
+
+		return total ? add(total, this.constant) : num(this.constant);
+	}
+}
 
 /** `left + right` with constants folded. */
 function add(left: ts.Expression, right: ts.Expression | number): ts.Expression {
@@ -335,7 +345,9 @@ export function buildSerializerFromType(
 	file = state.getSourceFile(node),
 ): ts.Expression {
 	const generator = generatorFor(state, node, file);
-	const serializer = generator.buildSerializer(type);
+	// The type argument as written is where the unions in it get their member order from.
+	if (ts.isCallExpression(node)) generator.hint(node.typeArguments?.[0], type);
+	const serializer = generator.buildSerializer(unwrapPromise(state, type));
 	emitHoisted(state, generator);
 
 	// roblox-ts type-checks the transformed file. The generated functions are typed loosely inside
@@ -346,7 +358,9 @@ export function buildSerializerFromType(
 /**
  * Networking: the decoder for an argument list, given its tuple type: `(payload, blobs) => values`.
  * Promise elements are unwrapped, since a function's resolved value is what crosses the network.
- * There is no encoder counterpart as a value; see {@link buildInlineEncoding}.
+ * There is no encoder counterpart as a value; see {@link buildInlineEncoding}. A list that carries
+ * nothing (no elements, or only `void` ones) gets `undefined`: the runtime then passes the (empty)
+ * argument list through, and the call sites send no payload at all.
  */
 export function buildDecoderFromType(
 	state: TransformState,
@@ -357,14 +371,18 @@ export function buildDecoderFromType(
 	const generator = generatorFor(state, node, file);
 	const decoder = generator.buildDecoder(type);
 	emitHoisted(state, generator);
+	if (!decoder) return f.nil();
 	// A block-bodied arrow cannot be followed by `as` without parentheses.
 	return f.asNever(factory.createParenthesizedExpression(decoder));
 }
 
-/** Statements that pack values into `payload` (and `blobs`, when the types have blob slots). */
+/**
+ * Statements that pack values into `payload` (and `blobs`, when the types have blob slots). Both are
+ * absent, with no statements, when the list carries nothing.
+ */
 export interface InlineEncoding {
 	statements: ts.Statement[];
-	payload: ts.Identifier;
+	payload: ts.Identifier | undefined;
 	blobs: ts.Identifier | undefined;
 }
 
@@ -387,18 +405,56 @@ export function buildInlineEncoding(
 	return encoding;
 }
 
-/** Packs one value as a one-element list, which is how a function's result travels. */
-export function buildInlineValueEncoding(
+/**
+ * Networking: the decoder for the result of a function type, carried as a one-element list. The
+ * function type, rather than its return type, so that a union written in the return type gets its
+ * member order from the declaration.
+ */
+export function buildResultDecoderFromType(
 	state: TransformState,
 	node: ts.Node,
-	type: ts.Type,
+	fn: ts.Type,
+	file = state.getSourceFile(node),
+): ts.Expression {
+	const generator = generatorFor(state, node, file);
+	const decoder = generator.buildDecoder(resultOf(state, generator, fn, node));
+	emitHoisted(state, generator);
+	if (!decoder) return f.nil();
+	return f.asNever(factory.createParenthesizedExpression(decoder));
+}
+
+/** Packs a function's result as a one-element list; see {@link buildResultDecoderFromType}. */
+export function buildInlineResultEncoding(
+	state: TransformState,
+	node: ts.Node,
+	fn: ts.Type,
 	value: ts.Expression,
 	file = state.getSourceFile(node),
 ): InlineEncoding {
 	const generator = generatorFor(state, node, file);
-	const encoding = generator.encodeValue(type, value);
+	const encoding = generator.encodeList(resultOf(state, generator, fn, node), [value]);
 	emitHoisted(state, generator);
 	return encoding;
+}
+
+/** The one-element list a function's (resolved) result travels as, with its declared return type node registered. */
+function resultOf(
+	state: TransformState,
+	generator: ReturnType<typeof createSerializerGenerator>,
+	fn: ts.Type,
+	node: ts.Node,
+): ListKind {
+	const signature = fn.getCallSignatures()[0];
+	if (!signature) {
+		Diagnostics.error(
+			node,
+			`Flamework expected a function type here, got '${state.typeChecker.typeToString(fn)}'.`,
+		);
+	}
+
+	const returnType = signature.getReturnType();
+	generator.hint(signature.getDeclaration()?.type, returnType);
+	return { kind: "list", elements: [unwrapPromise(state, returnType)] };
 }
 
 /** Unwraps `Promise<T>` to `T`. */
@@ -434,12 +490,21 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	const guards = new Map<ts.Type, ts.Identifier>();
 	const enumTables = new Map<string, ts.Identifier>();
 	const literalTables = new Map<Kind, { list: ts.Identifier; index: ts.Identifier }>();
+	const discriminants = new Map<UnionKind, string | undefined>();
+	/** Where each union was written, which is the order its members are numbered in. */
+	const unionNodes = new Map<ts.Type, ts.UnionTypeNode>();
+	let varint: Varint | undefined;
 
-	return { buildSerializer, buildDecoder, encodeList, encodeValue, use, takeHoisted };
+	return { buildSerializer, buildDecoder, encodeList, use, hint, takeHoisted };
 
 	/** Points diagnostics at the intrinsic or call site being built. */
 	function use(node: ts.Node) {
 		diagnosticNode = node;
+	}
+
+	/** Registers where a type was written; see {@link registerTypeNode}. */
+	function hint(node: ts.TypeNode | undefined, type: ts.Type | undefined) {
+		registerTypeNode(node, type);
 	}
 
 	/** Hoisted statements added since the last call, in an order that keeps every reference in scope. */
@@ -487,8 +552,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		]);
 	}
 
-	function buildDecoder(type: ts.Type): ts.Expression {
-		const list = listOf(type);
+	function buildDecoder(type: ts.Type | ListKind): ts.Expression | undefined {
+		const list = isKind(type) ? type : listOf(type);
+		if (carriesNothing(list)) return;
+
 		const layout = layoutOf(list);
 		const buf = uid("buf");
 		const blobs = layout.blobs ? uid("blobs") : undefined;
@@ -503,12 +570,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		);
 	}
 
-	function encodeList(type: ts.Type, values: ts.Expression[] | { table: ts.Expression }): InlineEncoding {
-		return encodeElements(listOf(type), values);
+	function encodeList(type: ts.Type | ListKind, values: ts.Expression[] | { table: ts.Expression }): InlineEncoding {
+		return encodeElements(isKind(type) ? type : listOf(type), values);
 	}
 
-	function encodeValue(type: ts.Type, value: ts.Expression): InlineEncoding {
-		return encodeElements({ kind: "list", elements: [unwrapPromise(state, type)] }, [value]);
+	/** A list with nothing to carry: no elements, or only `void` ones. Such a list sends no payload. */
+	function carriesNothing(list: ListKind): boolean {
+		return !list.rest && list.elements.every((element) => describe(element).kind === "nothing");
 	}
 
 	/**
@@ -516,6 +584,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 * optionals fold into the layout: a call with only fixed-size arguments gets a constant buffer size.
 	 */
 	function encodeElements(list: ListKind, values: ts.Expression[] | { table: ts.Expression }): InlineEncoding {
+		if (carriesNothing(list)) return { statements: [], payload: undefined, blobs: undefined };
+
 		const layout = layoutOf(list);
 		const statements = new Array<ts.Statement>();
 		if (!Array.isArray(values)) {
@@ -527,15 +597,17 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const rest = values.slice(list.elements.length);
 		if (rest.length > 0 && !list.rest) fail("more arguments than the list has elements");
 
-		let size: ts.Expression = num(0);
-		list.elements.forEach((element, index) => {
-			size = add(size, emitSize(element, elementValue(index), statements));
-		});
+		// The rest count is known here, so its varint is a constant: literal bytes, no helper call.
+		const countBytes = staticVarint(rest.length);
+
+		const total = new Sum();
+		list.elements.forEach((element, index) => total.add(emitSize(element, elementValue(index), statements)));
 		if (list.rest) {
-			size = add(size, 4);
-			for (const value of rest) size = add(size, emitSize(list.rest, value, statements));
+			total.add(countBytes.length);
+			for (const value of rest) total.add(emitSize(list.rest, value, statements));
 		}
 
+		const size = total.build();
 		const buf = uid("buf");
 		statements.push(constDecl(buf, bufferCall("create", [size])));
 		const blobs = layout.blobs ? uid("blobs") : undefined;
@@ -547,12 +619,26 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const ctx: Ctx = { buf, blobs, cursor: { variable, base: variable, offset: 0 }, out: statements };
 		list.elements.forEach((element, index) => emitWrite(element, elementValue(index), ctx));
 		if (list.rest) {
-			ctx.out.push(f.statement(bufferCall("writeu32", [buf, at(ctx), num(rest.length)])));
-			ctx.cursor.offset += 4;
+			for (const byte of countBytes) {
+				ctx.out.push(f.statement(bufferCall("writeu8", [buf, at(ctx), num(byte)])));
+				ctx.cursor.offset += 1;
+			}
 			for (const value of rest) emitWrite(list.rest, value, ctx);
 		}
 
 		return { statements, payload: buf, blobs };
+	}
+
+	/** The bytes of a varint known at compile time. */
+	function staticVarint(n: number): number[] {
+		const bytes = new Array<number>();
+		while (n >= 128) {
+			bytes.push((n % 128) + 128);
+			n = Math.floor(n / 128);
+		}
+
+		bytes.push(n);
+		return bytes;
 	}
 
 	/** The argument list a tuple type describes, with Promise elements unwrapped. */
@@ -567,6 +653,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		for (let i = 0; i < types.length; i++) {
 			const element = unwrapPromise(state, types[i]);
 			const flags = type.target.elementFlags[i];
+			const declaration = type.target.labeledElementDeclarations?.[i];
+			registerDeclaration(declaration, types[i], (flags & ts.ElementFlags.Rest) !== 0);
 			if (flags & ts.ElementFlags.Rest) {
 				rest = element;
 			} else if (flags & ts.ElementFlags.Optional && !hasUndefined(element)) {
@@ -687,9 +775,9 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		}
 
 		if ((type.flags & ts.TypeFlags.TypeVariable) !== 0) {
+			// An unconstrained type parameter can be anything, which is what a blob carries.
 			const constraint = typeChecker.getBaseConstraintOfType(type);
-			if (!constraint) fail("a type parameter without a constraint");
-			return describe(constraint);
+			return constraint ? describe(constraint) : { kind: "blob" };
 		}
 
 		const literals = getLiteral(type);
@@ -699,11 +787,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				: { kind: "literals", values: literals };
 		}
 
-		if (type.flags & ts.TypeFlags.TemplateLiteral) fail("a template literal type has no finite set of values");
-		if (type.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined)) return { kind: "nothing" };
+		if (type.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined | ts.TypeFlags.Null)) return { kind: "nothing" };
 		if (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return { kind: "blob" };
 		if (type.flags & ts.TypeFlags.Never) fail("`never` has no values");
-		if (type.flags & ts.TypeFlags.String) return { kind: "string", length: "u32" };
+		// A template literal (`${string}-id`) or `Uppercase<T>` is a string with a pattern; the bytes are the same.
+		if (type.flags & (ts.TypeFlags.String | ts.TypeFlags.TemplateLiteral | ts.TypeFlags.StringMapping)) {
+			return { kind: "string", length: "v" };
+		}
 		if (type.flags & ts.TypeFlags.Number) return { kind: "number", width: "f64" };
 		if (type.flags & ts.TypeFlags.BigInt) fail("bigint does not exist in Luau");
 		if (type.flags & ts.TypeFlags.ESSymbolLike) fail("symbols cannot be sent");
@@ -718,8 +808,9 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		if (type.getCallSignatures().length > 0) fail("functions cannot be sent");
 
+		// `object`, and whatever else has no declaration behind it, has no structure to write.
 		const symbol = type.getSymbol();
-		if (!symbol) fail(`an unknown type without a symbol (${typeChecker.typeToString(type)})`);
+		if (!symbol) return { kind: "blob" };
 
 		if (symbol === resolve("Map") || symbol === resolve("ReadonlyMap")) {
 			const [key, value] = typeChecker.getTypeArguments(type as ts.TypeReference);
@@ -735,14 +826,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		if (symbol === resolve("WeakMap") || symbol === resolve("WeakSet")) fail("weak collections cannot be sent");
 		if (symbol === resolve("Promise")) fail("a Promise cannot be sent; send its resolved value");
-		if (symbol === resolve("buffer")) return { kind: "buffer", length: "u32" };
+		if (symbol === resolve("buffer")) return { kind: "buffer", length: "v" };
 
-		if (symbol === resolve(symbol.name)) {
+		const global = symbol === resolve(symbol.name);
+		if (global) {
 			if (symbol.name === "CFrame") return { kind: "cframe" };
 			if (DATATYPES[symbol.name] !== undefined) return { kind: "datatype", name: symbol.name };
-			if (BLOB_TYPES.has(symbol.name)) {
-				return { kind: "blob", typeofName: TYPEOF_NAMES.has(symbol.name) ? symbol.name : undefined };
-			}
 		}
 
 		// `Enum.Material` and friends are interfaces declared under the Enum namespace.
@@ -751,9 +840,27 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			return { kind: "enum", name: symbol.name };
 		}
 
-		if (type.isClass()) fail(`class '${symbol.name}': send a plain object instead`);
+		// The rest of the Roblox API (EnumItem, Font, RBXScriptSignal, ...) and anything nominal has no
+		// structure a plain table could stand in for; a global's name is also what `typeof` reports.
+		if (isRobloxType(symbol)) return { kind: "blob", typeofName: global ? symbol.name : undefined };
+		if (hasNominalMarker(type)) return { kind: "blob" };
+
+		// A class instance is more than its fields; it travels as a reference.
+		if (type.isClass()) return { kind: "blob" };
 
 		return classifyObject(type);
+	}
+
+	/** Declared by roblox-ts's Roblox API types, as opposed to by the project or the TypeScript library. */
+	function isRobloxType(symbol: ts.Symbol | undefined): boolean {
+		const declarations = symbol?.declarations;
+		if (!declarations) return false;
+		return declarations.some((declaration) => ROBLOX_TYPES.test(declaration.getSourceFile().fileName));
+	}
+
+	/** roblox-ts marks its nominal types with a `_nominal_X` property; project code may do the same. */
+	function hasNominalMarker(type: ts.Type): boolean {
+		return type.getProperties().some((property) => property.name.startsWith("_nominal_"));
 	}
 
 	function classifyUnion(type: ts.UnionType): Kind {
@@ -771,22 +878,178 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		let inner: Shape;
 		if (alternatives.length === 0) inner = { kind: "nothing" };
 		else if (alternatives.length === 1) inner = alternatives[0].shape;
-		else inner = { kind: "union", alternatives };
+		// A one-byte tag numbers at most 256 members; past that the value travels whole.
+		else if (alternatives.length > 0xff) inner = { kind: "blob" };
+		else inner = { kind: "union", alternatives: orderAlternatives(type, alternatives) };
 
 		if (isOptional) return { kind: "optional", inner };
 		return describe(inner);
 	}
 
+	/**
+	 * Union members in the order they were written: `{ Coins } | { Items }` numbers Coins 0 and Items
+	 * 1. TypeScript lists them by internal id instead, so the order comes from the union's type node:
+	 * an alias's own declaration, or the first property, parameter or type argument seen declaring
+	 * it. Members that node does not account for (a generic alias instantiation, say) keep
+	 * TypeScript's order after the others; a union with no node at all keeps it throughout.
+	 */
+	function orderAlternatives(type: ts.UnionType, alternatives: Alternative[]): Alternative[] {
+		const node = unionNodes.get(type) ?? aliasNode(type);
+		if (!node) return alternatives;
+
+		const positions = new Map<Alternative, number>();
+		for (const member of node.types) {
+			const memberType = typeChecker.getTypeFromTypeNode(member);
+			for (const constituent of memberType.isUnion() ? memberType.types : [memberType]) {
+				const alternative = alternativeFor(alternatives, constituent);
+				if (alternative && !positions.has(alternative)) positions.set(alternative, positions.size);
+			}
+		}
+
+		const rank = (alternative: Alternative) =>
+			positions.get(alternative) ?? positions.size + alternatives.indexOf(alternative);
+		return [...alternatives].sort((a, b) => rank(a) - rank(b));
+	}
+
+	function aliasNode(type: ts.UnionType): ts.UnionTypeNode | undefined {
+		const declaration = type.aliasSymbol?.declarations?.[0];
+		if (declaration && ts.isTypeAliasDeclaration(declaration) && ts.isUnionTypeNode(declaration.type)) {
+			return declaration.type;
+		}
+	}
+
+	/** The alternative a flattened union constituent belongs to: its own, or the group it was folded into. */
+	function alternativeFor(alternatives: Alternative[], constituent: ts.Type): Alternative | undefined {
+		const own = alternatives.find((alternative) => alternative.type === constituent);
+		if (own) return own;
+
+		if (constituent.flags & ts.TypeFlags.BooleanLiteral) {
+			const boolean = alternatives.find((alternative) => alternative.type === typeChecker.getBooleanType());
+			if (boolean) return boolean;
+		}
+
+		const enumName = robloxEnumOf(constituent);
+		if (enumName !== undefined) {
+			const whole = alternatives.find(
+				(alternative) =>
+					isKind(alternative.shape) &&
+					alternative.shape.kind === "enum" &&
+					alternative.shape.name === enumName,
+			);
+			if (whole) return whole;
+		}
+
+		if (enumName !== undefined || getLiteral(constituent, true) !== undefined) {
+			return alternatives.find(
+				(alternative) =>
+					isKind(alternative.shape) &&
+					(alternative.shape.kind === "constant" || alternative.shape.kind === "literals"),
+			);
+		}
+	}
+
+	/** `Material` for `Enum.Material.Plastic`. */
+	function robloxEnumOf(type: ts.Type): string | undefined {
+		const symbol = type.getSymbol();
+		const enumNamespace = resolve("Enum");
+		const group = symbol?.parent;
+		if (group?.parent && enumNamespace && typeChecker.getMergedSymbol(group.parent) === enumNamespace) {
+			return group.name;
+		}
+	}
+
+	/**
+	 * Remembers where a type was written, walking into the node (array elements, type arguments, tuple
+	 * elements, inline object members) so that anonymous unions inside get their order from the source
+	 * too. The first place a type is seen wins; an aliased union is looked up on its own declaration.
+	 */
+	function registerTypeNode(node: ts.TypeNode | undefined, type: ts.Type | undefined): void {
+		if (!node || !type) return;
+		if (ts.isParenthesizedTypeNode(node)) return registerTypeNode(node.type, type);
+
+		if (ts.isUnionTypeNode(node)) {
+			if (!unionNodes.has(type)) unionNodes.set(type, node);
+			return;
+		}
+
+		if (ts.isArrayTypeNode(node)) {
+			const element = typeChecker.isArrayType(type)
+				? typeChecker.getTypeArguments(type as ts.TypeReference)[0]
+				: undefined;
+			return registerTypeNode(node.elementType, element);
+		}
+
+		if (ts.isTypeReferenceNode(node) && node.typeArguments) {
+			const isReference =
+				(type.flags & ts.TypeFlags.Object) !== 0 &&
+				((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0;
+			if (!isReference) return;
+
+			const args = typeChecker.getTypeArguments(type as ts.TypeReference);
+			node.typeArguments.forEach((argument, index) => registerTypeNode(argument, args[index]));
+			return;
+		}
+
+		if (ts.isTupleTypeNode(node) && isTupleType(state, type)) {
+			const args = typeChecker.getTypeArguments(type);
+			node.elements.forEach((element, index) => {
+				if (ts.isNamedTupleMember(element))
+					return registerElement(element.type, args[index], element.dotDotDotToken !== undefined);
+				if (ts.isRestTypeNode(element)) return registerElement(element.type, args[index], true);
+				if (ts.isOptionalTypeNode(element)) return registerTypeNode(element.type, args[index]);
+				registerTypeNode(element, args[index]);
+			});
+			return;
+		}
+
+		if (ts.isTypeLiteralNode(node)) {
+			for (const member of node.members) {
+				if (!ts.isPropertySignature(member) || !member.type) continue;
+				const name =
+					ts.isIdentifier(member.name) || ts.isStringLiteral(member.name) ? member.name.text : undefined;
+				if (name !== undefined) registerTypeNode(member.type, typeChecker.getTypeOfPropertyOfType(type, name));
+			}
+		}
+	}
+
+	/** A tuple element or parameter: a rest element's node is the array, its type the element. */
+	function registerElement(node: ts.TypeNode, type: ts.Type | undefined, rest: boolean) {
+		if (!rest) return registerTypeNode(node, type);
+		if (ts.isArrayTypeNode(node)) return registerTypeNode(node.elementType, type);
+		if (ts.isTypeReferenceNode(node) && node.typeArguments?.length === 1) {
+			return registerTypeNode(node.typeArguments[0], type);
+		}
+	}
+
+	/** A property's, parameter's or tuple member's declared type node is where its unions were written. */
+	function registerDeclaration(declaration: ts.Declaration | undefined, type: ts.Type, rest = false) {
+		if (!declaration) return;
+		if (
+			ts.isPropertySignature(declaration) ||
+			ts.isPropertyDeclaration(declaration) ||
+			ts.isParameter(declaration) ||
+			ts.isNamedTupleMember(declaration)
+		) {
+			if (declaration.type) registerElement(declaration.type, type, rest);
+		}
+	}
+
 	function classifyIntersection(type: ts.IntersectionType): Kind {
+		// `LuaTuple<T>` is `T & { LUA_TUPLE: never }`: several values at runtime, never a table.
+		if (type.types.some((member) => member.getProperty("LUA_TUPLE") !== undefined)) {
+			fail("a LuaTuple is several values at runtime, not a table; declare a tuple type such as `[A, B]` instead");
+		}
+
 		const brand = findBrand(type);
 		const disjoint = type.types.find((member) => (member.flags & TYPE_FLAG_DISJOINT_DOMAINS) !== 0);
 		if (disjoint) {
 			if (disjoint.flags & ts.TypeFlags.Number) {
+				if (brand === VARINT_BRAND) return { kind: "varint" };
 				return { kind: "number", width: brand && NUMBER_BRANDS.has(brand) ? (brand as Width) : "f64" };
 			}
 
 			if (disjoint.flags & ts.TypeFlags.String) {
-				return { kind: "string", length: (brand && STRING_BRANDS[brand]) || "u32" };
+				return { kind: "string", length: (brand && STRING_BRANDS[brand]) || "v" };
 			}
 
 			return describe(disjoint);
@@ -794,7 +1057,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		const bufferSymbol = resolve("buffer");
 		if (type.types.some((member) => member.getSymbol() === bufferSymbol)) {
-			return { kind: "buffer", length: (brand && BUFFER_BRANDS[brand]) || "u32" };
+			return { kind: "buffer", length: (brand && BUFFER_BRANDS[brand]) || "v" };
 		}
 
 		const datatype = type.types.find((member) => {
@@ -807,6 +1070,9 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		});
 		if (datatype) return describe(datatype);
 		if (type.types.some((member) => isInstanceType(member))) return { kind: "blob", typeofName: "Instance" };
+		if (type.types.some((member) => isRobloxType(member.getSymbol())) || hasNominalMarker(type)) {
+			return { kind: "blob" };
+		}
 
 		return classifyObject(type);
 	}
@@ -820,7 +1086,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				const propertyType = typeChecker.getTypeOfPropertyOfType(member, property.name);
 				if (propertyType?.isStringLiteral()) {
 					const brand = propertyType.value;
-					if (NUMBER_BRANDS.has(brand) || brand in STRING_BRANDS || brand in BUFFER_BRANDS) return brand;
+					if (NUMBER_BRANDS.has(brand) || brand === VARINT_BRAND) return brand;
+					if (brand in STRING_BRANDS || brand in BUFFER_BRANDS) return brand;
 				}
 			}
 		}
@@ -839,15 +1106,16 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		if (properties.length === 0 && indexInfos.length === 0) return { kind: "blob" };
 
 		if (indexInfos.length > 0) {
-			if (properties.length > 0) fail("an object with both named properties and an index signature");
-			if (indexInfos.length > 1) fail("an object with more than one index signature");
+			// Named properties next to an index signature, or several signatures, have no single layout.
+			if (properties.length > 0 || indexInfos.length > 1) return { kind: "blob" };
 			return { kind: "map", key: indexInfos[0].keyType, value: indexInfos[0].type };
 		}
 
-		const sorted = [...properties].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-		const fields = sorted.map((property) => {
+		// Declaration order, which every compilation of the same source shares.
+		const fields = properties.map((property) => {
 			const propertyType = typeChecker.getTypeOfPropertyOfType(type, property.name)!;
 			if (propertyType.getCallSignatures().length > 0) fail(`property '${property.name}' is a function`);
+			registerDeclaration(property.valueDeclaration, propertyType);
 
 			const optional = (property.flags & ts.SymbolFlags.Optional) !== 0 && !hasUndefined(propertyType);
 			const shape: Shape = optional ? { kind: "optional", inner: propertyType } : propertyType;
@@ -901,18 +1169,20 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		switch (kind.kind) {
 			case "number":
 				return fixed(WIDTH_SIZE[kind.width]);
+			case "varint":
+				return { size: undefined, min: 1, blobs: false };
 			case "boolean":
 				return fixed(1);
 			case "string":
 			case "buffer":
-				return { size: undefined, min: WIDTH_SIZE[kind.length], blobs: false };
+				return { size: undefined, min: lengthMin(kind.length), blobs: false };
 			case "constant":
 			case "nothing":
 				return fixed(0);
 			case "literals":
 				return fixed(kind.values.length > 0xff ? 2 : 1);
 			case "blob":
-				return fixed(2, true);
+				return fixed(BLOB_SIZE, true);
 			case "datatype":
 				return fixed(DATATYPES[kind.name].reduce((total, [width]) => total + WIDTH_SIZE[width], 0));
 			case "cframe":
@@ -926,18 +1196,18 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "array":
 			case "set": {
 				const element = layoutOf(kind.element);
-				return { size: undefined, min: 4, blobs: element.blobs };
+				return { size: undefined, min: 1, blobs: element.blobs };
 			}
 			case "map": {
 				const key = layoutOf(kind.key);
 				const value = layoutOf(kind.value);
-				return { size: undefined, min: 4, blobs: key.blobs || value.blobs };
+				return { size: undefined, min: 1, blobs: key.blobs || value.blobs };
 			}
 			case "list": {
 				const layout = sumLayouts(kind.elements.map((element) => layoutOf(element)));
 				if (kind.rest) {
 					const rest = layoutOf(kind.rest);
-					return { size: undefined, min: layout.min + 4, blobs: layout.blobs || rest.blobs };
+					return { size: undefined, min: layout.min + 1, blobs: layout.blobs || rest.blobs };
 				}
 
 				return layout;
@@ -1056,7 +1326,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const symbolName = type.aliasSymbol?.name ?? type.symbol?.name;
 		if (symbolName === undefined || symbolName === "__type" || symbolName === "__object") return;
 		if (symbolName === "Array" || symbolName === "ReadonlyArray") return;
-		if (DATATYPES[symbolName] !== undefined || symbolName === "CFrame" || BLOB_TYPES.has(symbolName)) return;
+		if (DATATYPES[symbolName] !== undefined || symbolName === "CFrame") return;
 
 		return symbolName.replace(/\W/g, "_");
 	}
@@ -1109,6 +1379,243 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return entry;
 	}
 
+	// --- varints -------------------------------------------------------------------------------------
+
+	/**
+	 * The LEB128 helpers, hoisted once per file: seven bits per byte, low bits first, the high bit set
+	 * on every byte but the last. Reading gives up after five bytes, so a hostile buffer cannot loop.
+	 */
+	function varintHelpers(): Varint {
+		if (varint) return varint;
+		varint = { size: uid("vsize"), write: uid("vwrite"), read: uid("vread") };
+
+		const below = (value: ts.Expression, limit: number) => f.binary(value, ts.SyntaxKind.LessThanToken, num(limit));
+		const parameter = (id: ts.Identifier, type: ts.TypeNode) => f.parameterDeclaration(id, type);
+
+		// vsize: `n < 128 ? 1 : n < 16384 ? 2 : ... : 5`
+		const sizeOf = uid("n");
+		let size: ts.Expression = num(VARINT_MAX_BYTES);
+		for (let bytes = VARINT_MAX_BYTES - 1; bytes >= 1; bytes--) {
+			size = conditional(below(sizeOf, 128 ** bytes), num(bytes), size);
+		}
+		tables.push(constDecl(varint.size, f.arrowFunction(size, [parameter(sizeOf, T.number())])));
+
+		// vwrite: continuation bytes while 128 or more remain, then the last byte; returns the new position.
+		const wbuf = uid("buf");
+		const wo = uid("o");
+		const wn = uid("n");
+		tables.push(
+			constDecl(
+				varint.write,
+				f.arrowFunction(
+					f.block([
+						factory.createWhileStatement(
+							f.binary(wn, ts.SyntaxKind.GreaterThanEqualsToken, num(128)),
+							f.block([
+								f.statement(
+									bufferCall("writeu8", [
+										wbuf,
+										wo,
+										f.binary(
+											f.binary(wn, ts.SyntaxKind.PercentToken, num(128)),
+											ts.SyntaxKind.PlusToken,
+											num(128),
+										),
+									]),
+								),
+								addAssign(wo, num(1)),
+								assign(
+									wn,
+									f.call(prop("math", "floor"), [f.binary(wn, ts.SyntaxKind.SlashToken, num(128))]),
+								),
+							]),
+						),
+						f.statement(bufferCall("writeu8", [wbuf, wo, wn])),
+						f.returnStatement(add(wo, 1)),
+					]),
+					[parameter(wbuf, T.buffer()), parameter(wo, T.number()), parameter(wn, T.number())],
+				),
+			),
+		);
+
+		// vread: `n += (b % 128) * scale` per byte until one is below 128; returns the value and position.
+		const rbuf = uid("buf");
+		const ro = uid("o");
+		const rn = uid("n");
+		const byte = uid("b");
+		const scale = uid("scale");
+		tables.push(
+			constDecl(
+				varint.read,
+				f.arrowFunction(
+					f.block([
+						letDecl(rn, num(0)),
+						letDecl(scale, num(1)),
+						factory.createWhileStatement(
+							f.bool(true),
+							f.block([
+								constDecl(byte, bufferCall("readu8", [rbuf, ro])),
+								addAssign(ro, num(1)),
+								addAssign(
+									rn,
+									f.binary(
+										f.binary(byte, ts.SyntaxKind.PercentToken, num(128)),
+										ts.SyntaxKind.AsteriskToken,
+										scale,
+									),
+								),
+								ifStatement(below(byte, 128), [f.returnStatement(f.call("$tuple", [rn, ro]))]),
+								f.statement(f.binary(scale, ts.SyntaxKind.AsteriskEqualsToken, num(128))),
+								ifStatement(
+									f.binary(scale, ts.SyntaxKind.GreaterThanToken, num(128 ** (VARINT_MAX_BYTES - 1))),
+									[raise(MALFORMED)],
+								),
+							]),
+						),
+					]),
+					[parameter(rbuf, T.buffer()), parameter(ro, T.number())],
+				),
+			),
+		);
+
+		return varint;
+	}
+
+	/** `o = vwrite(buf, o, n)`: the cursor re-bases on the position variable. */
+	function writeVarint(ctx: Ctx, n: ts.Expression) {
+		const variable = ctx.cursor.variable;
+		if (!variable) throw new Error("Flamework: a varint inside a fixed layout");
+
+		ctx.out.push(assign(variable, f.call(varintHelpers().write, [ctx.buf, at(ctx), n])));
+		ctx.cursor.base = variable;
+		ctx.cursor.offset = 0;
+	}
+
+	/** `const [n, o2] = vread(buf, o)`: the cursor re-bases on the position that came back. */
+	function readVarint(ctx: Ctx, hint = "n"): ts.Identifier {
+		if (!ctx.cursor.variable) throw new Error("Flamework: a varint inside a fixed layout");
+
+		const n = uid(hint);
+		const next = uid("o");
+		ctx.out.push(constDecl(f.arrayBindingDeclaration([n, next]), f.call(varintHelpers().read, [ctx.buf, at(ctx)])));
+		ctx.cursor.base = next;
+		ctx.cursor.offset = 0;
+		return n;
+	}
+
+	/** `<prefix> + length`: a constant prefix for a branded width, `vsize(length)` otherwise. */
+	function sizeWithLength(out: ts.Statement[], width: LengthWidth, length: ts.Expression): ts.Expression {
+		if (width !== "v") return add(length, WIDTH_SIZE[width]);
+
+		const bound = bind(out, length, "length");
+		return add(f.call(varintHelpers().size, [bound]), bound);
+	}
+
+	/** `vsize(n) + n * size` for a run of `n` fixed-size elements. */
+	function countedSize(prefix: ts.Expression, count: ts.Expression, size: number): ts.Expression {
+		if (size === 0) return prefix;
+		return add(prefix, f.binary(count, ts.SyntaxKind.AsteriskToken, num(size)));
+	}
+
+	/**
+	 * Sets and maps have no cheap length, so the elements are counted in the pass that measures them:
+	 * `let size = 0, n = 0; for (...) { n += 1; size += <element>; } size += vsize(n)`.
+	 */
+	function countedInPass(
+		out: ts.Statement[],
+		collection: ts.Expression,
+		binding: ts.BindingName,
+		element: (body: ts.Statement[]) => ts.Expression,
+	): ts.Identifier {
+		const total = uid("size");
+		const count = uid("n");
+		out.push(letDecl(total, num(0)), letDecl(count, num(0)));
+		const body = new Array<ts.Statement>();
+		body.push(addAssign(count, num(1)));
+		body.push(addAssign(total, element(body)));
+		out.push(forOf(binding, collection, body));
+		out.push(addAssign(total, f.call(varintHelpers().size, [count])));
+		return total;
+	}
+
+	// --- unions --------------------------------------------------------------------------------------
+
+	/**
+	 * The order the members are tested in when encoding: every member with a test of its own first,
+	 * a blob that matches anything last. The tag written is still the member's own index.
+	 */
+	function evaluationOrder(union: UnionKind): number[] {
+		const catchAll = (index: number) => {
+			const kind = describe(union.alternatives[index].shape);
+			return kind.kind === "blob" && kind.typeofName === undefined ? 1 : 0;
+		};
+
+		return union.alternatives.map((_, index) => index).sort((a, b) => catchAll(a) - catchAll(b));
+	}
+
+	/**
+	 * A cheap test for an object member of a union: its discriminant compared (`v.kind == "a"`), or
+	 * else the presence of a required key no other object member has (`v.Coins ~= nil`). Neither
+	 * leaves a guard in the output; a member with no such test falls back to one.
+	 */
+	function objectTest(union: UnionKind, kind: ObjectKind, record: ts.Expression): ts.Expression | undefined {
+		const discriminant = discriminantOf(union);
+		const field = discriminant !== undefined ? kind.fields.find((field) => field.name === discriminant) : undefined;
+		if (field) {
+			const constant = describe(field.shape) as Extract<Kind, { kind: "constant" }>;
+			return equals(fieldAccess(record, field.name), constant.value);
+		}
+
+		// A collection among the members could hold any key, so presence is only trusted when the
+		// other members are objects or not tables at all.
+		const others = union.alternatives.map((other) => describe(other.shape)).filter((other) => other !== kind);
+		if (others.some((other) => TABLE_KINDS.has(other.kind) && other.kind !== "object")) return;
+
+		const unique = kind.fields.find((candidate) => {
+			const shape = describe(candidate.shape);
+			if (shape.kind === "optional" || shape.kind === "nothing") return false;
+			return others.every(
+				(other) => other.kind !== "object" || !other.fields.some((field) => field.name === candidate.name),
+			);
+		});
+		if (unique) return notNil(fieldAccess(record, unique.name));
+	}
+
+	/**
+	 * A property every object member has with a distinct literal type (`kind: "circle"` against
+	 * `kind: "rect"`). Comparing it is cheaper than a guard and leaves no guard in the output.
+	 */
+	function discriminantOf(union: UnionKind): string | undefined {
+		if (discriminants.has(union)) return discriminants.get(union);
+
+		const objects = union.alternatives
+			.map((alternative) => describe(alternative.shape))
+			.filter((kind): kind is ObjectKind => kind.kind === "object");
+
+		let discriminant: string | undefined;
+		for (const field of objects[0]?.fields ?? []) {
+			const seen = new Set<string>();
+			const distinct = objects.every((object) => {
+				const candidate = object.fields.find((other) => other.name === field.name);
+				const kind = candidate && describe(candidate.shape);
+				if (!kind || kind.kind !== "constant") return false;
+
+				const text = printLiteral(kind.value);
+				if (seen.has(text)) return false;
+				seen.add(text);
+				return true;
+			});
+
+			if (distinct) {
+				discriminant = field.name;
+				break;
+			}
+		}
+
+		discriminants.set(union, discriminant);
+		return discriminant;
+	}
+
 	// --- cursor --------------------------------------------------------------------------------------
 
 	function at(ctx: Ctx, extra = 0): ts.Expression {
@@ -1132,10 +1639,19 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		cursor.offset = 0;
 	}
 
-	/** Moves the position by a runtime amount. */
+	/** Moves the position by a runtime amount, folding the pending constant into the same statement. */
 	function advanceBy(ctx: Ctx, amount: ts.Expression) {
-		sync(ctx);
-		ctx.out.push(addAssign(ctx.cursor.variable!, amount));
+		const cursor = ctx.cursor;
+		if (!cursor.variable) throw new Error("Flamework: a variable-size write inside a fixed layout");
+
+		if (cursor.base === cursor.variable) {
+			ctx.out.push(addAssign(cursor.variable, add(amount, cursor.offset)));
+		} else {
+			ctx.out.push(assign(cursor.variable, add(at(ctx), amount)));
+		}
+
+		cursor.base = cursor.variable;
+		cursor.offset = 0;
 	}
 
 	/**
@@ -1202,9 +1718,11 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const kind = describe(shape);
 		switch (kind.kind) {
 			case "string":
-				return add(f.call(prop(f.as(value, T.string()), "size"), []), WIDTH_SIZE[kind.length]);
+				return sizeWithLength(out, kind.length, f.call(prop(f.as(value, T.string()), "size"), []));
 			case "buffer":
-				return add(bufferCall("len", [f.as(value, T.buffer())]), WIDTH_SIZE[kind.length]);
+				return sizeWithLength(out, kind.length, bufferCall("len", [f.as(value, T.buffer())]));
+			case "varint":
+				return f.call(varintHelpers().size, [f.as(value, T.number())]);
 			case "optional": {
 				if (isNilLiteral(value)) return num(1);
 				const inner = layoutOf(kind.inner);
@@ -1222,18 +1740,14 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			}
 			case "array": {
 				const array = bind(out, f.as(value, T.array()), "array");
+				const count = bind(out, f.call(prop(array, "size"), []), "n");
+				const prefix = f.call(varintHelpers().size, [count]);
 				const element = layoutOf(kind.element);
-				if (element.size !== undefined) {
-					if (element.size === 0) return num(4);
-					return add(
-						f.binary(f.call(prop(array, "size"), []), ts.SyntaxKind.AsteriskToken, num(element.size)),
-						4,
-					);
-				}
+				if (element.size !== undefined) return countedSize(prefix, count, element.size);
 
 				const total = uid("size");
 				const item = uid("item");
-				out.push(letDecl(total, num(4)));
+				out.push(letDecl(total, prefix));
 				const body = new Array<ts.Statement>();
 				body.push(addAssign(total, emitSize(kind.element, item, body)));
 				out.push(forOf(item, array, body));
@@ -1241,45 +1755,40 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			}
 			case "set": {
 				const set = bind(out, f.as(value, T.set()), "set");
-				const total = uid("size");
+				const element = layoutOf(kind.element);
 				const item = uid("item");
-				out.push(letDecl(total, num(4)));
-				const body = new Array<ts.Statement>();
-				body.push(addAssign(total, emitSize(kind.element, item, body)));
-				out.push(forOf(item, set, body));
-				return total;
+				return countedInPass(out, set, item, (body) =>
+					element.size !== undefined ? num(element.size) : emitSize(kind.element, item, body),
+				);
 			}
 			case "map": {
 				const map = bind(out, f.as(value, T.map()), "map");
-				const total = uid("size");
 				const key = uid("key");
 				const entry = uid("entry");
-				out.push(letDecl(total, num(4)));
-				const body = new Array<ts.Statement>();
-				const keySize = emitSize(kind.key, key, body);
-				const valueSize = emitSize(kind.value, entry, body);
-				body.push(addAssign(total, add(keySize, valueSize)));
-				out.push(forOf(f.arrayBindingDeclaration([key, entry]), map, body));
-				return total;
+				return countedInPass(out, map, f.arrayBindingDeclaration([key, entry]), (body) =>
+					add(emitSize(kind.key, key, body), emitSize(kind.value, entry, body)),
+				);
 			}
 			case "list": {
 				const list = bind(out, f.as(value, T.array()), "list");
-				let total: ts.Expression = num(0);
+				const total = new Sum();
 				kind.elements.forEach((element, index) => {
-					total = add(total, emitSize(element, f.elementAccessExpression(list, num(index)), out));
+					total.add(emitSize(element, f.elementAccessExpression(list, num(index)), out));
 				});
 
 				if (kind.rest) {
 					const rest = layoutOf(kind.rest);
 					const count = restCount(out, list, kind.elements.length);
+					const prefix = f.call(varintHelpers().size, [count]);
 					if (rest.size !== undefined) {
-						if (rest.size === 0) return add(total, 4);
-						return add(add(total, 4), f.binary(count, ts.SyntaxKind.AsteriskToken, num(rest.size)));
+						total.add(countedSize(prefix, count, rest.size));
+						return total.build();
 					}
 
 					const sum = uid("size");
 					const index = uid("i");
-					out.push(letDecl(sum, add(total, 4)));
+					total.add(prefix);
+					out.push(letDecl(sum, total.build()));
 					const body = new Array<ts.Statement>();
 					const element = f.elementAccessExpression(list, f.binary(index, ts.SyntaxKind.MinusToken, num(1)));
 					body.push(addAssign(sum, emitSize(kind.rest, element, body)));
@@ -1289,16 +1798,16 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 					return sum;
 				}
 
-				return total;
+				return total.build();
 			}
 			case "object": {
 				const object = bind(out, f.as(value, T.record()), "object");
-				let total: ts.Expression = num(0);
+				const total = new Sum();
 				for (const field of kind.fields) {
-					total = add(total, emitSize(field.shape, fieldAccess(object, field.name), out));
+					total.add(emitSize(field.shape, fieldAccess(object, field.name), out));
 				}
 
-				return total;
+				return total.build();
 			}
 			case "union": {
 				const v = bind(out, value, "v");
@@ -1306,14 +1815,14 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				out.push(letDecl(total, num(1)));
 
 				let chain: ts.Statement | undefined;
-				for (let i = kind.alternatives.length - 1; i >= 0; i--) {
+				for (const i of evaluationOrder(kind).reverse()) {
 					const alternative = kind.alternatives[i];
 					const layout = layoutOf(alternative.shape);
 					const body = new Array<ts.Statement>();
 					const size = layout.size !== undefined ? num(layout.size) : emitSize(alternative.shape, v, body);
 					if (!(f.is.number(size) && size.text === "0")) body.push(addAssign(total, size));
 					if (body.length === 0 && chain === undefined) continue;
-					chain = ifStatement(discriminate(alternative, v), body, chain);
+					chain = ifStatement(discriminate(kind, i, v), body, chain);
 				}
 
 				if (chain) out.push(chain);
@@ -1346,6 +1855,9 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 					f.statement(bufferCall(`write${kind.width}`, [ctx.buf, at(ctx), f.as(value, T.number())])),
 				);
 				ctx.cursor.offset += WIDTH_SIZE[kind.width];
+				return;
+			case "varint":
+				writeVarint(ctx, f.as(value, T.number()));
 				return;
 			case "boolean":
 				ctx.out.push(
@@ -1395,12 +1907,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 						notNil(blob),
 						[
 							f.statement(f.call(prop(blobs, "push"), [f.as(blob, T.defined())])),
-							f.statement(bufferCall("writeu16", [ctx.buf, at(ctx), f.call(prop(blobs, "size"), [])])),
+							f.statement(bufferCall("writeu32", [ctx.buf, at(ctx), f.call(prop(blobs, "size"), [])])),
 						],
-						[f.statement(bufferCall("writeu16", [ctx.buf, at(ctx), num(0)]))],
+						[f.statement(bufferCall("writeu32", [ctx.buf, at(ctx), num(0)]))],
 					),
 				);
-				ctx.cursor.offset += 2;
+				ctx.cursor.offset += BLOB_SIZE;
 				return;
 			}
 			case "datatype": {
@@ -1453,8 +1965,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			}
 			case "array": {
 				const array = bind(ctx.out, f.as(value, T.array()), "array");
-				ctx.out.push(f.statement(bufferCall("writeu32", [ctx.buf, at(ctx), f.call(prop(array, "size"), [])])));
-				ctx.cursor.offset += 4;
+				writeVarint(ctx, f.call(prop(array, "size"), []));
 				const item = uid("item");
 				ctx.out.push(
 					forOf(
@@ -1493,8 +2004,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 				if (kind.rest) {
 					const count = restCount(ctx.out, list, kind.elements.length);
-					ctx.out.push(f.statement(bufferCall("writeu32", [ctx.buf, at(ctx), count])));
-					ctx.cursor.offset += 4;
+					writeVarint(ctx, count);
 					const index = uid("i");
 					const element = f.elementAccessExpression(list, f.binary(index, ts.SyntaxKind.MinusToken, num(1)));
 					ctx.out.push(
@@ -1519,14 +2029,14 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				const layout = layoutOf(kind);
 				const start = ctx.cursor.offset;
 				let chain: ts.Statement = f.block([raise("value matches none of the union's members")]);
-				for (let i = kind.alternatives.length - 1; i >= 0; i--) {
+				for (const i of evaluationOrder(kind).reverse()) {
 					const alternative = kind.alternatives[i];
 					const body = branch(ctx, (child) => {
 						child.out.push(f.statement(bufferCall("writeu8", [child.buf, at(child), num(i)])));
 						child.cursor.offset += 1;
 						emitWrite(alternative.shape, v, child);
 					});
-					chain = ifStatement(discriminate(alternative, v), body, chain);
+					chain = ifStatement(discriminate(kind, i, v), body, chain);
 				}
 
 				ctx.out.push(chain);
@@ -1544,8 +2054,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return count;
 	}
 
-	/** The length prefix of a string or buffer, refusing one the prefix cannot hold. */
+	/** The length prefix of a string or buffer: a varint, or a fixed width refusing what it cannot hold. */
 	function writeLength(ctx: Ctx, width: LengthWidth, length: ts.Expression, what: string) {
+		if (width === "v") return writeVarint(ctx, length);
+
 		if (width !== "u32") {
 			ctx.out.push(
 				ifStatement(f.binary(length, ts.SyntaxKind.GreaterThanToken, num(LENGTH_MAX[width])), [
@@ -1558,37 +2070,42 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		ctx.cursor.offset += WIDTH_SIZE[width];
 	}
 
-	/** Sets and maps have no cheap length: the count is written into a slot reserved ahead of the elements. */
+	/** Sets and maps have no cheap length: they are counted (a loop, in roblox-ts) before the elements. */
 	function writeCounted(
 		ctx: Ctx,
 		collection: ts.Expression,
 		body: (item: ts.Identifier, child: Ctx) => void,
 		binding?: ts.BindingName,
 	) {
-		const slot = uid("countAt");
-		ctx.out.push(constDecl(slot, at(ctx)));
-		ctx.cursor.offset += 4;
-		const count = uid("count");
-		ctx.out.push(letDecl(count, num(0)));
+		const count = bind(ctx.out, f.call(prop(collection, "size"), []), "n");
+		writeVarint(ctx, count);
 		const item = uid("item");
 		ctx.out.push(
 			forOf(
 				binding ?? item,
 				collection,
-				branch(ctx, (child) => {
-					child.out.push(addAssign(count, num(1)));
-					body(item, child);
-				}),
+				branch(ctx, (child) => body(item, child)),
 			),
 		);
-		ctx.out.push(f.statement(bufferCall("writeu32", [ctx.buf, slot, count])));
 	}
 
-	/** The test that tells a union member apart from the others, given a value. */
-	function discriminate(alternative: Alternative, value: ts.Expression): ts.Expression {
+	/** The test that tells member `index` of `union` apart from the others, given a value. */
+	function discriminate(union: UnionKind, index: number, value: ts.Expression): ts.Expression {
+		const alternative = union.alternatives[index];
 		const kind = describe(alternative.shape);
+
+		if (kind.kind === "object") {
+			const test = objectTest(union, kind, f.as(value, T.record()));
+			if (test) {
+				// Indexing is only safe once the value is known to be a table.
+				const tables = union.alternatives.every((other) => TABLE_KINDS.has(describe(other.shape).kind));
+				return tables ? test : f.binary(typeOfIs(value, "table"), ts.SyntaxKind.AmpersandAmpersandToken, test);
+			}
+		}
+
 		switch (kind.kind) {
 			case "number":
+			case "varint":
 				return typeOfIs(value, "number");
 			case "string":
 				return typeOfIs(value, "string");
@@ -1649,6 +2166,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				ctx.cursor.offset += WIDTH_SIZE[kind.width];
 				return read;
 			}
+			case "varint":
+				return readVarint(ctx);
 			case "boolean": {
 				const read = f.binary(
 					bufferCall("readu8", [ctx.buf, at(ctx)]),
@@ -1685,8 +2204,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				return value;
 			}
 			case "blob": {
-				const index = bufferCall("readu16", [ctx.buf, at(ctx)]);
-				ctx.cursor.offset += 2;
+				const index = bufferCall("readu32", [ctx.buf, at(ctx)]);
+				ctx.cursor.offset += BLOB_SIZE;
 				// 1-based on the wire; roblox-ts adds the one back when indexing an array.
 				return f.elementAccessExpression(ctx.blobs!, f.binary(index, ts.SyntaxKind.MinusToken, num(1)));
 			}
@@ -1850,20 +2369,31 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	}
 
 	function readLength(ctx: Ctx, width: LengthWidth): ts.Expression {
+		if (width === "v") return readVarint(ctx, "length");
+
 		const length = bind(ctx.out, bufferCall(`read${width}`, [ctx.buf, at(ctx)]), "length");
 		ctx.cursor.offset += WIDTH_SIZE[width];
-		sync(ctx);
 		return length;
 	}
 
 	/**
 	 * An element count from the buffer, refused when the elements it announces could not fit in what
-	 * is left: a hostile count must not drive a huge allocation or a long loop.
+	 * is left: a hostile count must not drive a huge allocation or a long loop. Elements that take no
+	 * bytes cannot be bounded that way and get a plain cap instead.
 	 */
 	function readCount(ctx: Ctx, minimumElementSize: number): ts.Expression {
-		const count = bind(ctx.out, bufferCall("readu32", [ctx.buf, at(ctx)]), "count");
-		ctx.cursor.offset += 4;
+		const count = readVarint(ctx, "count");
 		sync(ctx);
+
+		if (minimumElementSize === 0) {
+			ctx.out.push(
+				ifStatement(f.binary(count, ts.SyntaxKind.GreaterThanToken, num(ZERO_SIZE_COUNT_MAX)), [
+					raise(MALFORMED),
+				]),
+			);
+			return count;
+		}
+
 		const remaining = f.binary(bufferCall("len", [ctx.buf]), ts.SyntaxKind.MinusToken, ctx.cursor.variable!);
 		const needed =
 			minimumElementSize > 1 ? f.binary(count, ts.SyntaxKind.AsteriskToken, num(minimumElementSize)) : count;

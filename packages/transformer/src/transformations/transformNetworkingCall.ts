@@ -2,7 +2,7 @@ import ts from "typescript";
 import { Diagnostics } from "../classes/diagnostics";
 import { TransformState } from "../classes/transformState";
 import { f } from "../util/factory";
-import { buildInlineEncoding, buildInlineValueEncoding } from "../util/functions/buildSerializerFromType";
+import { buildInlineEncoding, buildInlineResultEncoding } from "../util/functions/buildSerializerFromType";
 
 /**
  * With `networking.serialization` on, a call that sends over a networking handler packs its
@@ -15,8 +15,9 @@ import { buildInlineEncoding, buildInlineValueEncoding } from "../util/functions
  * see it, which is why the receiving side needs a function and the sending side does not.
  *
  * Call sites are found by type: the handler members carry hidden `_flamework_send` /
- * `_flamework_receive` markers, so a handler reached through a widened type is left alone (and then
- * sends unpacked values, which the peer rejects as malformed).
+ * `_flamework_fn` markers. A member declared `Networking.Raw*` has no marker and is left alone, as is
+ * a handler reached through a widened type (which then sends unpacked values that the peer rejects
+ * as malformed). An argument list that carries nothing (`bump(): void`) sends no payload at all.
  */
 
 /** Sending methods and the hidden entry point each becomes. */
@@ -38,7 +39,7 @@ export function transformNetworkingCall(state: TransformState, node: ts.CallExpr
 		const name = callee.name.text;
 		const target = typeChecker.getTypeAtLocation(callee.expression);
 
-		if (name === "setCallback" && target.getProperty("_flamework_result")) {
+		if (name === "setCallback" && target.getProperty("_flamework_fn")) {
 			return transformReceiverCallback(state, node, callee.expression, target);
 		}
 
@@ -104,13 +105,18 @@ function transformSend(
 
 	statements.push(...encoding.statements);
 
-	const payload = encoding.blobs ? [encoding.payload, encoding.blobs] : [encoding.payload];
 	const transformedTarget = state.transformNode(target);
 	const call = f.call(f.propertyAccessExpression(transformedTarget, f.identifier(method)), [
 		...leadingValues,
-		...payload,
+		...packedArguments(encoding),
 	]);
 	return emitWithStatements(state, node, statements, call);
+}
+
+/** `payload, blobs`, `payload`, or nothing at all when the list carries nothing. */
+function packedArguments(encoding: { payload: ts.Identifier | undefined; blobs: ts.Identifier | undefined }) {
+	if (!encoding.payload) return [];
+	return encoding.blobs ? [encoding.payload, encoding.blobs] : [encoding.payload];
 }
 
 /**
@@ -124,6 +130,8 @@ function emitWithStatements(
 	statements: ts.Statement[],
 	call: ts.Expression,
 ): ts.Expression {
+	if (statements.length === 0) return call;
+
 	let current: ts.Node | undefined = node.parent;
 	while (current !== undefined && !ts.isStatement(current)) {
 		if (ts.isFunctionLike(current)) {
@@ -139,8 +147,8 @@ function emitWithStatements(
 
 /**
  * `handler.fn.setCallback(cb)` becomes `handler.fn._setCallback((lead..., a, b) => pack(cb(lead..., a, b)))`,
- * where `pack` turns a successful result into `[payload, blobs?]`, follows a Promise if the callback
- * returned one, and lets `Networking.Skip` through untouched.
+ * where `pack` turns a successful result into `[payload, blobs?]` (or nothing, for a `void` result),
+ * follows a Promise if the callback returned one, and lets `Networking.Skip` through untouched.
  */
 function transformReceiverCallback(
 	state: TransformState,
@@ -153,8 +161,8 @@ function transformReceiverCallback(
 	if (!callbackArgument) return;
 
 	const listType = markerType(state, targetType, "_flamework_receive", node);
-	const resultType = markerType(state, targetType, "_flamework_result", node);
-	if (!listType || !resultType) return;
+	const fnType = markerType(state, targetType, "_flamework_fn", node);
+	if (!listType || !fnType) return;
 
 	// How many arguments precede the list: the callback type is declared `(lead..., ...args: I) => ...`.
 	const signature = typeChecker.getResolvedSignature(node);
@@ -209,33 +217,34 @@ function transformReceiverCallback(
 
 	// A Promise is followed; its value is packed once it resolves.
 	const value = f.identifier("value", true);
-	const packLater = f.arrowFunction(f.block(packResult(state, node, resultType, value)), [
-		f.parameterDeclaration(value),
-	]);
+	const packLater = f.arrowFunction(f.block(packResult(state, node, fnType, value)), [f.parameterDeclaration(value)]);
 	body.push(
 		ts.factory.createIfStatement(
 			f.call(f.propertyAccessExpression(f.identifier("Promise"), f.identifier("is")), [result]),
 			f.block([f.returnStatement(f.call(f.propertyAccessExpression(result, f.identifier("then")), [packLater]))]),
 		),
 	);
-	body.push(...packResult(state, node, resultType, result));
+	body.push(...packResult(state, node, fnType, result));
 
 	const wrapper = f.arrowFunction(f.block(body), parameters);
 	const call = f.call(f.propertyAccessExpression(boundTarget, f.identifier("_setCallback")), [wrapper]);
 	return emitWithStatements(state, node, statements, call);
 }
 
-/** `if (v === Networking.Skip) return v; <pack v>; return [payload, blobs?]` */
+/**
+ * `if (v === Networking.Skip) return v; <pack v>; return [payload, blobs?]`, or `return undefined`
+ * when the result type carries nothing.
+ */
 function packResult(
 	state: TransformState,
 	node: ts.CallExpression,
-	resultType: ts.Type,
+	fnType: ts.Type,
 	value: ts.Identifier,
 ): ts.Statement[] {
 	const networking = state.addFileImport(state.getSourceFile(node), "@flamework/networking", "Networking");
 	const skip = f.propertyAccessExpression(networking, f.identifier("Skip"));
-	const encoding = buildInlineValueEncoding(state, node, resultType, value);
-	const packed = encoding.blobs ? [encoding.payload, encoding.blobs] : [encoding.payload];
+	const encoding = buildInlineResultEncoding(state, node, fnType, value);
+	const packed = packedArguments(encoding);
 
 	return [
 		ts.factory.createIfStatement(
@@ -243,11 +252,11 @@ function packResult(
 			f.block([f.returnStatement(value)]),
 		),
 		...encoding.statements,
-		f.returnStatement(f.as(f.array(packed, false), arrayType())),
+		f.returnStatement(packed.length > 0 ? f.as(f.array(packed, false), arrayType()) : f.nil()),
 	];
 }
 
-/** The tuple a hidden marker property carries, without the `undefined` its optionality adds. */
+/** The type a hidden marker property carries, without the `undefined` its optionality adds. */
 function markerType(state: TransformState, type: ts.Type, marker: string, node: ts.Node): ts.Type | undefined {
 	const property = type.getProperty(marker);
 	if (!property) return;

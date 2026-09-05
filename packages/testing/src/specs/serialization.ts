@@ -64,6 +64,27 @@ interface Datatypes {
 	brick: BrickColor;
 }
 
+/** Fields are written in the order they are declared, not alphabetically. */
+interface Ordered {
+	second: Serialization.u8;
+	first: Serialization.u16;
+}
+
+/** Members are numbered as written: Coins is 0 and Items is 1. */
+type Wallet = { Coins: number } | { Items: string[] };
+
+/** Nested collections with Instances as keys, sets of maps, arrays of tuples: nothing here is special. */
+interface Nested {
+	byPart: Map<Instance, Array<Set<string>>>;
+	pairs: Array<[Serialization.varint, string?]>;
+	groups: Set<Map<string, number[]>>;
+	tag: `${string}-id`;
+}
+
+class Thing {
+	constructor(public value: number) {}
+}
+
 const payloadSerializer = Flamework.createSerializer<Payload>();
 const compactSerializer = Flamework.createSerializer<Compact>();
 const modeSerializer = Flamework.createSerializer<Mode>();
@@ -74,6 +95,11 @@ const nodeSerializer = Flamework.createSerializer<Node>();
 const blobSerializer = Flamework.createSerializer<WithBlobs>();
 const datatypeSerializer = Flamework.createSerializer<Datatypes>();
 const listSerializer = Flamework.createSerializer<number[]>();
+const orderedSerializer = Flamework.createSerializer<Ordered>();
+const walletSerializer = Flamework.createSerializer<Wallet>();
+const nestedSerializer = Flamework.createSerializer<Nested>();
+const thingSerializer = Flamework.createSerializer<Thing>();
+const varintSerializer = Flamework.createSerializer<Serialization.varint>();
 
 /** Whether decoding raises, which is how a malformed payload is reported. */
 function rejects(run: () => unknown): boolean {
@@ -248,12 +274,109 @@ export = suite("serialization", [
 			);
 
 			// A count that announces more elements than the buffer could hold must not drive an allocation.
-			const hostileCount = buffer.create(4);
-			buffer.writeu32(hostileCount, 0, 0xffffffff);
+			const hostileCount = buffer.create(5);
+			[0xff, 0xff, 0xff, 0xff, 0x0f].forEach((byte, i) => buffer.writeu8(hostileCount, i, byte));
 			expectTrue(
 				rejects(() => listSerializer.deserialize(hostileCount)),
 				"hostile element count",
 			);
+
+			// A varint that never ends is refused after five bytes rather than read forever.
+			const endless = buffer.create(8);
+			for (let i = 0; i < 8; i++) buffer.writeu8(endless, i, 0xff);
+			expectTrue(
+				rejects(() => listSerializer.deserialize(endless)),
+				"endless varint",
+			);
+		},
+	],
+	[
+		"writes fields in declaration order and counts with varints",
+		() => {
+			const [ordered] = orderedSerializer.serialize({
+				second: 1 as Serialization.u8,
+				first: 2 as Serialization.u16,
+			});
+			expectEqual(buffer.readu8(ordered, 0), 1, "first byte is the first declared field");
+			expectEqual(buffer.readu16(ordered, 1), 2, "second declared field follows");
+
+			const [short] = listSerializer.serialize([1, 2, 3]);
+			expectEqual(buffer.len(short), 1 + 3 * 8, "one length byte below 128 elements");
+			const long = new Array<number>();
+			for (let i = 0; i < 200; i++) long.push(i);
+			const [longPayload] = listSerializer.serialize(long);
+			expectEqual(buffer.len(longPayload), 2 + 200 * 8, "two length bytes from 128 elements");
+			expectTrue(deepEquals(listSerializer.deserialize(longPayload), long), "long list decoded");
+
+			const [small] = varintSerializer.serialize(5 as Serialization.varint);
+			expectEqual(buffer.len(small), 1, "varint below 128");
+			const [big] = varintSerializer.serialize(300 as Serialization.varint);
+			expectEqual(buffer.len(big), 2, "varint below 16384");
+			expectEqual(varintSerializer.deserialize(big), 300, "varint decoded");
+			expectEqual(roundTrip(varintSerializer, (2 ** 31) as Serialization.varint), 2 ** 31, "large varint");
+
+			// Blob slots are four bytes each: two blobs, then a one-byte length and one byte of text.
+			const [withBlobs] = blobSerializer.serialize({ target: new Instance("Folder"), anything: 1, label: "x" });
+			expectEqual(buffer.len(withBlobs), 4 + 4 + 1 + 1, "blob indices are u32");
+		},
+	],
+	[
+		"numbers union members in the order they are written",
+		() => {
+			const [coins] = walletSerializer.serialize({ Coins: 5 });
+			const [items] = walletSerializer.serialize({ Items: ["a"] });
+			expectEqual(buffer.readu8(coins, 0), 0, "first written member is tag 0");
+			expectEqual(buffer.readu8(items, 0), 1, "second written member is tag 1");
+			expectTrue(deepEquals(roundTrip(walletSerializer, { Items: ["a", "b"] }), { Items: ["a", "b"] }), "items");
+			expectTrue(deepEquals(roundTrip(walletSerializer, { Coins: 7 }), { Coins: 7 }), "coins");
+
+			// `Point | string` as written: the object first, then the string.
+			const [text] = mixedSerializer.serialize("text");
+			expectEqual(buffer.readu8(text, 0), 1, "string is the second member");
+		},
+	],
+	[
+		"round-trips nested collections with Instances as keys and sends class instances as blobs",
+		() => {
+			const first = new Instance("Folder");
+			const second = new Instance("Part");
+			const value: Nested = {
+				byPart: new Map<Instance, Array<Set<string>>>([
+					[first, [new Set(["a", "b"]), new Set<string>()]],
+					[second, []],
+				]),
+				pairs: [
+					[1 as Serialization.varint, "one"],
+					[200 as Serialization.varint, undefined],
+				],
+				groups: new Set([new Map([["x", [1, 2]]]), new Map<string, number[]>()]),
+				tag: "abc-id",
+			};
+
+			const [payload, blobs] = nestedSerializer.serialize(value);
+			expectEqual(blobs?.size(), 2, "one blob per Instance key");
+			const decoded = nestedSerializer.deserialize(payload, blobs);
+			expectTrue(deepEquals(decoded.byPart, value.byPart), "map keyed by Instances");
+			expectEqual(decoded.byPart.get(second)?.size(), 0, "empty array under an Instance key");
+			expectTrue(deepEquals(decoded.pairs, value.pairs), "array of tuples");
+			expectEqual(decoded.pairs[1][0], 200, "varint tuple element");
+			expectEqual(decoded.pairs[1][1], undefined, "absent optional tuple element");
+			expectEqual(decoded.tag, "abc-id", "template literal string");
+
+			// A set of tables cannot be compared by identity: its members are checked by content.
+			expectEqual(decoded.groups.size(), 2, "set of maps");
+			let filled = false;
+			let empty = false;
+			for (const group of decoded.groups) {
+				if (group.size() === 0) empty = true;
+				else if (deepEquals(group.get("x"), [1, 2])) filled = true;
+			}
+			expectTrue(filled && empty, "set members decoded by content");
+
+			const thing = new Thing(3);
+			const [thingPayload, thingBlobs] = thingSerializer.serialize(thing);
+			expectEqual(buffer.len(thingPayload), 4, "a class instance is one blob slot");
+			expectEqual(thingSerializer.deserialize(thingPayload, thingBlobs), thing, "same instance back");
 		},
 	],
 	[

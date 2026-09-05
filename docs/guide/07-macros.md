@@ -126,12 +126,14 @@ const back = snapshots.deserialize(payload, blobs); // raises on malformed input
 ```
 
 The output is plain buffer code: each field is a `buffer.write*` at an offset the transformer
-computed, fixed-size types at literal offsets, and the decoder mirrors it. Named types with a
-variable size are hoisted into `s_`, `w_` and `r_` functions (size, write, read) ahead of the
-statement, once per statement, which is also how recursive types work. There is no runtime
-library behind it and nothing in the output describes the type. Wrap `deserialize` in `pcall` for
-untrusted input. Create serializers at module scope: one built inside a function is rebuilt on
-every call. This is also what powers [networking serialization](06-networking.md#serialization).
+computed, fixed-size types at literal offsets, and the decoder mirrors it. Fields go in declaration
+order; counts and lengths are varints; `Serialization.varint` does the same for an integer of your
+own. Named types with a variable size are hoisted into `s_`, `w_` and `r_` functions (size, write,
+read) ahead of the statement, once per statement, which is also how recursive types work. There is
+no runtime library behind it and nothing in the output describes the type. Wrap `deserialize` in
+`pcall` for untrusted input. Create serializers at module scope: one built inside a function is
+rebuilt on every call. This is also what powers [networking serialization](06-networking.md#serialization),
+which lists what each kind of type costs and what travels as a blob.
 
 ## When a macro does not fire
 
