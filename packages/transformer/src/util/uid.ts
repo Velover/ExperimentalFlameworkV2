@@ -159,6 +159,14 @@ function getSymbolUid(state: TransformState, symbol: ts.Symbol, trace?: ts.Node)
 	if (validDeclaration) {
 		return getDeclarationUid(state, validDeclaration);
 	}
+
+	if (trace) {
+		Diagnostics.error(
+			trace,
+			`Could not find a declaration with a unique ID for '${symbol.name}'.`,
+			"Only classes, interfaces, type aliases and functions have IDs; a type parameter or an anonymous type cannot be used here.",
+		);
+	}
 }
 
 export function getTypeUid(state: TransformState, type: ts.Type, trace: ts.Node): string;
@@ -175,6 +183,13 @@ export function getTypeUid(state: TransformState, type: ts.Type, trace?: ts.Node
 		assert(originalType !== undefined && originalType !== type, "malformed injectable type");
 
 		return getTypeUid(state, originalType, trace);
+	}
+
+	// A type parameter cannot be resolved here; a generic class's own constructor is the usual source,
+	// and only its subclasses -- where the argument is concrete -- are ever constructed. The placeholder
+	// keeps the parameter count intact and fails at resolution time with the parameter's name.
+	if (type.flags & ts.TypeFlags.TypeParameter) {
+		return `$tp:${type.checker.typeToString(type)}`;
 	}
 
 	if (type.symbol) {

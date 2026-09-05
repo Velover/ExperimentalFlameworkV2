@@ -2,19 +2,33 @@ import Ajv from "ajv";
 import path from "path";
 import fs from "fs";
 import { FlameworkBuildInfo } from "../classes/buildInfo";
-
-const SCHEMA = createSchema();
+import type { ProjectConfig } from "./projectConfig";
 
 interface Schemas {
 	buildInfo: FlameworkBuildInfo;
+	projectConfig: ProjectConfig;
 }
 
+/** Schemas that live in their own file, so editors can reference them directly. */
+const STANDALONE_SCHEMAS: Record<string, string> = {
+	projectConfig: "flamework.config.schema.json",
+};
+
+const SCHEMA = createSchema();
+
 function createSchema() {
-	const schemaPath = path.join(__dirname, "../../flamework-schema.json");
 	const schema = new Ajv();
-	schema.addSchema(JSON.parse(fs.readFileSync(schemaPath, { encoding: "ascii" })), "root");
+	schema.addSchema(readSchema("flamework-schema.json"), "root");
+
+	for (const [key, file] of Object.entries(STANDALONE_SCHEMAS)) {
+		schema.addSchema(readSchema(file), key);
+	}
 
 	return schema;
+}
+
+function readSchema(file: string) {
+	return JSON.parse(fs.readFileSync(path.join(__dirname, "../..", file), { encoding: "utf8" }));
 }
 
 export function getSchemaErrors() {
@@ -22,5 +36,5 @@ export function getSchemaErrors() {
 }
 
 export function validateSchema<K extends keyof Schemas>(key: K, value: unknown): value is Schemas[K] {
-	return SCHEMA.validate(`root#/properties/${key}`, value);
+	return SCHEMA.validate(key in STANDALONE_SCHEMAS ? key : `root#/properties/${key}`, value);
 }

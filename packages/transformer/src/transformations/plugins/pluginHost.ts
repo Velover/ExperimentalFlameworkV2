@@ -1,6 +1,6 @@
 import path from "path";
 import ts from "typescript";
-import type { MacroContext, MacroTypeHandler, PluginApi } from "rbxts-transformer-flamework-plugin";
+import type { MacroContext, MacroTypeHandler, PluginApi, PluginCallback } from "rbxts-transformer-flamework-plugin";
 import { Diagnostics } from "../../classes/diagnostics";
 import type { TransformState } from "../../classes/transformState";
 import { f } from "../../util/factory";
@@ -23,6 +23,15 @@ interface CacheEntry {
 	fileName: string;
 	expression: ts.Expression;
 }
+
+/**
+ * The callbacks each plugin module registered when it was first loaded, keyed by its resolved path.
+ *
+ * Node caches modules, so requiring a plugin a second time does not run its top level again and
+ * registers nothing. A transformer state is created for every compilation -- every rebuild in watch
+ * mode -- so the callbacks have to outlive the state that first loaded them.
+ */
+const LOADED_PLUGINS = new Map<string, PluginCallback[]>();
 
 /**
  * Loads and drives Flamework transformer plugins.
@@ -55,19 +64,26 @@ export function createPluginHost(state: TransformState): PluginHost | undefined 
 	function loadPlugin(pluginPath: string, options: Record<string, unknown>) {
 		const resolved = resolvePluginPath(state, pluginPath);
 
-		try {
-			// eslint-disable-next-line @typescript-eslint/no-require-imports
-			require(resolved);
-		} catch (e) {
-			throw new Error(`Failed to load Flamework plugin '${pluginPath}': ${e instanceof Error ? e.message : e}`);
-		}
+		let callbacks = LOADED_PLUGINS.get(resolved);
+		if (!callbacks) {
+			try {
+				// eslint-disable-next-line @typescript-eslint/no-require-imports
+				require(resolved);
+			} catch (e) {
+				throw new Error(
+					`Failed to load Flamework plugin '${pluginPath}': ${e instanceof Error ? e.message : e}`,
+				);
+			}
 
-		const pending = registry.drainRegisteredPlugins();
-		if (pending.length === 0) {
-			throw new Error(
-				`Flamework plugin '${pluginPath}' did not call registerPlugin(). ` +
-					`Plugins must be CommonJS modules that call registerPlugin at the top level.`,
-			);
+			callbacks = registry.drainRegisteredPlugins();
+			if (callbacks.length === 0) {
+				throw new Error(
+					`Flamework plugin '${pluginPath}' did not call registerPlugin(). ` +
+						`Plugins must be CommonJS modules that call registerPlugin at the top level.`,
+				);
+			}
+
+			LOADED_PLUGINS.set(resolved, callbacks);
 		}
 
 		const api: PluginApi = {
@@ -86,7 +102,7 @@ export function createPluginHost(state: TransformState): PluginHost | undefined 
 			},
 		};
 
-		for (const plugin of pending) {
+		for (const plugin of callbacks) {
 			plugin(api);
 		}
 	}
@@ -207,5 +223,5 @@ function requirePluginRegistry(state: TransformState) {
 	}
 
 	// eslint-disable-next-line @typescript-eslint/no-require-imports
-	return require(resolved) as { drainRegisteredPlugins(): ((api: PluginApi) => void)[] };
+	return require(resolved) as { drainRegisteredPlugins(): PluginCallback[] };
 }

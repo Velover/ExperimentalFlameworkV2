@@ -15,7 +15,8 @@
     "out",
     "index.d.ts",
     "rojo-schema.json",
-    "flamework-schema.json"
+    "flamework-schema.json",
+    "flamework.config.schema.json"
   ],
   "dependencies": {
     "@roblox-ts/path-translator": "^1.1.0",

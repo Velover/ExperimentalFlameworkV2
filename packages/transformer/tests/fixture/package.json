@@ -1,5 +1,5 @@
 {
-  "name": "@flamework/transformer-fixture",
+  "name": "transformer-fixture",
   "version": "0.0.0",
   "private": true,
   "description": "Compilation fixture used by the transformer test suite.",
@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@flamework/core": "workspace:*",
-    "@rbxts/t": "^3.1.0"
+    "@rbxts/t": "^3.1.0",
+    "@flamework/networking": "workspace:*"
   }
 }

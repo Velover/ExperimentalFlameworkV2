@@ -23,3 +23,8 @@ export function counter<T>(
 ): (increment: number) => number {
 	return meta!;
 }
+
+/** @metadata macro */
+export function callsiteId(id?: Modding.Caller.Uuid): string {
+	return id!;
+}

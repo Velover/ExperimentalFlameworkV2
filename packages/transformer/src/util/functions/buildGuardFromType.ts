@@ -68,6 +68,70 @@ const RBX_TYPES = [
 ] as const;
 
 const OBJECT_IGNORED_FIELD_TYPES = ts.TypeFlags.Unknown | ts.TypeFlags.Never | ts.TypeFlags.UniqueESSymbol;
+const DEDUP_HEURISTIC_LIMIT = 5;
+const DEDUP_HEURISTIC_FLAGS = ts.TypeFlags.Object | ts.TypeFlags.UnionOrIntersection;
+
+/**
+ * Finds the object and union types that appear at least `dedupLimit` times within `type`, which are
+ * worth emitting once as a local and referencing, rather than inlining at every occurrence.
+ */
+function getTypesRequiringDedupHeuristic(type: ts.Type, dedupLimit = DEDUP_HEURISTIC_LIMIT) {
+	const seenCount = new Map<ts.Type, number>();
+
+	// Types currently being walked, so that a self-referential type (`Vector3.Unit` is a `Vector3`)
+	// is counted where it recurs but not descended into again.
+	const visiting = new Set<ts.Type>();
+
+	function recurse(type: ts.Type, modifier = 1) {
+		if (type.flags & DEDUP_HEURISTIC_FLAGS) {
+			const typeSeenCount = seenCount.get(type) ?? 0;
+			seenCount.set(type, typeSeenCount + modifier);
+		}
+
+		if (visiting.has(type)) {
+			return;
+		}
+
+		visiting.add(type);
+		recurseChildren(type, modifier);
+		visiting.delete(type);
+	}
+
+	function recurseChildren(type: ts.Type, modifier: number) {
+		if (type.isUnionOrIntersection()) {
+			type.types.forEach((ty) => recurse(ty, modifier));
+		} else if (type.flags & ts.TypeFlags.Object && !isInstanceType(type)) {
+			for (const property of type.getProperties()) {
+				const propertyType = type.checker.getTypeOfPropertyOfType(type, property.name);
+				if (!propertyType) {
+					continue;
+				}
+
+				recurse(propertyType, modifier);
+			}
+
+			for (const indexInfo of type.checker.getIndexInfosOfType(type)) {
+				recurse(indexInfo.keyType, modifier);
+				recurse(indexInfo.type, modifier);
+			}
+		}
+	}
+
+	recurse(type);
+
+	const requiresDedup = new Set<ts.Type>();
+
+	for (const [type, count] of seenCount) {
+		if (count >= dedupLimit) {
+			requiresDedup.add(type);
+
+			// We subtract all the children, as deduplicating the parent effectively removes `count - 1` of any children from the emit.
+			recurse(type, -(count - 1));
+		}
+	}
+
+	return requiresDedup;
+}
 
 /**
  * Convert a type into a type guard.
@@ -87,11 +151,42 @@ export function buildGuardFromType(
 }
 
 /**
+ * Convert a type into a type guard, deduplicating large guards when the
+ * `optimizations.guardGenerationDedupLimit` transformer option is set.
+ *
+ * The returned statements declare the shared guards and must be emitted ahead of the expression.
+ * @param state The TransformState
+ * @param file The file that this type belongs to
+ * @param type The type to convert
+ */
+export function buildGuardFromTypeWithDedup(
+	state: TransformState,
+	node: ts.Node,
+	type: ts.Type,
+	file = state.getSourceFile(node),
+) {
+	const generator = createGuardGenerator(state, file, node);
+	const dedupLimit = state.config.optimizations?.guardGenerationDedupLimit;
+	if (dedupLimit !== undefined) {
+		generator.calculateDedup(type, Math.max(dedupLimit, 1));
+	}
+
+	return {
+		guard: generator.buildGuard(type),
+		statements: generator.dedupStatements,
+	};
+}
+
+/**
  * Creates a stateful guard generator.
  */
 export function createGuardGenerator(state: TransformState, file: ts.SourceFile, diagnosticNode: ts.Node) {
 	const tracking = new Array<[ts.Node, ts.Type]>();
-	return { buildGuard, buildGuardsFromType };
+	const dedupStatements = new Array<ts.Statement>();
+	const dedupIds = new Map<ts.Type, ts.Identifier>();
+	let requiresDedup = new Set<ts.Type>();
+
+	return { buildGuard, buildGuardsFromType, calculateDedup, dedupStatements };
 
 	function fail(err: string): never {
 		const basicDiagnostic = Diagnostics.createDiagnostic(diagnosticNode, ts.DiagnosticCategory.Error, err);
@@ -114,7 +209,18 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 		throw new DiagnosticError(basicDiagnostic);
 	}
 
+	function calculateDedup(type: ts.Type, dedupLimit?: number) {
+		requiresDedup = getTypesRequiringDedupHeuristic(type, dedupLimit);
+	}
+
 	function buildGuard(type: ts.Type): ts.Expression {
+		if (requiresDedup.has(type)) {
+			const existingId = dedupIds.get(type);
+			if (existingId) {
+				return existingId;
+			}
+		}
+
 		const declaration = getDeclarationOfType(type);
 		if (declaration) {
 			tracking.push([declaration, type]);
@@ -126,12 +232,21 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 			assert(tracking.pop()?.[0] === declaration, "Popped value was not expected");
 		}
 
+		if (requiresDedup.has(type)) {
+			const dedupId = f.identifier(type.aliasSymbol?.name ?? type.symbol?.name ?? "dedup", true);
+			dedupIds.set(type, dedupId);
+
+			dedupStatements.push(f.variableStatement(dedupId, guard));
+
+			return dedupId;
+		}
+
 		return guard;
 	}
 
 	function buildGuardInner(type: ts.Type): ts.Expression {
 		const typeChecker = state.typeChecker;
-		const tId = state.addFileImport(file, "@rbxts/t", "t");
+		const tId = state.getGuardLibrary(file);
 
 		if (type.isUnion()) {
 			return buildUnionGuard(type);
@@ -152,7 +267,7 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 			const baseGuard = f.call(f.field(tId, "instanceIsA"), [instanceType.symbol.name]);
 			return additionalGuards.length === 0
 				? baseGuard
-				: f.call(f.field(tId, "intersection"), [
+				: listLikeGuard("intersection", [
 						baseGuard,
 						f.call(f.field(tId, "children"), [f.object(additionalGuards)]),
 					]);
@@ -163,10 +278,7 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 		}
 
 		if (isConditionalType(type)) {
-			return f.call(f.field(tId, "union"), [
-				buildGuard(type.resolvedTrueType!),
-				buildGuard(type.resolvedFalseType!),
-			]);
+			return listLikeGuard("union", [buildGuard(type.resolvedTrueType!), buildGuard(type.resolvedFalseType!)]);
 		}
 
 		if ((type.flags & ts.TypeFlags.TypeVariable) !== 0) {
@@ -178,7 +290,7 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 
 		const literals = getLiteral(type);
 		if (literals) {
-			return f.call(f.field(tId, "literal"), literals);
+			return listLikeGuard("literal", literals);
 		}
 
 		if (typeChecker.isTupleType(type)) {
@@ -220,7 +332,7 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 		}
 
 		if ((type.flags & ts.TypeFlags.Unknown) !== 0) {
-			return f.call(f.field(tId, "union"), [f.field(tId, "any"), f.field(tId, "none")]);
+			return listLikeGuard("union", [f.field(tId, "any"), f.field(tId, "none")]);
 		}
 
 		if (type.flags & ts.TypeFlags.TemplateLiteral) {
@@ -299,14 +411,14 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 				guards.push(f.call(f.field(tId, "map"), [buildGuard(indexInfo.keyType), buildGuard(indexInfo.type)]));
 			}
 
-			return guards.length > 1 ? f.call(f.field(tId, "intersection"), guards) : guards[0];
+			return guards.length > 1 ? listLikeGuard("intersection", guards) : guards[0];
 		}
 
 		fail(`An unknown type was encountered: ${typeChecker.typeToString(type)}`);
 	}
 
 	function buildUnionGuard(type: ts.UnionType) {
-		const tId = state.addFileImport(file, "@rbxts/t", "t");
+		const tId = state.getGuardLibrary(file);
 
 		const boolType = type.checker.getBooleanType();
 		if (type === boolType) {
@@ -319,18 +431,16 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 		guards.push(...enums.map((enumId) => f.call(f.field(tId, "enum"), [f.field("Enum", enumId)])));
 
 		if (literals.length > 0) {
-			guards.push(f.call(f.field(tId, "literal"), literals));
+			guards.push(listLikeGuard("literal", literals));
 		}
 
-		const union = guards.length > 1 ? f.call(f.field(tId, "union"), guards) : guards[0];
+		const union = guards.length > 1 ? listLikeGuard("union", guards) : guards[0];
 		if (!union) return f.field(tId, "none");
 
 		return isOptional ? f.call(f.field(tId, "optional"), [union]) : union;
 	}
 
 	function buildIntersectionGuard(type: ts.IntersectionType) {
-		const tId = state.addFileImport(file, "@rbxts/t", "t");
-
 		if (type.checker.getIndexInfosOfType(type).length > 1) {
 			fail("Flamework cannot generate intersections with multiple index signatures.");
 		}
@@ -343,7 +453,7 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 		}
 
 		const guards = type.types.map(buildGuard);
-		return f.call(f.field(tId, "intersection"), guards);
+		return listLikeGuard("intersection", guards);
 	}
 
 	function buildGuardsFromType(type: ts.Type, isInterfaceType = false): ts.PropertyAssignment[] {
@@ -382,9 +492,26 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 
 		return guards;
 	}
+
+	/**
+	 * Emits `t.<guard>(a, b)` for up to two members and `t.<guard>List({ ... })` beyond that.
+	 *
+	 * A Luau call has a hard limit on its argument count, so a large union or literal set spelled
+	 * out as varargs fails to compile; the list variants take a table instead. This does not track
+	 * the real register count, but fixing that fully would mean moving away from `t`.
+	 */
+	function listLikeGuard(guard: "union" | "intersection" | "literal", list: ts.Expression[]) {
+		const tId = state.getGuardLibrary(file);
+
+		if (list.length <= 2) {
+			return f.call(f.field(tId, guard), list);
+		}
+
+		return f.call(f.field(tId, `${guard}List`), [list]);
+	}
 }
 
-function simplifyUnion(type: ts.UnionType) {
+export function simplifyUnion(type: ts.UnionType) {
 	const enumType = type.checker.resolveName("Enum", undefined, ts.SymbolFlags.Type, false);
 	if (
 		type.aliasSymbol &&
@@ -455,7 +582,7 @@ function simplifyUnion(type: ts.UnionType) {
 	return { enums, types, literals };
 }
 
-function extractTypes(typeChecker: ts.TypeChecker, types: ts.Type[]): [isOptional: boolean, types: ts.Type[]] {
+export function extractTypes(typeChecker: ts.TypeChecker, types: ts.Type[]): [isOptional: boolean, types: ts.Type[]] {
 	const undefinedtype = typeChecker.getUndefinedType();
 	const voidType = typeChecker.getVoidType();
 
@@ -465,7 +592,7 @@ function extractTypes(typeChecker: ts.TypeChecker, types: ts.Type[]): [isOptiona
 	];
 }
 
-function getLiteral(type: ts.Type, withoutEnums = false): ts.Expression[] | undefined {
+export function getLiteral(type: ts.Type, withoutEnums = false): ts.Expression[] | undefined {
 	if (type.isStringLiteral() || type.isNumberLiteral()) {
 		return [typeof type.value === "string" ? f.string(type.value) : f.number(type.value)];
 	}
@@ -512,10 +639,10 @@ function isObjectType(type: ts.Type): type is ts.InterfaceType {
 	return (type.flags & ts.TypeFlags.Object) !== 0;
 }
 
-function isInstanceType(type: ts.Type) {
+export function isInstanceType(type: ts.Type) {
 	return type.getProperty("_nominal_Instance") !== undefined;
 }
 
-function isConditionalType(type: ts.Type): type is ts.ConditionalType {
+export function isConditionalType(type: ts.Type): type is ts.ConditionalType {
 	return (type.flags & ts.TypeFlags.Conditional) !== 0;
 }

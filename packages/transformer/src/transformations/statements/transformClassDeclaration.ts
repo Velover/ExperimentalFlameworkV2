@@ -8,6 +8,19 @@ import { getDependencyInjectionMetadata } from "../transformUserMacro";
 import { validateConstraintMetadata } from "../../util/functions/validateConstraintMetadata";
 import { Diagnostics } from "../../classes/diagnostics";
 
+/**
+ * A parameter together with the type it has at the class being transformed.
+ *
+ * The declaration alone is not enough: a constructor inherited from a generic base such as
+ * `class Derived extends Base<Dep>` declares its parameter as `T`, and only the instantiated
+ * signature knows that `T` is `Dep` here.
+ */
+interface ParameterInfo {
+	declaration: ts.ParameterDeclaration | undefined;
+	type: ts.Type;
+	trace: ts.Node;
+}
+
 export function transformClassDeclaration(state: TransformState, node: ts.ClassDeclaration) {
 	const symbol = state.getSymbol(node);
 	if (!symbol || !node.name) return state.transform(node);
@@ -79,7 +92,14 @@ function generateFieldMetadata(state: TransformState, metadata: NodeMetadata, fi
 
 function generateMethodMetadata(state: TransformState, metadata: NodeMetadata, method: ts.FunctionLikeDeclaration) {
 	const fields = new Array<[string, f.ConvertableExpression]>();
-	fields.push(...generateParametersMetadata(state, metadata, method.parameters));
+
+	const parameters = method.parameters.map((declaration): ParameterInfo => ({
+		declaration,
+		type: state.typeChecker.getTypeAtLocation(declaration),
+		trace: declaration,
+	}));
+
+	fields.push(...generateParametersMetadata(state, metadata, parameters));
 
 	const baseSignature = state.typeChecker.getSignatureFromDeclaration(method);
 	if (baseSignature) {
@@ -97,35 +117,28 @@ function generateMethodMetadata(state: TransformState, metadata: NodeMetadata, m
 	return fields;
 }
 
-function generateParametersMetadata(
-	state: TransformState,
-	metadata: NodeMetadata,
-	parameters: Iterable<ts.ParameterDeclaration>,
-) {
+function generateParametersMetadata(state: TransformState, metadata: NodeMetadata, parameters: ParameterInfo[]) {
 	const fields = new Array<[string, f.ConvertableExpression]>();
 
 	generateMetadata("flamework:parameters", (param) => {
-		const type = state.typeChecker.getTypeAtLocation(param);
-		return getTypeUid(state, type, param);
+		return getTypeUid(state, param.type, param.trace);
 	});
 
 	generateMetadata("flamework:parameter_names", (param) => {
-		return f.is.identifier(param.name) ? param.name.text : "_binding_";
+		return param.declaration && f.is.identifier(param.declaration.name) ? param.declaration.name.text : "_binding_";
 	});
 
 	generateMetadata("flamework:parameter_guards", (param) => {
-		const type = state.typeChecker.getTypeAtLocation(param);
-		return buildGuardFromType(state, param, type);
+		return buildGuardFromType(state, param.declaration ?? param.trace, param.type);
 	});
 
 	generateMetadata("flamework:dependencies", (param) => {
-		const type = state.typeChecker.getTypeAtLocation(param);
-		return getDependencyInjectionMetadata(state, param, type);
+		return getDependencyInjectionMetadata(state, param.trace, param.type);
 	});
 
 	return fields;
 
-	function generateMetadata(name: string, callback: (value: ts.ParameterDeclaration) => f.ConvertableExpression) {
+	function generateMetadata(name: string, callback: (value: ParameterInfo) => f.ConvertableExpression) {
 		if (metadata.isRequested(name)) {
 			const values = new Array<f.ConvertableExpression>();
 
@@ -166,8 +179,18 @@ function generateClassMetadata(state: TransformState, metadata: NodeMetadata, no
 
 	const [firstSignature] = state.typeChecker.getTypeOfSymbol(symbol).getConstructSignatures();
 	if (firstSignature !== undefined) {
-		const params = firstSignature.parameters.map((v) => v.declarations![0]) as ts.ParameterDeclaration[];
-		fields.push(...generateParametersMetadata(state, metadata, params));
+		// The parameter *types* come from the signature, not the declarations, so that a constructor
+		// inherited from a generic base is seen with its type arguments applied.
+		const parameters = firstSignature.parameters.map((parameter, index): ParameterInfo => {
+			const declaration = parameter.declarations?.find(ts.isParameter);
+			return {
+				declaration,
+				type: state.typeChecker.getParameterType(firstSignature, index),
+				trace: declaration ?? node.name ?? node,
+			};
+		});
+
+		fields.push(...generateParametersMetadata(state, metadata, parameters));
 	}
 
 	return fields;

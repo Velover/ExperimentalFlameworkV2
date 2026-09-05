@@ -26,11 +26,11 @@ function shouldTryHooking() {
 
 	// Ensure we're running in the context of a project and not a multiplace repository or something,
 	// as we don't have access to the project directory until roblox-ts invokes the transformer.
-	if (
-		!existsSync(path.join(cwd, "tsconfig.json")) ||
-		!existsSync(path.join(cwd, "package.json")) ||
-		!existsSync(path.join(cwd, "node_modules"))
-	) {
+	//
+	// A node_modules folder is deliberately not required: a package inside a workspace with hoisted
+	// dependencies has none of its own, and resolving roblox-ts from here (see hook) already tells us
+	// whether there is an install to switch to.
+	if (!existsSync(path.join(cwd, "tsconfig.json")) || !existsSync(path.join(cwd, "package.json"))) {
 		return false;
 	}
 

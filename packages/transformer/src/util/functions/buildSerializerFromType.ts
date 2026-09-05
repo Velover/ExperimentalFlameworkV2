@@ -1,0 +1,1762 @@
+import ts from "typescript";
+import { Diagnostics } from "../../classes/diagnostics";
+import { TransformState } from "../../classes/transformState";
+import { f } from "../factory";
+import { TYPE_FLAG_DISJOINT_DOMAINS } from "../tsInternals";
+import {
+	buildGuardFromType,
+	extractTypes,
+	getLiteral,
+	isConditionalType,
+	isInstanceType,
+	simplifyUnion,
+} from "./buildGuardFromType";
+import { isArrayType, isTupleType } from "./isTupleType";
+
+/**
+ * Generates serialization code from types.
+ *
+ * Nothing about a type survives into the output. A value is written straight into a `buffer` with
+ * `buffer.write*` calls, at offsets folded at compile time wherever the layout is fixed, and read
+ * back the same way; a fixed-size payload is `buffer.create(<constant>)` followed by writes at
+ * literal offsets. Values with no buffer representation (Instances, `unknown`, most Roblox datatypes)
+ * go into a blob list, and the buffer holds each one's 1-based index in that list (0 for nil), so a
+ * missing or invalid value never shifts the others.
+ *
+ * Wire format, in bytes:
+ * - numbers: 8 (f64) unless branded (`u8` .. `f64`); booleans 1
+ * - strings and buffers: length prefix (4, or 1 / 2 with the `u8_string` / `u16_string` brands) + bytes
+ * - literal unions: a 1-byte index (2 past 255 members); a single literal costs nothing
+ * - optionals: 1 presence byte, then the value when present
+ * - arrays, sets, maps and tuple rest elements: u32 count + elements
+ * - unions: u8 member index + the member; objects: fields in name order, nothing spent on names
+ * - Vector3 12, Vector2 8, Vector3int16 6, Vector2int16 4, Color3 12, UDim 8, UDim2 16, NumberRange 8,
+ *   Rect 16, BrickColor 2, CFrame 48 (its twelve components), EnumItems 2 (their `Value`), blobs 2
+ *
+ * Named types with a variable size are hoisted into `s_` (size), `w_` (write) and `r_` (read)
+ * functions ahead of the statement, once per statement, which is also how recursive types work.
+ * Fixed-size types are always inlined.
+ */
+
+type Width = "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "f32" | "f64";
+type LengthWidth = "u8" | "u16" | "u32";
+
+const WIDTH_SIZE: Record<Width, number> = { u8: 1, i8: 1, u16: 2, i16: 2, u32: 4, i32: 4, f32: 4, f64: 8 };
+const LENGTH_MAX: Record<LengthWidth, number> = { u8: 0xff, u16: 0xffff, u32: 0xffffffff };
+
+/** `number & { <anything>: "<brand>" }` selects a width; the property name does not matter. */
+const NUMBER_BRANDS = new Set<string>(Object.keys(WIDTH_SIZE));
+const STRING_BRANDS: Record<string, LengthWidth> = { u8_string: "u8", u16_string: "u16", u32_string: "u32" };
+const BUFFER_BRANDS: Record<string, LengthWidth> = { u16_buffer: "u16", u32_buffer: "u32" };
+
+/** Roblox datatypes with a buffer representation: the fields written, in constructor order. */
+const DATATYPES: Record<string, Array<[Width, string[]]>> = {
+	Vector3: [
+		["f32", ["X"]],
+		["f32", ["Y"]],
+		["f32", ["Z"]],
+	],
+	Vector2: [
+		["f32", ["X"]],
+		["f32", ["Y"]],
+	],
+	Vector3int16: [
+		["i16", ["X"]],
+		["i16", ["Y"]],
+		["i16", ["Z"]],
+	],
+	Vector2int16: [
+		["i16", ["X"]],
+		["i16", ["Y"]],
+	],
+	Color3: [
+		["f32", ["R"]],
+		["f32", ["G"]],
+		["f32", ["B"]],
+	],
+	UDim: [
+		["f32", ["Scale"]],
+		["i32", ["Offset"]],
+	],
+	UDim2: [
+		["f32", ["X", "Scale"]],
+		["i32", ["X", "Offset"]],
+		["f32", ["Y", "Scale"]],
+		["i32", ["Y", "Offset"]],
+	],
+	NumberRange: [
+		["f32", ["Min"]],
+		["f32", ["Max"]],
+	],
+	Rect: [
+		["f32", ["Min", "X"]],
+		["f32", ["Min", "Y"]],
+		["f32", ["Max", "X"]],
+		["f32", ["Max", "Y"]],
+	],
+	BrickColor: [["u16", ["Number"]]],
+};
+
+const CFRAME_COMPONENTS = 12;
+
+/** Roblox types that travel alongside the buffer. */
+const BLOB_TYPES = new Set([
+	"Instance",
+	"InstanceHandle",
+	"EnumItem",
+	"NumberSequence",
+	"NumberSequenceKeypoint",
+	"ColorSequence",
+	"ColorSequenceKeypoint",
+	"Font",
+	"Ray",
+	"Random",
+	"Axes",
+	"Faces",
+	"DockWidgetPluginGuiInfo",
+	"TweenInfo",
+	"PhysicalProperties",
+	"Region3",
+	"Region3int16",
+	"RaycastParams",
+	"OverlapParams",
+	"RaycastResult",
+	"PathWaypoint",
+	"DateTime",
+	"Content",
+	"SharedTable",
+	"RBXScriptConnection",
+	"RBXScriptSignal",
+]);
+
+/** Blob types whose `typeof` name can tell them apart inside a union. */
+const TYPEOF_NAMES = new Set([
+	"NumberSequence",
+	"NumberSequenceKeypoint",
+	"ColorSequence",
+	"ColorSequenceKeypoint",
+	"Font",
+	"Ray",
+	"Random",
+	"Axes",
+	"Faces",
+	"TweenInfo",
+	"PhysicalProperties",
+	"Region3",
+	"Region3int16",
+	"RaycastParams",
+	"OverlapParams",
+	"RaycastResult",
+	"PathWaypoint",
+	"DateTime",
+	"Content",
+	"SharedTable",
+	"RBXScriptConnection",
+	"RBXScriptSignal",
+]);
+
+const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+const MALFORMED = "malformed payload";
+
+/**
+ * What the generator knows about a type. Children are kept as types so that named ones can be
+ * hoisted; the synthetic kinds (literal groups, optionals) only appear where a type cannot stand.
+ */
+type Kind =
+	| { kind: "number"; width: Width }
+	| { kind: "boolean" }
+	| { kind: "string"; length: LengthWidth }
+	| { kind: "buffer"; length: LengthWidth }
+	| { kind: "constant"; value: ts.Expression }
+	| { kind: "literals"; values: ts.Expression[] }
+	| { kind: "nothing" }
+	| { kind: "blob"; typeofName?: string }
+	| { kind: "datatype"; name: string }
+	| { kind: "cframe" }
+	| { kind: "enum"; name: string }
+	| { kind: "optional"; inner: Shape }
+	| { kind: "array"; element: ts.Type }
+	| { kind: "set"; element: ts.Type }
+	| { kind: "map"; key: ts.Type; value: ts.Type }
+	| { kind: "list"; elements: Shape[]; rest?: ts.Type }
+	| { kind: "object"; fields: Array<{ name: string; shape: Shape }> }
+	| { kind: "union"; alternatives: Alternative[] };
+
+type Shape = ts.Type | Kind;
+
+/** A union member; `type` is set when the member is a real type, which a guard may be built from. */
+interface Alternative {
+	shape: Shape;
+	type?: ts.Type;
+}
+
+interface Layout {
+	/** Byte size when every value of the type takes the same number of bytes. */
+	size: number | undefined;
+	/** The fewest bytes any value takes; bounds counts read from a hostile buffer. */
+	min: number;
+	/** Whether any value of the type can put something in the blob list. */
+	blobs: boolean;
+}
+
+/** Where the next write or read goes: `base + offset`, with `offset` folded at compile time. */
+interface Cursor {
+	/** The `let` that tracks the position in a variable-size layout; absent when everything is fixed. */
+	variable: ts.Identifier | undefined;
+	/** The identifier the offset is relative to: `variable`, or the second result of a hoisted read. */
+	base: ts.Identifier | undefined;
+	offset: number;
+}
+
+interface Ctx {
+	buf: ts.Identifier;
+	blobs: ts.Identifier | undefined;
+	cursor: Cursor;
+	out: ts.Statement[];
+}
+
+interface Hoisted {
+	size: ts.Identifier;
+	write: ts.Identifier;
+	read: ts.Identifier;
+	layout: Layout;
+}
+
+function isKind(shape: Shape): shape is Kind {
+	return "kind" in shape;
+}
+
+// --- AST shorthands ---------------------------------------------------------------------------------
+
+const factory = ts.factory;
+const num = (value: number) => f.number(value);
+const prop = (object: ts.Expression | string, name: string) =>
+	factory.createPropertyAccessExpression(typeof object === "string" ? f.identifier(object) : object, name);
+const bufferCall = (method: string, args: ts.Expression[]) => f.call(prop("buffer", method), args);
+const uid = (hint: string) => f.identifier(hint, true);
+const assign = (target: ts.Expression, value: ts.Expression) =>
+	f.statement(f.binary(target, ts.SyntaxKind.EqualsToken, value));
+const addAssign = (target: ts.Expression, value: ts.Expression) =>
+	f.statement(f.binary(target, ts.SyntaxKind.PlusEqualsToken, value));
+const constDecl = (name: ts.Identifier | ts.BindingName, value: ts.Expression, type?: ts.TypeNode) =>
+	f.variableStatement(name, value, type);
+const letDecl = (name: ts.Identifier, value?: ts.Expression, type?: ts.TypeNode) =>
+	f.variableStatement(name, value, type, true);
+const ifStatement = (condition: ts.Expression, then: ts.Statement[], otherwise?: ts.Statement | ts.Statement[]) =>
+	factory.createIfStatement(condition, f.block(then), Array.isArray(otherwise) ? f.block(otherwise) : otherwise);
+const forOf = (name: ts.BindingName, iterable: ts.Expression, body: ts.Statement[]) =>
+	factory.createForOfStatement(
+		undefined,
+		factory.createVariableDeclarationList([factory.createVariableDeclaration(name)], ts.NodeFlags.Const),
+		iterable,
+		f.block(body),
+	);
+const range = (from: ts.Expression, to: ts.Expression) => f.call("$range", [from, to]);
+const notNil = (value: ts.Expression) => f.binary(value, ts.SyntaxKind.ExclamationEqualsEqualsToken, f.nil());
+const isNil = (value: ts.Expression) => f.binary(value, ts.SyntaxKind.EqualsEqualsEqualsToken, f.nil());
+const equals = (left: ts.Expression, right: ts.Expression) =>
+	f.binary(left, ts.SyntaxKind.EqualsEqualsEqualsToken, right);
+const conditional = (condition: ts.Expression, whenTrue: ts.Expression, whenFalse: ts.Expression) =>
+	factory.createConditionalExpression(
+		condition,
+		f.token(ts.SyntaxKind.QuestionToken),
+		whenTrue,
+		f.token(ts.SyntaxKind.ColonToken),
+		whenFalse,
+	);
+const raise = (message: string) => f.statement(f.call("error", [f.string(message)]));
+const typeOfIs = (value: ts.Expression, name: string) => equals(f.call("typeOf", [value]), f.string(name));
+const construct = (name: string, args: ts.Expression[]) =>
+	factory.createNewExpression(f.identifier(name), undefined, args);
+
+/** `left + right` with constants folded. */
+function add(left: ts.Expression, right: ts.Expression | number): ts.Expression {
+	if (typeof right === "number") {
+		if (right === 0) return left;
+		if (f.is.number(left)) return num(Number(left.text) + right);
+		return f.binary(left, ts.SyntaxKind.PlusToken, num(right));
+	}
+
+	if (f.is.number(left) && Number(left.text) === 0) return right;
+	if (f.is.number(right)) return add(left, Number(right.text));
+	return f.binary(left, ts.SyntaxKind.PlusToken, right);
+}
+
+namespace T {
+	export const unknown = () => f.keywordType(ts.SyntaxKind.UnknownKeyword);
+	export const number = () => f.keywordType(ts.SyntaxKind.NumberKeyword);
+	export const string = () => f.keywordType(ts.SyntaxKind.StringKeyword);
+	export const buffer = () => f.referenceType("buffer");
+	export const defined = () => f.referenceType("defined");
+	export const blobs = () => f.referenceType("Array", [defined()]);
+	export const array = () => f.referenceType("Array", [unknown()]);
+	export const record = () => f.referenceType("Record", [string(), unknown()]);
+	export const map = () => f.referenceType("Map", [unknown(), unknown()]);
+	export const set = () => f.referenceType("Set", [defined()]);
+	export const enumItem = () => f.referenceType("EnumItem");
+	export const tuple = (elements: ts.TypeNode[]) => f.referenceType("LuaTuple", [f.tupleType(elements)]);
+	export const fn = (parameters: Array<[string, ts.TypeNode]>, result: ts.TypeNode) =>
+		f.functionType(
+			parameters.map(([name, type]) => f.parameterDeclaration(name, type)),
+			result,
+		);
+}
+
+// --- entry points -----------------------------------------------------------------------------------
+
+/**
+ * One generator per statement: every intrinsic inside the same `createServer`/`createClient` call
+ * (each event's arguments, a function's arguments and its result) shares it, so a type they have in
+ * common is hoisted once. Hoisted code lands ahead of that statement, which is why sharing stops at
+ * the statement boundary.
+ */
+const generators = new WeakMap<ts.Node, ReturnType<typeof createSerializerGenerator>>();
+
+function generatorFor(state: TransformState, node: ts.Node, file: ts.SourceFile) {
+	const scope = ts.findAncestor(node, ts.isStatement) ?? node;
+	let generator = generators.get(scope);
+	if (!generator) {
+		generator = createSerializerGenerator(state, file, node);
+		generators.set(scope, generator);
+	}
+
+	return generator;
+}
+
+/** `Flamework.createSerializer<T>()`: a `{ serialize, deserialize }` pair for one value. */
+export function buildSerializerFromType(
+	state: TransformState,
+	node: ts.Node,
+	type: ts.Type,
+	file = state.getSourceFile(node),
+): ts.Expression {
+	const generator = generatorFor(state, node, file);
+	const serializer = generator.buildSerializer(type);
+	state.prereqList(generator.takeHoisted());
+
+	// roblox-ts type-checks the transformed file. The generated functions are typed loosely inside
+	// (`unknown` values with casts); the macro's own return type is what users see.
+	return f.asNever(serializer);
+}
+
+/**
+ * Networking: an `{ encode, decode }` pair for an argument list, given its tuple type. Promise
+ * elements are unwrapped: a function's resolved value is what crosses the network.
+ */
+export function buildListCodecFromType(
+	state: TransformState,
+	node: ts.Node,
+	type: ts.Type,
+	file = state.getSourceFile(node),
+): ts.Expression {
+	const generator = generatorFor(state, node, file);
+	const codec = generator.buildListCodec(type);
+	state.prereqList(generator.takeHoisted());
+	return f.asNever(codec);
+}
+
+/** Unwraps `Promise<T>` to `T`. */
+export function unwrapPromise(state: TransformState, type: ts.Type): ts.Type {
+	const promiseSymbol = state.typeChecker.resolveName("Promise", undefined, ts.SymbolFlags.Type, false);
+	if (promiseSymbol !== undefined && type.getSymbol() === promiseSymbol) {
+		return state.typeChecker.getTypeArguments(type as ts.TypeReference)[0] ?? type;
+	}
+
+	return type;
+}
+
+// --- generator --------------------------------------------------------------------------------------
+
+export function createSerializerGenerator(state: TransformState, file: ts.SourceFile, diagnosticNode: ts.Node) {
+	const typeChecker = state.typeChecker;
+	const resolve = (name: string) => typeChecker.resolveName(name, undefined, ts.SymbolFlags.Type, false);
+
+	const kinds = new Map<ts.Type, Kind>();
+	const layouts = new Map<Shape, Layout>();
+	const visiting = new Set<Shape>();
+	let provisional = 0;
+	const trail = new Array<ts.Type>();
+
+	/** Forward declarations of hoisted functions, then everything they refer to, then their bodies. */
+	const declarations = new Array<ts.Statement>();
+	const tables = new Array<ts.Statement>();
+	const definitions = new Array<ts.Statement>();
+	let emitted = [0, 0, 0];
+
+	const hoisted = new Map<ts.Type, Hoisted>();
+	const guards = new Map<ts.Type, ts.Identifier>();
+	const enumTables = new Map<string, ts.Identifier>();
+	const literalTables = new Map<Kind, { list: ts.Identifier; index: ts.Identifier }>();
+
+	return { buildSerializer, buildListCodec, takeHoisted };
+
+	/** Hoisted statements added since the last call, in an order that keeps every reference in scope. */
+	function takeHoisted(): ts.Statement[] {
+		const statements = [
+			...declarations.slice(emitted[0]),
+			...tables.slice(emitted[1]),
+			...definitions.slice(emitted[2]),
+		];
+		emitted = [declarations.length, tables.length, definitions.length];
+		return statements;
+	}
+
+	function fail(message: string): never {
+		const chain = trail.map((type) => typeChecker.typeToString(type)).join(" > ");
+		const lines = [`Flamework cannot serialize this type: ${message}.`];
+		if (chain !== "") lines.push(`Reached through: ${chain}`);
+		return Diagnostics.error(diagnosticNode, ...(lines as [string, ...string[]]));
+	}
+
+	// --- top level -----------------------------------------------------------------------------------
+
+	function buildSerializer(type: ts.Type): ts.Expression {
+		const layout = layoutOf(type);
+		const value = uid("v");
+		const serialize = f.arrowFunction(f.block(encodeBody(type, layout, value)), [
+			f.parameterDeclaration(value, T.unknown()),
+		]);
+
+		const buf = uid("buf");
+		const blobs = layout.blobs ? uid("blobs") : undefined;
+		const body = new Array<ts.Statement>();
+		const result = decodeBody(type, layout, buf, blobs, body);
+		body.push(f.returnStatement(result));
+		const deserialize = f.arrowFunction(
+			f.block(body),
+			blobs
+				? [f.parameterDeclaration(buf, T.buffer()), f.parameterDeclaration(blobs, T.blobs())]
+				: [f.parameterDeclaration(buf, T.buffer())],
+		);
+
+		return f.object([
+			f.propertyAssignmentDeclaration("serialize", serialize),
+			f.propertyAssignmentDeclaration("deserialize", deserialize),
+		]);
+	}
+
+	function buildListCodec(type: ts.Type): ts.Expression {
+		const list = listOf(type);
+		const layout = layoutOf(list);
+		const args = uid("args");
+		const encode = f.arrowFunction(f.block(encodeBody(list, layout, args)), [
+			f.parameterDeclaration(args, T.array()),
+		]);
+
+		const buf = uid("buf");
+		const blobs = layout.blobs ? uid("blobs") : undefined;
+		const body = new Array<ts.Statement>();
+		const result = decodeBody(list, layout, buf, blobs, body);
+		body.push(f.returnStatement(result));
+		const decode = f.arrowFunction(
+			f.block(body),
+			blobs
+				? [f.parameterDeclaration(buf, T.buffer()), f.parameterDeclaration(blobs, T.blobs())]
+				: [f.parameterDeclaration(buf, T.buffer())],
+		);
+
+		return f.object([
+			f.propertyAssignmentDeclaration("encode", encode),
+			f.propertyAssignmentDeclaration("decode", decode),
+		]);
+	}
+
+	/** The argument list a tuple type describes, with Promise elements unwrapped. */
+	function listOf(type: ts.Type): Kind {
+		if (!isTupleType(state, type)) {
+			return { kind: "list", elements: [unwrapPromise(state, type)] };
+		}
+
+		const elements = new Array<Shape>();
+		let rest: ts.Type | undefined;
+		const types = typeChecker.getTypeArguments(type);
+		for (let i = 0; i < types.length; i++) {
+			const element = unwrapPromise(state, types[i]);
+			const flags = type.target.elementFlags[i];
+			if (flags & ts.ElementFlags.Rest) {
+				rest = element;
+			} else if (flags & ts.ElementFlags.Optional && !hasUndefined(element)) {
+				elements.push({ kind: "optional", inner: element });
+			} else {
+				elements.push(element);
+			}
+		}
+
+		return { kind: "list", elements, rest };
+	}
+
+	/**
+	 * `const buf = buffer.create(<size>)`, the blob list when the type has blob slots, the writes,
+	 * and `return buf, blobs`.
+	 */
+	function encodeBody(shape: Shape, layout: Layout, value: ts.Identifier): ts.Statement[] {
+		const body = new Array<ts.Statement>();
+		const size = emitSize(shape, value, body);
+
+		const buf = uid("buf");
+		body.push(constDecl(buf, bufferCall("create", [size])));
+
+		const blobs = layout.blobs ? uid("blobs") : undefined;
+		if (blobs) body.push(constDecl(blobs, construct("Array", []), T.blobs()));
+
+		const top = isKind(shape) ? undefined : hoist(shape);
+		if (top) {
+			body.push(f.statement(f.call(top.write, blobs ? [buf, num(0), value, blobs] : [buf, num(0), value])));
+		} else {
+			const variable = layout.size === undefined ? uid("o") : undefined;
+			if (variable) body.push(letDecl(variable, num(0)));
+			emitWrite(shape, value, { buf, blobs, cursor: { variable, base: variable, offset: 0 }, out: body });
+		}
+
+		body.push(f.returnStatement(blobs ? f.call("$tuple", [buf, blobs]) : buf));
+		return body;
+	}
+
+	/** The reads, ending with a check that the whole buffer was consumed; returns the value. */
+	function decodeBody(
+		shape: Shape,
+		layout: Layout,
+		buf: ts.Identifier,
+		blobs: ts.Identifier | undefined,
+		body: ts.Statement[],
+	): ts.Expression {
+		const length = bufferCall("len", [buf]);
+		const top = isKind(shape) ? undefined : hoist(shape);
+		if (top) {
+			const value = uid("value");
+			const end = uid("o");
+			body.push(
+				constDecl(
+					f.arrayBindingDeclaration([value, end]),
+					f.call(top.read, blobs ? [buf, num(0), blobs] : [buf, num(0)]),
+				),
+			);
+			body.push(
+				ifStatement(f.binary(end, ts.SyntaxKind.ExclamationEqualsEqualsToken, length), [raise(MALFORMED)]),
+			);
+			return value;
+		}
+
+		const variable = layout.size === undefined ? uid("o") : undefined;
+		if (variable) body.push(letDecl(variable, num(0)));
+
+		const ctx: Ctx = { buf, blobs, cursor: { variable, base: variable, offset: 0 }, out: body };
+		let result = emitRead(shape, ctx);
+		if (!f.is.identifier(result) && !isLiteral(result)) {
+			result = bind(body, result, "value");
+		}
+
+		if (variable) {
+			sync(ctx);
+			body.push(
+				ifStatement(f.binary(variable, ts.SyntaxKind.ExclamationEqualsEqualsToken, length), [raise(MALFORMED)]),
+			);
+		} else {
+			body.push(
+				ifStatement(f.binary(length, ts.SyntaxKind.ExclamationEqualsEqualsToken, num(layout.size!)), [
+					raise(MALFORMED),
+				]),
+			);
+		}
+
+		return result;
+	}
+
+	// --- classification ------------------------------------------------------------------------------
+
+	function describe(shape: Shape): Kind {
+		if (isKind(shape)) return shape;
+
+		let kind = kinds.get(shape);
+		if (!kind) {
+			kind = classify(shape);
+			kinds.set(shape, kind);
+		}
+
+		return kind;
+	}
+
+	function classify(type: ts.Type): Kind {
+		if (type.isUnion()) return classifyUnion(type);
+		if (isInstanceType(type)) return { kind: "blob", typeofName: "Instance" };
+		if (type.isIntersection()) return classifyIntersection(type);
+
+		if (isConditionalType(type)) {
+			const branches = [type.resolvedTrueType!, type.resolvedFalseType!];
+			return { kind: "union", alternatives: branches.map((branch) => ({ shape: branch, type: branch })) };
+		}
+
+		if ((type.flags & ts.TypeFlags.TypeVariable) !== 0) {
+			const constraint = typeChecker.getBaseConstraintOfType(type);
+			if (!constraint) fail("a type parameter without a constraint");
+			return describe(constraint);
+		}
+
+		const literals = getLiteral(type);
+		if (literals) {
+			return literals.length === 1
+				? { kind: "constant", value: literals[0] }
+				: { kind: "literals", values: literals };
+		}
+
+		if (type.flags & ts.TypeFlags.TemplateLiteral) fail("a template literal type has no finite set of values");
+		if (type.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined)) return { kind: "nothing" };
+		if (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return { kind: "blob" };
+		if (type.flags & ts.TypeFlags.Never) fail("`never` has no values");
+		if (type.flags & ts.TypeFlags.String) return { kind: "string", length: "u32" };
+		if (type.flags & ts.TypeFlags.Number) return { kind: "number", width: "f64" };
+		if (type.flags & ts.TypeFlags.BigInt) fail("bigint does not exist in Luau");
+		if (type.flags & ts.TypeFlags.ESSymbolLike) fail("symbols cannot be sent");
+
+		if (isTupleType(state, type)) return listOf(type);
+
+		if (isArrayType(state, type) || typeChecker.isArrayType(type)) {
+			const element = typeChecker.getTypeArguments(type as ts.TypeReference)[0];
+			if (!element) fail("an array without an element type");
+			return { kind: "array", element };
+		}
+
+		if (type.getCallSignatures().length > 0) fail("functions cannot be sent");
+
+		const symbol = type.getSymbol();
+		if (!symbol) fail(`an unknown type without a symbol (${typeChecker.typeToString(type)})`);
+
+		if (symbol === resolve("Map") || symbol === resolve("ReadonlyMap")) {
+			const [key, value] = typeChecker.getTypeArguments(type as ts.TypeReference);
+			if (!key || !value) fail("a Map without key and value types");
+			return { kind: "map", key, value };
+		}
+
+		if (symbol === resolve("Set") || symbol === resolve("ReadonlySet")) {
+			const [element] = typeChecker.getTypeArguments(type as ts.TypeReference);
+			if (!element) fail("a Set without an element type");
+			return { kind: "set", element };
+		}
+
+		if (symbol === resolve("WeakMap") || symbol === resolve("WeakSet")) fail("weak collections cannot be sent");
+		if (symbol === resolve("Promise")) fail("a Promise cannot be sent; send its resolved value");
+		if (symbol === resolve("buffer")) return { kind: "buffer", length: "u32" };
+
+		if (symbol === resolve(symbol.name)) {
+			if (symbol.name === "CFrame") return { kind: "cframe" };
+			if (DATATYPES[symbol.name] !== undefined) return { kind: "datatype", name: symbol.name };
+			if (BLOB_TYPES.has(symbol.name)) {
+				return { kind: "blob", typeofName: TYPEOF_NAMES.has(symbol.name) ? symbol.name : undefined };
+			}
+		}
+
+		// `Enum.Material` and friends are interfaces declared under the Enum namespace.
+		const enumNamespace = resolve("Enum");
+		if (symbol.parent && enumNamespace && typeChecker.getMergedSymbol(symbol.parent) === enumNamespace) {
+			return { kind: "enum", name: symbol.name };
+		}
+
+		if (type.isClass()) fail(`class '${symbol.name}': send a plain object instead`);
+
+		return classifyObject(type);
+	}
+
+	function classifyUnion(type: ts.UnionType): Kind {
+		if (type === typeChecker.getBooleanType()) return { kind: "boolean" };
+
+		const { enums, literals, types } = simplifyUnion(type);
+		const [isOptional, members] = extractTypes(typeChecker, types);
+		const alternatives = new Array<Alternative>();
+
+		for (const member of members) alternatives.push({ shape: member, type: member });
+		for (const name of enums) alternatives.push({ shape: { kind: "enum", name } });
+		if (literals.length === 1) alternatives.push({ shape: { kind: "constant", value: literals[0] } });
+		if (literals.length > 1) alternatives.push({ shape: { kind: "literals", values: literals } });
+
+		let inner: Shape;
+		if (alternatives.length === 0) inner = { kind: "nothing" };
+		else if (alternatives.length === 1) inner = alternatives[0].shape;
+		else inner = { kind: "union", alternatives };
+
+		if (isOptional) return { kind: "optional", inner };
+		return describe(inner);
+	}
+
+	function classifyIntersection(type: ts.IntersectionType): Kind {
+		const brand = findBrand(type);
+		const disjoint = type.types.find((member) => (member.flags & TYPE_FLAG_DISJOINT_DOMAINS) !== 0);
+		if (disjoint) {
+			if (disjoint.flags & ts.TypeFlags.Number) {
+				return { kind: "number", width: brand && NUMBER_BRANDS.has(brand) ? (brand as Width) : "f64" };
+			}
+
+			if (disjoint.flags & ts.TypeFlags.String) {
+				return { kind: "string", length: (brand && STRING_BRANDS[brand]) || "u32" };
+			}
+
+			return describe(disjoint);
+		}
+
+		const bufferSymbol = resolve("buffer");
+		if (type.types.some((member) => member.getSymbol() === bufferSymbol)) {
+			return { kind: "buffer", length: (brand && BUFFER_BRANDS[brand]) || "u32" };
+		}
+
+		const datatype = type.types.find((member) => {
+			const name = member.getSymbol()?.name;
+			return (
+				name !== undefined &&
+				(DATATYPES[name] !== undefined || name === "CFrame") &&
+				member.getSymbol() === resolve(name)
+			);
+		});
+		if (datatype) return describe(datatype);
+		if (type.types.some((member) => isInstanceType(member))) return { kind: "blob", typeofName: "Instance" };
+
+		return classifyObject(type);
+	}
+
+	/** The literal in `number & { __brand: "u8" }`, whatever the property is called. */
+	function findBrand(type: ts.IntersectionType): string | undefined {
+		for (const member of type.types) {
+			if ((member.flags & ts.TypeFlags.Object) === 0) continue;
+
+			for (const property of member.getProperties()) {
+				const propertyType = typeChecker.getTypeOfPropertyOfType(member, property.name);
+				if (propertyType?.isStringLiteral()) {
+					const brand = propertyType.value;
+					if (NUMBER_BRANDS.has(brand) || brand in STRING_BRANDS || brand in BUFFER_BRANDS) return brand;
+				}
+			}
+		}
+	}
+
+	function classifyObject(type: ts.Type): Kind {
+		const indexInfos = typeChecker.getIndexInfosOfType(type);
+		const properties = type.getProperties().filter((property) => {
+			const propertyType = typeChecker.getTypeOfPropertyOfType(type, property.name);
+			return (
+				propertyType !== undefined &&
+				(propertyType.flags & (ts.TypeFlags.Never | ts.TypeFlags.UniqueESSymbol)) === 0
+			);
+		});
+
+		if (properties.length === 0 && indexInfos.length === 0) return { kind: "blob" };
+
+		if (indexInfos.length > 0) {
+			if (properties.length > 0) fail("an object with both named properties and an index signature");
+			if (indexInfos.length > 1) fail("an object with more than one index signature");
+			return { kind: "map", key: indexInfos[0].keyType, value: indexInfos[0].type };
+		}
+
+		const sorted = [...properties].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+		const fields = sorted.map((property) => {
+			const propertyType = typeChecker.getTypeOfPropertyOfType(type, property.name)!;
+			if (propertyType.getCallSignatures().length > 0) fail(`property '${property.name}' is a function`);
+
+			const optional = (property.flags & ts.SymbolFlags.Optional) !== 0 && !hasUndefined(propertyType);
+			const shape: Shape = optional ? { kind: "optional", inner: propertyType } : propertyType;
+			return { name: property.name, shape };
+		});
+
+		return { kind: "object", fields };
+	}
+
+	function hasUndefined(type: ts.Type) {
+		return (
+			type.isUnion() &&
+			type.types.some((member) => (member.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0)
+		);
+	}
+
+	// --- layout --------------------------------------------------------------------------------------
+
+	function layoutOf(shape: Shape): Layout {
+		const memo = layouts.get(shape);
+		if (memo) return memo;
+
+		// A type reached again while it is being measured: its size is not fixed, whatever it is.
+		if (visiting.has(shape)) {
+			provisional += 1;
+			return { size: undefined, min: 0, blobs: false };
+		}
+
+		visiting.add(shape);
+		const before = provisional;
+		const layout = computeLayout(shape);
+		visiting.delete(shape);
+
+		// A result that saw a cycle is only final for the type that closes it, at the top of the chain.
+		if (provisional === before || visiting.size === 0) layouts.set(shape, layout);
+		if (visiting.size === 0) provisional = 0;
+
+		return layout;
+	}
+
+	function computeLayout(shape: Shape): Layout {
+		if (!isKind(shape)) {
+			trail.push(shape);
+			const layout = layoutOf(describe(shape));
+			trail.pop();
+			return layout;
+		}
+
+		const fixed = (size: number, blobs = false): Layout => ({ size, min: size, blobs });
+		const kind = shape;
+		switch (kind.kind) {
+			case "number":
+				return fixed(WIDTH_SIZE[kind.width]);
+			case "boolean":
+				return fixed(1);
+			case "string":
+			case "buffer":
+				return { size: undefined, min: WIDTH_SIZE[kind.length], blobs: false };
+			case "constant":
+			case "nothing":
+				return fixed(0);
+			case "literals":
+				return fixed(kind.values.length > 0xff ? 2 : 1);
+			case "blob":
+				return fixed(2, true);
+			case "datatype":
+				return fixed(DATATYPES[kind.name].reduce((total, [width]) => total + WIDTH_SIZE[width], 0));
+			case "cframe":
+				return fixed(CFRAME_COMPONENTS * 4);
+			case "enum":
+				return fixed(2);
+			case "optional": {
+				const inner = layoutOf(kind.inner);
+				return { size: undefined, min: 1, blobs: inner.blobs };
+			}
+			case "array":
+			case "set": {
+				const element = layoutOf(kind.element);
+				return { size: undefined, min: 4, blobs: element.blobs };
+			}
+			case "map": {
+				const key = layoutOf(kind.key);
+				const value = layoutOf(kind.value);
+				return { size: undefined, min: 4, blobs: key.blobs || value.blobs };
+			}
+			case "list": {
+				const layout = sumLayouts(kind.elements.map((element) => layoutOf(element)));
+				if (kind.rest) {
+					const rest = layoutOf(kind.rest);
+					return { size: undefined, min: layout.min + 4, blobs: layout.blobs || rest.blobs };
+				}
+
+				return layout;
+			}
+			case "object":
+				return sumLayouts(kind.fields.map((field) => layoutOf(field.shape)));
+			case "union": {
+				const members = kind.alternatives.map((alternative) => layoutOf(alternative.shape));
+				const sizes = new Set(members.map((member) => member.size));
+				const size = sizes.size === 1 && !sizes.has(undefined) ? 1 + members[0].size! : undefined;
+				return {
+					size,
+					min: 1 + Math.min(...members.map((member) => member.min)),
+					blobs: members.some((member) => member.blobs),
+				};
+			}
+		}
+	}
+
+	function sumLayouts(layouts: Layout[]): Layout {
+		let size: number | undefined = 0;
+		let min = 0;
+		let blobs = false;
+		for (const layout of layouts) {
+			size = size === undefined || layout.size === undefined ? undefined : size + layout.size;
+			min += layout.min;
+			blobs ||= layout.blobs;
+		}
+
+		return { size, min, blobs };
+	}
+
+	// --- hoisting ------------------------------------------------------------------------------------
+
+	/** Named object-like types with a variable size get their own functions; everything else inlines. */
+	function hoist(type: ts.Type): Hoisted | undefined {
+		const existing = hoisted.get(type);
+		if (existing) return existing;
+
+		const name = hoistName(type);
+		if (name === undefined) return;
+
+		const layout = layoutOf(type);
+		if (layout.size !== undefined) return;
+
+		// Only structured types are worth a function; a named alias of a string or an array inlines.
+		const structure = describe(type).kind;
+		if (structure !== "object" && structure !== "union" && structure !== "list") return;
+
+		const info: Hoisted = { size: uid(`s_${name}`), write: uid(`w_${name}`), read: uid(`r_${name}`), layout };
+		hoisted.set(type, info);
+
+		const withBlobs = <U>(list: U[], entry: U) => (layout.blobs ? [...list, entry] : list);
+		const blobsParameter: [string, ts.TypeNode] = ["blobs", T.blobs()];
+		const writeParameters: Array<[string, ts.TypeNode]> = [
+			["buf", T.buffer()],
+			["o", T.number()],
+			["v", T.unknown()],
+		];
+		const readParameters: Array<[string, ts.TypeNode]> = [
+			["buf", T.buffer()],
+			["o", T.number()],
+		];
+		declarations.push(letDecl(info.size, undefined, T.fn([["v", T.unknown()]], T.number())));
+		declarations.push(letDecl(info.write, undefined, T.fn(withBlobs(writeParameters, blobsParameter), T.number())));
+		declarations.push(
+			letDecl(
+				info.read,
+				undefined,
+				T.fn(withBlobs(readParameters, blobsParameter), T.tuple([T.unknown(), T.number()])),
+			),
+		);
+
+		// The bodies are built after the identifiers exist, which is what lets a type refer to itself.
+		const kind = describe(type);
+		trail.push(type);
+
+		const value = uid("v");
+		const sizeBody = new Array<ts.Statement>();
+		const size = emitSize(kind, value, sizeBody);
+		sizeBody.push(f.returnStatement(size));
+		definitions.push(assign(info.size, f.arrowFunction(f.block(sizeBody), [f.parameterDeclaration(value)])));
+
+		const buf = uid("buf");
+		const o = uid("o");
+		const blobs = layout.blobs ? uid("blobs") : undefined;
+		const parameters = (...names: ts.Identifier[]) => names.map((id) => f.parameterDeclaration(id));
+
+		const writeBody = new Array<ts.Statement>();
+		const writeCtx: Ctx = { buf, blobs, cursor: { variable: o, base: o, offset: 0 }, out: writeBody };
+		emitWrite(kind, value, writeCtx);
+		sync(writeCtx);
+		writeBody.push(f.returnStatement(o));
+		definitions.push(
+			assign(info.write, f.arrowFunction(f.block(writeBody), parameters(...withBlobs([buf, o, value], blobs!)))),
+		);
+
+		const readBody = new Array<ts.Statement>();
+		const readCtx: Ctx = { buf, blobs, cursor: { variable: o, base: o, offset: 0 }, out: readBody };
+		const result = emitRead(kind, readCtx);
+		const bound = f.is.identifier(result) || isLiteral(result) ? result : bind(readBody, result, "value");
+		sync(readCtx);
+		readBody.push(f.returnStatement(f.call("$tuple", [bound, o])));
+		definitions.push(
+			assign(info.read, f.arrowFunction(f.block(readBody), parameters(...withBlobs([buf, o], blobs!)))),
+		);
+
+		trail.pop();
+		return info;
+	}
+
+	function hoistName(type: ts.Type): string | undefined {
+		if ((type.flags & (ts.TypeFlags.Object | ts.TypeFlags.UnionOrIntersection)) === 0) return;
+		if (isInstanceType(type) || getLiteral(type) !== undefined) return;
+
+		const symbolName = type.aliasSymbol?.name ?? type.symbol?.name;
+		if (symbolName === undefined || symbolName === "__type" || symbolName === "__object") return;
+		if (symbolName === "Array" || symbolName === "ReadonlyArray") return;
+		if (DATATYPES[symbolName] !== undefined || symbolName === "CFrame" || BLOB_TYPES.has(symbolName)) return;
+
+		return symbolName.replace(/\W/g, "_");
+	}
+
+	function guardFor(type: ts.Type): ts.Identifier {
+		let guard = guards.get(type);
+		if (!guard) {
+			guard = uid("guard");
+			tables.push(constDecl(guard, buildGuardFromType(state, diagnosticNode, type, file)));
+			guards.set(type, guard);
+		}
+
+		return guard;
+	}
+
+	/** `Enum.X` items by `Value`, built once: values are not always below 256, so they are sent as u16. */
+	function enumTableFor(name: string): ts.Identifier {
+		let table = enumTables.get(name);
+		if (!table) {
+			table = uid(`enum_${name}`);
+			const item = uid("item");
+			tables.push(
+				constDecl(table, construct("Map", []), f.referenceType("Map", [T.number(), T.enumItem()])),
+				forOf(item, f.call(prop(prop("Enum", name), "GetEnumItems"), []), [
+					f.statement(f.call(prop(table, "set"), [prop(item, "Value"), item])),
+				]),
+			);
+			enumTables.set(name, table);
+		}
+
+		return table;
+	}
+
+	/** A literal union's members as a list (decode) and as a lookup from member to index (encode). */
+	function literalTablesFor(kind: Kind & { kind: "literals" }) {
+		let entry = literalTables.get(kind);
+		if (!entry) {
+			entry = { list: uid("literals"), index: uid("literalIndex") };
+			tables.push(
+				constDecl(entry.list, f.array(kind.values, false), T.blobs()),
+				constDecl(
+					entry.index,
+					construct("Map", [f.array(kind.values.map((value, index) => f.array([value, num(index)], false)))]),
+					f.referenceType("Map", [T.defined(), T.number()]),
+				),
+			);
+			literalTables.set(kind, entry);
+		}
+
+		return entry;
+	}
+
+	// --- cursor --------------------------------------------------------------------------------------
+
+	function at(ctx: Ctx, extra = 0): ts.Expression {
+		const offset = ctx.cursor.offset + extra;
+		return ctx.cursor.base ? add(ctx.cursor.base, offset) : num(offset);
+	}
+
+	/** Folds the pending constant (and any hoisted read's result) into the position variable. */
+	function sync(ctx: Ctx) {
+		const cursor = ctx.cursor;
+		if (cursor.base === cursor.variable && cursor.offset === 0) return;
+		if (!cursor.variable) throw new Error("Flamework: a variable-size write inside a fixed layout");
+
+		if (cursor.base === cursor.variable) {
+			ctx.out.push(addAssign(cursor.variable, num(cursor.offset)));
+		} else {
+			ctx.out.push(assign(cursor.variable, at(ctx)));
+		}
+
+		cursor.base = cursor.variable;
+		cursor.offset = 0;
+	}
+
+	/** Moves the position by a runtime amount. */
+	function advanceBy(ctx: Ctx, amount: ts.Expression) {
+		sync(ctx);
+		ctx.out.push(addAssign(ctx.cursor.variable!, amount));
+	}
+
+	/**
+	 * Statements for a conditional or repeated body. In a variable layout the body starts from the
+	 * synced position variable and leaves it exact; in a fixed layout it inherits the offset and the
+	 * caller advances past it.
+	 */
+	function branch(ctx: Ctx, build: (child: Ctx) => void): ts.Statement[] {
+		if (ctx.cursor.variable) {
+			sync(ctx);
+			const child: Ctx = {
+				...ctx,
+				cursor: { variable: ctx.cursor.variable, base: ctx.cursor.variable, offset: 0 },
+				out: [],
+			};
+			build(child);
+			sync(child);
+			return child.out;
+		}
+
+		const child: Ctx = { ...ctx, cursor: { ...ctx.cursor }, out: [] };
+		build(child);
+		return child.out;
+	}
+
+	function bind(out: ts.Statement[], value: ts.Expression, hint: string, type?: ts.TypeNode): ts.Expression {
+		if (f.is.identifier(value) && !type) return value;
+		if (!type && ts.isAsExpression(value) && f.is.identifier(value.expression)) return value;
+		const id = uid(hint);
+		out.push(constDecl(id, value, type));
+		return id;
+	}
+
+	function isLiteral(expression: ts.Expression) {
+		return f.is.string(expression) || f.is.number(expression) || f.is.bool(expression) || f.is.nil(expression);
+	}
+
+	function fieldAccess(object: ts.Expression, name: string): ts.Expression {
+		return IDENTIFIER.test(name)
+			? factory.createPropertyAccessExpression(object, name)
+			: factory.createElementAccessExpression(object, f.string(name));
+	}
+
+	function path(object: ts.Expression, names: string[]): ts.Expression {
+		return names.reduce((current, name) => prop(current, name), object);
+	}
+
+	// --- size ----------------------------------------------------------------------------------------
+
+	/** The byte count of `value`: a constant for fixed layouts, otherwise an expression (plus statements). */
+	function emitSize(shape: Shape, value: ts.Expression, out: ts.Statement[]): ts.Expression {
+		const layout = layoutOf(shape);
+		if (layout.size !== undefined) return num(layout.size);
+
+		if (!isKind(shape)) {
+			const info = hoist(shape);
+			if (info) return f.call(info.size, [value]);
+		}
+
+		const kind = describe(shape);
+		switch (kind.kind) {
+			case "string":
+				return add(f.call(prop(f.as(value, T.string()), "size"), []), WIDTH_SIZE[kind.length]);
+			case "buffer":
+				return add(bufferCall("len", [f.as(value, T.buffer())]), WIDTH_SIZE[kind.length]);
+			case "optional": {
+				const inner = layoutOf(kind.inner);
+				const v = bind(out, value, "v");
+				if (inner.size !== undefined) {
+					return conditional(notNil(v), num(1 + inner.size), num(1));
+				}
+
+				const total = uid("size");
+				out.push(letDecl(total, num(1)));
+				const body = new Array<ts.Statement>();
+				body.push(addAssign(total, emitSize(kind.inner, v, body)));
+				out.push(ifStatement(notNil(v), body));
+				return total;
+			}
+			case "array": {
+				const array = bind(out, f.as(value, T.array()), "array");
+				const element = layoutOf(kind.element);
+				if (element.size !== undefined) {
+					if (element.size === 0) return num(4);
+					return add(
+						f.binary(f.call(prop(array, "size"), []), ts.SyntaxKind.AsteriskToken, num(element.size)),
+						4,
+					);
+				}
+
+				const total = uid("size");
+				const item = uid("item");
+				out.push(letDecl(total, num(4)));
+				const body = new Array<ts.Statement>();
+				body.push(addAssign(total, emitSize(kind.element, item, body)));
+				out.push(forOf(item, array, body));
+				return total;
+			}
+			case "set": {
+				const set = bind(out, f.as(value, T.set()), "set");
+				const total = uid("size");
+				const item = uid("item");
+				out.push(letDecl(total, num(4)));
+				const body = new Array<ts.Statement>();
+				body.push(addAssign(total, emitSize(kind.element, item, body)));
+				out.push(forOf(item, set, body));
+				return total;
+			}
+			case "map": {
+				const map = bind(out, f.as(value, T.map()), "map");
+				const total = uid("size");
+				const key = uid("key");
+				const entry = uid("entry");
+				out.push(letDecl(total, num(4)));
+				const body = new Array<ts.Statement>();
+				const keySize = emitSize(kind.key, key, body);
+				const valueSize = emitSize(kind.value, entry, body);
+				body.push(addAssign(total, add(keySize, valueSize)));
+				out.push(forOf(f.arrayBindingDeclaration([key, entry]), map, body));
+				return total;
+			}
+			case "list": {
+				const list = bind(out, f.as(value, T.array()), "list");
+				let total: ts.Expression = num(0);
+				kind.elements.forEach((element, index) => {
+					total = add(total, emitSize(element, f.elementAccessExpression(list, num(index)), out));
+				});
+
+				if (kind.rest) {
+					const rest = layoutOf(kind.rest);
+					const count = restCount(out, list, kind.elements.length);
+					if (rest.size !== undefined) {
+						if (rest.size === 0) return add(total, 4);
+						return add(add(total, 4), f.binary(count, ts.SyntaxKind.AsteriskToken, num(rest.size)));
+					}
+
+					const sum = uid("size");
+					const index = uid("i");
+					out.push(letDecl(sum, add(total, 4)));
+					const body = new Array<ts.Statement>();
+					const element = f.elementAccessExpression(list, f.binary(index, ts.SyntaxKind.MinusToken, num(1)));
+					body.push(addAssign(sum, emitSize(kind.rest, element, body)));
+					out.push(
+						forOf(index, range(num(kind.elements.length + 1), add(count, kind.elements.length)), body),
+					);
+					return sum;
+				}
+
+				return total;
+			}
+			case "object": {
+				const object = bind(out, f.as(value, T.record()), "object");
+				let total: ts.Expression = num(0);
+				for (const field of kind.fields) {
+					total = add(total, emitSize(field.shape, fieldAccess(object, field.name), out));
+				}
+
+				return total;
+			}
+			case "union": {
+				const v = bind(out, value, "v");
+				const total = uid("size");
+				out.push(letDecl(total, num(1)));
+
+				let chain: ts.Statement | undefined;
+				for (let i = kind.alternatives.length - 1; i >= 0; i--) {
+					const alternative = kind.alternatives[i];
+					const layout = layoutOf(alternative.shape);
+					const body = new Array<ts.Statement>();
+					const size = layout.size !== undefined ? num(layout.size) : emitSize(alternative.shape, v, body);
+					if (!(f.is.number(size) && size.text === "0")) body.push(addAssign(total, size));
+					if (body.length === 0 && chain === undefined) continue;
+					chain = ifStatement(discriminate(alternative, v), body, chain);
+				}
+
+				if (chain) out.push(chain);
+				return total;
+			}
+			default:
+				throw new Error(`Flamework: '${kind.kind}' has a fixed size`);
+		}
+	}
+
+	// --- write ---------------------------------------------------------------------------------------
+
+	function emitWrite(shape: Shape, value: ts.Expression, ctx: Ctx): void {
+		if (!isKind(shape)) {
+			const info = hoist(shape);
+			if (info) {
+				const args = [ctx.buf, at(ctx), value];
+				if (info.layout.blobs) args.push(ctx.blobs!);
+				ctx.out.push(assign(ctx.cursor.variable!, f.call(info.write, args)));
+				ctx.cursor.base = ctx.cursor.variable;
+				ctx.cursor.offset = 0;
+				return;
+			}
+		}
+
+		const kind = describe(shape);
+		switch (kind.kind) {
+			case "number":
+				ctx.out.push(
+					f.statement(bufferCall(`write${kind.width}`, [ctx.buf, at(ctx), f.as(value, T.number())])),
+				);
+				ctx.cursor.offset += WIDTH_SIZE[kind.width];
+				return;
+			case "boolean":
+				ctx.out.push(
+					f.statement(
+						bufferCall("writeu8", [
+							ctx.buf,
+							at(ctx),
+							conditional(equals(value, f.bool(true)), num(1), num(0)),
+						]),
+					),
+				);
+				ctx.cursor.offset += 1;
+				return;
+			case "string": {
+				const text = bind(ctx.out, f.as(value, T.string()), "text");
+				const length = bind(ctx.out, f.call(prop(text, "size"), []), "length");
+				writeLength(ctx, kind.length, length, "string");
+				ctx.out.push(f.statement(bufferCall("writestring", [ctx.buf, at(ctx), text])));
+				advanceBy(ctx, length);
+				return;
+			}
+			case "buffer": {
+				const bytes = bind(ctx.out, f.as(value, T.buffer()), "bytes");
+				const length = bind(ctx.out, bufferCall("len", [bytes]), "length");
+				writeLength(ctx, kind.length, length, "buffer");
+				ctx.out.push(f.statement(bufferCall("copy", [ctx.buf, at(ctx), bytes])));
+				advanceBy(ctx, length);
+				return;
+			}
+			case "constant":
+			case "nothing":
+				return;
+			case "literals": {
+				const { index } = literalTablesFor(kind);
+				const slot = bind(ctx.out, f.call(prop(index, "get"), [f.as(value, T.defined())]), "index");
+				ctx.out.push(ifStatement(isNil(slot), [raise("value is not one of the literals its type allows")]));
+				const width = kind.values.length > 0xff ? "u16" : "u8";
+				ctx.out.push(f.statement(bufferCall(`write${width}`, [ctx.buf, at(ctx), slot])));
+				ctx.cursor.offset += WIDTH_SIZE[width];
+				return;
+			}
+			case "blob": {
+				const blob = bind(ctx.out, value, "blob");
+				const blobs = ctx.blobs!;
+				ctx.out.push(
+					ifStatement(
+						notNil(blob),
+						[
+							f.statement(f.call(prop(blobs, "push"), [f.as(blob, T.defined())])),
+							f.statement(bufferCall("writeu16", [ctx.buf, at(ctx), f.call(prop(blobs, "size"), [])])),
+						],
+						[f.statement(bufferCall("writeu16", [ctx.buf, at(ctx), num(0)]))],
+					),
+				);
+				ctx.cursor.offset += 2;
+				return;
+			}
+			case "datatype": {
+				const datatype = bind(ctx.out, f.as(value, f.referenceType(kind.name)), kind.name.toLowerCase());
+				for (const [width, names] of DATATYPES[kind.name]) {
+					ctx.out.push(f.statement(bufferCall(`write${width}`, [ctx.buf, at(ctx), path(datatype, names)])));
+					ctx.cursor.offset += WIDTH_SIZE[width];
+				}
+				return;
+			}
+			case "cframe": {
+				const components = Array.from({ length: CFRAME_COMPONENTS }, (_, i) => uid(`c${i}`));
+				ctx.out.push(
+					constDecl(
+						f.arrayBindingDeclaration(components),
+						f.call(prop(f.as(value, f.referenceType("CFrame")), "GetComponents"), []),
+					),
+				);
+				for (const component of components) {
+					ctx.out.push(f.statement(bufferCall("writef32", [ctx.buf, at(ctx), component])));
+					ctx.cursor.offset += 4;
+				}
+				return;
+			}
+			case "enum":
+				ctx.out.push(
+					f.statement(bufferCall("writeu16", [ctx.buf, at(ctx), prop(f.as(value, T.enumItem()), "Value")])),
+				);
+				ctx.cursor.offset += 2;
+				return;
+			case "optional": {
+				const v = bind(ctx.out, value, "v");
+				ctx.out.push(
+					f.statement(bufferCall("writeu8", [ctx.buf, at(ctx), conditional(notNil(v), num(1), num(0))])),
+				);
+				ctx.cursor.offset += 1;
+				ctx.out.push(
+					ifStatement(
+						notNil(v),
+						branch(ctx, (child) => emitWrite(kind.inner, v, child)),
+					),
+				);
+				return;
+			}
+			case "array": {
+				const array = bind(ctx.out, f.as(value, T.array()), "array");
+				ctx.out.push(f.statement(bufferCall("writeu32", [ctx.buf, at(ctx), f.call(prop(array, "size"), [])])));
+				ctx.cursor.offset += 4;
+				const item = uid("item");
+				ctx.out.push(
+					forOf(
+						item,
+						array,
+						branch(ctx, (child) => emitWrite(kind.element, item, child)),
+					),
+				);
+				return;
+			}
+			case "set": {
+				const set = bind(ctx.out, f.as(value, T.set()), "set");
+				writeCounted(ctx, set, (item, child) => emitWrite(kind.element, item, child));
+				return;
+			}
+			case "map": {
+				const map = bind(ctx.out, f.as(value, T.map()), "map");
+				const key = uid("key");
+				const entry = uid("entry");
+				writeCounted(
+					ctx,
+					map,
+					(_, child) => {
+						emitWrite(kind.key, key, child);
+						emitWrite(kind.value, entry, child);
+					},
+					f.arrayBindingDeclaration([key, entry]),
+				);
+				return;
+			}
+			case "list": {
+				const list = bind(ctx.out, f.as(value, T.array()), "list");
+				kind.elements.forEach((element, index) => {
+					emitWrite(element, f.elementAccessExpression(list, num(index)), ctx);
+				});
+
+				if (kind.rest) {
+					const count = restCount(ctx.out, list, kind.elements.length);
+					ctx.out.push(f.statement(bufferCall("writeu32", [ctx.buf, at(ctx), count])));
+					ctx.cursor.offset += 4;
+					const index = uid("i");
+					const element = f.elementAccessExpression(list, f.binary(index, ts.SyntaxKind.MinusToken, num(1)));
+					ctx.out.push(
+						forOf(
+							index,
+							range(num(kind.elements.length + 1), add(count, kind.elements.length)),
+							branch(ctx, (child) => emitWrite(kind.rest!, element, child)),
+						),
+					);
+				}
+				return;
+			}
+			case "object": {
+				const object = bind(ctx.out, f.as(value, T.record()), "object");
+				for (const field of kind.fields) {
+					emitWrite(field.shape, fieldAccess(object, field.name), ctx);
+				}
+				return;
+			}
+			case "union": {
+				const v = bind(ctx.out, value, "v");
+				const layout = layoutOf(kind);
+				const start = ctx.cursor.offset;
+				let chain: ts.Statement = f.block([raise("value matches none of the union's members")]);
+				for (let i = kind.alternatives.length - 1; i >= 0; i--) {
+					const alternative = kind.alternatives[i];
+					const body = branch(ctx, (child) => {
+						child.out.push(f.statement(bufferCall("writeu8", [child.buf, at(child), num(i)])));
+						child.cursor.offset += 1;
+						emitWrite(alternative.shape, v, child);
+					});
+					chain = ifStatement(discriminate(alternative, v), body, chain);
+				}
+
+				ctx.out.push(chain);
+				if (layout.size !== undefined) ctx.cursor.offset = start + layout.size;
+				return;
+			}
+		}
+	}
+
+	/** How many rest elements a list holds: never negative, since absent trailing optionals shorten it. */
+	function restCount(out: ts.Statement[], list: ts.Expression, fixed: number): ts.Identifier {
+		const count = uid("count");
+		const length = f.binary(f.call(prop(list, "size"), []), ts.SyntaxKind.MinusToken, num(fixed));
+		out.push(constDecl(count, f.call(prop("math", "max"), [length, num(0)])));
+		return count;
+	}
+
+	/** The length prefix of a string or buffer, refusing one the prefix cannot hold. */
+	function writeLength(ctx: Ctx, width: LengthWidth, length: ts.Expression, what: string) {
+		if (width !== "u32") {
+			ctx.out.push(
+				ifStatement(f.binary(length, ts.SyntaxKind.GreaterThanToken, num(LENGTH_MAX[width])), [
+					raise(`${what} is longer than its ${width} length prefix allows`),
+				]),
+			);
+		}
+
+		ctx.out.push(f.statement(bufferCall(`write${width}`, [ctx.buf, at(ctx), length])));
+		ctx.cursor.offset += WIDTH_SIZE[width];
+	}
+
+	/** Sets and maps have no cheap length: the count is written into a slot reserved ahead of the elements. */
+	function writeCounted(
+		ctx: Ctx,
+		collection: ts.Expression,
+		body: (item: ts.Identifier, child: Ctx) => void,
+		binding?: ts.BindingName,
+	) {
+		const slot = uid("countAt");
+		ctx.out.push(constDecl(slot, at(ctx)));
+		ctx.cursor.offset += 4;
+		const count = uid("count");
+		ctx.out.push(letDecl(count, num(0)));
+		const item = uid("item");
+		ctx.out.push(
+			forOf(
+				binding ?? item,
+				collection,
+				branch(ctx, (child) => {
+					child.out.push(addAssign(count, num(1)));
+					body(item, child);
+				}),
+			),
+		);
+		ctx.out.push(f.statement(bufferCall("writeu32", [ctx.buf, slot, count])));
+	}
+
+	/** The test that tells a union member apart from the others, given a value. */
+	function discriminate(alternative: Alternative, value: ts.Expression): ts.Expression {
+		const kind = describe(alternative.shape);
+		switch (kind.kind) {
+			case "number":
+				return typeOfIs(value, "number");
+			case "string":
+				return typeOfIs(value, "string");
+			case "boolean":
+				return typeOfIs(value, "boolean");
+			case "buffer":
+				return typeOfIs(value, "buffer");
+			case "datatype":
+				return typeOfIs(value, kind.name);
+			case "cframe":
+				return typeOfIs(value, "CFrame");
+			case "enum":
+				return f.binary(
+					typeOfIs(value, "EnumItem"),
+					ts.SyntaxKind.AmpersandAmpersandToken,
+					equals(prop(f.as(value, T.enumItem()), "EnumType"), prop("Enum", kind.name)),
+				);
+			case "literals":
+				return notNil(f.call(prop(literalTablesFor(kind).index, "get"), [f.as(value, T.defined())]));
+			case "constant":
+				return equals(value, kind.value);
+			case "nothing":
+				return isNil(value);
+			case "blob":
+				return kind.typeofName !== undefined ? typeOfIs(value, kind.typeofName) : f.bool(true);
+			default:
+				if (!alternative.type) throw new Error(`Flamework: cannot discriminate a synthetic ${kind.kind}`);
+				return f.call(guardFor(alternative.type), [value]);
+		}
+	}
+
+	// --- read ----------------------------------------------------------------------------------------
+
+	/**
+	 * The value read at the cursor. Fixed-size reads are plain expressions; anything that moves the
+	 * position by a runtime amount is bound to a local first, so the expressions of one container are
+	 * always evaluated against a position that no later read has changed.
+	 */
+	function emitRead(shape: Shape, ctx: Ctx): ts.Expression {
+		if (!isKind(shape)) {
+			const info = hoist(shape);
+			if (info) {
+				const args = [ctx.buf, at(ctx)];
+				if (info.layout.blobs) args.push(ctx.blobs!);
+				const value = uid("value");
+				const next = uid("o");
+				ctx.out.push(constDecl(f.arrayBindingDeclaration([value, next]), f.call(info.read, args)));
+				ctx.cursor.base = next;
+				ctx.cursor.offset = 0;
+				return value;
+			}
+		}
+
+		const kind = describe(shape);
+		switch (kind.kind) {
+			case "number": {
+				const read = bufferCall(`read${kind.width}`, [ctx.buf, at(ctx)]);
+				ctx.cursor.offset += WIDTH_SIZE[kind.width];
+				return read;
+			}
+			case "boolean": {
+				const read = f.binary(
+					bufferCall("readu8", [ctx.buf, at(ctx)]),
+					ts.SyntaxKind.ExclamationEqualsEqualsToken,
+					num(0),
+				);
+				ctx.cursor.offset += 1;
+				return read;
+			}
+			case "string": {
+				const length = readLength(ctx, kind.length);
+				const text = bind(ctx.out, bufferCall("readstring", [ctx.buf, at(ctx), length]), "text");
+				advanceBy(ctx, length);
+				return text;
+			}
+			case "buffer": {
+				const length = readLength(ctx, kind.length);
+				const bytes = bind(ctx.out, bufferCall("create", [length]), "bytes");
+				ctx.out.push(f.statement(bufferCall("copy", [bytes, num(0), ctx.buf, at(ctx), length])));
+				advanceBy(ctx, length);
+				return bytes;
+			}
+			case "constant":
+				return kind.value;
+			case "nothing":
+				return f.nil();
+			case "literals": {
+				const { list } = literalTablesFor(kind);
+				const width = kind.values.length > 0xff ? "u16" : "u8";
+				const index = bufferCall(`read${width}`, [ctx.buf, at(ctx)]);
+				ctx.cursor.offset += WIDTH_SIZE[width];
+				const value = bind(ctx.out, f.elementAccessExpression(list, index), "literal");
+				ctx.out.push(ifStatement(isNil(value), [raise(MALFORMED)]));
+				return value;
+			}
+			case "blob": {
+				const index = bufferCall("readu16", [ctx.buf, at(ctx)]);
+				ctx.cursor.offset += 2;
+				// 1-based on the wire; roblox-ts adds the one back when indexing an array.
+				return f.elementAccessExpression(ctx.blobs!, f.binary(index, ts.SyntaxKind.MinusToken, num(1)));
+			}
+			case "datatype": {
+				const args = DATATYPES[kind.name].map(([width]) => {
+					const read = bufferCall(`read${width}`, [ctx.buf, at(ctx)]);
+					ctx.cursor.offset += WIDTH_SIZE[width];
+					return read;
+				});
+				return construct(kind.name, args);
+			}
+			case "cframe": {
+				const args = Array.from({ length: CFRAME_COMPONENTS }, () => {
+					const read = bufferCall("readf32", [ctx.buf, at(ctx)]);
+					ctx.cursor.offset += 4;
+					return read;
+				});
+				return construct("CFrame", args);
+			}
+			case "enum": {
+				const index = bufferCall("readu16", [ctx.buf, at(ctx)]);
+				ctx.cursor.offset += 2;
+				return f.call(prop(enumTableFor(kind.name), "get"), [index]);
+			}
+			case "optional": {
+				const present = bind(
+					ctx.out,
+					f.binary(
+						bufferCall("readu8", [ctx.buf, at(ctx)]),
+						ts.SyntaxKind.ExclamationEqualsEqualsToken,
+						num(0),
+					),
+					"present",
+				);
+				ctx.cursor.offset += 1;
+				const value = uid("value");
+				ctx.out.push(letDecl(value, undefined, T.unknown()));
+				ctx.out.push(
+					ifStatement(
+						present,
+						branch(ctx, (child) => child.out.push(assign(value, emitRead(kind.inner, child)))),
+					),
+				);
+				return value;
+			}
+			case "array": {
+				const count = readCount(ctx, layoutOf(kind.element).min);
+				const array = bind(ctx.out, construct("Array", [count]), "array", T.array());
+				const index = uid("i");
+				ctx.out.push(
+					forOf(
+						index,
+						range(num(1), count),
+						branch(ctx, (child) => {
+							const element = emitRead(kind.element, child);
+							child.out.push(
+								assign(
+									f.elementAccessExpression(array, f.binary(index, ts.SyntaxKind.MinusToken, num(1))),
+									element,
+								),
+							);
+						}),
+					),
+				);
+				return array;
+			}
+			case "set": {
+				const count = readCount(ctx, layoutOf(kind.element).min);
+				const set = bind(ctx.out, construct("Set", []), "set", T.set());
+				ctx.out.push(
+					forOf(
+						uid("_"),
+						range(num(1), count),
+						branch(ctx, (child) => {
+							const element = emitRead(kind.element, child);
+							child.out.push(f.statement(f.call(prop(set, "add"), [f.as(element, T.defined())])));
+						}),
+					),
+				);
+				return set;
+			}
+			case "map": {
+				const count = readCount(ctx, layoutOf(kind.key).min + layoutOf(kind.value).min);
+				const map = bind(ctx.out, construct("Map", []), "map", T.map());
+				ctx.out.push(
+					forOf(
+						uid("_"),
+						range(num(1), count),
+						branch(ctx, (child) => {
+							const key = readInto(kind.key, child, "key");
+							const value = readInto(kind.value, child, "entry");
+							child.out.push(f.statement(f.call(prop(map, "set"), [key, value])));
+						}),
+					),
+				);
+				return map;
+			}
+			case "list": {
+				const elements = kind.elements.map((element) => readInto(element, ctx, "arg"));
+				// Typed explicitly: an empty list would otherwise be an implicit `any[]`.
+				if (!kind.rest) return f.as(f.array(elements, false), T.array());
+
+				const count = readCount(ctx, layoutOf(kind.rest).min);
+				const list = bind(ctx.out, f.array(elements, false), "list", T.array());
+				const index = uid("i");
+				ctx.out.push(
+					forOf(
+						index,
+						range(num(1), count),
+						branch(ctx, (child) => {
+							const element = emitRead(kind.rest!, child);
+							child.out.push(
+								assign(
+									f.elementAccessExpression(
+										list,
+										f.binary(index, ts.SyntaxKind.PlusToken, num(kind.elements.length - 1)),
+									),
+									element,
+								),
+							);
+						}),
+					),
+				);
+				return list;
+			}
+			case "object": {
+				const fields = kind.fields.map((field) =>
+					f.propertyAssignmentDeclaration(field.name, readInto(field.shape, ctx, field.name)),
+				);
+				return f.object(fields);
+			}
+			case "union": {
+				const layout = layoutOf(kind);
+				const tag = bind(ctx.out, bufferCall("readu8", [ctx.buf, at(ctx)]), "tag");
+				ctx.cursor.offset += 1;
+				const start = ctx.cursor.offset;
+				const value = uid("value");
+				ctx.out.push(letDecl(value, undefined, T.unknown()));
+
+				let chain: ts.Statement = f.block([raise(MALFORMED)]);
+				for (let i = kind.alternatives.length - 1; i >= 0; i--) {
+					const alternative = kind.alternatives[i];
+					const body = branch(ctx, (child) =>
+						child.out.push(assign(value, emitRead(alternative.shape, child))),
+					);
+					chain = ifStatement(equals(tag, num(i)), body, chain);
+				}
+
+				ctx.out.push(chain);
+				if (layout.size !== undefined) ctx.cursor.offset = start + layout.size - 1;
+				return value;
+			}
+		}
+	}
+
+	/** A read whose result is bound to a local in variable layouts; see {@link emitRead}. */
+	function readInto(shape: Shape, ctx: Ctx, hint: string): ts.Expression {
+		const value = emitRead(shape, ctx);
+		if (!ctx.cursor.variable || f.is.identifier(value) || isLiteral(value)) return value;
+		return bind(ctx.out, value, hint.replace(/\W/g, "_"));
+	}
+
+	function readLength(ctx: Ctx, width: LengthWidth): ts.Expression {
+		const length = bind(ctx.out, bufferCall(`read${width}`, [ctx.buf, at(ctx)]), "length");
+		ctx.cursor.offset += WIDTH_SIZE[width];
+		sync(ctx);
+		return length;
+	}
+
+	/**
+	 * An element count from the buffer, refused when the elements it announces could not fit in what
+	 * is left: a hostile count must not drive a huge allocation or a long loop.
+	 */
+	function readCount(ctx: Ctx, minimumElementSize: number): ts.Expression {
+		const count = bind(ctx.out, bufferCall("readu32", [ctx.buf, at(ctx)]), "count");
+		ctx.cursor.offset += 4;
+		sync(ctx);
+		const remaining = f.binary(bufferCall("len", [ctx.buf]), ts.SyntaxKind.MinusToken, ctx.cursor.variable!);
+		const needed =
+			minimumElementSize > 1 ? f.binary(count, ts.SyntaxKind.AsteriskToken, num(minimumElementSize)) : count;
+		ctx.out.push(ifStatement(f.binary(needed, ts.SyntaxKind.GreaterThanToken, remaining), [raise(MALFORMED)]));
+		return count;
+	}
+}

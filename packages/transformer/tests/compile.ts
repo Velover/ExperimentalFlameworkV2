@@ -56,6 +56,12 @@ export function compileFixture(): CompileResult {
 	return cached;
 }
 
+/** Compiles the fixture again in a fresh rbxtsc process, ignoring the cached result. */
+export function compileFixtureFresh(): CompileResult {
+	cached = undefined;
+	return compileFixture();
+}
+
 export function emitted(name: string): string {
 	const file = compileFixture().files.get(name);
 	if (file === undefined) {

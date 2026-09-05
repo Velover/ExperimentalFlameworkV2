@@ -1,0 +1,111 @@
+import { beforeAll, describe, expect, test } from "bun:test";
+import fs from "fs";
+import path from "path";
+import { compileFixture, compileFixtureFresh, emitted, normalize } from "./compile";
+
+const FIXTURE = path.resolve(import.meta.dir, "fixture");
+
+beforeAll(() => {
+	const result = compileFixture();
+	if (result.status !== 0) {
+		throw new Error(`fixture failed to compile:\n${result.output}`);
+	}
+});
+
+describe("inherited constructors", () => {
+	test("resolves a generic base's parameter to the type argument at the subclass", () => {
+		// Regression: read as `T`, this crashed rbxtsc with a TypeError inside the emitter.
+		const source = normalize(emitted("inherited"));
+
+		expect(source).toContain('Reflect.defineMetadata(Derived, "flamework:parameters", { "fw:inherited@Dep" })');
+		expect(source).toMatch(
+			/defineMetadata\(Derived, "flamework:dependencies", \{ \{ id = "fw:inherited@Dep",? \},? \}\)/,
+		);
+
+		// The generic base's own constructor cannot resolve `T`; it gets a named placeholder instead of
+		// failing the build, since only its subclasses are ever constructed.
+		expect(source).toContain('Reflect.defineMetadata(GenericBase, "flamework:parameters", { "$tp:T" })');
+	});
+});
+
+describe("guard emission", () => {
+	test("uses the list variants beyond two members", () => {
+		const source = normalize(emitted("guards"));
+
+		expect(source).toContain('t.literalList({ "a", "b", "c", "d", "e" })');
+		expect(source).toContain("t.unionList({ t.string, t.number, t.Vector3 })");
+	});
+
+	test("keeps the vararg form for two members", () => {
+		expect(emitted("guards")).toContain("t.union(t.string, t.number)");
+	});
+
+	test("deduplicates a type repeated past the configured limit", () => {
+		const source = normalize(emitted("dedup"));
+
+		// `Point` is hoisted into one local and referenced by each field.
+		expect(source).toMatch(/local Point\w* = t\.interface\(\{ x = t\.number, y = t\.number, \}\)/);
+		expect(source).toMatch(/t\.interface\(\{ a = Point\w*, b = Point\w*, c = Point\w*, \}\)/);
+		expect(source.match(/t\.interface\(\{ x = t\.number/g) ?? []).toHaveLength(1);
+	});
+});
+
+describe("callsite uuids", () => {
+	function uuids(source: string) {
+		return [...source.matchAll(/callsiteId\("([0-9a-f-]{36})"\)/g)].map((m) => m[1]);
+	}
+
+	test("gives distinct callsites distinct ids", () => {
+		const ids = uuids(emitted("callsites"));
+
+		expect(ids).toHaveLength(2);
+		expect(ids[0]).not.toBe(ids[1]);
+	});
+
+	test("emits the same ids on a second compilation", () => {
+		// Regression: `randomUUID()` per compile renamed every remote folder on every build.
+		const before = uuids(emitted("callsites"));
+
+		const fresh = compileFixtureFresh();
+		if (fresh.status !== 0) {
+			throw new Error(`fixture failed to recompile:\n${fresh.output}`);
+		}
+
+		expect(uuids(emitted("callsites"))).toEqual(before);
+	});
+});
+
+describe("glob registration", () => {
+	test("records the paths a glob matched in the build info", () => {
+		const buildInfo = JSON.parse(fs.readFileSync(path.join(FIXTURE, "flamework.build"), "utf8"));
+		const paths: string[] | undefined = buildInfo.metadata?.globs?.paths?.["src/glob/**/*.ts"];
+
+		expect(paths).toBeDefined();
+		expect(paths!.some((p) => p.replace(/\\/g, "/").startsWith("out/glob/target"))).toBe(true);
+	});
+
+	test("passes the glob through to the runtime as a string", () => {
+		expect(emitted("globs")).toContain('registerProvidersGlob("src/glob/**/*.ts", "src/glob/**/*.ts")');
+	});
+});
+
+describe("plugin host", () => {
+	test("loads a plugin for a second transformer state in the same process", async () => {
+		// Regression: the host relied on `require` re-running the plugin's top level, which Node's
+		// module cache prevents, so every watch-mode rebuild failed with "did not call registerPlugin()".
+		const { createPluginHost } = await import("../out/transformations/plugins/pluginHost.js");
+
+		const state = {
+			config: { plugins: [{ path: "./fieldInfoPlugin.cjs", options: { prefix: "" } }] },
+			rootDirectory: FIXTURE,
+			typeChecker: undefined,
+			nextRootStatements: [],
+		} as never;
+
+		const first = createPluginHost(state);
+		const second = createPluginHost(state);
+
+		expect(first?.getRegisteredMacroTypes()).toContain("fieldInfo");
+		expect(second?.getRegisteredMacroTypes()).toContain("fieldInfo");
+	});
+});

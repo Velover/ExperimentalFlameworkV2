@@ -15,13 +15,13 @@ describe("nested macros", () => {
 		// emitted as raw calls to a `declare`d function and blew up at runtime.
 		const source = normalize(emitted("nested"));
 
-		expect(source).toContain('injectionId = "$f:nested@Target"');
+		expect(source).toContain('injectionId = "fw:nested@Target"');
 		expect(source).not.toContain("Flamework.id()");
 	});
 
 	test("transforms macros nested in array literals", () => {
 		expect(normalize(emitted("nested"))).toContain(
-			'local nestedInArray = { "$f:nested@Target", "$f:nested@Target" }',
+			'local nestedInArray = { "fw:nested@Target", "fw:nested@Target" }',
 		);
 	});
 });
@@ -49,6 +49,6 @@ describe("guard generation", () => {
 
 describe("identifier generation", () => {
 	test("uses the configured hash prefix", () => {
-		expect(emitted("nested")).toContain("$f:nested@Target");
+		expect(emitted("nested")).toContain("fw:nested@Target");
 	});
 });

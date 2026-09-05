@@ -1,9 +1,9 @@
-import { randomUUID } from "crypto";
+import { v5 as uuidv5 } from "uuid";
 import ts from "typescript";
 import { Diagnostics } from "../classes/diagnostics";
 import { TransformState } from "../classes/transformState";
 import { f } from "../util/factory";
-import { buildGuardFromType } from "../util/functions/buildGuardFromType";
+import { buildGuardFromTypeWithDedup } from "../util/functions/buildGuardFromType";
 import { getTypeUid } from "../util/uid";
 import { NodeMetadata } from "../classes/nodeMetadata";
 import { buildPathGlobIntrinsic, buildPathIntrinsic } from "./macros/intrinsics/paths";
@@ -14,6 +14,11 @@ import {
 	transformShuffleArrayIntrinsic,
 } from "./macros/intrinsics/networking";
 import { buildTupleGuardsIntrinsic } from "./macros/intrinsics/guards";
+import {
+	buildListCodecFromType,
+	buildSerializerFromType,
+	unwrapPromise,
+} from "../util/functions/buildSerializerFromType";
 import { isTupleType } from "../util/functions/isTupleType";
 import { inlineMacroIntrinsic } from "./macros/intrinsics/inlining";
 import { addLeadingComment } from "../util/functions/addLeadingComment";
@@ -248,7 +253,10 @@ function buildUserMacro(state: TransformState, node: ts.Node, macro: UserMacro):
 		}
 
 		if (macro.metadata === "guard") {
-			return buildGuardFromType(state, node, macro.target);
+			const result = buildGuardFromTypeWithDedup(state, node, macro.target);
+			state.prereqList(result.statements);
+
+			return result.guard;
 		}
 
 		if (macro.metadata === "text") {
@@ -276,7 +284,7 @@ function buildUserMacro(state: TransformState, node: ts.Node, macro: UserMacro):
 		}
 
 		if (macro.metadata === "uuid") {
-			return f.string(randomUUID());
+			return f.string(getCallsiteUuid(state, node));
 		}
 
 		if (macro.metadata === "text") {
@@ -343,6 +351,30 @@ function buildIntrinsicMacro(state: TransformState, node: ts.Node, macro: UserMa
 		}
 
 		return buildTupleGuardsIntrinsic(state, node, tupleType);
+	}
+
+	if (macro.id === "serializer") {
+		const [type] = macro.inputs;
+		if (!type) {
+			throw new Error(`Invalid intrinsic usage`);
+		}
+
+		return buildSerializerFromType(state, node, unwrapPromise(state, type));
+	}
+
+	// Networking metadata: an encode/decode pair for an argument list, only built when the project
+	// enables serialization so it costs nothing otherwise. `nil` tells the runtime to send values as they are.
+	if (macro.id === "network-serializer") {
+		const [type] = macro.inputs;
+		if (!type) {
+			throw new Error(`Invalid intrinsic usage`);
+		}
+
+		if (state.projectConfig.networking?.serialization !== true) {
+			return f.nil();
+		}
+
+		return buildListCodecFromType(state, node, type);
 	}
 
 	if (macro.id === "plugin") {
@@ -593,6 +625,44 @@ function getParameterCount(state: TransformState, signature: ts.Signature) {
 		}
 	}
 	return length;
+}
+
+/** Namespace for the callsite uuids; any fixed uuid works, it only has to never change. */
+const CALLSITE_UUID_NAMESPACE = "6f4c1d2e-8b3a-4e5f-9c7d-2a1b0e9f8d7c";
+
+/**
+ * A uuid that is unique per callsite and identical across compilations.
+ *
+ * It is derived from the package, the file, the enclosing declaration and the offset within it, so
+ * two builds of the same source emit the same value and a game's output is reproducible. A random
+ * uuid per compile would rename every remote folder on every build.
+ */
+function getCallsiteUuid(state: TransformState, node: ts.Node) {
+	const file = state.getSourceFile(node);
+	const declaration = ts.findAncestor(node, isCallsiteScope);
+	const declarationName = declaration?.name && f.is.identifier(declaration.name) ? declaration.name.text : "";
+	const offset = declaration ? node.getStart() - declaration.getStart() : node.getStart();
+	const key = `${state.packageName}:${state.getFileId(file)}@${declarationName}+${offset}`;
+
+	return uuidv5(key, CALLSITE_UUID_NAMESPACE);
+}
+
+/**
+ * The declarations a callsite id is anchored to: the units a user names and moves around as one.
+ *
+ * TypeScript's own `isNamedDeclaration` accepts anything with a `name` property, which includes the
+ * property access in `callsite().uuid`, so it cannot be used here.
+ */
+function isCallsiteScope(node: ts.Node): node is ts.NamedDeclaration {
+	return (
+		ts.isVariableDeclaration(node) ||
+		ts.isFunctionDeclaration(node) ||
+		ts.isMethodDeclaration(node) ||
+		ts.isPropertyDeclaration(node) ||
+		ts.isClassDeclaration(node) ||
+		ts.isGetAccessorDeclaration(node) ||
+		ts.isSetAccessorDeclaration(node)
+	);
 }
 
 function getNodeDebugName(state: TransformState, node: ts.Node) {

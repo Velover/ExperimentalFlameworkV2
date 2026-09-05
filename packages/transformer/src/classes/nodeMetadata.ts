@@ -3,7 +3,7 @@ import { f } from "../util/factory";
 import { TransformState } from "./transformState";
 
 export class NodeMetadata {
-	private static metadataCache = new Map<ts.Node, NodeMetadata>();
+	private static metadataCache = new WeakMap<ts.Node, NodeMetadata>();
 
 	public static fromSymbol(state: TransformState, symbol: ts.Symbol) {
 		if (symbol.valueDeclaration) {

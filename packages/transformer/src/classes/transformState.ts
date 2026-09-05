@@ -21,8 +21,20 @@ import { shuffle } from "../util/functions/shuffle";
 import glob from "glob";
 import type { PathTranslator } from "@roblox-ts/path-translator";
 import { createPluginHost, type PluginHost } from "../transformations/plugins/pluginHost";
+import { tryResolveTS } from "../util/functions/tryResolve";
+import { getRuntimeConfig, loadProjectConfig, ProjectConfig } from "../util/projectConfig";
+import { Diagnostics } from "./diagnostics";
 
 export interface TransformerConfig {
+	/**
+	 * Where to read the rest of these options from, relative to the tsconfig's directory.
+	 *
+	 * By default the transformer looks for `flamework.config.json` in the tsconfig's directory and then in
+	 * each parent up to the package root. Options set inline on the tsconfig entry override the file's `transformer` section.
+	 * Only meaningful inline; it is not a valid key inside the file itself.
+	 */
+	configFile?: string;
+
 	/**
 	 * Transformer plugins to load, which can register additional macro types.
 	 *
@@ -63,6 +75,17 @@ export interface TransformerConfig {
 	 * Defaults to "full" and should only be configured in game projects.
 	 */
 	idGenerationMode?: "full" | "short" | "tiny" | "obfuscated";
+
+	/**
+	 * Some experimental optimizations
+	 */
+	optimizations?: {
+		/**
+		 * When set, object and union types that occur at least this many times inside one generated
+		 * guard are emitted once as a local and referenced, instead of being inlined every time.
+		 */
+		guardGenerationDedupLimit?: number;
+	};
 }
 
 export class TransformState {
@@ -86,6 +109,7 @@ export class TransformState {
 
 	public isUserMacroCache = new Map<ts.Symbol, boolean>();
 	public nextRootStatements = new Array<ts.Statement>();
+	public flameworkGuardLibraryPath?: string;
 
 	private setupBuildInfo() {
 		let baseBuildInfo = BuildInfo.fromDirectory(this.currentDirectory);
@@ -232,28 +256,42 @@ export class TransformState {
 		}
 	}
 
+	/** The effective transformer options: the `transformer` section of `flamework.config.json` with the tsconfig entry's options on top. */
+	public config: TransformerConfig;
+
+	/** The `flamework.config.json` the options were read from, if one was found. */
+	public configPath?: string;
+
+	/** The whole `flamework.config.json`, including the sections meant for the runtime packages. */
+	public projectConfig: ProjectConfig;
+
 	constructor(
 		public program: ts.Program,
 		public context: ts.TransformationContext,
-		public config: TransformerConfig,
+		inlineConfig: TransformerConfig,
 	) {
 		const { result: packageJson, directory } = getPackageJson(this.currentDirectory);
 		this.rootDirectory = directory;
 		assert(packageJson.name);
 
+		const loaded = loadProjectConfig(this.currentDirectory, this.rootDirectory, inlineConfig);
+		this.config = loaded.config;
+		this.configPath = loaded.configPath;
+		this.projectConfig = loaded.project;
+
 		this.setupRojo();
 		this.setupBuildInfo();
 
-		config.idGenerationMode ??= config.obfuscation ? "obfuscated" : "full";
+		this.config.idGenerationMode ??= this.config.obfuscation ? "obfuscated" : "full";
 
 		this.packageName = packageJson.name;
 		this.isGame = !this.packageName.startsWith("@");
 		this.includeDirectory = this.getIncludePath();
 
-		if (!this.isGame) config.hashPrefix ??= this.packageName;
-		this.buildInfo.setIdentifierPrefix(config.hashPrefix);
+		if (!this.isGame) this.config.hashPrefix ??= this.packageName;
+		this.buildInfo.setIdentifierPrefix(this.config.hashPrefix);
 
-		if (config.hashPrefix?.startsWith("$") && !this.packageName.startsWith("@flamework")) {
+		if (this.config.hashPrefix?.startsWith("$") && !this.packageName.startsWith("@flamework")) {
 			throw new Error(`The hashPrefix $ is used internally by Flamework`);
 		}
 
@@ -273,7 +311,13 @@ export class TransformState {
 
 		if (this.isGame) {
 			const writtenFiles = new Map<string, string>();
-			const files = ["globs.json"];
+			const files = ["globs.json", "config.json"];
+
+			// The runtime sections of flamework.config.json, for the packages to read at runtime.
+			const runtimeConfig = getRuntimeConfig(this.projectConfig);
+			if (runtimeConfig) {
+				writtenFiles.set("config.json", JSON.stringify(runtimeConfig));
+			}
 
 			const packageGlobs = this.buildInfo.getChildrenMetadata("globs");
 			const globs = this.buildInfo.getMetadata("globs");
@@ -483,6 +527,50 @@ export class TransformState {
 		// Technically this isn't guaranteed to return `T`, and TypeScript 5.0+ updated the signature to disallow this,
 		// but we don't care so we'll just cast it.
 		return ts.visitNode(node, (newNode) => transformNode(this, newNode)) as T;
+	}
+
+	/**
+	 * Returns the identifier to reach `t` from, for generated guards.
+	 *
+	 * Generated guards use functions such as `t.unionList` that older `@rbxts/t` releases lack. When
+	 * the project resolves a different `@rbxts/t` than `@flamework/core` does, `t` is imported through
+	 * core's prelude so that the guards run against the version core was built with.
+	 */
+	getGuardLibrary(file: ts.SourceFile) {
+		if (this.flameworkGuardLibraryPath) {
+			return this.addFileImport(file, this.flameworkGuardLibraryPath, "t");
+		}
+
+		// Inside the Flamework packages themselves there is nothing to reconcile.
+		if (this.packageName.startsWith("@flamework/")) {
+			this.flameworkGuardLibraryPath = "@rbxts/t";
+			return this.addFileImport(file, "@rbxts/t", "t");
+		}
+
+		const corePath = tryResolveTS(this, "@flamework/core", file.fileName);
+		if (corePath === undefined) {
+			Diagnostics.warning(file.endOfFileToken, "Flamework core was not found, guard generation may not work.");
+			return this.addFileImport(file, "@rbxts/t", "t");
+		}
+
+		const fileGuardPath = tryResolveTS(this, "@rbxts/t", file.fileName);
+		const coreGuardPath = tryResolveTS(this, "@rbxts/t", corePath);
+		if (fileGuardPath === coreGuardPath) {
+			// @flamework/core and the consuming project are using the same @rbxts/t version.
+			this.flameworkGuardLibraryPath = "@rbxts/t";
+			return this.addFileImport(file, "@rbxts/t", "t");
+		}
+
+		if (
+			coreGuardPath === undefined ||
+			!isPathDescendantOf(coreGuardPath, path.join(path.dirname(corePath), "../node_modules/@rbxts/t"))
+		) {
+			Diagnostics.warning(file.endOfFileToken, "Valid `@rbxts/t` was not found, guard generation may not work.");
+			return this.addFileImport(file, "@rbxts/t", "t");
+		}
+
+		this.flameworkGuardLibraryPath = "@flamework/core/out/prelude";
+		return this.addFileImport(file, this.flameworkGuardLibraryPath, "t");
 	}
 }
 
