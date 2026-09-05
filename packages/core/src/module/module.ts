@@ -1,6 +1,11 @@
 import { Flamework } from "../flamework";
 import { Modding } from "../modding";
-import { PluginState, type InterfaceConfiguration, type InterfaceContext } from "../plugin/pluginDefinition";
+import {
+	PluginState,
+	type InterfaceConfiguration,
+	type InterfaceContext,
+	type InterfaceTargetKind,
+} from "../plugin/pluginDefinition";
 import { Reflect } from "../reflect";
 import type { Constructor } from "../utility/constructors";
 import { convertConciseDependencyInfo } from "../utility/convertConciseDependencyInfo";
@@ -87,6 +92,11 @@ export interface Module extends InternalModule {
 	 * Detaches an instance created by {@link createClassInstance} from its lifecycle events.
 	 */
 	removeClassInstance: (instance: object) => void;
+
+	/**
+	 * Whether {@link extinguish} has been called on this module.
+	 */
+	isExtinguished: () => boolean;
 }
 
 /**
@@ -119,8 +129,9 @@ interface ImportedHooks extends HookContext {
 	hook: HookConfig;
 }
 
-interface ImportedInterfaces extends InterfaceContext {
+interface ImportedInterface {
 	configuration: InterfaceConfiguration<unknown>;
+	context: Omit<InterfaceContext, "kind">;
 }
 
 enum ModuleInitState {
@@ -137,7 +148,7 @@ const PLUGIN_MODULE_ID = Flamework.id<PluginModule>();
 
 export function createModuleInstantiation(state: ModuleState, context: ModuleContext): Module {
 	const instantiatedProviders = new Map<string, defined>();
-	const importedInterfaces = new Map<string, ImportedInterfaces>();
+	const importedInterfaces = new Map<string, ImportedInterface>();
 	const importedHooks = new Array<ImportedHooks>();
 
 	const plugins = new Map<PluginState, Module>();
@@ -152,11 +163,17 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 	const switchInitState = (from: ModuleInitState, to: ModuleInitState) => {
 		if (moduleInitState !== from) {
 			error(
-				`module is in invalid state when transitioning to '${ModuleInitState[to]}', got '${ModuleInitState[moduleInitState]}' when '${ModuleInitState[from]}' was expected.`,
+				`module '${state.debugName}' is in invalid state when transitioning to '${ModuleInitState[to]}', got '${ModuleInitState[moduleInitState]}' when '${ModuleInitState[from]}' was expected.`,
 			);
 		}
 
 		moduleInitState = to;
+	};
+
+	const assertAlive = (action: string) => {
+		if (moduleInitState >= ModuleInitState.Extinguishing) {
+			error(`module '${state.debugName}' has been extinguished, cannot ${action}`);
+		}
 	};
 
 	const setupIncludedModules = () => {
@@ -187,9 +204,11 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 			for (const [interfaceId, configuration] of pluginState.interfaces) {
 				importedInterfaces.set(interfaceId, {
 					configuration,
-					interfaceId,
-					sourceModule: pluginModule,
-					targetModule: module,
+					context: {
+						interfaceId,
+						sourceModule: pluginModule,
+						targetModule: module,
+					},
 				});
 			}
 
@@ -229,25 +248,25 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		return matching;
 	};
 
-	const registerClassInterfaces = (instance: object) => {
+	const registerClassInterfaces = (instance: object, kind: InterfaceTargetKind) => {
 		for (const id of getClassImplements(instance)) {
 			const importedInterface = importedInterfaces.get(id);
 			if (!importedInterface) {
 				continue;
 			}
 
-			importedInterface.configuration.onAdded?.(importedInterface, instance);
+			importedInterface.configuration.onAdded?.({ ...importedInterface.context, kind }, instance);
 		}
 	};
 
-	const unregisterClassInterfaces = (instance: object) => {
+	const unregisterClassInterfaces = (instance: object, kind: InterfaceTargetKind) => {
 		for (const id of getClassImplements(instance)) {
 			const importedInterface = importedInterfaces.get(id);
 			if (!importedInterface) {
 				continue;
 			}
 
-			importedInterface.configuration.onRemoved?.(importedInterface, instance);
+			importedInterface.configuration.onRemoved?.({ ...importedInterface.context, kind }, instance);
 		}
 	};
 
@@ -268,7 +287,13 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 
 	const tryResolveDependency: Module["tryResolveDependency"] = (info, requestingModule, requestingOrigin) => {
 		if (moduleInitState <= ModuleInitState.PreIgniting) {
-			error(`module is in pre-ignite phase, dependency cannot be resolved: ${info.id}`);
+			error(`module '${state.debugName}' is in pre-ignite phase, dependency cannot be resolved: ${info.id}`);
+		}
+
+		// Extinguished hooks and removal callbacks may still resolve siblings while extinguishing,
+		// so only a fully extinguished module refuses.
+		if (moduleInitState === ModuleInitState.Extinguished) {
+			error(`module '${state.debugName}' has been extinguished, dependency cannot be resolved: ${info.id}`);
 		}
 
 		const instantiatedProvider = instantiatedProviders.get(info.id);
@@ -292,7 +317,7 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 			if (config.type === "class") {
 				const instantiatedProvider = instantiateClassWithDependencies(config.value as Constructor);
 				instantiatedProviders.set(info.id, instantiatedProvider);
-				registerClassInterfaces(instantiatedProvider);
+				registerClassInterfaces(instantiatedProvider, "provider");
 
 				return instantiatedProvider;
 			} else if (config.type === "function") {
@@ -328,7 +353,7 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 	const resolveDependencyWithOrigin = <T>(info: Modding.DependencyInfo, requestingOrigin?: object): T => {
 		const dependency = tryResolveDependency(info, undefined, requestingOrigin);
 		if (dependency === undefined) {
-			error(`module could not resolve dependency '${info.id}'`);
+			error(`module '${state.debugName}' could not resolve dependency '${info.id}'`);
 		}
 
 		return dependency as T;
@@ -341,9 +366,11 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 	};
 
 	const createClassInstance: Module["createClassInstance"] = (constructor, config) => {
+		assertAlive("create class instances");
+
 		const instance = instantiateClassWithDependencies(constructor, config?.overrideDependency);
 		temporaryInstances.add(instance);
-		registerClassInterfaces(instance);
+		registerClassInterfaces(instance, "instance");
 		return instance as never;
 	};
 
@@ -352,12 +379,13 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 			return;
 		}
 
-		unregisterClassInterfaces(instance);
+		unregisterClassInterfaces(instance, "instance");
 		temporaryInstances.delete(instance);
 	};
 
 	const listen: Module["listen"] = (...[param, metaId, metaKey]) => {
 		assert(metaId !== undefined);
+		assertAlive("listen for lifecycle events");
 
 		let listener: object;
 		if (metaKey === undefined) {
@@ -378,7 +406,7 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		Reflect.defineMetadata(listener, "flamework:implements", [metaId]);
 
 		temporaryInstances.add(listener);
-		registerClassInterfaces(listener);
+		registerClassInterfaces(listener, "instance");
 
 		return () => {
 			assert(listener !== undefined, "listeners cannot be destructed more than once");
@@ -391,6 +419,12 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		// We're already ignited, so we can ignore repeated calls.
 		if (moduleInitState === ModuleInitState.Ignited) {
 			return module;
+		}
+
+		// Checked before anything below runs, so that igniting a dead or half-ignited module fails
+		// cleanly instead of duplicating its submodules first.
+		if (moduleInitState !== ModuleInitState.Created) {
+			switchInitState(ModuleInitState.Created, ModuleInitState.PreIgniting);
 		}
 
 		setupIncludedModules();
@@ -411,7 +445,8 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		switchInitState(ModuleInitState.PreIgniting, ModuleInitState.Igniting);
 
 		for (const provider of state.providers) {
-			if (provider.config.type === "class") {
+			// Lazy providers are constructed the first time they are resolved instead.
+			if (provider.config.type === "class" && provider.config.lazy !== true) {
 				resolveDependency(provider.injectionId);
 			}
 		}
@@ -432,7 +467,8 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 			context.hook.callback(context);
 		}
 
-		for (const temporaryInstance of temporaryInstances) {
+		// Copied first: removal callbacks may themselves remove instances.
+		for (const temporaryInstance of [...temporaryInstances]) {
 			removeClassInstance(temporaryInstance);
 		}
 
@@ -440,7 +476,7 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		// unregistered too. Without this, a plugin such as the lifecycle plugin keeps holding (and
 		// ticking) providers that belong to an extinguished module.
 		for (const [, provider] of instantiatedProviders) {
-			unregisterClassInterfaces(provider);
+			unregisterClassInterfaces(provider, "provider");
 		}
 
 		instantiatedProviders.clear();
@@ -455,6 +491,8 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		switchInitState(ModuleInitState.Extinguishing, ModuleInitState.Extinguished);
 	};
 
+	const isExtinguished: Module["isExtinguished"] = () => moduleInitState >= ModuleInitState.Extinguishing;
+
 	const module: Module = {
 		getModuleState,
 		tryResolveDependency,
@@ -464,6 +502,7 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		removeClassInstance,
 		ignite,
 		extinguish,
+		isExtinguished,
 	};
 
 	return module;

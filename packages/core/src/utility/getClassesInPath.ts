@@ -2,14 +2,24 @@ import { Players, RunService, StarterPlayer } from "@rbxts/services";
 import { tsImport } from "./tsImport";
 import { Reflect } from "../reflect";
 
-export function getClassesInPath(path: string[]): Array<object> {
-	assert(path);
+/**
+ * Requires every ModuleScript at and under the specified Rojo path and returns every exported value
+ * that carries its own Flamework identifier.
+ *
+ * A module that fails to load raises, as it did in v1: a class that silently fails to register would
+ * otherwise only show up later as an unresolvable dependency, far from the cause.
+ */
+export function getClassesInPath(rbxPath: readonly string[]): Array<object> {
+	assert(rbxPath);
+
+	// Copied so that the generated path literal is not consumed by this call.
+	const path = [...rbxPath];
 
 	/** @hidden */
 	let preloadPath: Instance = game.GetService(path.shift() as keyof Services);
 	if (preloadPath === StarterPlayer) {
-		assert(path.shift() === "StarterPlayerScripts");
-		assert(RunService.IsClient());
+		assert(path.shift() === "StarterPlayerScripts", "StarterPlayer only supports StarterPlayerScripts");
+		assert(RunService.IsClient(), "The server cannot load StarterPlayer content");
 
 		preloadPath = Players.LocalPlayer.WaitForChild("PlayerScripts");
 	}
@@ -24,18 +34,21 @@ export function getClassesInPath(path: string[]): Array<object> {
 		const [success, value] = pcall(() => tsImport(moduleScript));
 		const endTime = math.floor((os.clock() - start) * 1000);
 		if (!success) {
-			warn(`${moduleScript.GetFullName()} failed to load (${endTime}ms): ${value}`);
+			error(`${moduleScript.GetFullName()} failed to load (${endTime}ms): ${value}`, 0);
 		}
 
 		if (typeIs(value, "table")) {
 			// This is an `export =` on a Flamework class.
-			if (Reflect.hasMetadata(value, "identifier")) {
+			if (Reflect.hasOwnMetadata(value, "identifier")) {
 				return foundClasses.push(value);
 			}
 
 			for (const [, member] of pairs(value)) {
 				// This is an `export` on a Flamework class.
-				if (Reflect.hasMetadata(member, "identifier")) {
+				//
+				// Own metadata only: an undecorated subclass inherits its parent's identifier, and
+				// must not be mistaken for a registered class of its own.
+				if (typeIs(member, "table") && Reflect.hasOwnMetadata(member, "identifier")) {
 					foundClasses.push(member);
 				}
 			}

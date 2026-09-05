@@ -36,7 +36,18 @@ export class ModuleDefinition {
 export type ModuleProvider = { config: ProviderConfig; injectionId: string };
 
 export type ProviderConfig =
-	| { type: "class"; value: object }
+	| {
+			type: "class";
+			value: object;
+
+			/**
+			 * A lazy class provider is not constructed during ignition. It is constructed the first
+			 * time something resolves it, and is otherwise never created.
+			 *
+			 * Defaults to the `lazy` option of the class's `@Provider()` decorator, or `false`.
+			 */
+			lazy?: boolean;
+	  }
 	| { type: "alias"; injectionId: string }
 	| { type: "function"; callback: (context: InjectionContext) => unknown };
 

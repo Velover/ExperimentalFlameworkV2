@@ -5,6 +5,7 @@ import { AbstractConstructor } from "./utility/constructors";
 import { ModuleBuilder } from "./module/moduleBuilder";
 import { PluginBuilder } from "./plugin/pluginBuilder";
 import type { ModuleDefinition } from "./module/moduleDefinition";
+import { Serialization } from "./serialization/types";
 
 export namespace Flamework {
 	/**
@@ -57,6 +58,20 @@ export namespace Flamework {
 	 * @metadata macro
 	 */
 	export function createGuard<T>(meta?: Modding.Target.Guard<T>): t.check<T> {
+		return meta!;
+	}
+
+	/**
+	 * Creates a serializer for `T`. The encode and decode code is generated from the type at compile
+	 * time: plain `buffer` reads and writes, at constant offsets wherever the layout is fixed, with
+	 * nothing describing the type left in the output. Instances and `unknown` values travel alongside
+	 * the buffer as blobs.
+	 *
+	 * @metadata macro
+	 */
+	export function createSerializer<T>(
+		meta?: Modding.Intrinsic<"serializer", [T], Serialization.Serializer<T>>,
+	): Serialization.Serializer<T> {
 		return meta!;
 	}
 }

@@ -39,6 +39,15 @@ export interface InterfaceConfiguration<T> {
 	onRemoved?: (context: InterfaceContext, value: T) => void;
 }
 
+/**
+ * What kind of object an interface callback is being invoked for.
+ *
+ * - `provider`: a class provider the module constructed, either during ignition or lazily.
+ * - `instance`: an object attached through `createClassInstance` or `listen`, which is owned by
+ *   whoever created it (for example, a component owned by `Components`).
+ */
+export type InterfaceTargetKind = "provider" | "instance";
+
 export interface InterfaceContext {
 	/**
 	 * This is the module instance that the hook originates from.
@@ -54,4 +63,9 @@ export interface InterfaceContext {
 	 * The ID of this interface.
 	 */
 	interfaceId: string;
+
+	/**
+	 * Whether the object is a provider constructed by the module, or an instance attached to it.
+	 */
+	kind: InterfaceTargetKind;
 }

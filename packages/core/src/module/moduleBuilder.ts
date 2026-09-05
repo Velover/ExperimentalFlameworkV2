@@ -1,10 +1,12 @@
 import { Modding } from "../modding";
 import { ModuleDefinition, ModuleState, ProviderConfig } from "./moduleDefinition";
 import { getClassesInPath } from "../utility/getClassesInPath";
+import { getClassesInGlob } from "../utility/globs";
 import { Reflect } from "../reflect";
 import type { Constructor } from "../utility/constructors";
 import type { WritableState } from "../utility/writable";
 import type { PluginDefinition } from "../plugin/pluginDefinition";
+import type { ProviderDecoratorConfig } from "../provider";
 
 type GenericId<T> = string | Modding.Target.Id<T>;
 type MultipleIDs<T> = string[] | Modding.Emit<(T extends T ? Modding.Target.Id<T> : never)[]>;
@@ -68,17 +70,37 @@ export class ModuleBuilder {
 	/**
 	 * Register all providers under the specified path and its descendants.
 	 *
-	 * The providers must be exported.
+	 * The providers must be exported, and must carry the `@Provider()` decorator themselves: an
+	 * undecorated subclass of a provider is not registered.
 	 *
 	 * @metadata macro
 	 */
 	public registerProviders<T extends string>(_stringPath: T, path?: Modding.Intrinsic<"path", [T], string[]>) {
 		assert(path);
 
-		const providers = getClassesInPath(path).filter((v) => Reflect.hasMetadata(v, "flamework:provider"));
-		for (const provider of providers) {
-			const providerId = Reflect.getMetadata<string>(provider, "identifier");
-			this.registerProvider({ type: "class", value: provider }, providerId);
+		return this.registerProviderClasses(getClassesInPath(path));
+	}
+
+	/**
+	 * Register all providers under every path matched by the specified glob, which is resolved at
+	 * compile time.
+	 *
+	 * This is the v2 equivalent of v1's `Flamework.addPathsGlob`. Globs can match a large number of
+	 * paths, so keep them as specific as possible.
+	 *
+	 * @metadata macro
+	 */
+	public registerProvidersGlob<T extends string>(_glob: T, glob?: Modding.Intrinsic<"pathglob", [T], string>) {
+		assert(glob !== undefined);
+
+		return this.registerProviderClasses(getClassesInGlob(glob));
+	}
+
+	private registerProviderClasses(classes: object[]) {
+		for (const provider of classes) {
+			if (Reflect.hasOwnMetadata(provider, "flamework:provider")) {
+				this.registerClassProvider(provider as Constructor);
+			}
 		}
 
 		return this;
@@ -92,6 +114,19 @@ export class ModuleBuilder {
 	public registerProvider<T>(providerConfig: ProviderConfig, injectionId?: GenericId<T>) {
 		assert(injectionId !== undefined);
 
+		if (providerConfig.type === "class") {
+			assertIsProviderClass(providerConfig.value);
+
+			if (providerConfig.lazy === undefined) {
+				const decoratorConfig = Reflect.getOwnMetadata<ProviderDecoratorConfig>(
+					providerConfig.value,
+					"flamework:providerConfig",
+				);
+
+				providerConfig = { ...providerConfig, lazy: decoratorConfig?.lazy === true };
+			}
+		}
+
 		for (const provider of this.module.providers) {
 			if (provider.injectionId === injectionId) {
 				error(`provider ID was registered more than once: ${injectionId}`);
@@ -99,13 +134,6 @@ export class ModuleBuilder {
 		}
 
 		this.module.providers.push({ config: providerConfig, injectionId });
-
-		if (providerConfig.type === "class") {
-			assert(
-				Reflect.hasMetadata(providerConfig.value, "flamework:provider"),
-				`class '${providerConfig.value}' is missing the @Provider() decorator`,
-			);
-		}
 
 		return this;
 	}
@@ -116,7 +144,14 @@ export class ModuleBuilder {
 	 * This is just a shorthand for `registerProvider` which uses the generated `identifier` from the class.
 	 */
 	public registerClassProvider(provider: Constructor) {
-		const providerId = Reflect.getMetadata<string>(provider, "identifier");
+		assertIsProviderClass(provider);
+
+		const providerId = Reflect.getOwnMetadata<string>(provider, "identifier");
+		assert(
+			providerId !== undefined,
+			`class '${provider}' has no identifier, was it compiled with the Flamework transformer?`,
+		);
+
 		return this.registerProvider({ type: "class", value: provider }, providerId);
 	}
 
@@ -164,4 +199,23 @@ export class ModuleBuilder {
 	public ignite() {
 		return this.build().ignite();
 	}
+}
+
+/**
+ * Metadata is inherited through the class hierarchy, so this deliberately checks the class's own
+ * metadata: an undecorated subclass of a provider carries the parent's identifier, and registering
+ * it would register it under the parent's id.
+ */
+function assertIsProviderClass(value: object) {
+	if (Reflect.hasOwnMetadata(value, "flamework:provider")) {
+		return;
+	}
+
+	if (Reflect.hasMetadata(value, "flamework:provider")) {
+		error(
+			`class '${value}' is missing the @Provider() decorator: it inherits one from a parent class, but every provider must be decorated itself`,
+		);
+	}
+
+	error(`class '${value}' is missing the @Provider() decorator`);
 }

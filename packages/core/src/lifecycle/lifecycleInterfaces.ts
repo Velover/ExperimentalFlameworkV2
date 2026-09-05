@@ -1,4 +1,24 @@
 /**
+ * Hook into the OnInit lifecycle event.
+ *
+ * `onInit` runs during ignition, after every provider has been constructed and before any `onStart`,
+ * in dependency order. It may return a Promise, which delays the initialisation of everything after
+ * it until the Promise settles; a rejection fails ignition.
+ *
+ * This is where setup that must be complete before other providers start belongs.
+ */
+export interface OnInit {
+	/**
+	 * Called once during ignition, in dependency order, before any `onStart`.
+	 *
+	 * Yielding or returning a Promise delays the providers after this one, so keep it short.
+	 *
+	 * @hideinherited
+	 */
+	onInit(): void | Promise<void>;
+}
+
+/**
  * Hook into the OnStart lifecycle event.
  */
 export interface OnStart {
@@ -32,9 +52,11 @@ export interface OnPhysics {
 	/**
 	 * Called every frame, before physics.
 	 *
+	 * @param dt The time since the previous frame.
+	 * @param time The elapsed game time, as returned by `time()`.
 	 * @hideinherited
 	 */
-	onPhysics(dt: number): void;
+	onPhysics(dt: number, time: number): void;
 }
 
 /**
@@ -46,7 +68,7 @@ export interface OnPhysics {
 export interface OnRender {
 	/**
 	 * Called every frame, before rendering.
-	 * Only available for controllers.
+	 * Only fires on the client.
 	 *
 	 * @hideinherited
 	 */

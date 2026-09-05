@@ -3,6 +3,10 @@ export { Modding } from "./modding";
 export { Reflect } from "./reflect";
 export { Provider } from "./provider";
 export { Injectable } from "./injectable";
+export { Serialization } from "./serialization/types";
+
+export type { ProviderDecoratorConfig } from "./provider";
+export type { InjectableDecoratorConfig } from "./injectable";
 
 // Modules
 export { ModuleDefinition } from "./module/moduleDefinition";
@@ -16,13 +20,27 @@ export type { HookCallbacks, HookConfig, HookContext } from "./module/moduleHook
 // Plugins
 export { PluginBuilder } from "./plugin/pluginBuilder";
 export { PluginDefinition } from "./plugin/pluginDefinition";
-export { LifecyclePlugin } from "./lifecycle/lifecyclePlugin";
+export { LifecyclePlugin, createLifecyclePlugin } from "./lifecycle/lifecyclePlugin";
 
-export type { InterfaceConfiguration, InterfaceContext, PluginState } from "./plugin/pluginDefinition";
+export type { LifecyclePluginOptions } from "./lifecycle/lifecyclePlugin";
+export type {
+	InterfaceConfiguration,
+	InterfaceContext,
+	InterfaceTargetKind,
+	PluginState,
+} from "./plugin/pluginDefinition";
 
 // Lifecycle events
-export type { OnExtinguished, OnPhysics, OnRender, OnStart, OnTick } from "./lifecycle/lifecycleInterfaces";
+export type { OnExtinguished, OnInit, OnPhysics, OnRender, OnStart, OnTick } from "./lifecycle/lifecycleInterfaces";
 
 // Utilities that plugins need in order to implement path-based registration.
 export { getClassesInPath } from "./utility/getClassesInPath";
+export { getClassesInGlob, getGlobPaths } from "./utility/globs";
+export { getRuntimeConfig } from "./utility/runtimeConfig";
+export type {
+	ComponentsRuntimeConfig,
+	CoreRuntimeConfig,
+	NetworkingRuntimeConfig,
+	RuntimeConfig,
+} from "./utility/runtimeConfig";
 export type { AbstractConstructor, Constructor } from "./utility/constructors";

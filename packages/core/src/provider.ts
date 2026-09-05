@@ -1,6 +1,18 @@
 import { Reflect } from "./reflect";
 
-export interface ProviderDecoratorConfig {}
+export interface ProviderDecoratorConfig {
+	/**
+	 * A lazy provider is not constructed during ignition. It is constructed the first time something
+	 * resolves it -- a constructor parameter, `resolveDependency`, or `createClassInstance` -- and is
+	 * otherwise never created.
+	 *
+	 * This is the v2 equivalent of v1's `@Optional()`. A lazy provider first resolved after ignition
+	 * still receives `onInit` and `onStart` from the lifecycle plugin, at the moment it is constructed.
+	 *
+	 * Defaults to `false`.
+	 */
+	lazy?: boolean;
+}
 
 /**
  * Register a class as a provider.
@@ -14,6 +26,6 @@ export interface ProviderDecoratorConfig {}
 export function Provider(config?: ProviderDecoratorConfig) {
 	return (constructor: object) => {
 		Reflect.defineMetadata(constructor, "flamework:provider", true);
-		Reflect.defineMetadata(constructor, "flamework:providerConfig", config);
+		Reflect.defineMetadata(constructor, "flamework:providerConfig", config ?? {});
 	};
 }
