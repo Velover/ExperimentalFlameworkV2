@@ -26,8 +26,9 @@ arguments are simply missing at runtime.
 }
 ```
 
-That is the whole required configuration. The optional keys are covered in
-[Project structure](09-project-structure.md#transformer-options).
+That is the whole required configuration. Everything optional goes in a `flamework.config.json` next
+to `tsconfig.json`, one section per package; it is covered in
+[Project structure](09-project-structure.md#configuration).
 
 ## Rojo
 
@@ -94,7 +95,8 @@ Three things happened:
    how this works and when it does not.
 2. **`includePlugin(LifecyclePlugin)`** enabled `OnStart`, `OnTick` and the rest. Lifecycle events
    are not built in; if you forget this line, `onStart` never runs and nothing complains.
-3. **`ignite()`** constructed every provider, injected their dependencies and ran the hooks.
+3. **`ignite()`** constructed every provider, injected their dependencies, ran every `onInit` in dependency
+   order, and then ran the hooks.
 
 The client is the same shape:
 
@@ -163,6 +165,10 @@ Put anything both realms need in a shared folder and register it from both entry
 | `Could not find Rojo data for 'src/...'` | The folder is not mapped in your Rojo project file. |
 | `Path is invalid, expected string literal and got: string` | The path argument is not a literal. |
 | `class 'X' is missing the @Provider() decorator` | `registerClassProvider`/`registerProvider` was given an undecorated class. |
+| `class 'X' is missing the @Provider() decorator: it inherits one from a parent class` | The class extends a provider but is not decorated itself. |
+| `Flamework has no paths for the glob '...'` | `registerProvidersGlob` in a package, or the include directory is not in the Rojo project, or the glob matched nothing. |
+| `ServerScriptService.TS.services.X failed to load (Nms): ...` | A module under a registered path raised while being required. |
+| `module '...' has been extinguished, cannot ...` | Something resolved from, or created an instance on, a module after `extinguish()`. |
 | `provider ID was registered more than once: ...` | The same class was registered twice, often by two overlapping `registerProviders` paths. |
 | `module could not resolve dependency 'X'` | A constructor parameter's type is not registered in this module or any module it includes. |
 

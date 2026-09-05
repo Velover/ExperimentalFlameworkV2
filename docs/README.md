@@ -32,6 +32,11 @@ Read in order the first time. Each page ends with the caveats for that topic.
   runtime.
 - [Transformer plugins](reference/transformer-plugins.md) -- adding macro types of your own.
 
+## Testing
+
+- [Testing in Roblox Studio](testing/studio.md) -- the battletest that runs a real place through the
+  packages: setup, the automated matrix, the manual scenarios, and what the first run found.
+
 ## I just want to…
 
 | | |

@@ -135,7 +135,7 @@ derived from the declaration's file path and name plus a salted hash, with the f
 so their ids do not collide with a game's; only game projects should shorten.
 
 **Guards** ([`src/util/functions/buildGuardFromType.ts`](../../packages/transformer/src/util/functions/buildGuardFromType.ts))
-compile a type into a `@rbxts/t` check. Unions become `t.union`, tuples `t.strictArray`, arrays
+compile a type into a `@rbxts/t` check. Unions become `t.union` (`t.unionList` past two members), tuples `t.strictArray`, arrays
 `t.array`, objects `t.interface`, literals `t.literal`, and Roblox datatypes map to their `t` alias.
 Types `t` has no alias for compile to `t.typeof("Name")` -- `RBX_TYPES_NEW` is that list, and a type
 missing from it silently falls through to the generic object branch and emits a table check, which
@@ -260,6 +260,26 @@ Networking is two layers, and the split is deliberate:
   request/response protocol over two of those events.
 - `events/` and `functions/` are the **namespace API** built on top: they take the generated
   metadata, walk it, and build a handler object whose members are the methods you actually call.
+
+### Serialization
+
+With `networking.serialization` enabled in the project config, the `network-serializer` intrinsic in
+the handler metadata resolves to a `Serialization.Codec` per event (an `encode`/`decode` pair for
+its argument tuple) and per function (arguments and, with `Promise<T>` unwrapped, the result as a
+one-element list); otherwise it is `nil` and the transport sends values as they are. `createEvent`
+encodes on `fire*` and decodes, under `pcall`, before the middleware chain, so guards and
+middleware see plain values; a decode failure is reported through `onMalformed` and the event
+dropped. Functions keep the request id and process result as plain arguments and pack only the
+payload after them.
+
+The generator is `transformer/src/util/functions/buildSerializerFromType.ts`. It classifies a type
+into a kind (number with a width, string with a length prefix, object, union, ...), computes its
+layout (fixed size or not, minimum size, whether it has blob slots) and then emits three things:
+a size expression, writes and reads. A cursor folds constant offsets at compile time and only
+materialises a position variable where a variable-size value forces one. Blobs are addressed by an
+index written into the buffer, never by their position in the list. `core/src/serialization/types.ts`
+holds only types: the brands and the `Serializer`/`Codec` shapes. `Flamework.createSerializer<T>()`
+exposes the same generator through the `serializer` intrinsic.
 
 ### Remote ids
 

@@ -53,7 +53,7 @@ Ordinary parameters come first, generated ones after. A caller passes only the o
 | `Character` | The column, from 1. |
 | `Width` | The width of the call expression. |
 | `Text` | The source text of the call. |
-| `Uuid` | A string, stable for one callsite and unique between callsites. |
+| `Uuid` | A string, unique between callsites and identical across compilations of the same source. |
 
 `Uuid` is what `Networking.createEvent` uses to give each network object a distinct name without you
 naming it.
@@ -106,6 +106,32 @@ export function keysOf<T>(keys?: Modding.Emit<Array<keyof T>>) {
 
 keysOf<{ a: 1; b: 2 }>(); // { "a", "b" }
 ```
+
+### Serializers
+
+`Flamework.createSerializer<T>()` generates encode and decode code for `T` at the call site:
+
+```ts
+interface Snapshot {
+    id: Serialization.u16;
+    position: Vector3;
+    tags: string[];
+    mode: "idle" | "walk";
+    owner: Instance; // travels alongside the buffer
+}
+
+const snapshots = Flamework.createSerializer<Snapshot>();
+const [payload, blobs] = snapshots.serialize(snapshot);
+const back = snapshots.deserialize(payload, blobs); // raises on malformed input
+```
+
+The output is plain buffer code: each field is a `buffer.write*` at an offset the transformer
+computed, fixed-size types at literal offsets, and the decoder mirrors it. Named types with a
+variable size are hoisted into `s_`, `w_` and `r_` functions (size, write, read) ahead of the
+statement, once per statement, which is also how recursive types work. There is no runtime
+library behind it and nothing in the output describes the type. Wrap `deserialize` in `pcall` for
+untrusted input. Create serializers at module scope: one built inside a function is rebuilt on
+every call. This is also what powers [networking serialization](06-networking.md#serialization).
 
 ## When a macro does not fire
 

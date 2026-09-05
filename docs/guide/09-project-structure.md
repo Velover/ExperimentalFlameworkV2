@@ -95,44 +95,56 @@ That last row is a real trap: `registerProviders("src/shared/services")` require
 under that folder. If a `ModuleDefinition` lives there, building it runs as a side effect of
 registration.
 
-## Transformer options
+## Configuration
 
-The only required entry is `transform`. The rest, in `tsconfig.json`:
+Every Flamework package reads one file, `flamework.config.json`, next to `tsconfig.json`. The only
+entry the tsconfig needs is `transform`; each package has its own section in the file:
 
 ```jsonc
+// flamework.config.json
 {
-  "compilerOptions": {
-    "plugins": [
-      {
-        "transform": "rbxts-transformer-flamework",
-
-        // Prefixes generated ids. Defaults to the package name; set it in a game to keep ids short
-        // and to avoid colliding with a package.
-        "hashPrefix": "$g",
-
-        // Randomises remote names and shortens ids. Game projects only.
-        "obfuscation": false,
-
-        // "full" (default), "short", "tiny" or "obfuscated". Only shorten in a game -- a published
-        // package must stay on "full" so its ids do not collide with its consumers'.
-        "idGenerationMode": "full",
-
-        // Transformer plugins; see reference/transformer-plugins.md
-        "plugins": [],
-
-        // Salt for generated hashes. Defaults to a random 64-byte salt.
-        "salt": "…",
-
-        // Skips TypeScript's semantic diagnostics. Faster, but you lose type errors.
-        "noSemanticDiagnostics": false
-      }
-    ]
-  }
+  "$schema": "./node_modules/rbxts-transformer-flamework/flamework.config.schema.json",
+  "transformer": {
+    "hashPrefix": "$g",
+    "obfuscation": false,
+    "idGenerationMode": "short",
+    "optimizations": { "guardGenerationDedupLimit": 5 },
+    "plugins": []
+  },
+  "core": { "profiling": true },
+  "networking": { "serialization": true },
+  "components": { "warningTimeout": 5, "streamingMode": "Contextual" }
 }
 ```
 
+| Section | Key | Effect |
+|---|---|---|
+| `transformer` | `hashPrefix` | Prefix for generated ids. Defaults to the package name; set a short one in a game. |
+| | `obfuscation` | Obfuscates identifiers: random remote names, shuffled metadata, short ids. Game projects only. |
+| | `idGenerationMode` | `"full"` (default), `"short"`, `"tiny"` or `"obfuscated"`. Only shorten in a game. |
+| | `plugins` | Transformer plugins; see [transformer plugins](../reference/transformer-plugins.md). |
+| | `salt`, `noSemanticDiagnostics`, `optimizations` | Hash salt, skipping semantic diagnostics, [guard deduplication](#guard-deduplication). |
+| `core` | `profiling` | Default for `LifecyclePlugin` profiling; `createLifecyclePlugin({ profiling })` overrides it per module. |
+| `networking` | `serialization` | Serializes every event and function payload into a buffer with code generated at compile time; see [Networking](06-networking.md#serialization). |
+| `components` | `warningTimeout`, `streamingMode` | Defaults for components that do not set their own. |
+
+The transformer looks for the file in the tsconfig's directory, then in each parent up to the
+package root, so a repository with several places can share one at the root and override it per
+place. Comments and trailing commas are allowed, unknown keys are rejected with their name, and the
+`$schema` line gives your editor completion and validation. To use a different name or location,
+set `"configFile": "config/flamework.json"` on the tsconfig entry.
+
+The `transformer` section can also be written inline on the tsconfig entry, where it **overrides** the
+file; the other sections cannot. For a game project the transformer copies those runtime sections
+into `include/flamework/config.json`, which the packages read through `getRuntimeConfig()` from
+`@flamework/core`. A package (a scoped name) gets no such artifact: its defaults come from the game
+that uses it.
+
 **Do not set `idGenerationMode` or `obfuscation` in a published package.** Ids have to be stable and
 collision-free across every consumer.
+
+The file is read once per compilation. `rbxtsc -w` does not watch it, so restart the watcher after
+editing it.
 
 ## Testing
 
@@ -178,6 +190,18 @@ Flamework's own runtime specs use exactly this shape; see
   `services`.
 - **The entry point should be the only file that ignites.** A second `ignite()` elsewhere builds a
   second, unrelated container, and dependencies will not resolve across them.
+
+## Guard deduplication
+
+Large guards can repeat the same nested type many times. With
+`"optimizations": { "guardGenerationDedupLimit": N }` in the transformer options, any object or
+union type that occurs at least `N` times inside one generated guard is emitted once as a local and
+referenced, which shrinks the output and the work `t` does per check. Guards with more than two
+members always use `t.unionList`, `t.intersectionList` and `t.literalList`, so there is no argument
+limit to hit.
+
+When your project resolves a different `@rbxts/t` than `@flamework/core` does, generated guards
+import `t` through `@flamework/core/out/prelude` so they run against the version core was built with.
 
 ---
 

@@ -30,9 +30,9 @@ export default tseslint.config(
 		},
 	},
 
-	// transformer
+	// transformer, plus the node-side test suites under tests/
 	{
-		files: ["packages/transformer/**/*", "packages/transformer-plugin/**/*"],
+		files: ["packages/transformer/**/*", "packages/transformer-plugin/**/*", "tests/**/*.ts"],
 		rules: {
 			"@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "file", caughtErrors: "none" }],
 			"@typescript-eslint/no-namespace": ["off"],
@@ -41,7 +41,13 @@ export default tseslint.config(
 
 	// roblox-ts packages
 	{
-		ignores: ["packages/transformer/**/*", "packages/transformer-plugin/**/*", "eslint.config.mjs", "scripts/**/*"],
+		ignores: [
+			"packages/transformer/**/*",
+			"packages/transformer-plugin/**/*",
+			"eslint.config.mjs",
+			"scripts/**/*",
+			"tests/**/*",
+		],
 		plugins: {
 			"roblox-ts": fixupPluginRules(eslintPluginRobloxTs),
 		},

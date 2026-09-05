@@ -39,6 +39,23 @@ Worth knowing, because the caveats fall out of it:
 
 So registration is "require everything in this folder and see what falls out".
 
+Only classes that carry `@Provider()` **themselves** are registered. Metadata is inherited through
+the class hierarchy, so an exported but undecorated subclass of a provider is skipped rather than
+registered under its parent's identifier -- and registering one explicitly raises.
+
+### Registering by glob
+
+When the providers are spread over folders that share a pattern, a glob avoids listing them:
+
+```ts
+Flamework.createModule().registerProvidersGlob("src/server/**/services").ignite();
+```
+
+The glob is resolved at **compile time** against your source tree, and the matching Rojo paths are
+written to `include/flamework/globs.json`, which the runtime reads. Two consequences: the include
+directory must be part of your Rojo project (it is in a default roblox-ts project), and only game
+projects emit the file -- a published package cannot use globs. This is v1's `Flamework.addPathsGlob`.
+
 ### Explicit registration
 
 When you want one specific class -- a library's provider, a test double, something conditional:
@@ -51,7 +68,8 @@ When you want one specific class -- a library's provider, a test double, somethi
 .registerProvider<Economy>({ type: "class", value: Economy })
 ```
 
-Both raise `class 'X' is missing the @Provider() decorator` if the class is not decorated.
+Both raise `class 'X' is missing the @Provider() decorator` if the class is not decorated -- including
+when it merely inherits the decorator from a parent class.
 
 ## Dependency injection
 
@@ -103,7 +121,8 @@ A provider does not have to be a class.
 
 ### Function providers
 
-Called once, the first time the dependency is resolved:
+Called on **every** resolution -- once per constructor parameter that asks for it, and once per
+`resolveDependency`. Nothing is cached for you, so cache in the callback if you want a singleton:
 
 ```ts
 interface Config {
@@ -135,7 +154,13 @@ The callback receives an `InjectionContext` describing *who asked*:
 })
 ```
 
-Every class that injects a `Logger` gets one tagged with its own name.
+Every class that injects a `Logger` gets one tagged with its own name, which is exactly why the
+callback runs per resolution. For a shared value, close over it:
+
+```ts
+const config = { maxPlayers: 8 };
+.registerProvider<Config>({ type: "function", callback: () => config })
+```
 
 ### Alias providers
 
@@ -148,6 +173,21 @@ Resolve one id to another. This is how an interface gets an implementation:
 
 Anything injecting `Storage` now gets the `DataStoreStorage` instance -- the same instance, not a
 second one. Swap the alias in tests to swap the implementation.
+
+### Lazy providers
+
+A provider is normally constructed during ignition whether or not anything uses it. Mark it lazy to
+construct it only when something first resolves it:
+
+```ts
+@Provider({ lazy: true })
+export class Telemetry implements OnStart {}
+```
+
+A lazy provider that nothing ever resolves is never created. One that is resolved after ignition
+still gets `onInit` and `onStart`, on the next resume point after it is constructed, so it behaves
+like any other provider from then on. This is v1's `@Optional()`; there is no equivalent of
+`includeOptionalClass`, because resolving it is how you include it.
 
 ## Classes that are not providers
 
@@ -238,7 +278,10 @@ to get configuration into everything without a global.
 - **Registration requires the class to be exported.** Path registration reads a ModuleScript's
   exports; a non-exported class is invisible to it.
 - **Path registration requires every module in the folder.** Import side effects run, and a module
-  that throws while loading is warned about and skipped rather than failing the ignite.
+  that throws while loading fails the ignite with that module's path and error, as in v1. A provider
+  that silently failed to register would otherwise only surface later as a missing dependency.
+- **Subclasses need their own decorator.** `class Fake extends Economy {}` without `@Provider()` is
+  not a provider; registering it explicitly raises, and path registration skips it.
 - **`WaitForChild` yields.** If the folder has not replicated yet, ignition waits.
 - **Overlapping paths raise.** Registering `src/server` and `src/server/services` will hit
   `provider ID was registered more than once`.

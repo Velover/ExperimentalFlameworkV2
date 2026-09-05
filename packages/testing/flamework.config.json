@@ -1,0 +1,4 @@
+{
+	"$schema": "../transformer/flamework.config.schema.json",
+	"networking": { "serialization": true }
+}

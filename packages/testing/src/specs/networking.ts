@@ -1,3 +1,4 @@
+import { Modding, Serialization } from "@flamework/core";
 import { Networking } from "@flamework/networking";
 import { Players, RunService } from "@rbxts/services";
 import { expectDefined, expectEqual, expectTrue, suite } from "../testkit";
@@ -20,6 +21,32 @@ interface ClientEvents {
 }
 
 const GlobalEvents = Networking.createEvent<ServerEvents, ClientEvents>();
+
+/**
+ * The wire codec for an argument list when the project enables `networking.serialization`, and
+ * `undefined` otherwise, so these specs run in either mode and describe what the remote really carries.
+ * @metadata macro
+ */
+function wireCodec<T extends unknown[]>(
+	meta?: Modding.Intrinsic<"network-serializer", [T], Serialization.Codec<T> | undefined>,
+): Serialization.Codec<T> | undefined {
+	return meta;
+}
+
+const wire = { number: wireCodec<[number]>(), text: wireCodec<[string]>() };
+
+/** The arguments a recorded message carried, decoded when they went out serialized. */
+function carried<T extends unknown[]>(codec: Serialization.Codec<T> | undefined, message: { args: unknown[] }): T {
+	if (!codec) return message.args as T;
+	return codec.decode(message.args[0] as buffer, (message.args[1] ?? []) as Array<defined>);
+}
+
+/** Arguments as the other realm would put them on the wire. */
+function onWire<T extends unknown[]>(codec: Serialization.Codec<T> | undefined, ...args: T): unknown[] {
+	if (!codec) return args;
+	const [payload, blobs] = codec.encode(args);
+	return blobs ? [payload, blobs] : [payload];
+}
 
 /**
  * The harness records everything a remote sends instead of replicating it, and exposes the
@@ -93,7 +120,7 @@ export = suite("networking", [
 
 				expectEqual(sent.size(), 1, "sent messages");
 				expectEqual(sent[0].kind, "FireClient", "dispatch method");
-				expectEqual(sent[0].args[0], 42, "payload");
+				expectEqual(carried(wire.number, sent[0])[0], 42, "payload");
 			} else {
 				primeRemotes();
 				const client = GlobalEvents.createClient({});
@@ -104,7 +131,7 @@ export = suite("networking", [
 
 				expectEqual(sent.size(), 1, "sent messages");
 				expectEqual(sent[0].kind, "FireServer", "dispatch method");
-				expectEqual(sent[0].args[0], 7, "payload");
+				expectEqual(carried(wire.number, sent[0])[0], 7, "payload");
 			}
 		},
 	],
@@ -124,7 +151,7 @@ export = suite("networking", [
 			const sent = __harness.sent(remote);
 			expectEqual(sent.size(), 1, "sent messages");
 			expectEqual(sent[0].kind, "FireAllClients", "dispatch method");
-			expectEqual(sent[0].args[0], 99, "payload");
+			expectEqual(carried(wire.number, sent[0])[0], 99, "payload");
 		},
 	],
 	[
@@ -184,7 +211,7 @@ export = suite("networking", [
 				const player = __harness.newPlayer("Sender");
 				(
 					remote as unknown as { OnServerEvent: { Fire(this: unknown, ...args: unknown[]): void } }
-				).OnServerEvent.Fire(player, 5);
+				).OnServerEvent.Fire(player, ...onWire(wire.number, 5));
 
 				expectEqual(received.size(), 1, "accepted messages");
 				expectEqual(received[0], 5, "received payload");
@@ -197,7 +224,7 @@ export = suite("networking", [
 				const remote = expectDefined(__harness.findRemote("scoreChanged"), "scoreChanged remote");
 				(
 					remote as unknown as { OnClientEvent: { Fire(this: unknown, ...args: unknown[]): void } }
-				).OnClientEvent.Fire(11);
+				).OnClientEvent.Fire(...onWire(wire.number, 11));
 
 				expectEqual(received.size(), 1, "accepted messages");
 				expectEqual(received[0], 11, "received payload");
@@ -222,10 +249,11 @@ export = suite("networking", [
 					remote as unknown as { OnServerEvent: { Fire(this: unknown, ...args: unknown[]): void } }
 				).OnServerEvent;
 
-				onServerEvent.Fire(player, 12345);
+				// Serialized, this is a number's bytes where a string is expected: a malformed payload.
+				onServerEvent.Fire(player, ...onWire(wire.number, 12345));
 				expectEqual(received.size(), 0, "messages accepted after a bad payload");
 
-				onServerEvent.Fire(player, "valid");
+				onServerEvent.Fire(player, ...onWire(wire.text, "valid"));
 				expectEqual(received.size(), 1, "messages accepted after a good payload");
 			} else {
 				primeRemotes();
@@ -238,10 +266,10 @@ export = suite("networking", [
 					remote as unknown as { OnClientEvent: { Fire(this: unknown, ...args: unknown[]): void } }
 				).OnClientEvent;
 
-				onClientEvent.Fire("not a number");
+				onClientEvent.Fire(...onWire(wire.text, "not a number"));
 				expectEqual(received.size(), 0, "messages accepted after a bad payload");
 
-				onClientEvent.Fire(3);
+				onClientEvent.Fire(...onWire(wire.number, 3));
 				expectEqual(received.size(), 1, "messages accepted after a good payload");
 			}
 		},

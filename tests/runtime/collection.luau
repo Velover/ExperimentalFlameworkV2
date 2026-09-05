@@ -5,6 +5,10 @@
 	Tags are stored per instance, and the added/removed signals fire synchronously so specs can
 	assert immediately after tagging.
 
+	`runDeferred(callback)` switches to Roblox's deferred behaviour for the duration of `callback`:
+	every fire is queued and delivered in order once it returns, so a spec can reproduce an event
+	arriving after the state it describes has already changed.
+
 	One instance per realm: two graphs in a single process must not share tag state.
 ]]
 
@@ -19,6 +23,38 @@ function collection.create()
 
 	local CollectionService = {}
 
+	local deferring = false
+	local queue: { { signal: any, instance: any } } = {}
+
+	local function fire(signal: any, instance: any)
+		if signal == nil then
+			return
+		end
+		if deferring then
+			table.insert(queue, { signal = signal, instance = instance })
+		else
+			signal:Fire(instance)
+		end
+	end
+
+	--- Runs `callback` with deferred signals, then delivers everything it queued, in order.
+	function CollectionService.runDeferred(callback: () -> ())
+		local previous = deferring
+		deferring = true
+		local ok, err = pcall(callback)
+		deferring = previous
+		if not deferring then
+			local pending = queue
+			queue = {}
+			for _, entry in pending do
+				entry.signal:Fire(entry.instance)
+			end
+		end
+		if not ok then
+			error(err, 0)
+		end
+	end
+
 	function CollectionService:AddTag(instance: any, tag: string)
 		local set = tagged[tag]
 		if not set then
@@ -31,11 +67,7 @@ function collection.create()
 		end
 
 		set[instance] = true
-
-		local signal = addedSignals[tag]
-		if signal then
-			signal:Fire(instance)
-		end
+		fire(addedSignals[tag], instance)
 	end
 
 	function CollectionService:RemoveTag(instance: any, tag: string)
@@ -45,11 +77,7 @@ function collection.create()
 		end
 
 		set[instance] = nil
-
-		local signal = removedSignals[tag]
-		if signal then
-			signal:Fire(instance)
-		end
+		fire(removedSignals[tag], instance)
 	end
 
 	function CollectionService:HasTag(instance: any, tag: string): boolean

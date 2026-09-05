@@ -235,6 +235,17 @@ function roblox.create(initialRealm: "Server" | "Client")
 		context.setGlobal("Enum", Enum)
 		context.setGlobal("task", env.task)
 		context.setGlobal("debug", env.debug)
+		-- Roblox's `time()` is elapsed game time; the lifecycle plugin passes it to onPhysics.
+		context.setGlobal("time", os.clock)
+
+		-- Roblox datatypes for the serialization specs. Lune's implementations report their `typeof`, so
+		-- `t.Vector3` and friends see them as the real thing.
+		local luneRoblox = require("@lune/roblox") :: any
+		for _, name in { "Vector3", "Vector2", "Vector3int16", "Vector2int16", "CFrame", "Color3", "UDim", "UDim2", "NumberRange", "Rect", "BrickColor" } do
+			if luneRoblox[name] ~= nil then
+				context.setGlobal(name, luneRoblox[name])
+			end
+		end
 		context.setGlobal("warn", function(...)
 			print("[warn]", ...)
 		end)
@@ -285,6 +296,9 @@ function roblox.create(initialRealm: "Server" | "Client")
 			flush = function()
 				luneTask.wait()
 			end,
+			--- Runs the callback with CollectionService signals deferred, delivering them afterwards in
+			--- order, the way a place with deferred signal behaviour does at the end of a resumption.
+			deferTags = CollectionService.runDeferred,
 			--- Advances one frame, firing the per-frame lifecycle signals.
 			step = env.step,
 			-- Remotes are created by the server and replicated to clients. A single-realm graph has

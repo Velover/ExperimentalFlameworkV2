@@ -172,6 +172,41 @@ const events = GlobalEvents.createServer({
 gets you `Flamework expected this argument to be a literal expression`. The same goes for the
 `middleware` object.
 
+## Serialization
+
+With `"networking": { "serialization": true }` in `flamework.config.json`, every event argument list
+and every function request and result is packed into a `buffer` before it leaves and unpacked when
+it arrives. The transformer generates the code for it from the declared types at each
+`createServer` / `createClient` call site, and it is plain buffer code: for
+`(value: number, where: Vector3)` the encoder is `buffer.create(20)` followed by four writes at
+literal offsets, and the decoder four reads. Nothing describes the type in the output, no schema
+table, no runtime library; only the bytes and the code that moves them. Nothing about the API
+changes; the guards still run on what was decoded.
+
+Sizes are what the types say: a `number` is eight bytes, a `boolean` one, an
+`"idle" | "walk" | "run"` one, an object is its fields in name order with nothing spent on names,
+a `Vector3` is three floats. Widths come from brands: `Serialization.u8`, `i16`, `f32` and friends
+from `@flamework/core` are `number & { __brand: "u8" }`-style types, and any brand with one of
+those literal names counts, so existing branded types keep working. `Serialization.string8` /
+`string16` shorten a string's length prefix from four bytes to one or two.
+
+Values with no buffer representation travel alongside it: Instances, `unknown`, EnumItems and the
+Roblox datatypes without a layout ride in a blob list. The buffer holds each one's index in that
+list, so a nil where an Instance was expected costs two bytes and shifts nothing; the receiving
+guard rejects it like any other wrong value. The blob list is `nil` when the types have no such
+values and a table (possibly empty) when they do. Functions, Promises, classes and symbols are
+compile errors, with the path through the type in the message.
+
+A payload that cannot be decoded (truncated, wrong shape, hostile) is dropped and reported through
+`onBadRequest` with `argIndex: -1`; a function reply that cannot be decoded rejects with
+`InvalidResult` and fires `onBadResponse`. Decoding never trusts a count it reads: one that
+announces more elements than the buffer could hold is refused before anything is allocated.
+Sending a value that does not match its declared type raises at the sender, which is a bug in the
+caller, not in the peer.
+
+The same generator is available on its own as `Flamework.createSerializer<T>()`; see
+[Macros](07-macros.md#serializers).
+
 ## Middleware
 
 A middleware is a factory: it receives the next processor and the event's info, and returns the
@@ -242,13 +277,20 @@ belong in the handler where they are testable.
 - **Config and middleware must be object literals.**
 - **The first `createServer`/`createClient` call wins.** The handler is cached per network object;
   later calls return the same one and ignore their config. Configure it once.
-- **Guards are incoming-only.** Nothing validates what you send, only what you receive.
+- **Guards are incoming-only.** Nothing validates what you send, only what you receive. With
+  serialization on, the generated encoder does refuse a value that does not match its type.
+- **Serialization is all or nothing per project.** Both realms compile from the same
+  `flamework.config.json`, so they always agree on the wire format; a client built without it cannot
+  talk to a server built with it.
 - **Unreliable events can be dropped.** Never make later messages depend on an earlier one.
 - **An event uses one remote for both directions; a function uses two.** If you are inspecting
   ReplicatedStorage, a function's two remotes share a name and differ only by their `id` attribute
   (`$name` for one direction, `@name` for the other).
 - **Remote wiring is deferred by one frame.** Connecting and immediately firing in the same frame can
   miss.
+- **Remote folder names are stable across builds.** Each network object's folder in ReplicatedStorage
+  is named by a callsite id derived from the file and declaration, so two compilations of the same
+  source produce the same tree and committed output does not churn.
 
 ---
 

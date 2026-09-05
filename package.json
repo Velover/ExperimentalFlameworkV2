@@ -10,7 +10,8 @@
     "build:transformer": "bun run ./scripts/build.mjs transformer-plugin transformer",
     "lint": "eslint .",
     "test": "bun run ./scripts/test.mjs",
-    "test:unit": "bun test packages/transformer/tests",
+    "test:unit": "bun test --timeout 120000 packages/transformer/tests",
+    "test:packaging": "bun test tests/packaging",
     "test:runtime": "bun run ./scripts/test-runtime.mjs",
     "dev:link": "node ./scripts/link-all.mjs",
     "prepare:readme": "node ./scripts/copy-readme.mjs",
@@ -29,5 +30,8 @@
     "roblox-ts": "^3.0.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.2.0"
+  },
+  "dependencies": {
+    "rbxts-transformer-flamework": "workspace:*"
   }
 }

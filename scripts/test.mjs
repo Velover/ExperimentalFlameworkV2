@@ -9,7 +9,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  */
 const STEPS = [
 	["build", ["bun", ["run", "./scripts/build.mjs"]]],
-	["transformer tests", ["bun", ["test", "packages/transformer/tests"]]],
+	// The transformer tests compile the fixture with the real rbxtsc inside a hook, which takes longer
+	// than bun's default five second hook timeout on a cold cache.
+	["transformer tests", ["bun", ["test", "--timeout", "120000", "packages/transformer/tests"]]],
+	["packaging checks", ["bun", ["test", "tests/packaging"]]],
 	["runtime specs", ["bun", ["run", "./scripts/test-runtime.mjs"]]],
 ];
 

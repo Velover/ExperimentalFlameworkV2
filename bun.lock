@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "flamework",
+      "dependencies": {
+        "rbxts-transformer-flamework": "workspace:*",
+      },
       "devDependencies": {
         "@eslint/compat": "^1.1.1",
         "@eslint/js": "^9.9.1",
@@ -127,10 +130,11 @@
       },
     },
     "packages/transformer/tests/fixture": {
-      "name": "@flamework/transformer-fixture",
+      "name": "transformer-fixture",
       "version": "0.0.0",
       "dependencies": {
         "@flamework/core": "workspace:*",
+        "@flamework/networking": "workspace:*",
         "@rbxts/t": "^3.1.0",
       },
       "devDependencies": {
@@ -170,8 +174,6 @@
     "@flamework/networking": ["@flamework/networking@workspace:packages/networking"],
 
     "@flamework/testing": ["@flamework/testing@workspace:packages/testing"],
-
-    "@flamework/transformer-fixture": ["@flamework/transformer-fixture@workspace:packages/transformer/tests/fixture"],
 
     "@humanfs/core": ["@humanfs/core@0.19.2", "", { "dependencies": { "@humanfs/types": "^0.15.0" } }, "sha512-UhXNm+CFMWcbChXywFwkmhqjs3PRCmcSa/hfBgLIb7oQ5HNb1wS0icWsGtSAUNgefHeI+eBrA8I1fxmbHsGdvA=="],
 
@@ -516,6 +518,8 @@
     "tinyglobby": ["tinyglobby@0.2.17", "", { "dependencies": { "fdir": "^6.5.0", "picomatch": "^4.0.4" } }, "sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g=="],
 
     "to-regex-range": ["to-regex-range@5.0.1", "", { "dependencies": { "is-number": "^7.0.0" } }, "sha512-65P7iz6X5yEr1cwcgvQxbbIw7Uk3gOy5dIdtZ4rDveLqhrdJP+Li/Hx6tyK0NEb+2GCyneCMJiGqrADCSNk8sQ=="],
+
+    "transformer-fixture": ["transformer-fixture@workspace:packages/transformer/tests/fixture"],
 
     "ts-api-utils": ["ts-api-utils@2.5.0", "", { "peerDependencies": { "typescript": ">=4.8.4" } }, "sha512-OJ/ibxhPlqrMM0UiNHJ/0CKQkoKF243/AEmplt3qpRgkW8VG7IfOS41h7V8TjITqdByHzrjcS/2si+y4lIh8NA=="],
 

@@ -30,10 +30,6 @@ const GlobalFunctions = Networking.createFunction<ServerFunctions, {}>();
 const log = new Array<string>();
 
 /** Declared with method syntax so roblox-ts emits a `:` call, as the real handler expects. */
-interface LooseSender {
-	fire(value: unknown): void;
-}
-
 export function setupServer() {
 	const events = GlobalEvents.createServer({});
 	events.setScore.connect((player, score) => log.push(`${player.Name}:${score}`));
@@ -55,10 +51,21 @@ export function fireScore(score: number) {
 	GlobalEvents.createClient({}).setScore.fire(score);
 }
 
-/** Sends a payload the server's generated guard has to reject. */
+declare const __harness: {
+	findRemote: (id: string) => Instance | undefined;
+};
+
+/**
+ * Sends what an exploiter might: a raw string on the remote where the server declared a number. The
+ * typed API cannot produce this (with serialization on, its codec refuses the value), so the remote
+ * is fired directly. Without serialization the guard rejects it; with serialization it is not even a
+ * buffer. Either way the server has to drop it.
+ */
 export function fireBadScore() {
-	const client = GlobalEvents.createClient({}) as unknown as { setScore: LooseSender };
-	client.setScore.fire("not a number");
+	GlobalEvents.createClient({});
+	const remote = __harness.findRemote("setScore") as RemoteEvent | undefined;
+	assert(remote, "setScore remote");
+	remote.FireServer("not a number" as never);
 }
 
 export function broadcastScore(score: number) {

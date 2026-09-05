@@ -57,8 +57,19 @@ ComponentPlugin.createPlugin()
     .build();
 ```
 
-`ComponentPlugin` includes `LifecyclePlugin` itself, so components get `onStart` and friends without
-you including it -- but your *providers* still need it, so keep including it at the top level.
+Components are constructed through the module that includes `ComponentPlugin`, so they get
+`onTick`, `onPhysics` and `onRender` from **that module's** `LifecyclePlugin` -- include it alongside
+`ComponentPlugin`, as above. `onStart` is the exception: `Components` calls it itself, so it works
+regardless.
+
+Register by glob when the components are spread across feature folders:
+
+```ts
+ComponentPlugin.fromGlob("src/**/components");
+```
+
+As with providers, only classes decorated with `@Component()` **themselves** are registered; an
+exported but undecorated subclass is skipped, and `registerComponent` raises for one.
 
 ## Attributes
 
@@ -128,9 +139,10 @@ Override it entirely with `instanceGuard` if the generated one is not what you w
 The default blocklist is why tagging a template in ReplicatedStorage does not spawn a component, and
 why a tagged instance cloned into Workspace does.
 
-**These only gate CollectionService-driven construction.** `addComponent` and the eager path in
-`getComponent` deliberately ignore them, so you can still attach a component by hand to something in
-ReplicatedStorage.
+The ancestor lists only gate CollectionService-driven construction, so you can still attach a
+component by hand to something in ReplicatedStorage. The `predicate` also gates the eager path in
+`getComponent`: an instance it rejects never gets a component unless you call `addComponent`
+yourself, which ignores all three.
 
 ## Streaming
 
@@ -224,9 +236,15 @@ for.
 
 ## Caveats
 
-- **`getComponent` constructs.** It is not a pure lookup: if the instance is tagged and qualifies, it
-  builds the component then and there, ignoring the ancestor lists. Use `getAllComponents` when you
-  want to *observe* rather than ensure.
+- **`getComponent` constructs.** It is not a pure lookup: if the instance is tagged, passes the
+  predicate and qualifies, it builds the component then and there, ignoring the ancestor lists. Use
+  `getAllComponents` when you want to *observe* rather than ensure.
+- **`getComponent` returns nothing for a component that is still constructing**, so a constructor
+  asking for its own component sees `undefined`. Forcing the construction with `addComponent` from
+  inside the constructor raises `component '...' is cyclic`.
+- **Extinguishing the module destroys every component** and stops watching the tags. `addComponent`
+  on the dead module raises; tagging an instance afterwards does nothing.
+- **Per-frame events need `LifecyclePlugin` in the same module** as `ComponentPlugin`.
 - **An invalid attribute throws** unless a default is configured.
 - **`onComponentRemoved` runs before `destroy`**, so the component is still usable inside it.
 - **Attribute tracking is on by default.** `refreshAttributes: false` disables `onAttributeChanged`

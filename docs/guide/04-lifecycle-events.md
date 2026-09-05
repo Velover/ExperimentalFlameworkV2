@@ -35,9 +35,10 @@ export class Spawner implements OnStart, OnTick {
 
 | Interface | Method | Fires on |
 |---|---|---|
+| `OnInit` | `onInit()` | Once, during ignition, in dependency order, before any `onStart`. May return a Promise. |
 | `OnStart` | `onStart()` | Once, at the end of ignition. |
 | `OnTick` | `onTick(dt)` | `RunService.PostSimulation` |
-| `OnPhysics` | `onPhysics(dt)` | `RunService.PreSimulation` |
+| `OnPhysics` | `onPhysics(dt, time)` | `RunService.PreSimulation`; `time` is the elapsed game time. |
 | `OnRender` | `onRender(dt)` | `RunService.PreRender` -- client only |
 | `OnExtinguished` | `onExtinguished()` | `module.extinguish()` |
 
@@ -47,6 +48,23 @@ signal order.
 There is nothing to register. Flamework checks each constructed object against the interfaces
 plugins have claimed, structurally, using metadata the transformer attached -- which is why the
 class must carry a Flamework decorator for this to work at all.
+
+## `onInit` in detail
+
+`onInit` is the ordered, awaitable setup step. It runs after every provider has been constructed,
+once per provider, **in dependency order**, and everything after it waits:
+
+```ts
+@Provider()
+class Database implements OnInit {
+    public async onInit() {
+        await this.connect(); // the next provider's onInit waits for this
+    }
+}
+```
+
+A rejected Promise fails ignition with `onInit failed for '<id>': <reason>`. Because it blocks, keep
+it to setup that other providers genuinely depend on; anything else belongs in `onStart`.
 
 ## `onStart` in detail
 
@@ -97,6 +115,33 @@ registered with it. Per-frame events start immediately.
 The same applies to anything built with `createClassInstance`: it is attached to the lifecycle
 events it implements, and detached by `removeClassInstance` or when the module extinguishes.
 
+A **lazy provider** is different: it is a provider, so when it is first resolved after ignition the
+plugin runs its `onInit` and `onStart` for it, on the next resume point, in that order.
+
+## Components
+
+Components are constructed through the module that includes `ComponentPlugin`, so they take their
+per-frame events from **that module's** lifecycle plugin. Include `LifecyclePlugin` in the module
+that includes `ComponentPlugin`, or components will not tick. `onStart` is the one exception:
+`Components` calls it itself, so it works even without the lifecycle plugin.
+
+## Profiling
+
+In Studio, every per-frame callback runs under `debug.profilebegin` and `debug.setmemorycategory`
+with the provider's identifier, so providers show up by name in the MicroProfiler and the memory
+view. To force it on or off, build the plugin with options instead of using the default:
+
+```ts
+import { createLifecyclePlugin } from "@flamework/core";
+
+Flamework.createModule()
+    .includePlugin(createLifecyclePlugin({ profiling: false }))
+    .ignite();
+```
+
+The project-wide default lives in `flamework.config.json` as `core.profiling`; this option overrides it
+for one module.
+
 ```ts
 @Injectable()
 class Countdown implements OnTick {
@@ -143,8 +188,10 @@ one provider iterating them over hundreds of `listen` calls.
 - **Extinguishing disconnects everything.** The plugin disconnects its `RunService` connections and
   releases the providers, so a dead module stops ticking. This was a bug once; it is covered by a
   spec now.
-- **`onExtinguished` fires for every provider the plugin knows about**, not only the module being
-  extinguished, when several modules share one plugin instance. Keep the handler idempotent.
+- **A failing `onExtinguished` does not abort extinguish.** It is warned about and the remaining
+  handlers still run, so the module cannot get stuck half-extinguished.
+- **`onInit` blocks.** A yielding `onInit` delays every provider after it; a rejected Promise fails
+  ignition.
 - **A yielding constructor stalls ignition**, because construction is synchronous. Yield in
   `onStart`.
 

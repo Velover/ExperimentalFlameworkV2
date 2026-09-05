@@ -8,6 +8,8 @@ import modding = require("./specs/modding");
 import modules = require("./specs/modules");
 import networking = require("./specs/networking");
 import providers = require("./specs/providers");
+import regressions = require("./specs/regressions");
+import serialization = require("./specs/serialization");
 
 /**
  * Every suite the Lune harness should run, in order.
@@ -21,4 +23,6 @@ export const suites: TestSuite[] = [
 	networking,
 	functions,
 	middleware,
+	regressions,
+	serialization,
 ];

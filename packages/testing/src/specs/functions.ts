@@ -1,3 +1,4 @@
+import { Modding, Serialization } from "@flamework/core";
 import { Networking, NetworkingFunctionError } from "@flamework/networking";
 import { RunService } from "@rbxts/services";
 import { expectDefined, expectEqual, expectRejects, expectResolves, expectTrue, suite } from "../testkit";
@@ -147,6 +148,56 @@ function deliver(channel: Instance, ...args: unknown[]) {
 	}
 }
 
+/**
+ * Wire codecs when the project enables `networking.serialization`, `undefined` otherwise (see the
+ * networking specs). A function request is `(id, ...args)` and a response `(id, result, value)`; with
+ * serialization the args or value become `(buffer, blobs?)` after the plain prefix.
+ * @metadata macro
+ */
+function wireCodec<T extends unknown[]>(
+	meta?: Modding.Intrinsic<"network-serializer", [T], Serialization.Codec<T> | undefined>,
+): Serialization.Codec<T> | undefined {
+	return meta;
+}
+
+const wire = {
+	textArgs: wireCodec<[string]>(),
+	textResult: wireCodec<[string]>(),
+	numberResult: wireCodec<[number]>(),
+};
+const SERIALIZED = wire.textArgs !== undefined;
+
+/** Packed values as the remote carries them: the buffer, then the blob list only when the type has blob slots. */
+function packed<T extends unknown[]>(codec: Serialization.Codec<T>, values: T): unknown[] {
+	const [payload, blobs] = codec.encode(values);
+	return blobs ? [payload, blobs] : [payload];
+}
+
+/** A response value as it travels after the plain `(id, result)` prefix. */
+function onWire<T>(codec: Serialization.Codec<[T]> | undefined, value: T): unknown[] {
+	return codec ? packed<[T]>(codec, [value]) : [value];
+}
+
+/** A request's argument list as it travels after the plain `id`: spread when not serialized. */
+function onWireArgs<T extends unknown[]>(codec: Serialization.Codec<T> | undefined, args: T): unknown[] {
+	return codec ? packed(codec, args) : args;
+}
+
+/** The response value that follows `prefix` plain arguments in a recorded message. */
+function fromWire<T>(codec: Serialization.Codec<[T]> | undefined, args: unknown[], prefix: number): T {
+	return codec ? fromWireArgs(codec, args, prefix)[0] : (args[prefix] as T);
+}
+
+/** The single request argument that follows `prefix` plain arguments in a recorded message. */
+function fromWireArgs<T extends unknown[]>(
+	codec: Serialization.Codec<T> | undefined,
+	args: unknown[],
+	prefix: number,
+): T {
+	if (!codec) return [args[prefix]] as unknown as T;
+	return codec.decode(args[prefix] as buffer, (args[prefix + 1] ?? []) as Array<defined>);
+}
+
 export = suite("networking functions", [
 	[
 		"rejects an incoming request before a callback is set",
@@ -187,14 +238,14 @@ export = suite("networking functions", [
 			const channel = remoteById(`${RECEIVE_PREFIX}echo`, "echo receive channel");
 			__harness.clearSent(channel);
 
-			deliver(channel, 7, "ping");
+			deliver(channel, 7, ...onWireArgs(wire.textArgs, ["ping"] as [string]));
 
 			const sent = __harness.sent(channel);
 			expectEqual(sent.size(), 1, "responses");
 			expectEqual(sent[0].kind, isServer ? "FireClient" : "FireServer", "dispatch method");
 			expectEqual(sent[0].args[0], 7, "request id echoed back");
 			expectEqual(sent[0].args[1], true, "process result");
-			expectEqual(sent[0].args[2], "ping!", "returned value");
+			expectEqual(fromWire(wire.textResult, sent[0].args, 2), "ping!", "returned value");
 		},
 	],
 	[
@@ -207,9 +258,9 @@ export = suite("networking functions", [
 
 			const sent = __harness.sent(channel);
 			expectEqual(sent.size(), 1, "requests");
-			expectEqual(sent[0].args[1], "ping", "payload");
+			expectEqual(fromWireArgs(wire.textArgs, sent[0].args, 1)[0], "ping", "payload");
 
-			deliver(channel, sent[0].args[0], true, "pong");
+			deliver(channel, sent[0].args[0], true, ...onWire(wire.textResult, "pong"));
 
 			expectEqual(expectResolves(request), "pong", "resolved value");
 		},
@@ -224,11 +275,12 @@ export = suite("networking functions", [
 			__harness.clearSent(channel);
 
 			const request = invoke(getHandler().echo, "ping");
-			deliver(channel, __harness.sent(channel)[0].args[0], true, 42);
+			// Serialized, a number's bytes where a string is expected cannot be decoded: still InvalidResult.
+			deliver(channel, __harness.sent(channel)[0].args[0], true, ...onWire(wire.numberResult, 42));
 
 			expectEqual(expectRejects(request, "invalid response"), NetworkingFunctionError.InvalidResult, "rejection");
 			expectEqual(badResponses.size(), 1, "onBadResponse events");
-			expectEqual(badResponses[0], 42, "reported value");
+			if (!SERIALIZED) expectEqual(badResponses[0], 42, "reported value");
 		},
 	],
 	[
