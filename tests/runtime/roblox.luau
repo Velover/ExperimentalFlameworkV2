@@ -101,6 +101,11 @@ function roblox.create(initialRealm: "Server" | "Client")
 	local function service(className: string, name: string)
 		local instance = instances.new(className)
 		instance.Name = name
+
+		-- A service is a root of the DataModel, which is what tells an instance parented under one
+		-- apart from an instance parented under a folder nothing holds.
+		instances.markAsRoot(instance)
+
 		return instance
 	end
 
@@ -111,6 +116,13 @@ function roblox.create(initialRealm: "Server" | "Client")
 	local ServerScriptService = service("Folder", "ServerScriptService")
 
 	local CollectionService = collection.create()
+
+	-- CollectionService announces a tag when its instance enters the DataModel and again when it
+	-- leaves; ancestry is the Instance harness's to report, tags are this realm's to hold.
+	instances.observeAncestry(CollectionService.announceAncestry)
+
+	-- A clone carries the tags of what it was cloned from, which is the other half of that split.
+	instances.observeClone(CollectionService.announceClone)
 
 	local services: { [string]: any } = {
 		RunService = RunService,
@@ -131,6 +143,11 @@ function roblox.create(initialRealm: "Server" | "Client")
 	env.RunService = RunService
 
 	local game = {}
+
+	-- `IsDescendantOf(game)` is how the runtime asks whether the DataModel holds an instance, so
+	-- the Instance harness has to recognise this realm's `game` as the DataModel rather than as
+	-- something to walk the tree for.
+	instances.registerDataModel(game)
 
 	function game:GetService(name: string)
 		local existing = services[name]
@@ -313,6 +330,14 @@ function roblox.create(initialRealm: "Server" | "Client")
 			--- Runs the callback with CollectionService signals deferred, delivering them afterwards in
 			--- order, the way a place with deferred signal behaviour does at the end of a resumption.
 			deferTags = CollectionService.runDeferred,
+			--- The same for the tree signals -- ChildAdded, ChildRemoved and the descendant pair --
+			--- which the engine defers as well, so a handler sees a tree that has finished moving
+			--- while the signals for the rest of the move are still queued behind it.
+			deferTree = instances.runDeferred,
+			--- And the same for BindableEvent dispatch, which is what `@rbxts/signal` fires
+			--- through: a component's added and removed announcements reach their handlers at the
+			--- end of the resumption, after everything the caller went on to do.
+			deferSignals = instances.runDeferredSignals,
 			--- Advances one frame, firing the per-frame lifecycle signals.
 			step = env.step,
 			-- Remotes are created by the server and replicated to clients. A single-realm graph has

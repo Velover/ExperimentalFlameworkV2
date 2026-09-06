@@ -188,6 +188,67 @@ describe("component links", () => {
 		expect(source).toContain(`self[SYMBOL_ATTRIBUTE_SETTER](self, "Target", part)`);
 	});
 
+	test("keeps a macro call's identifier in the value a mutating write is given", () => {
+		// Regression: `++` and `--` handed the operand to the emitter as written, so the copy of the
+		// receiver inside the value was never transformed and lost the id this pass injects. The
+		// write then called `getComponent` with no specifier and threw at runtime.
+		const source = normalize(emitted("components"));
+		const receiver = `self.components:getComponent(other, "fw:components@CounterComponent")`;
+
+		expect(source).toContain(`_[SYMBOL_ATTRIBUTE_SETTER](_, "count", ${receiver}.attributes.count + 1, true)`);
+		expect(source).toContain(`_[SYMBOL_ATTRIBUTE_SETTER](_, "count", ${receiver}.attributes.count + 1)`);
+		expect(source).not.toContain(`getComponent(other).attributes`);
+	});
+
+	test("links an optional child, and keeps the shapes beside it legal", () => {
+		// The fixture compiling at all is the assertion for the legal shapes (see `beforeAll`): a
+		// required child, an optional attribute, and a child naming a component optionally.
+		const source = normalize(emitted("components"));
+
+		expect(source).toContain(`Plain = t.instanceIsA("BasePart")`);
+		expect(source).toContain(`label = t.optional(t.string)`);
+		expect(source).toContain(`SpareHandler = t.optional(t.instanceIsA("BasePart"))`);
+		expect(source).toContain(
+			`kind = "child", name = "SpareHandler", optional = true, component = "fw:components@HandlerComponent",`,
+		);
+	});
+
+	test("rejects an optional child of the instance tree", () => {
+		// `this.instance.Head` is an index into the instance, which raises on a child that is not
+		// there, so the optional type would promise a read Roblox does not allow.
+		const result = compileProbe(
+			"optionalChild",
+			`import { BaseComponent, Component } from "@flamework/components";
+
+interface Character extends Model {
+	Head?: BasePart;
+	HumanoidRootPart: BasePart;
+}
+
+@Component({ tag: "FixtureOptionalChild" })
+export class CharacterComponent extends BaseComponent<{}, Character> {}
+`,
+		);
+
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("Child 'Head' of the instance tree of 'CharacterComponent' is optional");
+		expect(result.output).toContain("Roblox raises when a child that does not exist is indexed");
+	});
+
+	test("rejects an optional child deeper in the instance tree", () => {
+		const result = compileProbe(
+			"optionalGrandchild",
+			`import { BaseComponent, Component } from "@flamework/components";
+
+@Component({ tag: "FixtureOptionalGrandchild" })
+export class RiggedComponent extends BaseComponent<{}, Model & { Torso: BasePart & { Neck?: Motor6D } }> {}
+`,
+		);
+
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("Child 'Torso.Neck' of the instance tree of 'RiggedComponent' is optional");
+	});
+
 	test("rejects a component that is not a direct child of the instance tree", () => {
 		const result = compileProbe(
 			"nestedLink",

@@ -99,6 +99,19 @@ export class Components {
 	/** Components whose constructor is currently running, per instance, to detect cycles. */
 	private constructing = new Map<Instance, Set<Constructor>>();
 
+	/**
+	 * Components whose removal is running, per instance, so that nothing Flamework builds on its
+	 * own can take the place of one that is being taken apart.
+	 */
+	private removing = new Map<Instance, Set<Constructor>>();
+
+	/**
+	 * Components whose links are being read for an instance nobody is tracking, so that a ring of
+	 * links -- one naming its own component on its own instance included -- is answered rather than
+	 * followed round forever.
+	 */
+	private checkingLinks = new Map<Instance, Set<Constructor>>();
+
 	private trackers = new Map<Constructor, ComponentTracker>();
 	private componentWaiters = new Map<Instance, Map<Constructor, Set<(value: unknown) => void>>>();
 	private componentCleanup = new Map<BaseComponent, Maid>();
@@ -181,11 +194,26 @@ export class Components {
 		}
 	}
 
+	/**
+	 * Whether the ancestor lists let Flamework construct this component on this instance.
+	 *
+	 * A whitelist takes priority over the blocklist: with one configured, being inside it is the
+	 * whole question and the blocklist is not consulted.
+	 */
+	private passesAncestorLists(componentInfo: ComponentInfo, instance: Instance) {
+		const { config } = componentInfo;
+
+		const isWhitelisted = config.ancestorWhitelist?.some((ancestor) => instance.IsDescendantOf(ancestor));
+		if (isWhitelisted !== undefined) return isWhitelisted;
+
+		const ancestorBlacklist = config.ancestorBlacklist ?? DEFAULT_ANCESTOR_BLACKLIST;
+		return !ancestorBlacklist.some((ancestor) => instance.IsDescendantOf(ancestor));
+	}
+
 	/** @internal */
 	public startCollectionService() {
-		for (const [, { config, ctor }] of this.components) {
-			const ancestorBlacklist = config.ancestorBlacklist ?? DEFAULT_ANCESTOR_BLACKLIST;
-			const ancestorWhitelist = config.ancestorWhitelist;
+		for (const [, componentInfo] of this.components) {
+			const { config, ctor } = componentInfo;
 
 			if (config.tag !== undefined) {
 				const tag = config.tag;
@@ -204,30 +232,48 @@ export class Components {
 					// CollectionService signals are deferred in most places, so by the time this runs the tag
 					// can already be gone again (or the instance destroyed). Trusting the event here would
 					// re-qualify the instance and construct a component for an untagged instance.
-					if (instance.Parent === undefined || !CollectionService.HasTag(instance, tag)) {
+					//
+					// The DataModel is what a tag is announced by, so it is what is asked about here:
+					// an instance can have a parent and still be nowhere the tag was announced from --
+					// a descendant of a tree that has been pooled by unparenting it, or a template
+					// being assembled before it is dropped in.
+					if (!instance.IsDescendantOf(game) || !CollectionService.HasTag(instance, tag)) {
 						return;
 					}
 
+					// Recorded before the filters rather than after them: the criterion is a cache of
+					// `HasTag`, and every entry this tracker holds is answered from it -- including
+					// one a link created for an instance this component may never be constructed on.
+					// Leaving it behind is what makes such an entry stale, and a stale entry is then
+					// what `getComponent` is answered with.
+					tracker.setHasTag(instance, true);
+
+					// A filtered instance never reaches `trackInstance`, so nothing else here brings
+					// an entry a link created up to date -- and on a realm that does not poll the
+					// tree, nothing ever will. Leaving it is what freezes an instance guard that
+					// failed while the tree was still filling in, and `getComponent` is then
+					// answered from it: a link watching an instance would change the answer.
 					if (predicate !== undefined && !predicate(instance)) {
+						tracker.refreshInstance(instance);
 						return;
 					}
 
-					const isWhitelisted = ancestorWhitelist?.some((ancestor) => instance.IsDescendantOf(ancestor));
-					if (isWhitelisted === false) return;
-
-					const isBlacklisted = ancestorBlacklist.some((ancestor) => instance.IsDescendantOf(ancestor));
-					if (isBlacklisted && isWhitelisted === undefined) return;
+					if (!this.passesAncestorLists(componentInfo, instance)) {
+						tracker.refreshInstance(instance);
+						return;
+					}
 
 					tracker.trackInstance(instance, listener);
-					tracker.setHasTag(instance, true);
 				};
 
 				this.connections.push(CollectionService.GetInstanceAddedSignal(tag).Connect(instanceAdded));
 				this.connections.push(
 					CollectionService.GetInstanceRemovedSignal(tag).Connect((instance) => {
 						// The same deferral can deliver a removal for a tag that has since been added back;
-						// that instance keeps its component.
-						if (instance.Parent !== undefined && CollectionService.HasTag(instance, tag)) {
+						// that instance keeps its component. Being back in the DataModel is half of that:
+						// a removal announced because the instance left it stands, however tagged the
+						// instance still is, and whether it lost its own parent or an ancestor's.
+						if (instance.IsDescendantOf(game) && CollectionService.HasTag(instance, tag)) {
 							return;
 						}
 
@@ -302,10 +348,11 @@ export class Components {
 			streamingMode === ComponentStreamingMode.Watching;
 
 		const tracker = new ComponentTracker(componentInfo.identifier, {
-			checkLinks: hasLinks ? (instance) => this.checkLinks(componentInfo, instance) : undefined,
+			checkLinks: hasLinks ? (instance) => this.areLinksMet(componentInfo, instance) : undefined,
 			watchLinks: hasLinks
 				? (instance, update) => this.watchLinks(componentInfo, instance, update, pollsTree)
 				: undefined,
+			linksMet: hasLinks ? (instance) => this.areLinksMet(componentInfo, instance) : undefined,
 			tag: componentInfo.config.tag,
 			typeGuard: instanceGuard,
 			typeGuardPoll: pollsTree,
@@ -335,7 +382,15 @@ export class Components {
 
 		// A default stands in for an attribute that was never written, as it does for a plain one.
 		// It has to be read here rather than left to `getAttributes`, which only runs once the
-		// component is being built -- and it never would be, with the link unresolved.
+		// component is being built -- and a required link would hold that up forever.
+		//
+		// An optional one holds nothing up, so it needs no standing in: `getAttributes` writes its
+		// default to the instance like any other, and after that the attribute is the whole story.
+		// Answering with the default here as well is what would make clearing such an attribute
+		// impossible -- cleared and never written are the same nothing on an instance, so the
+		// default would simply be read back.
+		if (link.optional) return undefined;
+
 		const fallback = this.getConfigValue(componentInfo.ctor, "defaults")?.[link.name];
 		return typeIs(fallback, "Instance") ? fallback : undefined;
 	}
@@ -356,6 +411,54 @@ export class Components {
 		return component;
 	}
 
+	/**
+	 * The component a link names on an instance, constructing one only where a link is allowed to.
+	 *
+	 * `getComponent` ignores the ancestor lists on purpose -- asking by hand is how you get past
+	 * them -- while a link is Flamework driving construction and goes through them, exactly as the
+	 * criterion that decided the link was met did. Going straight to `getComponent` here is what
+	 * would build a component under a blocked ancestor for a link that is not even met.
+	 */
+	private resolveLinkedComponent(target: Instance, component: Constructor) {
+		const existing = this.activeComponents.get(target)?.get(component);
+		if (existing !== undefined) return existing;
+
+		if (this.canCreateComponentEager(target, component, true) !== true) return undefined;
+
+		return this.getComponent(target, component);
+	}
+
+	/**
+	 * Watches an instance's tree, calling `changed` on a deferred task so that a burst of changes
+	 * costs one call.
+	 *
+	 * This is the shape the tracker's own instance-guard poll has, for the same reason: a structural
+	 * guard is answered by children that may not have arrived yet. Returns the cleanup.
+	 */
+	private watchInstanceTree(instance: Instance, changed: () => void) {
+		let isScheduled = false;
+		let isReleased = false;
+
+		const schedule = () => {
+			if (isScheduled || isReleased) return;
+			isScheduled = true;
+
+			task.defer(() => {
+				isScheduled = false;
+				if (!isReleased) changed();
+			});
+		};
+
+		const added = instance.DescendantAdded.Connect(schedule);
+		const removing = instance.DescendantRemoving.Connect(schedule);
+
+		return () => {
+			isReleased = true;
+			added.Disconnect();
+			removing.Disconnect();
+		};
+	}
+
 	private getAttributeWarningTimeout(componentInfo: ComponentInfo) {
 		const config = getRuntimeConfig().components;
 
@@ -369,23 +472,66 @@ export class Components {
 	}
 
 	/**
-	 * Whether every link of a component resolves on this instance right now.
+	 * Whether one link is met on this instance right now, read from the instance rather than from
+	 * whatever the link last reported.
 	 *
-	 * This is the answer for an instance nobody is tracking, where there is nothing to wait on, so
-	 * a linked component has to already exist rather than merely be constructible.
+	 * This is the question `watchLink`'s `refresh` answers, and the one `resolveLinks` has to agree
+	 * with: an instance that is there, passes the guard, and either already carries the component
+	 * the link names or is somewhere Flamework would build one.
 	 */
-	private checkLinks(componentInfo: ComponentInfo, instance: Instance) {
-		for (const link of componentInfo.links) {
-			const target = this.resolveLinkTarget(instance, componentInfo, link);
-			if (target === undefined) {
-				if (link.optional) continue;
+	private isLinkMet(componentInfo: ComponentInfo, instance: Instance, link: ComponentLink) {
+		const target = this.resolveLinkTarget(instance, componentInfo, link);
+		if (target === undefined) return link.optional;
 
-				return false;
+		if (!this.passesLinkGuard(link, target)) return false;
+		if (link.component === undefined) return true;
+
+		const linkedComponent = this.getLinkedComponent(link);
+		return (
+			this.hasComponent(target, linkedComponent) ||
+			this.canCreateComponentEager(target, linkedComponent, true) === true
+		);
+	}
+
+	/**
+	 * Whether every link of a component is met on this instance right now.
+	 *
+	 * A watched link is a subscription, and a subscription only answers for the changes it is told
+	 * about: the engine defers the child signals, so one link is asked to rebuild the component
+	 * while the signal that would have unmet another is still queued behind it, and a child renamed
+	 * rather than moved fires nothing at all. The tracker reads this at the moment it would
+	 * qualify, which is the moment the difference between what the links reported and what the tree
+	 * holds stops being harmless: `resolveLinks` reads that tree next.
+	 *
+	 * It is also the answer for an instance nobody is tracking, where there is nothing watching and
+	 * nothing to wait on. The two used to differ -- an untracked instance's links had to name a
+	 * component that already existed, rather than one Flamework would build -- and that is what made
+	 * `getComponent` refuse a freshly tagged tree whose links `resolveLinks` would have built a
+	 * moment later, in the same resumption, for the very same instance.
+	 *
+	 * A link may reach for a component whose own links are still being decided, so this can come
+	 * back round to the question it started from: a ring of links, of which one naming its own
+	 * component on its own instance is the shortest. Nothing in such a ring exists yet, so none of
+	 * it can be built out of nothing, and the second arrival is answered `false` rather than
+	 * recursing -- which is the same answer the tracker's provisional entry gives for the tracked
+	 * side of it.
+	 */
+	private areLinksMet(componentInfo: ComponentInfo, instance: Instance) {
+		let checking = this.checkingLinks.get(instance);
+		if (checking?.has(componentInfo.ctor)) return false;
+
+		if (!checking) this.checkingLinks.set(instance, (checking = new Set()));
+		checking.add(componentInfo.ctor);
+
+		try {
+			for (const link of componentInfo.links) {
+				if (!this.isLinkMet(componentInfo, instance, link)) return false;
 			}
+		} finally {
+			checking.delete(componentInfo.ctor);
 
-			if (!this.passesLinkGuard(link, target)) return false;
-			if (link.component !== undefined && !this.hasComponent(target, this.getLinkedComponent(link))) {
-				return false;
+			if (checking.isEmpty()) {
+				this.checkingLinks.delete(instance);
 			}
 		}
 
@@ -420,6 +566,11 @@ export class Components {
 		pollsTree: boolean,
 	) {
 		const criterion = describeLink(link);
+
+		// `refreshAttributes: false` freezes a link attribute the way it freezes a plain one: the
+		// criterion behind the link is still watched -- re-pointing one at something its guard
+		// refuses still takes the component down -- it is the component's view that stops moving.
+		const tracksAttributes = this.getConfigValue(componentInfo.ctor, "refreshAttributes") !== false;
 
 		let targetMaid: Maid | undefined;
 		let pending: PendingLink | undefined;
@@ -473,42 +624,64 @@ export class Components {
 				return;
 			}
 
-			if (!this.passesLinkGuard(link, target)) {
-				noteTarget(undefined);
-				update(criterion, false);
-				return;
-			}
-
 			noteTarget(target);
 
-			// A handle that fills in after the component was built changes nothing on the instance,
-			// so no attribute signal reports it; this is the only place that notices. It matters for
-			// an optional link, which does not hold construction up in the first place.
-			if (link.kind === "attribute") {
-				this.refreshLinkAttribute(instance, componentInfo, link);
-			}
+			const linkedComponent = link.component !== undefined ? this.getLinkedComponent(link) : undefined;
 
-			if (link.component === undefined) {
-				update(criterion, true);
-				return;
-			}
+			// Whether the target is everything the link asks of it right now: the shape its guard
+			// describes, and the component it names being there or being one Flamework would build
+			// there. Asking the tracker alone would leave out the predicate and the ancestry weighed
+			// here as well, and report a link met that then throws out of the very construction it
+			// asked for. A component with no tag only exists once somebody adds it, which is what
+			// `hasComponent` is for -- and it is also what lets a component already attached under a
+			// blocked ancestor satisfy a link the ancestor lists would not build.
+			const refresh = () => {
+				if (!this.passesLinkGuard(link, target)) {
+					return update(criterion, false);
+				}
 
-			const linkedComponent = this.getLinkedComponent(link);
-			const tracker = this.getComponentTracker(linkedComponent);
+				// A handle that fills in after the component was built changes nothing on the
+				// instance, so no attribute signal reports it; this is the only place that notices.
+				// It matters for an optional link, which does not hold construction up in the first
+				// place.
+				if (link.kind === "attribute" && tracksAttributes) {
+					this.refreshLinkAttribute(instance, componentInfo, link);
+				}
+
+				// The target may not have moved while the component on it was replaced, which is
+				// what a removal and the rebuild behind it look like once they are delivered. Every
+				// other path here is keyed on the target instance changing, so this is what keeps
+				// the owner from holding on to the component that left. `refreshAttributes: false`
+				// freezes an attribute link's view of it, as it freezes the rest.
+				if (link.kind !== "attribute" || tracksAttributes) {
+					this.refreshLinkedComponent(instance, componentInfo, link, target);
+				}
+
+				update(
+					criterion,
+					linkedComponent === undefined ||
+						this.hasComponent(target, linkedComponent) ||
+						this.canCreateComponentEager(target, linkedComponent, true) === true,
+				);
+			};
 
 			targetMaid = new Maid();
 
-			// Whether `getComponent` would hand a component back, which is what the link is built
-			// from. Asking the tracker alone would leave out the predicate and the ancestry that
-			// `getComponent` weighs as well, and report a link met that then throws out of the very
-			// construction it asked for. A component with no tag only exists once somebody adds it,
-			// which is what the first half is for.
-			const refresh = () =>
-				update(
-					criterion,
-					this.hasComponent(target, linkedComponent) ||
-						this.canCreateComponentEager(target, linkedComponent) === true,
-				);
+			// The guard is a criterion rather than an answer given once. It carries the whole shape
+			// the target has to have, and that shape can arrive -- or break -- long after the
+			// attribute naming the instance was written, which is what a link to a component whose
+			// own tree fills in late looks like. Only an attribute link carries a guard; a child's
+			// shape is already part of its owner's instance guard.
+			if (link.guard !== undefined) {
+				targetMaid.GiveTask(this.watchInstanceTree(target, refresh));
+			}
+
+			if (linkedComponent === undefined) {
+				refresh();
+				return;
+			}
+
+			const tracker = this.getComponentTracker(linkedComponent);
 
 			// Observing, not waiting: this component's own tracker is the one that reports the link
 			// as a criterion it is still missing.
@@ -516,11 +689,11 @@ export class Components {
 			tracker.trackInstance(target, listener, true);
 			targetMaid.GiveTask(() => tracker.untrackInstance(target, listener));
 
-			let addedSignal = this.componentAddedListeners.get(link.component);
-			if (!addedSignal) this.componentAddedListeners.set(link.component, (addedSignal = new Signal()));
+			let addedSignal = this.componentAddedListeners.get(link.component!);
+			if (!addedSignal) this.componentAddedListeners.set(link.component!, (addedSignal = new Signal()));
 
-			let removedSignal = this.componentRemovedListeners.get(link.component);
-			if (!removedSignal) this.componentRemovedListeners.set(link.component, (removedSignal = new Signal()));
+			let removedSignal = this.componentRemovedListeners.get(link.component!);
+			if (!removedSignal) this.componentRemovedListeners.set(link.component!, (removedSignal = new Signal()));
 
 			targetMaid.GiveTask(
 				addedSignal.Connect((_, changed) => {
@@ -539,6 +712,16 @@ export class Components {
 				removedSignal.Connect((removed: object, changed) => {
 					if (changed !== target) return;
 					if (getmetatable(removed) !== linkedComponent) return;
+
+					// The same deferral is why the announcement has to be weighed against the
+					// target as it stands now. A hand removal leaves the tag and every criterion
+					// alone, so the same resumption can ask for the component again and get a new
+					// one; the removal then arrives about a component that has already been
+					// replaced. Acting on it is what turns a ring of links into a rebuild without
+					// end -- each side's stale removal takes the other down, and the rebuild that
+					// follows queues the next one -- while the link it is reporting lost is, on the
+					// instance itself, still met.
+					if (this.hasComponent(target, linkedComponent)) return;
 
 					update(criterion, false);
 				}),
@@ -631,7 +814,7 @@ export class Components {
 			if (link.kind === "attribute") attributes.set(link.name, target);
 
 			if (link.component !== undefined) {
-				const linked = this.getComponent(target, this.getLinkedComponent(link));
+				const linked = this.resolveLinkedComponent(target, this.getLinkedComponent(link));
 				if (linked === undefined) {
 					throw `${target.GetFullName()} has no component for ${describeLink(link)} of '${componentInfo.identifier}'`;
 				}
@@ -650,8 +833,12 @@ export class Components {
 	 *
 	 * A target that no longer qualifies is left alone: the tracker sees the same change and removes
 	 * the component, rather than leaving it running against a half-updated link.
+	 *
+	 * `notify` is what `refreshAttributes: false` switches off. The component's view still moves
+	 * for a write it made itself -- a plain attribute's own write lands the same way -- but a
+	 * component that tracks no attributes announces none either.
 	 */
-	private refreshLinkAttribute(instance: Instance, componentInfo: ComponentInfo, link: ComponentLink) {
+	private refreshLinkAttribute(instance: Instance, componentInfo: ComponentInfo, link: ComponentLink, notify = true) {
 		const component = this.activeComponents.get(instance)?.get(componentInfo.ctor);
 		if (component === undefined) return;
 
@@ -664,7 +851,7 @@ export class Components {
 			if (!this.passesLinkGuard(link, target)) return;
 
 			if (link.component !== undefined) {
-				const linked = this.getComponent(target, this.getLinkedComponent(link));
+				const linked = this.resolveLinkedComponent(target, this.getLinkedComponent(link));
 				if (linked === undefined) return;
 
 				(component.attributeComponents as unknown as Map<string, unknown>).set(link.name, linked);
@@ -676,7 +863,41 @@ export class Components {
 		}
 
 		attributes.set(link.name, target);
-		component[SYMBOL_ATTRIBUTE_HANDLERS].get(link.name)?.Fire(target, previous);
+
+		if (notify) {
+			component[SYMBOL_ATTRIBUTE_HANDLERS].get(link.name)?.Fire(target, previous);
+		}
+	}
+
+	/**
+	 * Puts a built component's view of the component one of its links names back in step, for a
+	 * target instance that has not moved.
+	 *
+	 * A removal and the rebuild that follows it are announced separately and delivered a resumption
+	 * late, so the link itself is never lost -- the target carries a component of the class it names
+	 * both before and after -- while the component the owner holds is the one that left.
+	 */
+	private refreshLinkedComponent(
+		instance: Instance,
+		componentInfo: ComponentInfo,
+		link: ComponentLink,
+		target: Instance,
+	) {
+		if (link.component === undefined) return;
+
+		const component = this.activeComponents.get(instance)?.get(componentInfo.ctor);
+		if (component === undefined) return;
+
+		const linked = this.activeComponents.get(target)?.get(this.getLinkedComponent(link));
+		if (linked === undefined) return;
+
+		const holder = (link.kind === "attribute"
+			? component.attributeComponents
+			: component.childComponents) as unknown as Map<string, unknown>;
+
+		if (holder.get(link.name) !== linked) {
+			holder.set(link.name, linked);
+		}
 	}
 
 	/**
@@ -697,6 +918,11 @@ export class Components {
 		guards: Map<string, t.check<unknown>>,
 	) {
 		if (guards.isEmpty() && componentInfo.attributeLinks.size() === 0) return undefined;
+
+		// A link key is written here rather than by the component, so this is the only path that
+		// could still announce one with tracking off: the external re-point is already silent in
+		// `refresh`, and the instance's own attribute signal is not even connected.
+		const tracksAttributes = this.getConfigValue(componentInfo.ctor, "refreshAttributes") !== false;
 
 		return (key: string, value: unknown) => {
 			const link = componentInfo.attributeLinks.get(key);
@@ -730,7 +956,7 @@ export class Components {
 				// loud instead -- wait for the component first, then assign.
 				if (
 					link.component !== undefined &&
-					this.getComponent(value, this.getLinkedComponent(link)) === undefined
+					this.resolveLinkedComponent(value, this.getLinkedComponent(link)) === undefined
 				) {
 					warn(
 						`[Flamework] ${value.GetFullName()} has no component '${link.component}', which attribute`,
@@ -745,8 +971,9 @@ export class Components {
 			}
 
 			// Attribute signals are deferred, so the component would otherwise not see its own
-			// write until the next resumption.
-			this.refreshLinkAttribute(instance, componentInfo, link);
+			// write until the next resumption. With tracking off the write still lands -- as a
+			// plain attribute's own write does -- and, like a plain one, it announces nothing.
+			this.refreshLinkAttribute(instance, componentInfo, link, tracksAttributes);
 
 			return true;
 		};
@@ -796,23 +1023,31 @@ export class Components {
 
 		for (const [key, guard] of pairs(guards)) {
 			const attribute = attributes.get(key);
-			if (!guard(attribute)) {
-				if (defaults?.[key] !== undefined) {
-					// A link's default is written as the instance it names, but stored the way
-					// every other instance-valued attribute is.
-					const value = defaults[key];
-					const isLink = componentInfo.attributeLinks.has(key);
+			const isLink = componentInfo.attributeLinks.has(key);
 
-					newAttributes.set(key, value);
-					instance.SetAttribute(
-						key,
-						(isLink && typeIs(value, "Instance") ? new InstanceHandle(value) : value) as never,
-					);
-				} else {
-					throw `${instance.GetFullName()} has invalid attribute '${key}' for '${componentInfo.identifier}'`;
-				}
-			} else {
+			// A link attribute that was never written takes its default even though its guard is
+			// happy without it, which an optional link's is. The default is meant to be written to
+			// the instance as a handle, exactly as a required link's is: filling the component's
+			// view alone would leave the two disagreeing about what the link names.
+			const isMissingLink = isLink && attribute === undefined;
+
+			if (guard(attribute) && !(isMissingLink && defaults?.[key] !== undefined)) {
 				newAttributes.set(key, attribute);
+				continue;
+			}
+
+			if (defaults?.[key] !== undefined) {
+				// A link's default is written as the instance it names, but stored the way
+				// every other instance-valued attribute is.
+				const value = defaults[key];
+
+				newAttributes.set(key, value);
+				instance.SetAttribute(
+					key,
+					(isLink && typeIs(value, "Instance") ? new InstanceHandle(value) : value) as never,
+				);
+			} else {
+				throw `${instance.GetFullName()} has invalid attribute '${key}' for '${componentInfo.identifier}'`;
 			}
 		}
 
@@ -932,9 +1167,24 @@ export class Components {
 		}
 	}
 
-	private canCreateComponentEager(instance: Instance, component: Constructor) {
+	/**
+	 * Whether `getComponent` would construct this component here: the instance is in the DataModel,
+	 * tagged, past the predicate and qualified.
+	 *
+	 * `checkAncestors` adds the ancestor lists on top. They gate construction Flamework drives, so
+	 * a link goes through them the way the tag that would build the component does, while
+	 * `getComponent` does not -- asking by hand is how you get past them.
+	 */
+	private canCreateComponentEager(instance: Instance, component: Constructor, checkAncestors = false) {
 		const componentInfo = this.components.get(component);
 		if (!componentInfo) return false;
+
+		// A component that is being removed is not one that can be built here, however qualified
+		// the instance still is: a hand removal leaves the tag and the tracker alone, so every
+		// criterion still says yes while the component it would build is the one being destroyed.
+		if (this.isRemoving(instance, component)) {
+			return false;
+		}
 
 		// The predicate gates eager construction too, as it did in v1; otherwise `getComponent`
 		// would construct a component for an instance the predicate rejected.
@@ -943,8 +1193,12 @@ export class Components {
 			return false;
 		}
 
+		if (checkAncestors && !this.passesAncestorLists(componentInfo, instance)) {
+			return false;
+		}
+
 		const tag = componentInfo.config.tag;
-		if (tag !== undefined && instance.Parent && CollectionService.HasTag(instance, tag)) {
+		if (tag !== undefined && instance.IsDescendantOf(game) && CollectionService.HasTag(instance, tag)) {
 			const tracker = this.getComponentTracker(component);
 			return tracker.checkInstance(instance);
 		}
@@ -952,6 +1206,10 @@ export class Components {
 
 	private isConstructing(instance: Instance, component: Constructor) {
 		return this.constructing.get(instance)?.has(component) === true;
+	}
+
+	private isRemoving(instance: Instance, component: Constructor) {
+		return this.removing.get(instance)?.has(component) === true;
 	}
 
 	private getDependencyResolutionOptions(
@@ -1021,6 +1279,14 @@ export class Components {
 		assert(component, `Could not find component from specifier: ${componentSpecifier}`);
 
 		if (this.isConstructing(instance, component)) {
+			return undefined;
+		}
+
+		// The removal is announced with the component already out of every lookup, and this is what
+		// makes that true for the eager path as well: a handler that reaches for the component it
+		// was just told about is told it has gone, rather than handed a second one built on top of
+		// the removal that is still running.
+		if (this.isRemoving(instance, component)) {
 			return undefined;
 		}
 
@@ -1176,31 +1442,57 @@ export class Components {
 		const existingComponent = activeComponents.get(component);
 		if (!existingComponent) return;
 
-		for (const id of componentInfo.polymorphicIds) {
-			const signal = this.componentRemovedListeners.get(id);
-			if (signal) {
-				signal.Fire(existingComponent as never, instance);
-			}
-		}
-
-		this.module.removeClassInstance(existingComponent);
-
-		existingComponent.destroy();
+		// Out of every lookup before the removal is announced, which mirrors a component being
+		// announced only once it is in them. A link that names this component reacts to that
+		// announcement by taking its own component down, and a cycle of links would otherwise come
+		// back round and remove this one a second time -- or without end. The engine defers these
+		// signals, so the maps are already clear by the time a handler runs there; this is that
+		// ordering, said out loud.
 		activeComponents.delete(component);
-
-		for (const id of componentInfo.polymorphicIds) {
-			this.removeIdMapping(instance, existingComponent, id);
-		}
 
 		if (activeComponents.size() === 0) {
 			this.activeComponents.delete(instance);
 		}
 
-		const maid = this.componentCleanup.get(existingComponent);
-		this.componentCleanup.delete(existingComponent);
+		for (const id of componentInfo.polymorphicIds) {
+			this.removeIdMapping(instance, existingComponent, id);
+		}
 
-		if (maid !== undefined) {
-			maid.Destroy();
+		// Marked as removing for as long as the removal runs. Leaving every lookup is only half of
+		// "the component has gone": the other half is that nothing builds it back, and the eager
+		// path would, because a hand removal never touched the tag or the tracker and every
+		// criterion still qualifies. Without this a handler asking for the component it was just
+		// told about gets a second, freshly constructed one -- announced to nobody, held by no
+		// earlier caller -- and `removeComponent` returns with a component still attached.
+		let removingSet = this.removing.get(instance);
+		if (!removingSet) this.removing.set(instance, (removingSet = new Set()));
+
+		removingSet.add(component);
+
+		try {
+			for (const id of componentInfo.polymorphicIds) {
+				const signal = this.componentRemovedListeners.get(id);
+				if (signal) {
+					signal.Fire(existingComponent as never, instance);
+				}
+			}
+
+			this.module.removeClassInstance(existingComponent);
+
+			existingComponent.destroy();
+
+			const maid = this.componentCleanup.get(existingComponent);
+			this.componentCleanup.delete(existingComponent);
+
+			if (maid !== undefined) {
+				maid.Destroy();
+			}
+		} finally {
+			removingSet.delete(component);
+
+			if (removingSet.isEmpty()) {
+				this.removing.delete(instance);
+			}
 		}
 	}
 

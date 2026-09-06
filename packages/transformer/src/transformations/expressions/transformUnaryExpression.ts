@@ -30,7 +30,12 @@ export function transformUnaryExpression(
 				"SYMBOL_ATTRIBUTE_SETTER",
 			);
 			const thisAccess = node.operand.expression.expression;
-			const args = [name, f.binary(node.operand, nonAssignmentOperator, 1)];
+
+			// The value is transformed rather than handed over as written: the operand carries the
+			// receiver a second time, and a receiver can be a macro call whose id this very pass is
+			// what injects. Leaving it alone emits the call without its id, which then fails to
+			// resolve at runtime.
+			const args = [name, state.transformNode(f.binary(node.operand, nonAssignmentOperator, 1))];
 
 			return f.call(
 				f.field(state.transformNode(thisAccess), attributeSetter, true),

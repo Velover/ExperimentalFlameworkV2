@@ -26,9 +26,14 @@ function Signal:Connect(callback: (...any) -> ())
 		Connected = true,
 		Disconnect = function()
 			self._connections[id] = nil
+			self._connectionObjects[id] = nil
 			connection.Connected = false
 		end,
 	}
+
+	-- Kept so that `DisconnectAll` can mark them as gone, which is what an instance being
+	-- destroyed does to every connection on it.
+	self._connectionObjects[id] = connection
 
 	-- roblox-ts emits `:Disconnect()`, and Lua libraries use `.disconnect()`. `@rbxts/maid`
 	-- identifies real connections with `typeof(x) == "RBXScriptConnection"`, which a table can
@@ -77,8 +82,24 @@ function Signal:Fire(...: any)
 	end
 end
 
+--[[
+	Drops every connection at once.
+
+	The engine disconnects everything connected to an instance when it is destroyed, before its
+	children come apart, which is why none of a destroyed instance's own tree signals reach a
+	handler.
+]]
+function Signal:DisconnectAll()
+	for _, connection in self._connectionObjects do
+		connection.Connected = false
+	end
+
+	table.clear(self._connections)
+	table.clear(self._connectionObjects)
+end
+
 function signals.create(): Signal
-	return setmetatable({ _connections = {}, _nextId = 1 }, Signal)
+	return setmetatable({ _connections = {}, _connectionObjects = {}, _nextId = 1 }, Signal)
 end
 
 return signals

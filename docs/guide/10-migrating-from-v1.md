@@ -126,6 +126,11 @@ The component API itself is largely unchanged. What is new:
   [link](05-components.md#links): Flamework resolves the `InstanceHandle`, waits for it, and exposes
   the components through `childComponents` and `attributeComponents`. In v1 an Instance attribute was
   yours to resolve.
+- **An optional child is now rejected.** `BaseComponent<{}, Model & { Head?: BasePart }>` compiled in
+  v1 and left `this.instance.Head` raising whenever the child was absent, because Roblox errors on
+  indexing a child that does not exist. Require the child, type it as a component -- an optional
+  child link is watched, and read through `childComponents` -- or drop it from the tree and use
+  `FindFirstChild`. Optional attributes are unaffected.
 
 ### 6. Replace `Modding.onListenerAdded`
 

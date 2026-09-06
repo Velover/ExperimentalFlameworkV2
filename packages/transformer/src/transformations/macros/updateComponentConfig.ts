@@ -258,22 +258,16 @@ function updateLinks(state: TransformState, node: ts.ClassDeclaration, propertie
 	if (instanceType) {
 		for (const [property, declaredType] of getDeclaredChildren(state, node, instanceType)) {
 			const targetType = state.typeChecker.getNonNullableType(declaredType);
+			const optional = isOptionalMember(state, property, declaredType);
 
 			if (getComponentInstanceType(state, targetType, node)) {
 				// A child's own guard is part of the component's instance guard, so the link only
 				// has to name the component that must exist on it.
-				links.push(
-					createLink(
-						state,
-						node,
-						"child",
-						property.name,
-						isOptionalMember(state, property, declaredType),
-						targetType,
-					),
-				);
+				links.push(createLink(state, node, "child", property.name, optional, targetType));
 			} else if (isInstanceType(targetType)) {
-				assertNoNestedComponents(state, node, targetType, property.name);
+				if (optional) assertChildIsRequired(node, property, property.name);
+
+				assertInstanceTree(state, node, targetType, property.name);
 			}
 		}
 	}
@@ -286,24 +280,68 @@ function updateLinks(state: TransformState, node: ts.ClassDeclaration, propertie
 }
 
 /**
+ * The node a diagnostic about a declared child belongs on, which is the child itself wherever it
+ * was written down, and the component otherwise.
+ */
+function getPropertyNode(node: ts.ClassDeclaration, property: ts.Symbol): ts.Node {
+	const declaration = property.valueDeclaration ?? property.declarations?.[0];
+	if (!declaration) return node.name ?? node;
+
+	return f.is.namedDeclaration(declaration) ? declaration.name : declaration;
+}
+
+/**
+ * A child of the instance tree cannot be optional. `this.instance.Head` is an index into the
+ * instance itself, and Roblox raises on a child that is not there rather than handing back nothing,
+ * so the optional type would promise a read that is not safe to make.
+ *
+ * A child typed as a *component* is the exception, and is let through above: it is a link, so its
+ * presence is watched and `childComponents.Head` -- an ordinary table read -- is what says whether
+ * the child is there.
+ */
+function assertChildIsRequired(node: ts.ClassDeclaration, property: ts.Symbol, path: string): never {
+	const component = node.name ? ` of '${node.name.text}'` : "";
+
+	// Naming a component is only an option for a direct child; one deeper in the tree cannot be
+	// linked at all, so it is not offered as a way out there.
+	const link = path.includes(".")
+		? ""
+		: " type it as a component so that Flamework watches it and 'childComponents' says whether it is there, or";
+
+	Diagnostics.error(
+		getPropertyNode(node, property),
+		`Child '${path}' of the instance tree${component} is optional, which Flamework does not allow: Roblox raises when a child that does not exist is indexed, so 'this.instance.${path}' would error rather than be undefined.`,
+		`Require the child,${link} leave it out of the tree and reach for it with FindFirstChild.`,
+	);
+}
+
+/**
+ * Checks the children declared below a direct child of the instance tree.
+ *
  * A component deeper in the tree cannot be linked: `this.instance` only resolves components it
  * holds directly, and the guard builder would meet the class itself. Saying so here beats the
- * "Flamework does not support generating guards for classes" that would follow.
+ * "Flamework does not support generating guards for classes" that would follow. An optional child
+ * is refused at every depth, for the same reason it is refused at the top.
  */
-function assertNoNestedComponents(state: TransformState, node: ts.ClassDeclaration, type: ts.Type, path: string): void {
+function assertInstanceTree(state: TransformState, node: ts.ClassDeclaration, type: ts.Type, path: string): void {
 	for (const [property, declaredType] of getDeclaredChildren(state, node, type)) {
 		const targetType = state.typeChecker.getNonNullableType(declaredType);
+		const childPath = `${path}.${property.name}`;
 
 		if (targetType.getProperty(COMPONENT_BRAND)) {
 			Diagnostics.error(
 				node.name ?? node,
-				`Component '${state.typeChecker.typeToString(targetType)}' is linked at '${path}.${property.name}', which is not a direct child of this component.`,
+				`Component '${state.typeChecker.typeToString(targetType)}' is linked at '${childPath}', which is not a direct child of this component.`,
 				"Only a direct child of the instance tree can name a component. Declare it on the component attached to that child, or look it up with getComponent.",
 			);
 		}
 
 		if (isInstanceType(targetType)) {
-			assertNoNestedComponents(state, node, targetType, `${path}.${property.name}`);
+			if (isOptionalMember(state, property, declaredType)) {
+				assertChildIsRequired(node, property, childPath);
+			}
+
+			assertInstanceTree(state, node, targetType, childPath);
 		}
 	}
 }

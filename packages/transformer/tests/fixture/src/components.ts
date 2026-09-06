@@ -1,4 +1,4 @@
-import { BaseComponent, Component } from "@flamework/components";
+import { BaseComponent, Component, ComponentMetadata, Components } from "@flamework/components";
 
 @Component({ tag: "FixtureHandler" })
 export class HandlerComponent extends BaseComponent<{ power: number }, BasePart> {}
@@ -30,7 +30,9 @@ interface LinkedAttributes {
 @Component({ tag: "FixtureLinked" })
 export class LinkedComponent extends BaseComponent<
 	LinkedAttributes,
-	Model & { EffectHandler: HandlerComponent; Plain: BasePart }
+	// `SpareHandler` is optional, which only a child naming a component may be: its presence is a
+	// link, so `childComponents` says whether it is there without indexing the instance.
+	Model & { EffectHandler: HandlerComponent; SpareHandler?: HandlerComponent; Plain: BasePart }
 > {
 	public rename() {
 		this.attributes.label = "renamed";
@@ -58,5 +60,28 @@ export class LinkedComponent extends BaseComponent<
 		const raw: InstanceHandle = this.attributes.Raw;
 
 		return [part, handler, linked, target, raw];
+	}
+}
+
+/** Writes to an attribute through a receiver that is itself a macro call. */
+@Component({ tag: "FixtureCounter" })
+export class CounterComponent extends BaseComponent<{ count: number }, BasePart> {
+	constructor(
+		metadata: ComponentMetadata,
+		private components: Components,
+	) {
+		super(metadata);
+	}
+
+	public bumpPostfix(other: BasePart) {
+		this.components.getComponent<CounterComponent>(other)!.attributes.count++;
+	}
+
+	public bumpPrefix(other: BasePart) {
+		++this.components.getComponent<CounterComponent>(other)!.attributes.count;
+	}
+
+	public bumpCompound(other: BasePart) {
+		this.components.getComponent<CounterComponent>(other)!.attributes.count += 1;
 	}
 }

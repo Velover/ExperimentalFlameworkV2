@@ -172,8 +172,9 @@ All three were invisible to the Lune suites and are fixed, each with a test that
 3. **A stale deferred `InstanceAdded` rebuilt a component whose tag was already gone** (three
    constructions and two destructions for one part when `waitForComponent` built it eagerly and the
    tag was removed in the same frame). v1 has the same code. Fix in `Components.startCollectionService`:
-   both CollectionService handlers check `HasTag` and `Parent` before acting. Reproduced in Lune with
-   `__harness.deferTags`, which queues tag signals and delivers them in order.
+   both CollectionService handlers check `HasTag` and DataModel membership before acting -- membership
+   rather than `Parent`, because a descendant of a tree that has been unparented still has one.
+   Reproduced in Lune with `__harness.deferTags`, which queues tag signals and delivers them in order.
 
 Not bugs, but worth knowing: `PreRender` starts a few seconds after the LocalScripts in Play Solo,
 so render checks need a longer window; and the template's shared modules yield at require time for

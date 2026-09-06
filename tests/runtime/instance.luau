@@ -51,6 +51,34 @@ local function isDescendantOf(instance: Instance, ancestor: Instance): boolean
 	return false
 end
 
+--[[
+	Whether an instance is held by the DataModel.
+
+	The services are marked as its roots, so this is the harness's answer to "is this in `game`" --
+	the question that tells an instance parented under a service apart from one parented under a
+	folder nothing holds, and the one CollectionService announces a tag on.
+]]
+local function isInDataModel(instance: Instance): boolean
+	local current = instance
+	while current do
+		if rawget(current, "_isRoot") then
+			return true
+		end
+		current = rawget(current, "_parent")
+	end
+	return false
+end
+
+instances.isInDataModel = isInDataModel
+
+--- Every realm's `game`, which is a plain table rather than an Instance.
+local dataModels: { [any]: boolean } = {}
+
+--- Registers a realm's `game`, so `IsDescendantOf(game)` can be answered.
+function instances.registerDataModel(dataModel: any)
+	dataModels[dataModel] = true
+end
+
 local methods = {}
 
 function methods:IsA(className: string): boolean
@@ -65,6 +93,13 @@ function methods:IsA(className: string): boolean
 end
 
 function methods:IsDescendantOf(ancestor: Instance): boolean
+	-- `game` is not one of this harness's Instances, so walking the tree for it would never find
+	-- it. The DataModel is modelled as the set of service roots, and membership of that set is
+	-- exactly what the engine answers `IsDescendantOf(game)` with.
+	if dataModels[ancestor] then
+		return isInDataModel(self)
+	end
+
 	return isDescendantOf(self, ancestor)
 end
 
@@ -171,16 +206,49 @@ function methods:ClearAllChildren()
 	end
 end
 
+--- Drops every connection on this instance, which is what destroying it does in the engine.
+local function disconnectAll(instance: Instance)
+	for _, signal in rawget(instance, "_signals") do
+		signal:DisconnectAll()
+	end
+
+	for _, signal in rawget(instance, "_attributeSignals") do
+		signal:DisconnectAll()
+	end
+end
+
+--[[
+	Destroys the instance, in the engine's order.
+
+	`Destroying` first, while the tree still stands; then the instance leaves its parent -- and with
+	it the DataModel, which is what announces its tags as gone; then every connection on it is
+	dropped; and only then do the children come apart. So none of the instance's own tree signals
+	ever reach a handler: they were disconnected before its children moved. Tearing the children
+	down first, as this used to, ran a component's `ChildRemoved` and `DescendantRemoving` handlers
+	against a half-dismantled tree that no place ever shows them.
+]]
 function methods:Destroy()
 	if rawget(self, "_destroyed") then
 		return
 	end
 
 	rawset(self, "_destroyed", true)
-	self:ClearAllChildren()
 
 	rawget(self, "Destroying"):Fire()
 	self.Parent = nil
+	disconnectAll(self)
+
+	for _, child in table.clone(rawget(self, "_children")) do
+		child:Destroy()
+	end
+end
+
+--- Observers told about a clone, so a realm's CollectionService can carry the tags across.
+local cloneObservers: { (any, any) -> () } = {}
+
+--- Registers a realm's CollectionService to copy an instance's tags onto its clone.
+function instances.observeClone(observer: (any, any) -> ())
+	table.insert(cloneObservers, observer)
 end
 
 function methods:Clone(): Instance
@@ -195,30 +263,174 @@ function methods:Clone(): Instance
 		child:Clone().Parent = clone
 	end
 
+	-- A clone carries its source's tags, which is what makes "tag a template, clone it into
+	-- Workspace" work at all. The clone is parentless, so nothing is announced until it is
+	-- parented in.
+	for _, observer in cloneObservers do
+		observer(self, clone)
+	end
+
 	return clone
 end
 
-local function detach(instance: Instance)
-	local parent = rawget(instance, "_parent")
-	if not parent then
+--[[
+	Deferred tree signals.
+
+	The engine defers ChildAdded/ChildRemoved and the descendant pair to the end of the resumption,
+	so a handler runs against a tree that has already finished moving -- and against criteria that
+	the signals still queued behind it have not corrected yet. Firing synchronously, as this harness
+	does by default, hides that entirely.
+
+	`runDeferred(callback)` reproduces it: every tree signal fired inside the callback is queued and
+	delivered, in order, once it returns. It is the counterpart of `CollectionService.runDeferred`.
+]]
+local deferringTree = false
+local treeQueue: { { signal: any, argument: any } } = {}
+
+local function fireTree(signal: any, argument: any)
+	if not signal then
 		return
 	end
 
-	local siblings = rawget(parent, "_children")
-	local index = table.find(siblings, instance)
-	if index then
-		table.remove(siblings, index)
+	if deferringTree then
+		table.insert(treeQueue, { signal = signal, argument = argument })
+	else
+		signal:Fire(argument)
+	end
+end
+
+--- Runs `callback` with the tree signals deferred, then delivers everything it queued, in order.
+function instances.runDeferred(callback: () -> ())
+	local previous = deferringTree
+	deferringTree = true
+	local ok, err = pcall(callback)
+	deferringTree = previous
+
+	if not deferringTree then
+		local pending = treeQueue
+		treeQueue = {}
+
+		-- One handler raising does not stop the rest, the way it does not in the engine; the first
+		-- error is kept and re-raised so a spec can see what a red error in the output would be.
+		for _, entry in pending do
+			local delivered, deliveryError = pcall(entry.signal.Fire, entry.signal, entry.argument)
+			if not delivered and ok then
+				ok, err = false, deliveryError
+			end
+		end
 	end
 
-	rawget(parent, "ChildRemoved"):Fire(instance)
+	if not ok then
+		error(err, 0)
+	end
+end
 
-	local ancestor = parent
-	while ancestor do
-		local signal = rawget(ancestor, "DescendantRemoving")
-		if signal then
-			signal:Fire(instance)
+--[[
+	Deferred BindableEvent dispatch.
+
+	`@rbxts/signal` -- which is what Flamework's own component added/removed announcements go
+	through -- fires a BindableEvent, and the engine defers those: the handler runs at the end of
+	the resumption, after everything the caller went on to do, and a fire made from inside a
+	deferred handler joins the back of the same queue rather than nesting.
+
+	`runDeferredSignals(callback)` reproduces that, draining until the queue empties. A queue that
+	does not empty is a place that never settles -- two components rebuilding each other without
+	end, say -- which in Roblox is a frozen server rather than an error, so the harness reports it
+	instead of running forever.
+]]
+local deferringSignals = false
+local signalQueue: { { signal: any, arguments: any } } = {}
+
+local MAX_DEFERRED_SIGNAL_STEPS = 200
+
+local function fireDeferrable(signal: any, ...: any)
+	if deferringSignals then
+		table.insert(signalQueue, { signal = signal, arguments = table.pack(...) })
+	else
+		signal:Fire(...)
+	end
+end
+
+--- Runs `callback` with BindableEvent dispatch deferred, then drains the queue it built.
+function instances.runDeferredSignals(callback: () -> ())
+	if deferringSignals then
+		return callback()
+	end
+
+	deferringSignals = true
+	local ok, err = pcall(callback)
+
+	local steps = 0
+	while #signalQueue > 0 do
+		steps += 1
+		if steps > MAX_DEFERRED_SIGNAL_STEPS then
+			deferringSignals = false
+			table.clear(signalQueue)
+
+			error(
+				`harness: the deferred signal queue still had work after {MAX_DEFERRED_SIGNAL_STEPS} dispatches`,
+				0
+			)
 		end
-		ancestor = rawget(ancestor, "_parent")
+
+		local entry = table.remove(signalQueue, 1) :: any
+
+		-- One handler raising does not stop the rest, the way it does not in the engine; the first
+		-- error is kept and re-raised so a spec can see what a red error in the output would be.
+		local delivered, deliveryError = pcall(function()
+			entry.signal:Fire(table.unpack(entry.arguments, 1, entry.arguments.n))
+		end)
+
+		if not delivered and ok then
+			ok, err = false, deliveryError
+		end
+	end
+
+	deferringSignals = false
+
+	if not ok then
+		error(err, 0)
+	end
+end
+
+--[[
+	Entering and leaving the DataModel.
+
+	CollectionService announces a tag when the instance carrying it enters the DataModel and again
+	when it leaves, which is a second way for a component to come and go: tagging a parentless
+	instance announces nothing, parenting it in announces the tag before that parent's ChildAdded,
+	and parenting it out announces the tag before ChildRemoved. Re-parenting within the DataModel
+	announces nothing at all -- the tag never went anywhere.
+
+	Ancestry is the harness's own business, and tags belong to a realm's CollectionService, so each
+	realm registers an observer here and is told which instances crossed the boundary.
+]]
+local ancestryObservers: { (any, boolean) -> () } = {}
+
+--- Registers a realm's CollectionService to be told when an instance enters or leaves the DataModel.
+function instances.observeAncestry(observer: (any, boolean) -> ())
+	table.insert(ancestryObservers, observer)
+end
+
+--- Marks an instance as a root of the DataModel, which is what the services are.
+function instances.markAsRoot(instance: Instance)
+	rawset(instance, "_isRoot", true)
+end
+
+--- Announces the whole subtree that just crossed the boundary, the instance itself first.
+local function announceAncestry(instance: Instance, entered: boolean)
+	if #ancestryObservers == 0 then
+		return
+	end
+
+	for _, observer in ancestryObservers do
+		observer(instance, entered)
+	end
+
+	-- Cloned: an observer is free to move things about, and the subtree it was told about is the
+	-- one that crossed.
+	for _, child in table.clone(rawget(instance, "_children")) do
+		announceAncestry(child, entered)
 	end
 end
 
@@ -263,19 +475,50 @@ instanceMeta.__newindex = function(instance: Instance, key: string, value: any)
 	if key == "Name" then
 		rawset(instance, "_name", value)
 	elseif key == "Parent" then
-		detach(instance)
+		local previousParent = rawget(instance, "_parent")
+		local wasInDataModel = isInDataModel(instance)
+		local isEntering = value ~= nil and isInDataModel(value)
+
+		-- The move itself lands before any of it is announced, the way a property change does in
+		-- the engine: every handler below reads the tree as it now stands.
+		if previousParent then
+			local siblings = rawget(previousParent, "_children")
+			local index = table.find(siblings, instance)
+			if index then
+				table.remove(siblings, index)
+			end
+		end
+
 		rawset(instance, "_parent", value)
 
 		if value then
 			table.insert(rawget(value, "_children"), instance)
-			rawget(value, "ChildAdded"):Fire(instance)
+		end
+
+		if wasInDataModel and not isEntering then
+			announceAncestry(instance, false)
+		end
+
+		if previousParent then
+			fireTree(rawget(previousParent, "ChildRemoved"), instance)
+
+			local ancestor = previousParent
+			while ancestor do
+				fireTree(rawget(ancestor, "DescendantRemoving"), instance)
+				ancestor = rawget(ancestor, "_parent")
+			end
+		end
+
+		if isEntering and not wasInDataModel then
+			announceAncestry(instance, true)
+		end
+
+		if value then
+			fireTree(rawget(value, "ChildAdded"), instance)
 
 			local ancestor = value
 			while ancestor do
-				local signal = rawget(ancestor, "DescendantAdded")
-				if signal then
-					signal:Fire(instance)
-				end
+				fireTree(rawget(ancestor, "DescendantAdded"), instance)
 				ancestor = rawget(ancestor, "_parent")
 			end
 		end
@@ -400,7 +643,7 @@ function instances.new(className: string, parent: Instance?): Instance
 		rawset(instance, "Event", event)
 		rawget(instance, "_signals")["Event"] = event
 		rawset(instance, "Fire", function(_self, ...)
-			event:Fire(...)
+			fireDeferrable(event, ...)
 		end)
 	end
 

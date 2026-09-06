@@ -3,7 +3,10 @@
 	CollectionService stand-in.
 
 	Tags are stored per instance, and the added/removed signals fire synchronously so specs can
-	assert immediately after tagging.
+	assert immediately after tagging -- but only for an instance the DataModel holds. Tagging
+	something outside it announces nothing at all, and `GetTagged` does not list it: it is entering
+	the DataModel that announces the tag, whether that happens to the instance itself or to an
+	ancestor of it.
 
 	`runDeferred(callback)` switches to Roblox's deferred behaviour for the duration of `callback`:
 	every fire is queued and delivered in order once it returns, so a spec can reproduce an event
@@ -12,6 +15,7 @@
 	One instance per realm: two graphs in a single process must not share tag state.
 ]]
 
+local instances = require("./instance")
 local signals = require("./signals")
 
 local collection = {}
@@ -67,7 +71,13 @@ function collection.create()
 		end
 
 		set[instance] = true
-		fire(addedSignals[tag], instance)
+
+		-- The tag lands either way; it is the DataModel that announces it. An instance outside it
+		-- -- a template being assembled, or a subtree that has been unparented -- is announced when
+		-- it, or an ancestor of it, is parented in.
+		if instances.isInDataModel(instance) then
+			fire(addedSignals[tag], instance)
+		end
 	end
 
 	function CollectionService:RemoveTag(instance: any, tag: string)
@@ -77,7 +87,12 @@ function collection.create()
 		end
 
 		set[instance] = nil
-		fire(removedSignals[tag], instance)
+
+		-- Nothing was announced when it was tagged outside the DataModel, so nothing is announced
+		-- when the tag goes either.
+		if instances.isInDataModel(instance) then
+			fire(removedSignals[tag], instance)
+		end
 	end
 
 	function CollectionService:HasTag(instance: any, tag: string): boolean
@@ -85,12 +100,39 @@ function collection.create()
 		return set ~= nil and set[instance] == true
 	end
 
+	--- Only what the DataModel holds, which is what the engine lists.
 	function CollectionService:GetTagged(tag: string): { any }
 		local result = {}
 		for instance in tagged[tag] or {} do
-			table.insert(result, instance)
+			if instances.isInDataModel(instance) then
+				table.insert(result, instance)
+			end
 		end
 		return result
+	end
+
+	--[[
+		Announces the tags of an instance that has entered or left the DataModel.
+
+		The tag itself stays on the instance either way -- it is the announcement that ancestry
+		drives -- so a tagged instance parented out and back in is reported as removed and then
+		added again, which is what takes a component down with its instance and brings it back.
+	]]
+	function CollectionService.announceAncestry(instance: any, entered: boolean)
+		for tag, set in tagged do
+			if set[instance] then
+				fire(if entered then addedSignals[tag] else removedSignals[tag], instance)
+			end
+		end
+	end
+
+	--- Carries an instance's tags onto a clone of it, which is what `Instance:Clone` does.
+	function CollectionService.announceClone(source: any, clone: any)
+		for _, set in tagged do
+			if set[source] then
+				set[clone] = true
+			end
+		end
 	end
 
 	function CollectionService:GetTags(instance: any): { string }

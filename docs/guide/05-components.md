@@ -109,12 +109,16 @@ Assigning to `this.attributes` writes the value back to the instance:
 ```ts
 this.attributes.speed = 32;
 this.attributes.speed += 8;
+this.attributes.speed++;
 delete this.attributes.label;
 ```
 
-The write has to be spelled against `this.attributes` -- that is the shape the transformer rewrites.
-Through a local (`const attributes = this.attributes; attributes.speed = 32`) it is an ordinary table
-write, and the instance never hears about it.
+The write has to be spelled `<component>.attributes.<name>` -- that is the shape the transformer
+rewrites -- but the component does not have to be `this`: one reached through `getComponent` is
+written the same way. Through a local (`const attributes = this.attributes; attributes.speed = 32`)
+it is an ordinary table write, and the instance never hears about it. A read-modify-write (`+=`,
+`++`, `--`) evaluates the component expression a second time for the value it computes, so keep side
+effects out of it.
 
 Every write is checked against the same guard the attribute was accepted with, and raises if it
 fails. That is there for the write a cast let through:
@@ -148,6 +152,22 @@ a Folder. Intersect it with an object type to require children:
 @Component({ tag: "Character" })
 export class Character extends BaseComponent<{}, Model & { Humanoid: Humanoid }> {}
 ```
+
+A child cannot be optional, and Flamework rejects one at compile time:
+
+```ts
+// Rejected: `this.instance.Head` would error whenever the child is missing
+export class Character extends BaseComponent<{}, Model & { Head?: BasePart }> {}
+```
+
+`this.instance.Head` is an index into the instance itself, and Roblox raises on a child that is not
+there rather than handing back nothing -- the `if (this.instance.Head)` written to check for it
+raises too. The optional type would promise a read that cannot be made. Require the child, or leave
+it out of the tree and reach for it with `FindFirstChild`. A child naming a **component** is the
+exception, because Flamework watches whether it is there; see [links](#links).
+
+Attributes are a different mechanism and stay optional: a missing one reads back as `undefined`, so
+`label?: string` is fine.
 
 Override it entirely with `instanceGuard` if the generated one is not what you want.
 
@@ -195,7 +215,12 @@ An attribute typed `InstanceHandle` is left alone: you get the handle, and no wa
 opt-out when you want to do the resolving yourself.
 
 `defaults` works here as it does elsewhere: give an instance and an attribute that was never written
-is filled in with a handle for it, rather than keeping the component waiting.
+is filled in with a handle for it, rather than keeping the component waiting. That holds for an
+optional link too, whose guard would happily accept the attribute being missing: the default is
+written to the instance either way, so the component and the instance never disagree about what the
+link names. It stands in for an attribute the component was **built** without, not for one it has
+since written away -- clearing an optional link clears it, and the default is applied again the next
+time a component is built.
 
 ### Naming a component
 
@@ -237,13 +262,60 @@ component leaving the linked instance changes nothing, a subclass of the one it 
 guard is the whole shape too: a link to a component declaring `Model & { Root: BasePart }` only
 accepts a model that has that child.
 
-A link waits for exactly what `getComponent` would hand back, so a linked component that a
-`predicate` refuses, or one whose instance sits under a blocked ancestor, leaves the link unmet and
-the component unbuilt. It never reports the link met and then fails to build it.
+A link waits for what `getComponent` would hand back, and for the ancestor lists on top of it: a
+linked component that a `predicate` refuses, or one whose instance sits under a blocked ancestor,
+leaves the link unmet and the component unbuilt. It never reports the link met and then fails to
+build it, and it never builds one there itself -- pointing a link attribute at a tagged instance
+under a blocked ancestor leaves the link unmet rather than constructing the component the ancestor
+lists refused. The ancestor lists gate *construction* rather than the link, so a component that is
+already attached to a blocked instance -- added by hand, or built by a `getComponent` of your own --
+does satisfy the link.
+
+"What `getComponent` would hand back" is the whole of it: a link is met by an instance that already
+carries the component **or** by one Flamework would build it on, and the answer is the same whether
+or not anything happens to be tracking that instance yet. So a spawner can tag a whole tree and ask
+for its component in the same breath -- tag announcements arrive a resumption later, and
+`getComponent` builds the link's component on the way to building yours, rather than refusing
+because the announcement has not landed.
+
+A link that names its own component on its own instance is unmet for the same reason, and it is the
+one link that can never be met on the way in: the component would have to already exist to be built.
+So it is not built, and the link says so rather than raising out of the tag that asked for it. Point
+the attribute somewhere else -- or, if it is optional, clear it -- and the component is built;
+pointing it back at its own instance afterwards resolves to the component that is now there. A ring
+of links reads the same way, however many instances it goes round: none of it can be built out of
+nothing, so the ring is unmet until something in it exists for another reason.
+
+That promise covers a rebuild as well. Roblox delivers the tree's signals a resumption late, so a
+change that takes a component down and a change that should keep it down can arrive one after the
+other; every link is therefore read from the instance again on the way in, rather than trusted to
+still be whatever it last reported. A component is built only when the tree agrees.
+
+The guard is kept current too, not read once when the attribute is written. A link to a component
+declaring `Model & { Root: BasePart }` is unmet while the model it names has no `Root`, and becomes
+met when one is parented in -- so an attribute may be written before the instance it names is
+finished, and the component is built when it is.
 
 A component can only be named as a **direct** member of the tree. One further down raises at compile
 time, because `this.instance` would have nowhere to put it -- declare it on the component attached to
 that child instead, or look it up with `getComponent`.
+
+A child naming a component may be **optional**, which a plain child may not:
+
+```ts
+@Component({ tag: "Cannon" })
+export class Cannon extends BaseComponent<{}, Folder & { Core?: CoreComponent }> {
+    public onStart() {
+        // The link is what says whether the child is there.
+        this.childComponents.Core?.spin();
+    }
+}
+```
+
+The component builds with or without `Core`, and is built again when it arrives or leaves, so
+`childComponents.Core` is either the component or `undefined` for the whole life of one. Read it
+there rather than on the instance: `this.instance.Core` is still an index into the instance and
+raises while the child is missing.
 
 #### Writing one
 
@@ -263,14 +335,20 @@ this.attributes.Rigged = target;
 The resolved attribute type already asks for the linked component's instance type, so most of the
 mistakes here are compile errors; the guard is what catches the ones a cast let through.
 
+An instance under a blocked ancestor reads the same way, because a link never builds a component
+somewhere the ancestor lists keep one out of: the write is refused and warned about, whether or not
+that instance is tagged.
+
 ### What takes a component down again
 
 | Change | Effect |
 |---|---|
 | The tag is removed | Removed. |
+| The instance leaves the DataModel -- unparented, destroyed, or an **ancestor** of it unparented | Removed. CollectionService announces the tag as gone for the whole subtree that left, and announces it again when it is parented back in, so the components come back with it. Moving an instance *within* the DataModel announces nothing and changes nothing. |
 | The component a link names is destroyed | Removed, whatever the streaming mode: that is a lifecycle event, not the tree moving. |
 | Some **other** component on a linked instance is destroyed | **Kept**, including a subclass of the one the link names. |
 | A link attribute is re-pointed at something that fails its guard | Removed, and built again if it is pointed back at something valid. |
+| The instance a link attribute names stops passing its guard | Removed, and built again once it passes. The guard carries the whole shape, so a linked model losing the child the link asked for counts, whatever the streaming mode: the target's tree is not this component's tree. |
 | A required link attribute is cleared from outside | Removed. |
 | A plain attribute is changed to a value its guard rejects | **Kept.** The change is filtered out, `this.attributes` holds its last good value and `onAttributeChanged` does not fire. An attribute guard is a construction check, not a criterion. |
 | A child a link names is replaced by another instance of the same name | Removed and built again around the new one, so it never holds a child that has left. |
@@ -290,6 +368,17 @@ about the tree rather than about another object's lifetime:
 | `Watching` | Re-checked, so the component goes and comes back with its tree. |
 | `Disabled` | Read once and kept. The component stays, still holding the child it resolved to. |
 
+`Disabled` reads the *tree* once, not the components in it. A child that moves elsewhere in the
+DataModel keeps its tag and its components, and that is the case `Disabled` keeps the component
+through. A child that is unparented or destroyed loses its own components on the way out, so a link
+naming one of them is the `leaves the DataModel` row of the previous table rather than a streaming
+question at all: the owner goes with it whatever the mode.
+
+`Disabled` is about the component that was built, not about the next one. If something else takes
+that component down -- a link attribute re-pointed at an instance its guard refuses, say -- the
+build that follows reads the tree as it is then, so a child link the tree no longer holds keeps the
+component down until it does.
+
 ### Waiting and warnings
 
 | Option | Effect |
@@ -303,6 +392,13 @@ about the tree rather than about another object's lifetime:
 
 Both default to 5 and `0` disables them. Keep instances an attribute names somewhere that is always
 loaded -- ReplicatedStorage, or inside the same model -- and the wait never happens.
+
+A warning is only ever about something that is **waiting**. A link watches the instance it names
+without waiting for it, so it neither starts a warning nor keeps one alive: untag an instance again
+and the warning goes with the tag, however many links are still watching, and tagging it once more
+starts the wait over. The same goes down the chain, in both directions -- the components a watched
+component depends on are watched too and report nothing until something asks for the component
+itself, and when the tag that was asking goes, their warnings go with it.
 
 ## Where components may attach
 
@@ -319,10 +415,10 @@ loaded -- ReplicatedStorage, or inside the same model -- and the wait never happ
 The default blocklist is why tagging a template in ReplicatedStorage does not spawn a component, and
 why a tagged instance cloned into Workspace does.
 
-The ancestor lists only gate CollectionService-driven construction, so you can still attach a
-component by hand to something in ReplicatedStorage. The `predicate` also gates the eager path in
-`getComponent`: an instance it rejects never gets a component unless you call `addComponent`
-yourself, which ignores all three.
+The ancestor lists only gate construction Flamework drives -- a tag, or a link to the component --
+so you can still attach a component by hand to something in ReplicatedStorage. The `predicate` also
+gates the eager path in `getComponent`: an instance it rejects never gets a component unless you call
+`addComponent` yourself, which ignores all three.
 
 ## Streaming
 
@@ -339,7 +435,10 @@ checks for children may fail and then pass a moment later.
 @Component({ tag: "Character", streamingMode: ComponentStreamingMode.Watching })
 ```
 
-When a watched component's tree breaks apart again, the component is removed. If an instance never
+When a watched component's tree breaks apart again, the component is removed. That holds however the
+component came to qualify: a tag arriving at an instance another component's link was already
+watching re-reads the instance guard, and what it reads is what the tree is watched for next, so the
+component still goes and comes back with its tree afterwards. If an instance never
 qualifies, Flamework warns after `warningTimeout` seconds (default 5, `0` disables) listing the
 criteria it is still waiting on -- that warning is usually the fastest way to find a typo in a tag
 or a missing child.
@@ -386,7 +485,7 @@ export class VehicleService {
 | `removeComponent<T>(instance)` | Detaches and destroys. |
 | `waitForComponent<T>(instance)` | Promise; resolves immediately if it already exists. |
 | `onComponentAdded<T>(cb)` | Fires for every future component of that type. |
-| `onComponentRemoved<T>(cb)` | Fires **before** `destroy`. |
+| `onComponentRemoved<T>(cb)` | Fires **before** `destroy`, and after the component has left the lookups. |
 
 `getComponent` needs the exact class. The polymorphic ones -- `getComponents`, `getAllComponents`,
 and both listeners -- accept a superclass or an interface:
@@ -416,8 +515,15 @@ for.
 
 ## Caveats
 
-- **`getComponent` constructs.** It is not a pure lookup: if the instance is tagged, passes the
-  predicate and qualifies, it builds the component then and there, ignoring the ancestor lists. Use
+- **`getComponent` constructs.** It is not a pure lookup: if the instance is in the DataModel,
+  tagged, passes the predicate and qualifies, it builds the component then and there, ignoring the
+  ancestor lists. Being in the DataModel is part of it because that is what announces the tag: an
+  instance sitting in a pool, or a template being assembled, gets nothing until it is parented in.
+  Whether some other component's link happens to be watching that instance makes no difference to
+  the answer -- including a link that watched it while its instance guard was still failing, and
+  including an instance under a blocked ancestor, where `getComponent` is the only way in and a link
+  watching it is not allowed to close that way. It stays true as the tree goes on moving: a watched
+  component still comes and goes with its tree on an instance a link found first. Use
   `getAllComponents` when you want to *observe* rather than ensure.
 - **`getComponent` returns nothing for a component that is still constructing**, so a constructor
   asking for its own component sees `undefined`. Forcing the construction with `addComponent` from
@@ -426,7 +532,17 @@ for.
   on the dead module raises; tagging an instance afterwards does nothing.
 - **Per-frame events need `LifecyclePlugin` in the same module** as `ComponentPlugin`.
 - **An invalid attribute throws** unless a default is configured.
-- **`onComponentRemoved` runs before `destroy`**, so the component is still usable inside it.
+- **`onComponentRemoved` runs before `destroy`**, so the component is still usable inside it -- but
+  it has already left `getComponent` and `getComponents` by then, and nothing builds a replacement
+  while the removal is running, so the value the callback is handed is the only way to reach it. A
+  hand removal leaves the tag alone, so asking a still-tagged instance for the component *after*
+  `removeComponent` has returned builds a new one, the way it always has. That is also what keeps two
+  components whose links name each other from removing one another twice: taking one down takes the
+  other with it, once each. The announcement is delivered a resumption late, so a link weighs it
+  against the instance as it stands when it arrives: a removal about a component the instance has
+  since replaced -- because that same resumption asked for it again -- leaves the link alone and
+  updates `childComponents` and `attributeComponents` to the component that is there now. Otherwise
+  a cycle would remove and rebuild itself for as long as the place is running.
 - **Attribute tracking is on by default.** `refreshAttributes: false` disables `onAttributeChanged`
   as well as the tracking.
 - **A component with no `tag` can only be added by hand.**
@@ -440,7 +556,11 @@ for.
 - **A link is only kept current for a tag-driven component.** One added by hand is resolved once,
   like its instance guard.
 - **`refreshAttributes: false` freezes link attributes too**, so re-pointing one stops updating
-  `this.attributes`.
+  `this.attributes` and `attributeComponents`, and `onAttributeChanged` does not fire for them
+  either. It is the component's *view* that is frozen, not the criterion behind it: a re-point the
+  guard refuses still takes the component down, the same as it would with tracking on. The
+  component's own writes still land -- in `this.attributes` and `attributeComponents` both -- and,
+  exactly as for a plain attribute, they announce nothing.
 - **Clearing a required link raises.** Only an optional one can be set back to `undefined`.
 - **A write that fails its guard raises**, so an attribute never holds a value its type forbids.
 - **A link write to an instance without the component warns and is refused**, rather than raising or
