@@ -51,6 +51,16 @@ class Thing {
 	value = 1;
 }
 
+/**
+ * A field named after its own datatype. Imported by a probe rather than used here: the local the
+ * decoder declares for it only clashes when the file it lands in never spells `CFrame` itself.
+ */
+export interface Placement {
+	readonly OwnerUserId: number;
+	readonly CFrame: CFrame;
+	readonly Surfaced: boolean;
+}
+
 export const payloadSerializer = Flamework.createSerializer<Payload>();
 export const nodeSerializer = Flamework.createSerializer<Node>();
 export const pairSerializer = Flamework.createSerializer<[number, string?, ...boolean[]]>();

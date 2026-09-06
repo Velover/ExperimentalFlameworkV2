@@ -502,7 +502,15 @@ The generator is `transformer/src/util/functions/buildSerializerFromType.ts`. It
 into a kind (number with a width, string with a length prefix, object, union, ...), computes its
 layout (fixed size or not, minimum size, whether it has blob slots) and then emits three things:
 a size expression, writes and reads. A cursor folds constant offsets at compile time and only
-materialises a position variable where a variable-size value forces one. Counts and lengths are
+materialises a position variable where a variable-size value forces one. Exactly one party moves the
+cursor past a union: with a position variable, each branch advances it on its way out, and the
+enclosing layout adds nothing; without one, the branches write at literal offsets and the layout
+steps over the union itself. Doing both puts everything after the union a union's worth too far
+along -- which is what a union whose members all carry nothing (`true | None`, the shape a synced
+`Set` takes) used to do inside a collection. A field's name becomes the local its value is read
+into, unless that name means something globally: `readonly CFrame: CFrame` would otherwise emit
+`const CFrame = new CFrame(...)`, correct once lowered to Luau but rejected by the check the emit
+goes through first. Counts and lengths are
 LEB128 varints through three helpers (`vsize`, `vwrite`, `vread`) hoisted once per file. Blobs are
 addressed by a u32 index written into the buffer, never by their position in the list; what counts
 as a blob is decided structurally (declared by `@rbxts/types`, a `_nominal_` marker, `unknown`,

@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { compileFixture, emitted } from "./compile";
+import { compileFixture, compileProbe, emitted } from "./compile";
 
 beforeAll(() => {
 	const result = compileFixture();
@@ -187,5 +187,36 @@ describe("networking serialization", () => {
 			/Vector3\.new\(buffer\.readf32\(buf\w*, 8\), buffer\.readf32\(buf\w*, 12\), buffer\.readf32\(buf\w*, 16\)\)/,
 		);
 		expect(source()).toMatch(/if buffer\.len\(buf\w*\) ~= 20 then/);
+	});
+});
+
+describe("generated locals", () => {
+	test("does not name a local after a global the generated code itself uses", () => {
+		// A field named after its own datatype, in a file that never spells that datatype, used to
+		// produce `const CFrame = new CFrame(...)`. Luau reads that as the outer binding and is
+		// fine, but the emit is typechecked before it is lowered, and a `const` in its own
+		// initializer is an error there. The field has to come from elsewhere: a name the file
+		// already uses is renamed for us.
+		const result = compileProbe(
+			"shadowedLocal",
+			`import { Networking } from "@flamework/networking";
+import type { Placement } from "./serialization";
+
+interface ProbeServerEvents {
+	noop(): void;
+}
+
+interface ProbeClientEvents {
+	place(list: Placement[]): void;
+}
+
+const probeEvents = Networking.createEvent<ProbeServerEvents, ProbeClientEvents>();
+export const probeClient = probeEvents.createClient({});
+`,
+		);
+
+		expect(result.output).not.toContain("TS7022");
+		expect(result.output).not.toContain("TS2448");
+		expect(result.status).toBe(0);
 	});
 });

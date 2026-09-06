@@ -85,6 +85,32 @@ class Thing {
 	constructor(public value: number) {}
 }
 
+/**
+ * A member that carries no payload of its own, only its tag. `@rbxts/charm-sync` builds exactly
+ * this: the patch for a `ReadonlySet<T>` is `ReadonlyMap<T, true | None>`, so every synced set
+ * meets a union in which no member writes a byte past the tag.
+ */
+interface None {
+	readonly __none: "__none";
+}
+
+/** The two-member object union, where the tag is again the whole payload. */
+type Flag = { readonly a: 1 } | { readonly b: 2 };
+
+/** The same union as a field of a struct that sits inside a collection, next to a sized field. */
+interface Slot {
+	readonly u: true | None;
+	readonly n: number;
+}
+
+/** And at the top level, in front of a field whose size is not fixed. */
+interface Header {
+	readonly v: true | None;
+	readonly s: string;
+}
+
+const NONE: None = { __none: "__none" };
+
 /** One union over every family of kind: a blob, a datatype, discriminated objects, an array and literals. */
 type Mixed = Instance | Vector3 | { kind: "a"; v: number } | { kind: "b"; s: string } | number[] | "lit" | 5;
 
@@ -116,6 +142,11 @@ const nestedSerializer = Flamework.createSerializer<Nested>();
 const thingSerializer = Flamework.createSerializer<Thing>();
 const varintSerializer = Flamework.createSerializer<Serialization.varint>();
 const bizarreSerializer = Flamework.createSerializer<Bizarre>();
+const noneMapSerializer = Flamework.createSerializer<ReadonlyMap<string, true | None>>();
+const noneArraySerializer = Flamework.createSerializer<Array<true | None>>();
+const flagMapSerializer = Flamework.createSerializer<ReadonlyMap<string, Flag>>();
+const slotMapSerializer = Flamework.createSerializer<ReadonlyMap<string, Slot>>();
+const headerSerializer = Flamework.createSerializer<Header>();
 
 /** Whether decoding raises, which is how a malformed payload is reported. */
 function rejects(run: () => unknown): boolean {
@@ -474,6 +505,55 @@ export = suite("serialization", [
 			const brick = back.colors[1];
 			expectTrue(typeIs(brick, "BrickColor") && brick.Number === 1004, "BrickColor member");
 			expectEqual(back.ro.get("r")?.[0].has(2), true, "readonly collections");
+		},
+	],
+	[
+		// A union whose members all carry nothing has a fixed size of one byte: the tag. Inside a
+		// collection the member wrote that byte and moved the position itself, and the enclosing
+		// element layout then moved past the union a second time -- so a struct field after it was
+		// written one byte too far along, and every element overran what the size pass had
+		// budgeted. One entry left the buffer a byte short and only `deserialize` noticed; two
+		// entries ran off the end inside `serialize`. Every synced `Set` in `@rbxts/charm-sync`
+		// travels as one of these.
+		"round-trips a union whose members carry no payload, in every container",
+		() => {
+			const single = new Map<string, true | None>([["a", true]]);
+			expectTrue(deepEquals(roundTrip(noneMapSerializer, single), single), "one map entry");
+
+			const many = new Map<string, true | None>([
+				["a", true],
+				["b", NONE],
+				["c", true],
+			]);
+			const [mapPayload] = noneMapSerializer.serialize(many);
+			// A varint count, then per entry a varint length, one byte of name and one tag byte.
+			expectEqual(buffer.len(mapPayload), 1 + 3 * 3, "map payload length");
+			expectTrue(deepEquals(noneMapSerializer.deserialize(mapPayload), many), "three map entries");
+
+			const list: Array<true | None> = [true, NONE, true, NONE];
+			const [listPayload] = noneArraySerializer.serialize(list);
+			expectEqual(buffer.len(listPayload), 1 + 4, "array payload length");
+			expectTrue(deepEquals(noneArraySerializer.deserialize(listPayload), list), "array elements");
+
+			const flags = new Map<string, Flag>([
+				["x", { a: 1 }],
+				["y", { b: 2 }],
+			]);
+			expectTrue(deepEquals(roundTrip(flagMapSerializer, flags), flags), "two-member object union");
+
+			// The union is a field here, so a mis-advance also lands the number at the wrong offset.
+			const slots = new Map<string, Slot>([
+				["p", { u: true, n: 1.5 }],
+				["q", { u: NONE, n: -2 }],
+			]);
+			const back = roundTrip(slotMapSerializer, slots);
+			expectEqual(back.get("p")?.n, 1.5, "sized field after a payload-free union");
+			expectEqual(back.get("q")?.n, -2, "sized field after the other member");
+			expectTrue(deepEquals(back, slots), "struct inside a map");
+
+			// The same at the top level, where the string that follows makes the layout variable.
+			const header: Header = { v: NONE, s: "tail" };
+			expectTrue(deepEquals(roundTrip(headerSerializer, header), header), "union before a string");
 		},
 	],
 	[

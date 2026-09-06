@@ -124,6 +124,9 @@ const CFRAME_COMPONENTS = 12;
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
 const MALFORMED = "malformed payload";
 
+/** What a name has to mean globally for a generated local to have to avoid it; see `localName`. */
+const GLOBAL_MEANING = ts.SymbolFlags.Value | ts.SymbolFlags.Namespace;
+
 /**
  * What the generator knows about a type. Children are kept as types so that named ones can be
  * hoisted; the synthetic kinds (literal groups, optionals) only appear where a type cannot stand.
@@ -2067,6 +2070,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "union": {
 				const v = bind(ctx.out, value, "v");
 				const layout = layoutOf(kind);
+				// Who moves the position past the union. In a fixed layout the branches write at
+				// literal offsets and move nothing, so the size is added here; in a variable one
+				// `branch` syncs the position variable on the way out of every branch, and the
+				// union has already been stepped over. Adding it in both cases steps over it
+				// twice, which puts the next write a union's worth too far along and runs the
+				// element past what the size pass budgeted.
+				const isFixedLayout = ctx.cursor.variable === undefined;
 				const start = ctx.cursor.offset;
 				let chain: ts.Statement = f.block([raise("value matches none of the union's members")]);
 				for (const i of evaluationOrder(kind).reverse()) {
@@ -2080,7 +2090,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				}
 
 				ctx.out.push(chain);
-				if (layout.size !== undefined) ctx.cursor.offset = start + layout.size;
+				if (isFixedLayout && layout.size !== undefined) ctx.cursor.offset = start + layout.size;
 				return;
 			}
 		}
@@ -2379,6 +2389,9 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			}
 			case "union": {
 				const layout = layoutOf(kind);
+				// As in {@link emitWrite}: only a fixed layout's branches leave the position where
+				// they found it, so only there does the union's size get added on top of them.
+				const isFixedLayout = ctx.cursor.variable === undefined;
 				const tag = bind(ctx.out, bufferCall("readu8", [ctx.buf, at(ctx)]), "tag");
 				ctx.cursor.offset += 1;
 				const start = ctx.cursor.offset;
@@ -2395,7 +2408,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				}
 
 				ctx.out.push(chain);
-				if (layout.size !== undefined) ctx.cursor.offset = start + layout.size - 1;
+				if (isFixedLayout && layout.size !== undefined) ctx.cursor.offset = start + layout.size - 1;
 				return value;
 			}
 		}
@@ -2405,7 +2418,24 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	function readInto(shape: Shape, ctx: Ctx, hint: string): ts.Expression {
 		const value = emitRead(shape, ctx);
 		if (!ctx.cursor.variable || f.is.identifier(value) || isLiteral(value)) return value;
-		return bind(ctx.out, value, hint.replace(/\W/g, "_"));
+		return bind(ctx.out, value, localName(hint));
+	}
+
+	/**
+	 * A field's name as a local, kept clear of the globals the generated code reaches for.
+	 *
+	 * A synthesised local is renamed when it clashes with a name the file it lands in already uses,
+	 * but a global is declared elsewhere, so nothing renames a local named after one. A field named
+	 * after its own datatype -- `readonly CFrame: CFrame` -- then reads back as
+	 * `const CFrame = new CFrame(...)`. The Luau that lowers to is correct, since its right-hand
+	 * side is the outer binding; the intermediate TypeScript is checked before it is lowered, and a
+	 * `const` in its own initializer is an error there. The same goes for a field named `buffer` or
+	 * `Map`, which the reads that follow it would resolve to instead of the global.
+	 */
+	function localName(hint: string): string {
+		const name = hint.replace(/\W/g, "_");
+		const global = typeChecker.resolveName(name, undefined, GLOBAL_MEANING, false);
+		return global !== undefined ? `v_${name}` : name;
 	}
 
 	function readLength(ctx: Ctx, width: LengthWidth): ts.Expression {
