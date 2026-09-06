@@ -232,8 +232,14 @@ names the link.
 
 A link resolves the class it names and **nothing else**. A subclass does not stand in for its
 parent, and an instance carrying several components hands back the one the link names rather than
-whichever came first -- there is no ambiguity to resolve. The guard is the whole shape too: a link to
-a component declaring `Model & { Root: BasePart }` only accepts a model that has that child.
+whichever came first -- there is no ambiguity to resolve. That holds in both directions: another
+component leaving the linked instance changes nothing, a subclass of the one it names included. The
+guard is the whole shape too: a link to a component declaring `Model & { Root: BasePart }` only
+accepts a model that has that child.
+
+A link waits for exactly what `getComponent` would hand back, so a linked component that a
+`predicate` refuses, or one whose instance sits under a blocked ancestor, leaves the link unmet and
+the component unbuilt. It never reports the link met and then fails to build it.
 
 A component can only be named as a **direct** member of the tree. One further down raises at compile
 time, because `this.instance` would have nowhere to put it -- declare it on the component attached to
@@ -263,10 +269,12 @@ mistakes here are compile errors; the guard is what catches the ones a cast let 
 |---|---|
 | The tag is removed | Removed. |
 | The component a link names is destroyed | Removed, whatever the streaming mode: that is a lifecycle event, not the tree moving. |
+| Some **other** component on a linked instance is destroyed | **Kept**, including a subclass of the one the link names. |
 | A link attribute is re-pointed at something that fails its guard | Removed, and built again if it is pointed back at something valid. |
 | A required link attribute is cleared from outside | Removed. |
 | A plain attribute is changed to a value its guard rejects | **Kept.** The change is filtered out, `this.attributes` holds its last good value and `onAttributeChanged` does not fire. An attribute guard is a construction check, not a criterion. |
 | A child a link names is replaced by another instance of the same name | Removed and built again around the new one, so it never holds a child that has left. |
+| The child of an **optional** link arrives, or leaves | Removed and built again, so `childComponents` never names an instance the tree no longer holds. An optional link never holds construction up, but it is still part of the tree. |
 | The instance tree stops matching -- a child goes, including one a link names | Follows `streamingMode` (below). |
 
 A swap is worth calling out because signals are deferred: a child parented out and its replacement

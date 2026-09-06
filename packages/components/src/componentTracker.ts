@@ -182,29 +182,44 @@ export class ComponentTracker {
 			);
 		}
 
-		if (!tracker.isQualified && !observeOnly && this.criteria.warningTimeout !== 0) {
-			tracker.timeoutWarningThread = task.delay(this.criteria.warningTimeout ?? 5, () => {
-				const reasons = new Array<string>();
-
-				for (const criteria of tracker.unmetCriteria) {
-					if (typeIs(criteria, "string")) {
-						reasons.push(criteria);
-					}
-				}
-
-				if (dependencies) {
-					for (const dependency of dependencies) {
-						if (tracker.unmetCriteria.has(dependency)) {
-							reasons.push(`dependency '${dependency.identifier}'`);
-						}
-					}
-				}
-
-				warn(`[Flamework] Infinite yield possible on instance '${instance.GetFullName()}'`);
-				warn(`Waiting for component '${this.identifier}'`);
-				warn(`Waiting for the following criteria: ${reasons.join(", ")}`);
-			});
+		if (!observeOnly) {
+			this.armWarning(instance, tracker);
 		}
+	}
+
+	/**
+	 * Starts the warning that reports what a component is still waiting for, unless it is already
+	 * running or there is nothing left to wait for.
+	 *
+	 * A tracker outlives the listener that created it, and one created by a link watches without
+	 * waiting, so this is also what arms the warning for the first listener that does wait.
+	 */
+	private armWarning(instance: Instance, tracker: InstanceTracker) {
+		if (tracker.isQualified || tracker.timeoutWarningThread !== undefined) return;
+		if (this.criteria.warningTimeout === 0) return;
+
+		tracker.timeoutWarningThread = task.delay(this.criteria.warningTimeout ?? 5, () => {
+			const reasons = new Array<string>();
+
+			for (const criteria of tracker.unmetCriteria) {
+				if (typeIs(criteria, "string")) {
+					reasons.push(criteria);
+				}
+			}
+
+			const { dependencies } = this.criteria;
+			if (dependencies) {
+				for (const dependency of dependencies) {
+					if (tracker.unmetCriteria.has(dependency)) {
+						reasons.push(`dependency '${dependency.identifier}'`);
+					}
+				}
+			}
+
+			warn(`[Flamework] Infinite yield possible on instance '${instance.GetFullName()}'`);
+			warn(`Waiting for component '${this.identifier}'`);
+			warn(`Waiting for the following criteria: ${reasons.join(", ")}`);
+		});
 	}
 
 	private testInstance(instance: Instance, tracker?: InstanceTracker) {
@@ -299,6 +314,10 @@ export class ComponentTracker {
 		if (isNewInstance) {
 			this.testInstance(instance, tracker);
 			this.setupTracker(instance, tracker, observeOnly);
+		} else if (!observeOnly) {
+			// The tracker is already here because a link is watching this instance, which arms no
+			// warning of its own: the wait only starts once somebody is actually waiting.
+			this.armWarning(instance, tracker);
 		}
 
 		tracker.listeners.add(listener);
@@ -331,6 +350,14 @@ export class ComponentTracker {
 			if (tracker.listeners.isEmpty()) {
 				for (const cleanup of tracker.cleanup) {
 					cleanup();
+				}
+
+				// The warning outlives the tracker it belongs to otherwise, and a link can create a
+				// tracker that the tag path later arms, so this is a warning for an instance that
+				// nothing is tracking any more.
+				if (tracker.timeoutWarningThread) {
+					task.cancel(tracker.timeoutWarningThread);
+					tracker.timeoutWarningThread = undefined;
 				}
 
 				this.instances.delete(instance);

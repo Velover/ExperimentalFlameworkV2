@@ -154,6 +154,26 @@ class BaseOwner extends BaseComponent<{}, Folder & { Core: BaseHandler }> {}
 @Component({ tag: "FrozenOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Disabled })
 class FrozenOwner extends BaseComponent<{}, Folder & { Core: Handler }> {}
 
+/** Only ever built under an instance named `Chosen`, which a link has to weigh as well. */
+@Component({ tag: "Choosy", predicate: (instance) => instance.Parent?.Name === "Chosen" })
+class Choosy extends BaseComponent<{}, Folder> {}
+
+/** Links to a component a predicate can refuse, which no amount of tagging then satisfies. */
+@Component({ tag: "ChoosyOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
+class ChoosyOwner extends BaseComponent<{}, Folder & { Core: Choosy }> {}
+
+/** An optional child link, so the component is built with or without the child it names. */
+@Component({ tag: "LooseOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
+class LooseOwner extends BaseComponent<{}, Folder & { Core?: Handler }> {}
+
+/** Warns almost at once, so a spec can wait for the warning rather than the default five seconds. */
+@Component({ tag: "Impatient", warningTimeout: 0.1 })
+class Impatient extends BaseComponent<{}, Part> {}
+
+/** Links to `Impatient`, so that tracker exists before anything is waiting on it. */
+@Component({ tag: "ImpatientOwner", warningTimeout: 0 })
+class ImpatientOwner extends BaseComponent<{}, Folder & { Core: Impatient }> {}
+
 /**
  * Names a component on a child of its own instance tree.
  *
@@ -250,6 +270,11 @@ function createComponentModule() {
 		.registerComponent(DerivedHandler)
 		.registerComponent(BaseOwner)
 		.registerComponent(FrozenOwner)
+		.registerComponent(Choosy)
+		.registerComponent(ChoosyOwner)
+		.registerComponent(LooseOwner)
+		.registerComponent(Impatient)
+		.registerComponent(ImpatientOwner)
 		.build();
 
 	return Flamework.createModule().includePlugin(plugin).ignite();
@@ -464,6 +489,143 @@ export = suite("components", [
 			collectionService().AddTag(core, "BaseHandler");
 			const owner = expectDefined(components.getComponent<BaseOwner>(instance), "component with the class named");
 			expectEqual(owner.childComponents.Core, components.getComponent<BaseHandler>(core), "the named component");
+
+			module.extinguish();
+		},
+	],
+	[
+		"keeps a component when a subclass of the component its link names is removed",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("SubclassRemoved");
+			const core = folderIn(instance, "Core");
+
+			// Both are on the child, and a component announces its removal under every id it
+			// inherits: the link names `BaseHandler`, which is still attached.
+			collectionService().AddTag(core, "BaseHandler");
+			collectionService().AddTag(core, "DerivedHandler");
+			collectionService().AddTag(instance, "BaseOwner");
+
+			const owner = expectDefined(components.getComponent<BaseOwner>(instance), "component");
+
+			collectionService().RemoveTag(core, "DerivedHandler");
+
+			expectEqual(components.getComponent<DerivedHandler>(core), undefined, "the subclass after its tag went");
+			expectEqual(components.getComponent<BaseOwner>(instance), owner, "component after the subclass went");
+
+			module.extinguish();
+		},
+	],
+	[
+		"waits for a linked component a predicate refuses instead of building one that throws",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			// `Choosy` is only built under an instance named `Chosen`, so tagging the child is not
+			// enough here: the link has to weigh everything `getComponent` weighs.
+			const refused = folder("Refused");
+			const refusedCore = folderIn(refused, "Core");
+			collectionService().AddTag(refusedCore, "Choosy");
+			collectionService().AddTag(refused, "ChoosyOwner");
+
+			expectEqual(components.getComponent<Choosy>(refusedCore), undefined, "the refused component");
+			expectEqual(components.getComponent<ChoosyOwner>(refused), undefined, "component whose link is refused");
+
+			const chosen = folder("Chosen");
+			const chosenCore = folderIn(chosen, "Core");
+			collectionService().AddTag(chosenCore, "Choosy");
+			collectionService().AddTag(chosen, "ChoosyOwner");
+
+			const owner = expectDefined(components.getComponent<ChoosyOwner>(chosen), "component whose link is met");
+			expectEqual(
+				owner.childComponents.Core,
+				components.getComponent<Choosy>(chosenCore),
+				"the linked component",
+			);
+
+			module.extinguish();
+		},
+	],
+	[
+		"rebuilds a component when the child of an optional link arrives",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("OptionalArrives");
+			collectionService().AddTag(instance, "LooseOwner");
+
+			const built = expectDefined(components.getComponent<LooseOwner>(instance), "component without the child");
+			expectEqual(built.childComponents.Core, undefined, "the link before the child arrived");
+
+			// Tagged before it is parented, the way a template is tagged and then dropped in.
+			const core = new Instance("Folder");
+			core.Name = "Core";
+			collectionService().AddTag(core, "Handler");
+			core.Parent = instance;
+			__harness.flush();
+
+			const rebuilt = expectDefined(components.getComponent<LooseOwner>(instance), "component after it arrived");
+			expectEqual(rebuilt.childComponents.Core, components.getComponent<Handler>(core), "the child's component");
+
+			module.extinguish();
+		},
+	],
+	[
+		"rebuilds a component when the child of an optional link leaves the tree",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("OptionalLeaves");
+			const core = addCore(instance);
+			collectionService().AddTag(core, "Handler");
+			collectionService().AddTag(instance, "LooseOwner");
+
+			const built = expectDefined(components.getComponent<LooseOwner>(instance), "component with the child");
+			const handler = expectDefined(components.getComponent<Handler>(core), "the child's component");
+			expectEqual(built.childComponents.Core, handler, "the link while the child is in the tree");
+
+			// Moved rather than destroyed, so the component on it lives on: a link is about the
+			// tree, and this tree no longer holds it.
+			core.Parent = folder("Elsewhere");
+			__harness.flush();
+
+			expectEqual(components.getComponent<Handler>(core), handler, "the child's component after it moved");
+
+			const rebuilt = expectDefined(components.getComponent<LooseOwner>(instance), "component after it left");
+			expectEqual(rebuilt.childComponents.Core, undefined, "the link after the child left the tree");
+
+			module.extinguish();
+		},
+	],
+	[
+		"warns for an instance whose tracker a link created before anything waited on it",
+		() => {
+			const module = createComponentModule();
+
+			const instance = folder("ObservedFirst");
+			const core = folderIn(instance, "Core"); // a Folder, so `Impatient` never qualifies
+
+			// The link watches the child without waiting for it, which is what creates the tracker.
+			collectionService().AddTag(instance, "ImpatientOwner");
+
+			__harness.clearWarnings();
+			collectionService().AddTag(core, "Impatient");
+			task.wait(0.3);
+
+			expectTrue(
+				__harness.warnings().some((line) => line.find("Impatient")[0] !== undefined),
+				`warnings: ${__harness.warnings().join(" | ")}`,
+			);
+
+			// Every other spec leaves its instances behind, which this one cannot: an instance that
+			// can never qualify arms a warning of its own in every module a later spec builds, and
+			// enough of those pending timers stall the Lune runner long after the suite is done.
+			instance.Destroy();
 
 			module.extinguish();
 		},

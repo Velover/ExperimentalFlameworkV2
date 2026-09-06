@@ -262,12 +262,24 @@ nobody is tracking, where a linked component has to already exist; and `watchLin
 subscribes per link and reports it as met or lost. An attribute link resolves through
 `InstanceHandle:Get`, and parks a thread in `InstanceHandle:Wait` when it is empty. A component link
 subscribes to the linked component's tracker on the *target* instance, plus that component's
-added and removed signals -- removal is announced before the component leaves the active map, so the
-removed signal marks the criterion unmet outright rather than asking again. A child link re-resolves
-only when the component re-reads its tree at all, which is the same `typeGuardPoll` the instance
-guard uses: a child is part of the tree, while an attribute is not and is followed regardless. The subscription tracks
-the target with `observeOnly`, which keeps the linked component's tracker from warning about an
-instance it is not itself waiting for; the owner's own warning names the link instead.
+added and removed signals. The criterion itself is `canCreateComponentEager`, the same question
+`getComponent` asks on the way in, so the predicate and the ancestry are weighed here rather than
+only the tracker. Removal is announced before the component leaves the active map, which is what
+lets the removed signal compare the departing component against the one the link holds: a component
+announces its removal under every id it inherits, so a subclass leaving would otherwise read as its
+parent leaving.
+
+A child link re-resolves only when the component re-reads its tree at all, which is the same
+`typeGuardPoll` the instance guard uses: a child is part of the tree, while an attribute is not and
+is followed regardless. Each link remembers the instance it resolved to and reports itself lost
+whenever that changes, undefined at either end included, which is what rebuilds a component around a
+swapped child and what keeps an optional link's `childComponents` in step with the tree.
+
+The subscription tracks the target with `observeOnly`, which keeps the linked component's tracker
+from warning about an instance it is not itself waiting for; the owner's own warning names the link
+instead. A tracker outlives the listener that created it, so the warning is armed by the first
+listener that actually waits rather than by whichever one created the tracker -- otherwise a link
+observing an instance first would silence the warning for the tag that follows it.
 
 Polymorphic lookup is a pair of maps from id to component set -- one keyed by instance, one global.
 The ids come from `getPolymorphicIds`, which walks the class's parents plus its

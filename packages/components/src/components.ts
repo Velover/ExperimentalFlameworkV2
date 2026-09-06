@@ -424,6 +424,7 @@ export class Components {
 		let targetMaid: Maid | undefined;
 		let pending: PendingLink | undefined;
 		let lastTarget: Instance | undefined;
+		let hasResolved = false;
 
 		const release = () => {
 			targetMaid?.Destroy();
@@ -435,12 +436,32 @@ export class Components {
 			}
 		};
 
+		/**
+		 * Records what the link resolved to, taking the component down first when that changed.
+		 *
+		 * A child is part of the instance tree, so a different child is a different tree and the
+		 * component is rebuilt around it. That includes the child of an optional link arriving or
+		 * leaving, which never holds construction up and would otherwise leave `childComponents`
+		 * naming an instance the tree no longer holds. Signals are deferred, so a child swapped out
+		 * and back within one resumption arrives as a single change with a new instance on the end
+		 * of it. An attribute is a pointer with an event of its own, so re-pointing one updates in
+		 * place instead of rebuilding.
+		 */
+		const noteTarget = (target: Instance | undefined) => {
+			if (link.kind === "child" && hasResolved && lastTarget !== target) {
+				update(criterion, false);
+			}
+
+			hasResolved = true;
+			lastTarget = target;
+		};
+
 		const resolve = () => {
 			release();
 
 			const target = this.resolveLinkTarget(instance, componentInfo, link);
 			if (target === undefined) {
-				lastTarget = undefined;
+				noteTarget(undefined);
 				update(criterion, link.optional);
 
 				// The attribute names an instance that has never streamed in, which is what
@@ -453,21 +474,12 @@ export class Components {
 			}
 
 			if (!this.passesLinkGuard(link, target)) {
-				lastTarget = undefined;
+				noteTarget(undefined);
 				update(criterion, false);
 				return;
 			}
 
-			// A different child is a different tree, so the component is rebuilt around it. Signals
-			// are deferred, so a child swapped out and back within one resumption arrives here as a
-			// single change with a new instance on the end of it, and would otherwise leave the
-			// component holding the one that left. An attribute is a pointer with an event of its
-			// own, so re-pointing one updates in place instead of rebuilding.
-			if (link.kind === "child" && lastTarget !== undefined && lastTarget !== target) {
-				update(criterion, false);
-			}
-
-			lastTarget = target;
+			noteTarget(target);
 
 			// A handle that fills in after the component was built changes nothing on the instance,
 			// so no attribute signal reports it; this is the only place that notices. It matters for
@@ -483,16 +495,19 @@ export class Components {
 
 			const linkedComponent = this.getLinkedComponent(link);
 			const tracker = this.getComponentTracker(linkedComponent);
-			const hasTag = this.getConfigValue(linkedComponent, "tag") !== undefined;
 
 			targetMaid = new Maid();
 
-			// A tagged component that qualifies is close enough, because `getComponent` constructs
-			// it on the way in. One without a tag only ever exists because somebody added it.
+			// Whether `getComponent` would hand a component back, which is what the link is built
+			// from. Asking the tracker alone would leave out the predicate and the ancestry that
+			// `getComponent` weighs as well, and report a link met that then throws out of the very
+			// construction it asked for. A component with no tag only exists once somebody adds it,
+			// which is what the first half is for.
 			const refresh = () =>
 				update(
 					criterion,
-					this.hasComponent(target, linkedComponent) || (hasTag && tracker.checkInstance(target)),
+					this.hasComponent(target, linkedComponent) ||
+						this.canCreateComponentEager(target, linkedComponent) === true,
 				);
 
 			// Observing, not waiting: this component's own tracker is the one that reports the link
@@ -514,10 +529,16 @@ export class Components {
 			);
 
 			// Removal is announced before the component leaves the active map, so this cannot go
-			// back through `refresh`: it would still find the component that is on its way out.
+			// back through `refresh`: it would still find the component that is on its way out. It
+			// still being there is what lets it be compared, which is what tells this link's
+			// component leaving from another that merely shares an id with it -- a subclass
+			// announces its removal under every id it inherits, its parent class among them.
 			targetMaid.GiveTask(
-				removedSignal.Connect((_, changed) => {
-					if (changed === target) update(criterion, false);
+				removedSignal.Connect((removed: unknown, changed) => {
+					if (changed !== target) return;
+					if (this.activeComponents.get(target)?.get(linkedComponent) !== removed) return;
+
+					update(criterion, false);
 				}),
 			);
 
