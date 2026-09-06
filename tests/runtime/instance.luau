@@ -274,106 +274,59 @@ function methods:Clone(): Instance
 end
 
 --[[
-	Deferred tree signals.
+	Deferred delivery.
 
-	The engine defers ChildAdded/ChildRemoved and the descendant pair to the end of the resumption,
-	so a handler runs against a tree that has already finished moving -- and against criteria that
-	the signals still queued behind it have not corrected yet. Firing synchronously, as this harness
-	does by default, hides that entirely.
+	The engine has one queue. The tree signals -- ChildAdded, ChildRemoved and the descendant pair
+	-- CollectionService's tag signals, and BindableEvent dispatch, which is what `@rbxts/signal`
+	and with it every component added/removed announcement fires through, all join it in the order
+	they are raised, and the whole batch is delivered at the end of the resumption. So a handler
+	runs against a tree that has already finished moving, against criteria the signals still queued
+	behind it have not corrected yet, and anything it fires joins the back of that same batch rather
+	than nesting. Firing synchronously, as this harness does by default, hides all of that.
 
-	`runDeferred(callback)` reproduces it: every tree signal fired inside the callback is queued and
-	delivered, in order, once it returns. It is the counterpart of `CollectionService.runDeferred`.
+	`runDeferred(category, callback)` opens a batch: each of the three controls defers its own
+	category, they nest, and the batch is delivered once the outermost one returns -- in raise
+	order, across categories, which is the ordering that a place and only a place shows. A batch
+	that does not settle is a frozen server rather than an error in Roblox, so the harness caps it
+	and reports instead of running forever.
 ]]
-local deferringTree = false
-local treeQueue: { { signal: any, argument: any } } = {}
+local deferring: { [string]: boolean } = { tree = false, tags = false, signals = false }
 
-local function fireTree(signal: any, argument: any)
+--- Every category deferred at any point in the open batch, which delivery keeps deferred.
+local batchCategories: { [string]: boolean } = {}
+local deferDepth = 0
+local deferQueue: { { signal: any, arguments: any } } = {}
+
+local MAX_DEFERRED_STEPS = 200
+
+--- Queues a fire whose category is deferred, and delivers it at once otherwise.
+local function fireDeferred(category: string, signal: any, ...: any)
 	if not signal then
 		return
 	end
 
-	if deferringTree then
-		table.insert(treeQueue, { signal = signal, argument = argument })
-	else
-		signal:Fire(argument)
-	end
-end
-
---- Runs `callback` with the tree signals deferred, then delivers everything it queued, in order.
-function instances.runDeferred(callback: () -> ())
-	local previous = deferringTree
-	deferringTree = true
-	local ok, err = pcall(callback)
-	deferringTree = previous
-
-	if not deferringTree then
-		local pending = treeQueue
-		treeQueue = {}
-
-		-- One handler raising does not stop the rest, the way it does not in the engine; the first
-		-- error is kept and re-raised so a spec can see what a red error in the output would be.
-		for _, entry in pending do
-			local delivered, deliveryError = pcall(entry.signal.Fire, entry.signal, entry.argument)
-			if not delivered and ok then
-				ok, err = false, deliveryError
-			end
-		end
-	end
-
-	if not ok then
-		error(err, 0)
-	end
-end
-
---[[
-	Deferred BindableEvent dispatch.
-
-	`@rbxts/signal` -- which is what Flamework's own component added/removed announcements go
-	through -- fires a BindableEvent, and the engine defers those: the handler runs at the end of
-	the resumption, after everything the caller went on to do, and a fire made from inside a
-	deferred handler joins the back of the same queue rather than nesting.
-
-	`runDeferredSignals(callback)` reproduces that, draining until the queue empties. A queue that
-	does not empty is a place that never settles -- two components rebuilding each other without
-	end, say -- which in Roblox is a frozen server rather than an error, so the harness reports it
-	instead of running forever.
-]]
-local deferringSignals = false
-local signalQueue: { { signal: any, arguments: any } } = {}
-
-local MAX_DEFERRED_SIGNAL_STEPS = 200
-
-local function fireDeferrable(signal: any, ...: any)
-	if deferringSignals then
-		table.insert(signalQueue, { signal = signal, arguments = table.pack(...) })
+	if deferring[category] then
+		table.insert(deferQueue, { signal = signal, arguments = table.pack(...) })
 	else
 		signal:Fire(...)
 	end
 end
 
---- Runs `callback` with BindableEvent dispatch deferred, then drains the queue it built.
-function instances.runDeferredSignals(callback: () -> ())
-	if deferringSignals then
-		return callback()
-	end
+instances.fireDeferred = fireDeferred
 
-	deferringSignals = true
-	local ok, err = pcall(callback)
-
+--- Delivers the batch, in order, until it settles. Returns the first error a handler raised.
+local function deliverBatch(): (boolean, any)
+	local ok, err = true, nil
 	local steps = 0
-	while #signalQueue > 0 do
-		steps += 1
-		if steps > MAX_DEFERRED_SIGNAL_STEPS then
-			deferringSignals = false
-			table.clear(signalQueue)
 
-			error(
-				`harness: the deferred signal queue still had work after {MAX_DEFERRED_SIGNAL_STEPS} dispatches`,
-				0
-			)
+	while #deferQueue > 0 do
+		steps += 1
+		if steps > MAX_DEFERRED_STEPS then
+			table.clear(deferQueue)
+			return false, `harness: the deferred queue still had work after {MAX_DEFERRED_STEPS} dispatches`
 		end
 
-		local entry = table.remove(signalQueue, 1) :: any
+		local entry = table.remove(deferQueue, 1) :: any
 
 		-- One handler raising does not stop the rest, the way it does not in the engine; the first
 		-- error is kept and re-raised so a spec can see what a red error in the output would be.
@@ -386,11 +339,72 @@ function instances.runDeferredSignals(callback: () -> ())
 		end
 	end
 
-	deferringSignals = false
+	return ok, err
+end
+
+--- Runs `callback` with one category of signal deferred, delivering the batch it built afterwards.
+function instances.runDeferred(category: string, callback: () -> ())
+	local previous = deferring[category]
+	deferring[category] = true
+	batchCategories[category] = true
+	deferDepth += 1
+
+	local ok, err = pcall(callback)
+	deferDepth -= 1
+
+	-- An inner control only widens what the batch defers; the outermost one is what delivers it.
+	if deferDepth > 0 then
+		deferring[category] = previous
+
+		if not ok then
+			error(err, 0)
+		end
+		return
+	end
+
+	-- Delivered with every category the batch deferred still deferred, because a fire made from
+	-- inside a deferred handler joins the back of this batch rather than being delivered at once.
+	for name in batchCategories do
+		deferring[name] = true
+	end
+
+	local delivered, deliveryError = deliverBatch()
+
+	for name in batchCategories do
+		deferring[name] = false
+	end
+	table.clear(batchCategories)
 
 	if not ok then
 		error(err, 0)
 	end
+
+	if not delivered then
+		error(deliveryError, 0)
+	end
+end
+
+local function fireTree(signal: any, argument: any)
+	fireDeferred("tree", signal, argument)
+end
+
+local function fireDeferrable(signal: any, ...: any)
+	fireDeferred("signals", signal, ...)
+end
+
+--- The tree signals, which a place delivers a resumption after the move that raised them.
+function instances.runDeferredTree(callback: () -> ())
+	return instances.runDeferred("tree", callback)
+end
+
+--- BindableEvent dispatch, which is what a component's added and removed announcements go through.
+function instances.runDeferredSignals(callback: () -> ())
+	return instances.runDeferred("signals", callback)
+end
+
+--- CollectionService's tag signals, which a realm's stand-in fires through this same queue.
+function instances.runDeferredTags(callback: () -> ())
+	return instances.runDeferred("tags", callback)
 end
 
 --[[

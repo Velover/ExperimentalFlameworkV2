@@ -360,6 +360,22 @@ is followed regardless. Each link remembers the instance it resolved to and repo
 whenever that changes, undefined at either end included, which is what rebuilds a component around a
 swapped child and what keeps an optional link's `childComponents` in step with the tree.
 
+What it starts from is read out of the component, not out of the instance, because a component
+outlives the watcher that follows its tree. `getComponent` builds one the moment it is asked for,
+while the tag that creates the tracker entry -- and with it these watchers -- is announced a
+resumption later, and the tree can move in between. Reading the tree at that point records the swap
+as the state the component was built from, and the component runs on against a tree it was never
+built out of; the child it holds in `childComponents` is what it *was* built with, so that is the
+baseline. A link that does not re-read its tree keeps the child it was built with whatever happens,
+so it is seeded with nothing and has nothing to notice.
+
+The other half of that window belongs to the tracker, because an entry is set up before its first
+listener is added. A criterion lost while nothing is registered to hear it reaches nobody, and the
+listener arriving next is handed the current answer -- "qualified" -- which it answers by handing
+back the component that is already there. So an entry remembers a loss nobody heard and replays it to
+that listener ahead of the current answer, in the order the two happened: the stale component is
+taken down and built again out of the tree as it now stands.
+
 A link attribute's `defaults` entry is read in two places, and only one of them is about the value.
 `resolveLinkTarget` falls back to it so that a **required** link resolves at all before the component
 exists -- `getAttributes` only runs once one is being built, and a required link would hold that up
@@ -575,25 +591,34 @@ identify the component by its class rather than by looking it up, because the lo
 it here, and a removal can arrive about a component the instance has already replaced.
 
 `__harness.deferSignals(callback)` switches to the engine's behaviour for the duration of the
-callback: every BindableEvent fire inside it is queued, and the queue is then drained in order, with
-fires made by the queued handlers themselves joining the back of it rather than nesting. That last
+callback: every BindableEvent fire inside it is queued, and delivered afterwards in order, with fires
+made by the queued handlers themselves joining the back of the batch rather than nesting. That last
 part is the whole point -- it is what lets a spec show a ring of links removing and rebuilding itself
-one round per drain. A queue that will not empty is a place that never settles, which in Roblox is a
-frozen server rather than an error, so the drain gives up after 200 dispatches and raises; a spec
-asserts that its block does *not* raise. It covers `@rbxts/signal` and the harness's own
-BindableEvents; the tag and tree signals have deferrals of their own, below.
+one round per delivery. It covers `@rbxts/signal` and the harness's own BindableEvents; the tag and
+tree signals join the same batch through controls of their own, below.
+
+**One batch, three controls.** The engine has a single deferred queue, and so does the harness: tree
+signals, tag signals and BindableEvent dispatch all join it in the order they are raised, and the
+batch is delivered once the outermost control returns. Nesting the three is how a spec opens a
+resumption's worth of a place -- and the interleaving across categories is the point, because a tag
+announcement and the child signal for the same move reach their handlers one after the other, in the
+order a place raises them. Draining a queue per category at a scope exit cannot show that at all,
+and it is what a place's own sequences are made of: `getComponent` builds a component out of a tree
+that then moves, and the tag that starts Flamework watching it is delivered after both. Everything
+the batch deferred stays deferred while it is delivered. A batch that will not settle is a place that
+never settles, which in Roblox is a frozen server rather than an error, so delivery gives up after
+200 dispatches and raises; a spec asserts that its block does *not* raise.
 
 **Tree signals are deferred in the engine, and on request here.** ChildAdded, ChildRemoved and the
 descendant pair fire inline in this harness, so a spec's own moves arrive one at a time, in the
 order it made them -- which hides every case where a handler runs against a tree that has already
 finished moving. `__harness.deferTree(callback)` switches to the engine's behaviour for the duration
-of the callback: every tree signal fired inside it is queued and delivered afterwards, in order. It
-is the counterpart of `__harness.deferTags`, and it is what lets a spec put a link's rebuild in
-front of the signal that would have unmet a different link. An error raised by a queued handler does
-not stop the rest, and the first one is re-raised once they have all run, so a spec can assert on
-what would be a red error in the output rather than only on the state left behind. It covers the
-tree signals and nothing else; `__harness.deferSignals`, above, is the counterpart for the dispatch
-`@rbxts/signal` goes through.
+of the callback: every tree signal fired inside it joins the batch. It is the counterpart of
+`__harness.deferTags`, and it is what lets a spec put a link's rebuild in front of the signal that
+would have unmet a different link. An error raised by a queued handler does not stop the rest, and
+the first one is re-raised once they have all run, so a spec can assert on what would be a red error
+in the output rather than only on the state left behind. It covers the tree signals and nothing else;
+`__harness.deferTags` and `__harness.deferSignals` cover the other two categories of the same batch.
 
 **Ancestry announces tags.** CollectionService announces a tag when the instance carrying it enters
 the DataModel and again when it leaves, which is a second way for a component to come and go, and one

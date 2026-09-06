@@ -47,6 +47,17 @@ interface InstanceTracker {
 	 * construction it asked for, so it is answered `false` until the entry can speak for itself.
 	 */
 	isProvisional?: boolean;
+
+	/**
+	 * Whether a criterion was lost with nothing registered to hear it.
+	 *
+	 * An entry is set up before its first listener is added, and the component it is for can
+	 * already be there: the eager path builds one the moment somebody asks for it, a resumption
+	 * before the tag that creates this entry is announced. A criterion that goes unmet and met
+	 * again in between describes a component that has to be built afresh, and the current answer
+	 * on its own says none of that -- it is "qualified", and the stale component is handed back.
+	 */
+	unheardLoss?: boolean;
 }
 
 export interface Criteria {
@@ -127,6 +138,16 @@ export class ComponentTracker {
 
 		if (isQualified !== tracker.isQualified) {
 			tracker.isQualified = isQualified;
+
+			// A criterion lost with nothing registered to hear it is kept for the listener that
+			// arrives next, because the component this entry is for may already exist and would
+			// otherwise simply be handed back. A gain nobody heard needs nothing: the answer a
+			// listener is given as it registers already says it.
+			if (tracker.listeners.isEmpty()) {
+				if (!isQualified) tracker.unheardLoss = true;
+			} else {
+				tracker.unheardLoss = undefined;
+			}
 
 			for (const listener of tracker.listeners) {
 				listener(isQualified, instance);
@@ -507,6 +528,17 @@ export class ComponentTracker {
 		tracker.listeners.add(listener);
 		if (!observeOnly) {
 			tracker.waiting.add(listener);
+		}
+
+		// The entry was set up before this listener existed, so a criterion lost and met again
+		// while that happened is news it has not been given. Handing it the current answer alone is
+		// what leaves a component built from a tree that has since moved exactly where it was: the
+		// answer is "qualified", and the listener has nothing to do about a component it already
+		// has. The loss is replayed first, in the order it happened.
+		if (tracker.unheardLoss === true && tracker.isQualified) {
+			tracker.unheardLoss = undefined;
+
+			listener(false, instance);
 		}
 
 		listener(tracker.isQualified, instance);

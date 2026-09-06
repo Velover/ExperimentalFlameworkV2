@@ -359,6 +359,11 @@ A swap is worth calling out because signals are deferred: a child parented out a
 parented in within one resumption arrives as a single change with a different instance on the end of
 it, never a moment with no child at all. It is still a different tree, so it still rebuilds.
 
+That holds even when the swap happens before Flamework was watching. `getComponent` builds a
+component the moment you ask for it, while the tag that starts Flamework following its tree is
+announced a resumption later; a tree that moves in between is weighed against the child the component
+was actually built with, not against whatever the tree happens to hold once anything looks.
+
 The last row is the only one the streaming mode has a say in, because it is the only one that is
 about the tree rather than about another object's lifetime:
 

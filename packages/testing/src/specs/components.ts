@@ -288,7 +288,51 @@ class StarterOwner extends BaseComponent<{}, Folder & { Core: Starter }> {}
  * streaming does not watch on a server, and the tree filling in is the case being tested.
  */
 @Component({ tag: "Owner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
-class Owner extends BaseComponent<{}, Folder & { Core: Handler }> {}
+class Owner extends BaseComponent<{}, Folder & { Core: Handler }> {
+	/** Counts the takedowns, so a rebuild can be told from a component that was never replaced. */
+	public destroyCount = 0;
+
+	public destroy() {
+		this.destroyCount += 1;
+		super.destroy();
+	}
+}
+
+/** A part-shaped component, so a link tree can be built out of the classes a place uses. */
+@Component({ tag: "Bolt" })
+class Bolt extends BaseComponent<{}, Part> {}
+
+interface ChassisAttributes {
+	Target: Part;
+	Linked: Bolt;
+	Spare?: Part;
+}
+
+/** A model with a required and an optional linked child, alongside two link attributes. */
+@Component({
+	tag: "Chassis",
+	warningTimeout: 0,
+	attributeWarningTimeout: 0,
+	streamingMode: ComponentStreamingMode.Watching,
+})
+class Chassis extends BaseComponent<ChassisAttributes, Model & { Core: Bolt; Aux?: Bolt }> {
+	public static created = 0;
+	public static destroyed = 0;
+
+	constructor(metadata: ComponentMetadata) {
+		super(metadata);
+		Chassis.created += 1;
+	}
+
+	public retarget(target: Part) {
+		this.attributes.Target = target;
+	}
+
+	public destroy() {
+		Chassis.destroyed += 1;
+		super.destroy();
+	}
+}
 
 /** The instance a missing link attribute falls back to. */
 const DEFAULT_LINK_TARGET = new Instance("Folder");
@@ -406,6 +450,8 @@ function createComponentModule() {
 		.registerComponent(Ignition)
 		.registerComponent(Starter)
 		.registerComponent(StarterOwner)
+		.registerComponent(Bolt)
+		.registerComponent(Chassis)
 		.build();
 
 	return Flamework.createModule().includePlugin(plugin).ignite();
@@ -425,6 +471,15 @@ function folderIn(parent: Instance, name: string, attributes?: { [key: string]: 
 
 function folder(name: string, attributes?: { [key: string]: unknown }) {
 	return folderIn(game.Workspace, name, attributes);
+}
+
+/** A part-shaped child, for the link trees a place builds out of models and parts. */
+function partIn(parent: Instance, name: string) {
+	const instance = new Instance("Part");
+	instance.Name = name;
+	instance.Parent = parent;
+
+	return instance;
 }
 
 /** Completes an instance tree that a `Core` child is missing from. */
@@ -995,17 +1050,159 @@ export = suite("components", [
 
 			// The replacement is parented before the old child leaves, so the link never sees a
 			// moment with no child at all -- which is how a swap looks through deferred signals. The
-			// old child moves rather than leaving the DataModel, which would announce its tag as
-			// gone and take the component down for a reason that has nothing to do with the tree.
-			const second = folderIn(instance, "Core");
-			collectionService().AddTag(second, "Handler");
-			first.Parent = folder("SwappedInPlaceElsewhere");
+			// old child is unparented rather than moved, which is what a place does when it pools a
+			// part instead of destroying it: its own tag is announced as gone on the way out, and
+			// the link still has to weigh the tree rather than that announcement.
+			let second!: Folder;
+			__harness.deferSignals(() => {
+				__harness.deferTags(() => {
+					__harness.deferTree(() => {
+						second = folderIn(instance, "Core");
+						collectionService().AddTag(second, "Handler");
+						first.Parent = undefined;
+					});
+				});
+			});
 			__harness.flush();
 
 			const rebuilt = expectDefined(components.getComponent<Owner>(instance), "component after the swap");
+			expectEqual(owner.destroyCount, 1, "takedowns of the component that held the old child");
 			expectTrue(rebuilt !== owner, "the component was rebuilt rather than left holding the old child");
 			expectEqual(rebuilt.childComponents.Core, components.getComponent<Handler>(second), "the new child");
 
+			instance.Destroy();
+			first.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"rebuilds a component around the child that replaced the one it was built with",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const root = folder("SwappedUnwatched");
+			const model = new Instance("Model");
+			model.Name = "SwappedUnwatchedModel";
+			model.Parent = root;
+
+			const core = partIn(model, "Core");
+			const target = partIn(root, "SwappedUnwatchedTarget");
+			const linked = partIn(root, "SwappedUnwatchedLinked");
+
+			const created = Chassis.created;
+			const destroyed = Chassis.destroyed;
+
+			let component!: Chassis;
+			let replacement!: Part;
+
+			// Everything a place defers, deferred: the tags, the tree, and the BindableEvents a
+			// component's own announcements go through. `getComponent` builds the component out of
+			// the tree as it stands, while the tag that gives it a tracker entry -- and with it the
+			// watchers that follow that tree -- is not announced until this resumption ends. The
+			// swap happens in the window between the two, which is a window every place has.
+			__harness.deferSignals(() => {
+				__harness.deferTags(() => {
+					__harness.deferTree(() => {
+						collectionService().AddTag(linked, "Bolt");
+						model.SetAttribute("Target", new InstanceHandle(target));
+						model.SetAttribute("Linked", new InstanceHandle(linked));
+						collectionService().AddTag(model, "Chassis");
+						collectionService().AddTag(core, "Bolt");
+
+						component = expectDefined(components.getComponent<Chassis>(model), "component");
+						expectEqual(component.childComponents.Core.instance, core, "the child it was built with");
+
+						// The child leaves the DataModel entirely and one of the same name takes its
+						// place, before a single one of the announcements above has been delivered.
+						core.Parent = undefined;
+						replacement = partIn(model, "Core");
+						collectionService().AddTag(replacement, "Bolt");
+					});
+				});
+			});
+			__harness.flush();
+
+			expectEqual(Chassis.created - created, 2, "constructions");
+			expectEqual(Chassis.destroyed - destroyed, 1, "takedowns");
+
+			const swapped = expectDefined(components.getComponent<Chassis>(model), "component after the swap");
+			expectTrue(swapped !== component, "the component was rebuilt rather than left holding the old child");
+			expectEqual(swapped.childComponents.Core, components.getComponent<Bolt>(replacement), "the new child");
+			expectEqual(components.getComponent<Bolt>(core), undefined, "the component on the child that left");
+
+			root.Destroy();
+			core.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"rebuilds a component as an optional linked child arrives tagged and then moves away",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const root = folder("OptionalChildRoot");
+			const model = new Instance("Model");
+			model.Name = "OptionalChildModel";
+			model.Parent = root;
+
+			const core = partIn(model, "Core");
+			const target = partIn(root, "OptionalChildTarget");
+			const linked = partIn(root, "OptionalChildLinked");
+			collectionService().AddTag(linked, "Bolt");
+			collectionService().AddTag(core, "Bolt");
+			model.SetAttribute("Target", new InstanceHandle(target));
+			model.SetAttribute("Linked", new InstanceHandle(linked));
+			collectionService().AddTag(model, "Chassis");
+
+			const built = expectDefined(components.getComponent<Chassis>(model), "component");
+			expectEqual(built.childComponents.Aux, undefined, "the optional child before it arrives");
+
+			const created = Chassis.created;
+
+			// Tagged before it is parented, the way a clone is prepared: nothing is announced while
+			// it is outside the DataModel, and the tag lands as it enters, just before ChildAdded.
+			const aux = new Instance("Part");
+			aux.Name = "Aux";
+			collectionService().AddTag(aux, "Bolt");
+
+			__harness.deferSignals(() => {
+				__harness.deferTags(() => {
+					__harness.deferTree(() => {
+						aux.Parent = model;
+					});
+				});
+			});
+			__harness.flush();
+
+			expectEqual(Chassis.created - created, 1, "constructions once the optional child arrived");
+
+			const withAux = expectDefined(components.getComponent<Chassis>(model), "component with the child");
+			expectTrue(withAux !== built, "the component was rebuilt around the optional child");
+			expectEqual(withAux.childComponents.Aux, components.getComponent<Bolt>(aux), "the optional child");
+
+			// Moved rather than destroyed, so the component on it lives on: the tree is what changed.
+			__harness.deferSignals(() => {
+				__harness.deferTags(() => {
+					__harness.deferTree(() => {
+						aux.Parent = root;
+					});
+				});
+			});
+			__harness.flush();
+
+			expectEqual(Chassis.created - created, 2, "constructions once the optional child left");
+
+			const withoutAux = expectDefined(components.getComponent<Chassis>(model), "component without the child");
+			expectEqual(withoutAux.childComponents.Aux, undefined, "the optional child after it moved away");
+			expectDefined(components.getComponent<Bolt>(aux), "the component on the child that moved");
+
+			// And the component the required link names going takes the owner down with it.
+			collectionService().RemoveTag(core, "Bolt");
+			expectEqual(components.getComponent<Chassis>(model), undefined, "component after the linked one went");
+
+			root.Destroy();
 			module.extinguish();
 		},
 	],

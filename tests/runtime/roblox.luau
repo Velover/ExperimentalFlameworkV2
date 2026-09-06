@@ -333,7 +333,7 @@ function roblox.create(initialRealm: "Server" | "Client")
 			--- The same for the tree signals -- ChildAdded, ChildRemoved and the descendant pair --
 			--- which the engine defers as well, so a handler sees a tree that has finished moving
 			--- while the signals for the rest of the move are still queued behind it.
-			deferTree = instances.runDeferred,
+			deferTree = instances.runDeferredTree,
 			--- And the same for BindableEvent dispatch, which is what `@rbxts/signal` fires
 			--- through: a component's added and removed announcements reach their handlers at the
 			--- end of the resumption, after everything the caller went on to do.

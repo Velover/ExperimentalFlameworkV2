@@ -9,8 +9,10 @@
 	ancestor of it.
 
 	`runDeferred(callback)` switches to Roblox's deferred behaviour for the duration of `callback`:
-	every fire is queued and delivered in order once it returns, so a spec can reproduce an event
-	arriving after the state it describes has already changed.
+	every fire joins the harness's one deferred queue, alongside the tree signals and BindableEvent
+	dispatch, and the batch is delivered in raise order once the outermost control returns. That
+	interleaving is the whole point: a tag announcement and the child signal for the same move reach
+	their handlers one after the other, in the order a place raises them.
 
 	One instance per realm: two graphs in a single process must not share tag state.
 ]]
@@ -27,37 +29,12 @@ function collection.create()
 
 	local CollectionService = {}
 
-	local deferring = false
-	local queue: { { signal: any, instance: any } } = {}
-
 	local function fire(signal: any, instance: any)
-		if signal == nil then
-			return
-		end
-		if deferring then
-			table.insert(queue, { signal = signal, instance = instance })
-		else
-			signal:Fire(instance)
-		end
+		instances.fireDeferred("tags", signal, instance)
 	end
 
-	--- Runs `callback` with deferred signals, then delivers everything it queued, in order.
-	function CollectionService.runDeferred(callback: () -> ())
-		local previous = deferring
-		deferring = true
-		local ok, err = pcall(callback)
-		deferring = previous
-		if not deferring then
-			local pending = queue
-			queue = {}
-			for _, entry in pending do
-				entry.signal:Fire(entry.instance)
-			end
-		end
-		if not ok then
-			error(err, 0)
-		end
-	end
+	--- Runs `callback` with the tag signals joining the harness's deferred batch.
+	CollectionService.runDeferred = instances.runDeferredTags
 
 	function CollectionService:AddTag(instance: any, tag: string)
 		local set = tagged[tag]

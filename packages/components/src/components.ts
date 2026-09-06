@@ -577,6 +577,26 @@ export class Components {
 		let lastTarget: Instance | undefined;
 		let hasResolved = false;
 
+		// A component outlives the watcher that follows its tree. The eager path builds one the
+		// moment somebody asks for it, while the tag that creates this entry -- and with it these
+		// watchers -- is announced a resumption later, and the tree can have moved in between: the
+		// place that swapped the child did so before anything was watching for it.
+		//
+		// So the child a link starts from is the one the live component actually holds, read from
+		// the component rather than from the instance. Starting from the tree instead is what
+		// records the swap as the state the component was built from, leaving it running against a
+		// tree it was never built out of and never rebuilding it. A link that does not follow the
+		// tree keeps the child it was built with whatever happens, so there is nothing to notice.
+		if (link.kind === "child" && pollsTree) {
+			const built = this.activeComponents.get(instance)?.get(componentInfo.ctor);
+			if (built !== undefined) {
+				const linked = (built.childComponents as unknown as Map<string, BaseComponent>).get(link.name);
+
+				hasResolved = true;
+				lastTarget = linked?.instance;
+			}
+		}
+
 		const release = () => {
 			targetMaid?.Destroy();
 			targetMaid = undefined;
