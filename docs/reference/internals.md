@@ -263,7 +263,9 @@ subscribes per link and reports it as met or lost. An attribute link resolves th
 `InstanceHandle:Get`, and parks a thread in `InstanceHandle:Wait` when it is empty. A component link
 subscribes to the linked component's tracker on the *target* instance, plus that component's
 added and removed signals -- removal is announced before the component leaves the active map, so the
-removed signal marks the criterion unmet outright rather than asking again. The subscription tracks
+removed signal marks the criterion unmet outright rather than asking again. A child link re-resolves
+only when the component re-reads its tree at all, which is the same `typeGuardPoll` the instance
+guard uses: a child is part of the tree, while an attribute is not and is followed regardless. The subscription tracks
 the target with `observeOnly`, which keeps the linked component's tracker from warning about an
 instance it is not itself waiting for; the owner's own warning names the link instead.
 

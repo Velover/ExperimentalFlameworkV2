@@ -135,6 +135,25 @@ class Handler extends BaseComponent<{}, Folder> {}
 @Component({ tag: "Rig", warningTimeout: 0 })
 class Rig extends BaseComponent<{}, Folder & { Root: Folder }> {}
 
+/** A second component for the same instances, to show a link picks the one it names. */
+@Component({ tag: "Extra" })
+class Extra extends BaseComponent<{}, Folder> {}
+
+/** A component hierarchy, to show which of the two a link to the parent accepts. */
+@Component({ tag: "BaseHandler" })
+class BaseHandler extends BaseComponent<{}, Folder> {}
+
+@Component({ tag: "DerivedHandler" })
+class DerivedHandler extends BaseHandler {}
+
+/** Links to the parent class of a hierarchy. */
+@Component({ tag: "BaseOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
+class BaseOwner extends BaseComponent<{}, Folder & { Core: BaseHandler }> {}
+
+/** Links through a tree it never re-checks, so the two kinds of change can be told apart. */
+@Component({ tag: "FrozenOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Disabled })
+class FrozenOwner extends BaseComponent<{}, Folder & { Core: Handler }> {}
+
 /**
  * Names a component on a child of its own instance tree.
  *
@@ -226,6 +245,11 @@ function createComponentModule() {
 		.registerComponent(Pointer)
 		.registerComponent(PointerDefault)
 		.registerComponent(Rig)
+		.registerComponent(Extra)
+		.registerComponent(BaseHandler)
+		.registerComponent(DerivedHandler)
+		.registerComponent(BaseOwner)
+		.registerComponent(FrozenOwner)
 		.build();
 
 	return Flamework.createModule().includePlugin(plugin).ignite();
@@ -282,6 +306,195 @@ function collectionService() {
 }
 
 export = suite("components", [
+	[
+		"keeps a component when a plain attribute is changed to a value its guard rejects",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("BadExternal", { speed: 3 });
+			collectionService().AddTag(instance, "Tagged");
+			const component = expectDefined(components.getComponent<Tagged>(instance), "component");
+
+			// A plain attribute guard is a construction check, not a criterion: a bad change is
+			// filtered out so a handler never sees it, and the component carries on.
+			instance.SetAttribute("speed", "nope");
+
+			expectDefined(components.getComponent<Tagged>(instance), "component after a bad attribute change");
+			expectEqual(component.attributes.speed, 3, "attribute after a bad change");
+
+			module.extinguish();
+		},
+	],
+	[
+		"keeps a component whose tree breaks when streaming is disabled",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("FrozenTree");
+			const core = addCore(instance);
+			collectionService().AddTag(instance, "Frozen");
+			expectDefined(components.getComponent<Frozen>(instance), "component while the tree holds");
+
+			core.Parent = undefined;
+			__harness.flush();
+
+			expectEqual(
+				components.getComponent<Frozen>(instance) !== undefined,
+				true,
+				"component after the tree broke with streaming disabled",
+			);
+
+			module.extinguish();
+		},
+	],
+	[
+		"removes a component when the component a link names goes, whatever the streaming mode",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("FrozenLink");
+			const core = folderIn(instance, "Core");
+			collectionService().AddTag(core, "Handler");
+			collectionService().AddTag(instance, "FrozenOwner");
+			expectDefined(components.getComponent<FrozenOwner>(instance), "component while the link holds");
+
+			// The tree is never re-checked under `Disabled`, but a linked component being destroyed
+			// is a lifecycle event rather than the tree filling in, so it is always noticed.
+			collectionService().RemoveTag(core, "Handler");
+
+			expectEqual(components.getComponent<FrozenOwner>(instance), undefined, "component after the link broke");
+
+			module.extinguish();
+		},
+	],
+	[
+		"keeps a linked child that goes away when streaming is disabled",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("FrozenChild");
+			const core = folderIn(instance, "Core");
+			collectionService().AddTag(core, "Handler");
+			collectionService().AddTag(instance, "FrozenOwner");
+
+			const owner = expectDefined(components.getComponent<FrozenOwner>(instance), "component");
+
+			// A child link is part of the instance tree, so `Disabled` reads it once and keeps the
+			// answer, exactly as it does for the instance guard.
+			core.Parent = undefined;
+			__harness.flush();
+
+			expectDefined(components.getComponent<FrozenOwner>(instance), "component after the child was removed");
+			expectEqual(owner.childComponents.Core, components.getComponent<Handler>(core), "the child it resolved to");
+
+			module.extinguish();
+		},
+	],
+	[
+		"rebuilds a component when its linked child is swapped without ever going missing",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("SwappedInPlace");
+			const first = folderIn(instance, "Core");
+			collectionService().AddTag(first, "Handler");
+			collectionService().AddTag(instance, "Owner");
+
+			const owner = expectDefined(components.getComponent<Owner>(instance), "component");
+
+			// The replacement is parented before the old child leaves, so the link never sees a
+			// moment with no child at all -- which is how a swap looks through deferred signals.
+			const second = folderIn(instance, "Core");
+			collectionService().AddTag(second, "Handler");
+			first.Parent = undefined;
+			__harness.flush();
+
+			const rebuilt = expectDefined(components.getComponent<Owner>(instance), "component after the swap");
+			expectTrue(rebuilt !== owner, "the component was rebuilt rather than left holding the old child");
+			expectEqual(rebuilt.childComponents.Core, components.getComponent<Handler>(second), "the new child");
+
+			module.extinguish();
+		},
+	],
+	[
+		"resolves a link to the component it names, not to whatever else is on the instance",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("Crowded");
+			const core = folderIn(instance, "Core");
+
+			// Two components on one child: the link names one of them and gets that one.
+			collectionService().AddTag(core, "Extra");
+			collectionService().AddTag(core, "Handler");
+			collectionService().AddTag(instance, "Owner");
+
+			const owner = expectDefined(components.getComponent<Owner>(instance), "component");
+			expectEqual(owner.childComponents.Core, components.getComponent<Handler>(core), "the named component");
+			expectTrue(components.getComponent<Extra>(core) !== undefined, "the other component is still there");
+
+			// And losing the one it does not name changes nothing.
+			collectionService().RemoveTag(core, "Extra");
+			expectDefined(components.getComponent<Owner>(instance), "component after the other one went");
+
+			module.extinguish();
+		},
+	],
+	[
+		"names a component exactly: a subclass does not stand in for the class a link names",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("Subclassed");
+			const core = folderIn(instance, "Core");
+
+			// `DerivedHandler` is a `BaseHandler`, but a link resolves the class it names and
+			// nothing else, so this is not the component the link is waiting for.
+			collectionService().AddTag(core, "DerivedHandler");
+			collectionService().AddTag(instance, "BaseOwner");
+			expectEqual(components.getComponent<BaseOwner>(instance), undefined, "component with only the subclass");
+
+			collectionService().AddTag(core, "BaseHandler");
+			const owner = expectDefined(components.getComponent<BaseOwner>(instance), "component with the class named");
+			expectEqual(owner.childComponents.Core, components.getComponent<BaseHandler>(core), "the named component");
+
+			module.extinguish();
+		},
+	],
+	[
+		"re-resolves a child link when the child is replaced by another instance",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("Replaced");
+			const first = folderIn(instance, "Core");
+			collectionService().AddTag(first, "Handler");
+			collectionService().AddTag(instance, "Owner");
+
+			const owner = expectDefined(components.getComponent<Owner>(instance), "component");
+			expectEqual(owner.childComponents.Core, components.getComponent<Handler>(first), "the first child");
+
+			// Swapped for another instance of the same name: the link follows the child, not the
+			// component it happened to resolve to first.
+			first.Parent = undefined;
+			const second = folderIn(instance, "Core");
+			collectionService().AddTag(second, "Handler");
+			__harness.flush();
+
+			const replaced = expectDefined(components.getComponent<Owner>(instance), "component after the swap");
+			expectEqual(replaced.childComponents.Core, components.getComponent<Handler>(second), "the second child");
+
+			module.extinguish();
+		},
+	],
 	[
 		"writes an attribute through to the instance",
 		() => {

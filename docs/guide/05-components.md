@@ -230,6 +230,11 @@ order, and it is removed again if that component goes away. This is the same cri
 component dependencies and streaming use, so the warning that lists what a component is waiting for
 names the link.
 
+A link resolves the class it names and **nothing else**. A subclass does not stand in for its
+parent, and an instance carrying several components hands back the one the link names rather than
+whichever came first -- there is no ambiguity to resolve. The guard is the whole shape too: a link to
+a component declaring `Model & { Root: BasePart }` only accepts a model that has that child.
+
 A component can only be named as a **direct** member of the tree. One further down raises at compile
 time, because `this.instance` would have nowhere to put it -- declare it on the component attached to
 that child instead, or look it up with `getComponent`.
@@ -251,6 +256,31 @@ this.attributes.Rigged = target;
 
 The resolved attribute type already asks for the linked component's instance type, so most of the
 mistakes here are compile errors; the guard is what catches the ones a cast let through.
+
+### What takes a component down again
+
+| Change | Effect |
+|---|---|
+| The tag is removed | Removed. |
+| The component a link names is destroyed | Removed, whatever the streaming mode: that is a lifecycle event, not the tree moving. |
+| A link attribute is re-pointed at something that fails its guard | Removed, and built again if it is pointed back at something valid. |
+| A required link attribute is cleared from outside | Removed. |
+| A plain attribute is changed to a value its guard rejects | **Kept.** The change is filtered out, `this.attributes` holds its last good value and `onAttributeChanged` does not fire. An attribute guard is a construction check, not a criterion. |
+| A child a link names is replaced by another instance of the same name | Removed and built again around the new one, so it never holds a child that has left. |
+| The instance tree stops matching -- a child goes, including one a link names | Follows `streamingMode` (below). |
+
+A swap is worth calling out because signals are deferred: a child parented out and its replacement
+parented in within one resumption arrives as a single change with a different instance on the end of
+it, never a moment with no child at all. It is still a different tree, so it still rebuilds.
+
+The last row is the only one the streaming mode has a say in, because it is the only one that is
+about the tree rather than about another object's lifetime:
+
+| `ComponentStreamingMode` | A child, or a child link, going away |
+|---|---|
+| `Contextual` (default) | Re-checked on a client, ignored on a server. |
+| `Watching` | Re-checked, so the component goes and comes back with its tree. |
+| `Disabled` | Read once and kept. The component stays, still holding the child it resolved to. |
 
 ### Waiting and warnings
 

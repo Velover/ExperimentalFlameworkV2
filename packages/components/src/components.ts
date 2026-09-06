@@ -293,14 +293,22 @@ export class Components {
 
 		const hasLinks = componentInfo.links.size() !== 0;
 		const streamingMode = componentInfo.config.streamingMode ?? defaultStreamingMode();
+
+		// Whether this component re-reads its instance tree at all. A child link is part of that
+		// tree, so it follows the same rule the instance guard does: under `Disabled` the tree is
+		// read once and the answer kept, however the children move afterwards.
+		const pollsTree =
+			(streamingMode === ComponentStreamingMode.Contextual && RunService.IsClient()) ||
+			streamingMode === ComponentStreamingMode.Watching;
+
 		const tracker = new ComponentTracker(componentInfo.identifier, {
 			checkLinks: hasLinks ? (instance) => this.checkLinks(componentInfo, instance) : undefined,
-			watchLinks: hasLinks ? (instance, update) => this.watchLinks(componentInfo, instance, update) : undefined,
+			watchLinks: hasLinks
+				? (instance, update) => this.watchLinks(componentInfo, instance, update, pollsTree)
+				: undefined,
 			tag: componentInfo.config.tag,
 			typeGuard: instanceGuard,
-			typeGuardPoll:
-				(streamingMode === ComponentStreamingMode.Contextual && RunService.IsClient()) ||
-				streamingMode === ComponentStreamingMode.Watching,
+			typeGuardPoll: pollsTree,
 			typeGuardPollAtomic: streamingMode !== ComponentStreamingMode.Contextual,
 			warningTimeout: componentInfo.config.warningTimeout ?? getRuntimeConfig().components?.warningTimeout,
 			dependencies,
@@ -392,11 +400,12 @@ export class Components {
 		componentInfo: ComponentInfo,
 		instance: Instance,
 		update: (criterion: string, isMet: boolean) => void,
+		pollsTree: boolean,
 	) {
 		const maid = new Maid();
 
 		for (const link of componentInfo.links) {
-			this.watchLink(componentInfo, instance, link, update, maid);
+			this.watchLink(componentInfo, instance, link, update, maid, pollsTree);
 		}
 
 		return () => maid.Destroy();
@@ -408,11 +417,13 @@ export class Components {
 		link: ComponentLink,
 		update: (criterion: string, isMet: boolean) => void,
 		maid: Maid,
+		pollsTree: boolean,
 	) {
 		const criterion = describeLink(link);
 
 		let targetMaid: Maid | undefined;
 		let pending: PendingLink | undefined;
+		let lastTarget: Instance | undefined;
 
 		const release = () => {
 			targetMaid?.Destroy();
@@ -429,6 +440,7 @@ export class Components {
 
 			const target = this.resolveLinkTarget(instance, componentInfo, link);
 			if (target === undefined) {
+				lastTarget = undefined;
 				update(criterion, link.optional);
 
 				// The attribute names an instance that has never streamed in, which is what
@@ -441,9 +453,21 @@ export class Components {
 			}
 
 			if (!this.passesLinkGuard(link, target)) {
+				lastTarget = undefined;
 				update(criterion, false);
 				return;
 			}
+
+			// A different child is a different tree, so the component is rebuilt around it. Signals
+			// are deferred, so a child swapped out and back within one resumption arrives here as a
+			// single change with a new instance on the end of it, and would otherwise leave the
+			// component holding the one that left. An attribute is a pointer with an event of its
+			// own, so re-pointing one updates in place instead of rebuilding.
+			if (link.kind === "child" && lastTarget !== undefined && lastTarget !== target) {
+				update(criterion, false);
+			}
+
+			lastTarget = target;
 
 			// A handle that fills in after the component was built changes nothing on the instance,
 			// so no attribute signal reports it; this is the only place that notices. It matters for
@@ -503,8 +527,9 @@ export class Components {
 		maid.GiveTask(release);
 
 		if (link.kind === "attribute") {
+			// An attribute is not part of the tree, so it is followed whatever the streaming mode.
 			maid.GiveTask(instance.GetAttributeChangedSignal(link.name).Connect(resolve));
-		} else {
+		} else if (pollsTree) {
 			const childChanged = (child: Instance) => {
 				if (child.Name === link.name) resolve();
 			};
