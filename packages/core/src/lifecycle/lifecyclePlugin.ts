@@ -25,9 +25,11 @@ export interface LifecyclePluginOptions {
  * Tracks the objects attached to each lifecycle event for one module.
  *
  * Plugins are instantiated once per including module, so nothing here is shared between modules.
+ * The plugin exports it, so `module.resolveDependency<LifecycleProvider>()` answers what is
+ * attached to a module's events right now.
  */
 @Provider()
-class LifecycleProvider {
+export class LifecycleProvider {
 	/** In attachment order, which for providers is dependency order. */
 	private onInit = new Array<OnInit>();
 	private initMembers = new Set<OnInit>();
@@ -57,6 +59,43 @@ class LifecycleProvider {
 		}
 
 		return identifier;
+	}
+
+	/**
+	 * Drops the memoised identifier of an object that has left its last lifecycle event.
+	 *
+	 * The memo is keyed by the object itself, so an entry left behind is a strong reference to it:
+	 * a removed component, and with it its instance, its attributes and everything it links to,
+	 * held for as long as the module lives. `profile` fills it in for every object it runs a
+	 * per-frame callback for, so the table grew by one for every component that ever ticked
+	 * whenever profiling was on -- which it is in Studio by default, and in production for anyone
+	 * who sets `core.profiling`.
+	 *
+	 * The entry stays while any event still holds the object: dropping it there would only make the
+	 * next frame look it up again.
+	 */
+	private forget(object: object) {
+		const attached =
+			this.initMembers.has(object as OnInit) ||
+			this.onStart.has(object as OnStart) ||
+			this.onTick.has(object as OnTick) ||
+			this.onPhysics.has(object as OnPhysics) ||
+			this.onRender.has(object as OnRender) ||
+			this.onExtinguished.has(object as OnExtinguished);
+
+		if (!attached) {
+			this.identifiers.delete(object);
+		}
+	}
+
+	/**
+	 * Detaches an object from one of the plain event sets, forgetting it once nothing holds it.
+	 *
+	 * @internal
+	 */
+	public removeFrom<T>(set: Set<T>, value: T) {
+		set.delete(value);
+		this.forget(value as object);
 	}
 
 	private profile(callback: () => void, object: object) {
@@ -149,6 +188,8 @@ class LifecycleProvider {
 		if (index !== -1) {
 			this.onInit.remove(index);
 		}
+
+		this.forget(object);
 	}
 
 	public addStart(object: OnStart, context: InterfaceContext) {
@@ -162,6 +203,7 @@ class LifecycleProvider {
 	public removeStart(object: OnStart) {
 		this.onStart.delete(object);
 		this.lateProviders.delete(object);
+		this.forget(object);
 	}
 
 	public postIgnite(module: Module) {
@@ -235,7 +277,10 @@ class LifecycleProvider {
 function createLifecycleSet<T>(get: (provider: LifecycleProvider) => Set<T>): InterfaceConfiguration<T> {
 	return {
 		onAdded: (ctx, value) => get(ctx.sourceModule.resolveDependency<LifecycleProvider>()).add(value),
-		onRemoved: (ctx, value) => get(ctx.sourceModule.resolveDependency<LifecycleProvider>()).delete(value),
+		onRemoved: (ctx, value) => {
+			const provider = ctx.sourceModule.resolveDependency<LifecycleProvider>();
+			provider.removeFrom(get(provider), value);
+		},
 	};
 }
 
@@ -250,6 +295,7 @@ export function createLifecyclePlugin(options: LifecyclePluginOptions = {}): Plu
 		.setDebugName("LifecyclePlugin")
 		.registerProvider<LifecyclePluginOptions>({ type: "function", callback: () => options })
 		.registerClassProvider(LifecycleProvider)
+		.exportProviders<LifecycleProvider>()
 		.build();
 
 	const getProvider = (context: HookContext | InterfaceContext) =>

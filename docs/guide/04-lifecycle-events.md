@@ -142,6 +142,24 @@ Flamework.createModule()
 The project-wide default lives in `flamework.config.json` as `core.profiling`; this option overrides it
 for one module.
 
+The identifier each object is profiled under is looked up once and remembered until the object
+leaves its last lifecycle event, so components that come and go leave nothing behind.
+
+## Asking what is attached
+
+The plugin exports its provider, so a module can be asked what it is currently running:
+
+```ts
+import { LifecycleProvider } from "@flamework/core";
+
+const lifecycle = module.resolveDependency<LifecycleProvider>();
+print(lifecycle.onTick.size(), "objects are ticking");
+```
+
+`onStart`, `onTick`, `onPhysics`, `onRender` and `onExtinguished` are the live sets, one per module.
+They are there to be read: the plugin fills and empties them from the interfaces a class implements,
+and `listen` is how you attach something by hand.
+
 ```ts
 @Injectable()
 class Countdown implements OnTick {

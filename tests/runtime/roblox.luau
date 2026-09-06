@@ -369,6 +369,8 @@ function roblox.create(initialRealm: "Server" | "Client")
 				return instances.newHandle(instance, true)
 			end,
 			streamIn = instances.streamIn,
+			--- Every handler connected to an instance, so a spec can watch a count come back down.
+			connectionCount = instances.connectionCount,
 		})
 
 		context.setGlobal("typeof", robloxTypeof)

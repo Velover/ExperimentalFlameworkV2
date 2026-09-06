@@ -535,6 +535,11 @@ for.
   inside the constructor raises `component '...' is cyclic`.
 - **Extinguishing the module destroys every component** and stops watching the tags. `addComponent`
   on the dead module raises; tagging an instance afterwards does nothing.
+- **A `destroy` that raises does not hold up the teardown.** Whatever Flamework attached for the
+  component -- the attribute-changed connections behind `onAttributeChanged` -- is released either
+  way, so nothing is left firing into a component that has gone. On extinguish the failure is
+  warned about and the remaining components still come down, so one component cannot leave a module
+  half-extinguished. A hand `removeComponent` still re-raises it, since you asked for the removal.
 - **Per-frame events need `LifecyclePlugin` in the same module** as `ComponentPlugin`.
 - **An invalid attribute throws** unless a default is configured.
 - **`onComponentRemoved` runs before `destroy`**, so the component is still usable inside it -- but

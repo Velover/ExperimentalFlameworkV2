@@ -20,7 +20,7 @@ export type { HookCallbacks, HookConfig, HookContext } from "./module/moduleHook
 // Plugins
 export { PluginBuilder } from "./plugin/pluginBuilder";
 export { PluginDefinition } from "./plugin/pluginDefinition";
-export { LifecyclePlugin, createLifecyclePlugin } from "./lifecycle/lifecyclePlugin";
+export { LifecyclePlugin, LifecycleProvider, createLifecyclePlugin } from "./lifecycle/lifecyclePlugin";
 
 export type { LifecyclePluginOptions } from "./lifecycle/lifecyclePlugin";
 export type {

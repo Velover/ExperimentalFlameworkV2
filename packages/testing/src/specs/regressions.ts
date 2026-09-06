@@ -2,6 +2,7 @@ import { BaseComponent, Component, ComponentMetadata, ComponentPlugin, Component
 import {
 	Flamework,
 	LifecyclePlugin,
+	LifecycleProvider,
 	OnInit,
 	OnPhysics,
 	OnStart,
@@ -9,7 +10,7 @@ import {
 	Provider,
 	createLifecyclePlugin,
 } from "@flamework/core";
-import { expectDefined, expectEqual, expectThrows, expectTrue, suite } from "../testkit";
+import { expectDefined, expectEqual, expectNoThrow, expectThrows, expectTrue, suite } from "../testkit";
 
 /**
  * Regressions found in the v1-to-v2 review. Each case names the behaviour it pins down; the
@@ -21,7 +22,30 @@ declare const __harness: {
 	flush: () => void;
 	/** Runs the callback with CollectionService signals deferred, then delivers them in order. */
 	deferTags: (callback: () => void) => void;
+	/** Every handler connected to an instance: a leaked teardown is a count that never comes down. */
+	connectionCount: (instance: Instance) => number;
+	warnings: () => string[];
+	clearWarnings: () => void;
 };
+
+/**
+ * The lookups a leak shows up in. They are private to `Components`, and read here only to count
+ * their entries: a leak is a table that never comes back to the size it started at.
+ */
+interface ComponentsInternals {
+	activeComponents: Map<Instance, Map<unknown, unknown>>;
+	activeInheritedComponents: Map<Instance, Map<string, unknown>>;
+	componentCleanup: Map<object, unknown>;
+}
+
+function internals(components: Components) {
+	return components as unknown as ComponentsInternals;
+}
+
+/** The same, for the identifiers the lifecycle plugin memoises for the profiler. */
+function memoisedIdentifiers(provider: LifecycleProvider) {
+	return (provider as unknown as { identifiers: Map<object, string> }).identifiers;
+}
 
 const log = new Array<string>();
 
@@ -163,6 +187,38 @@ class RgStale extends BaseComponent<{}, Folder> {
 	}
 }
 
+/** Always raises from its constructor: a construction that fails after the lookups were reached. */
+@Component({ tag: "RgFaulty" })
+class RgFaulty extends BaseComponent<{}, Folder> {
+	constructor(metadata: ComponentMetadata) {
+		super(metadata);
+		error("RgFaulty always fails to construct");
+	}
+}
+
+/**
+ * Ticks, so that profiling memoises its identifier. It has a tag of its own because the counting
+ * case has to start from nothing: an instance another case left tagged would tick here too, and its
+ * component -- still attached, and rightly memoised -- would read as an entry that was never let go.
+ */
+@Component({ tag: "RgLeakTicker" })
+class RgLeakTicker extends BaseComponent<{}, Folder> implements OnTick {
+	public static ticks = 0;
+
+	public onTick() {
+		RgLeakTicker.ticks += 1;
+	}
+}
+
+/** Overrides `destroy` for cleanup of its own -- the usual reason to -- and that cleanup raises. */
+@Component({ tag: "RgBadTeardown", defaults: { speed: 1 } })
+class RgBadTeardown extends BaseComponent<{ speed: number }, Folder> {
+	override destroy() {
+		super.destroy();
+		error("RgBadTeardown always fails to clean up");
+	}
+}
+
 function componentPlugin() {
 	return ComponentPlugin.createPlugin()
 		.registerComponent(RgTicker)
@@ -171,6 +227,9 @@ function componentPlugin() {
 		.registerComponent(RgPicky)
 		.registerComponent(RgPlain)
 		.registerComponent(RgStale)
+		.registerComponent(RgFaulty)
+		.registerComponent(RgLeakTicker)
+		.registerComponent(RgBadTeardown)
 		.build();
 }
 
@@ -334,7 +393,8 @@ export = suite("regressions", [
 				.includePlugin(componentPlugin())
 				.ignite();
 
-			collectionService().AddTag(folder("RgTickerTarget"), "RgTicker");
+			const instance = folder("RgTickerTarget");
+			collectionService().AddTag(instance, "RgTicker");
 			__harness.step(0.25);
 
 			expectEqual(log.filter((v) => v === "ctick:0.25").size(), 1, "component ticks in one frame");
@@ -344,6 +404,10 @@ export = suite("regressions", [
 
 			__harness.step(0.25);
 			expectEqual(log.size(), 0, "component ticks after extinguish");
+
+			// Left tagged, it would be picked up and ticked by every module a later case builds.
+			collectionService().RemoveTag(instance, "RgTicker");
+			instance.Destroy();
 		},
 	],
 	[
@@ -465,6 +529,140 @@ export = suite("regressions", [
 			expectEqual(components.getComponent<RgStale>(instance), component, "the same component survives");
 			expectEqual(RgStale.created, 1, "constructions");
 			expectEqual(RgStale.destroyed, 0, "destructions");
+
+			module.extinguish();
+		},
+	],
+	[
+		// Both per-instance lookups were created before the component was, and nothing takes an
+		// empty one away again: `removeComponent` leaves before it reaches the map, and the module
+		// teardown only walks what is in it. So every construction that raised -- a constructor, a
+		// link that cannot resolve, the cyclic check -- left one behind keyed by the instance, a
+		// strong reference that outlived the instance's own `Destroy`.
+		"leaves no per-instance lookup behind when a construction raises",
+		() => {
+			const module = Flamework.createModule().includePlugin(componentPlugin()).ignite();
+			const components = module.resolveDependency<Components>();
+			const { activeComponents, activeInheritedComponents } = internals(components);
+
+			const active = activeComponents.size();
+			const inherited = activeInheritedComponents.size();
+
+			for (let i = 0; i < 200; i++) {
+				const byHand = folder("RgFaultyByHand");
+				expectThrows(() => components.addComponent<RgFaulty>(byHand), "a constructor that raises");
+				byHand.Destroy();
+
+				const byTag = folder("RgFaultyByTag");
+				expectThrows(() => collectionService().AddTag(byTag, "RgFaulty"), "a tagged constructor that raises");
+				collectionService().RemoveTag(byTag, "RgFaulty");
+				byTag.Destroy();
+			}
+
+			expectEqual(activeComponents.size(), active, "component lookups after 400 failed constructions");
+			expectEqual(activeInheritedComponents.size(), inherited, "inherited lookups after the same");
+
+			module.extinguish();
+		},
+	],
+	[
+		// The maid holding a component's attribute connections was released after `destroy`, inside
+		// the same `try`. A `destroy` overridden for a component's own cleanup -- the usual reason
+		// to override it -- that raised skipped the release, leaving one cleanup entry per removal
+		// and one live `GetAttributeChangedSignal` connection per tracked attribute, firing into a
+		// component nothing else held.
+		"releases a component's maid and attribute connections when its teardown raises",
+		() => {
+			const module = Flamework.createModule().includePlugin(componentPlugin()).ignite();
+			const components = module.resolveDependency<Components>();
+			const { componentCleanup } = internals(components);
+
+			const instance = folder("RgBadTeardownTarget");
+			const cleanup = componentCleanup.size();
+			const connections = __harness.connectionCount(instance);
+
+			for (let i = 0; i < 200; i++) {
+				components.addComponent<RgBadTeardown>(instance);
+				expectThrows(() => components.removeComponent<RgBadTeardown>(instance), "a teardown that raises");
+			}
+
+			expectEqual(componentCleanup.size(), cleanup, "cleanup entries after 200 failed teardowns");
+			expectEqual(__harness.connectionCount(instance), connections, "connections left on the instance");
+
+			instance.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		// The same fault, one level up: the teardown loop called `removeComponent` bare, so one
+		// component's raise propagated out of `extinguish` before the trackers were released,
+		// leaving their tree connections and warning timers attached to a module that says it is
+		// gone.
+		"extinguishes the rest of the module when one component's teardown raises",
+		() => {
+			__harness.clearWarnings();
+
+			const instance = folder("RgBadTeardownExtinguish");
+			const connections = __harness.connectionCount(instance);
+
+			const module = Flamework.createModule().includePlugin(componentPlugin()).ignite();
+			const components = module.resolveDependency<Components>();
+
+			collectionService().AddTag(instance, "RgBadTeardown");
+			expectDefined(components.getComponent<RgBadTeardown>(instance), "component before extinguish");
+
+			expectNoThrow(() => module.extinguish(), "extinguishing past a teardown that raises");
+			expectTrue(
+				__harness.warnings().some((line) => line.find("RgBadTeardown")[0] !== undefined),
+				`the failure is reported: ${__harness.warnings().join(" | ")}`,
+			);
+			expectEqual(__harness.connectionCount(instance), connections, "connections left on the instance");
+
+			collectionService().RemoveTag(instance, "RgBadTeardown");
+			instance.Destroy();
+		},
+	],
+	[
+		// The lifecycle plugin memoises each object's identifier for the profiler, keyed by the
+		// object itself, and nothing dropped the entry when the object detached. With profiling on
+		// -- the default in Studio, and whatever `core.profiling` says in production -- every
+		// component that ever ticked stayed held, and with it its instance and its attributes.
+		"forgets a profiled object's identifier once it leaves every lifecycle event",
+		() => {
+			RgLeakTicker.ticks = 0;
+
+			const module = Flamework.createModule()
+				.includePlugin(createLifecyclePlugin({ profiling: true }))
+				.includePlugin(componentPlugin())
+				.ignite();
+
+			// Anything still attached is memoised on the first frame, and rightly stays; the
+			// baseline is taken after that, so it counts only what this case attaches and detaches.
+			__harness.step(0.1);
+			RgLeakTicker.ticks = 0;
+
+			const identifiers = memoisedIdentifiers(module.resolveDependency<LifecycleProvider>());
+			const memoised = identifiers.size();
+
+			for (let i = 0; i < 200; i++) {
+				const instance = folder("RgLeakTickerTarget");
+				collectionService().AddTag(instance, "RgLeakTicker");
+				__harness.step(0.1);
+				collectionService().RemoveTag(instance, "RgLeakTicker");
+				instance.Destroy();
+			}
+
+			expectEqual(RgLeakTicker.ticks, 200, "one tick per round, so every identifier was looked up");
+
+			// Named rather than counted, so a failure says which listener was never let go of.
+			const held = new Set<string>();
+			for (const [, identifier] of identifiers) held.add(identifier);
+
+			expectEqual(
+				identifiers.size(),
+				memoised,
+				`memoised identifiers after 200 tick-and-remove rounds (held: ${[...held].join(", ")})`,
+			);
 
 			module.extinguish();
 		},

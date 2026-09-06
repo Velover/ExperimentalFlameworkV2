@@ -98,6 +98,15 @@ function Signal:DisconnectAll()
 	table.clear(self._connectionObjects)
 end
 
+--- How many handlers are connected right now, which is what a leak test counts.
+function signals.count(signal: Signal): number
+	local total = 0
+	for _ in signal._connections do
+		total += 1
+	end
+	return total
+end
+
 function signals.create(): Signal
 	return setmetatable({ _connections = {}, _connectionObjects = {}, _nextId = 1 }, Signal)
 end

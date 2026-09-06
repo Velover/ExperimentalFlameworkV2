@@ -310,9 +310,17 @@ export class Components {
 		}
 		this.connections.clear();
 
+		// One component's teardown must not leave the rest of the module standing. A `destroy` that
+		// raises is reported and the next component comes down anyway, so the trackers below are
+		// released either way -- otherwise the raise left every tracker's tree connections and
+		// warning timers attached to a module that says it is gone.
 		for (const [instance, active] of [...this.activeComponents]) {
 			for (const [ctor] of [...active]) {
-				this.removeComponent(instance, ctor as Constructor<BaseComponent>);
+				const [success, err] = pcall(() => this.removeComponent(instance, ctor as Constructor<BaseComponent>));
+
+				if (!success) {
+					warn(`[Flamework] Failed to remove '${ctor}' from ${instance.GetFullName()}: ${tostring(err)}`);
+				}
 			}
 		}
 
@@ -1381,13 +1389,7 @@ export class Components {
 			}
 		}
 
-		let activeComponents = this.activeComponents.get(instance);
-		if (!activeComponents) this.activeComponents.set(instance, (activeComponents = new Map()));
-
-		let inheritedComponents = this.activeInheritedComponents.get(instance);
-		if (!inheritedComponents) this.activeInheritedComponents.set(instance, (inheritedComponents = new Map()));
-
-		const existingComponent = activeComponents.get(component);
+		const existingComponent = this.activeComponents.get(instance)?.get(component);
 		if (existingComponent !== undefined) return existingComponent;
 
 		let constructingSet = this.constructing.get(instance);
@@ -1424,6 +1426,18 @@ export class Components {
 				this.constructing.delete(instance);
 			}
 		}
+
+		// The per-instance lookups are created here rather than before the construction: nothing
+		// takes an empty one away again -- `removeComponent` leaves before it looks at the map, and
+		// `stopCollectionService` only walks what is in it -- so a construction that raises, from a
+		// constructor or a link or the cyclic check, would leave one keyed by the instance for as
+		// long as the module lives, holding the instance past its own `Destroy`. A nested
+		// construction may have made them in the meantime, so they are looked up again here.
+		let activeComponents = this.activeComponents.get(instance);
+		if (!activeComponents) this.activeComponents.set(instance, (activeComponents = new Map()));
+
+		let inheritedComponents = this.activeInheritedComponents.get(instance);
+		if (!inheritedComponents) this.activeInheritedComponents.set(instance, (inheritedComponents = new Map()));
 
 		activeComponents.set(component, componentInstance);
 
@@ -1500,18 +1514,24 @@ export class Components {
 			this.module.removeClassInstance(existingComponent);
 
 			existingComponent.destroy();
-
-			const maid = this.componentCleanup.get(existingComponent);
-			this.componentCleanup.delete(existingComponent);
-
-			if (maid !== undefined) {
-				maid.Destroy();
-			}
 		} finally {
 			removingSet.delete(component);
 
 			if (removingSet.isEmpty()) {
 				this.removing.delete(instance);
+			}
+
+			// The maid goes whatever the teardown above did, since it holds what Flamework attached
+			// rather than what the component did: an attribute-changed connection per tracked
+			// attribute, on an instance that may well outlive the component. A `destroy` overridden
+			// for a component's own cleanup -- the usual reason to override it -- that raises used
+			// to leave those connections live, still firing into a component nothing else holds,
+			// and the entry here holding the component for as long as the module lived.
+			const maid = this.componentCleanup.get(existingComponent);
+			this.componentCleanup.delete(existingComponent);
+
+			if (maid !== undefined) {
+				maid.Destroy();
 			}
 		}
 	}

@@ -623,6 +623,28 @@ function instances.clearSent(remote: Instance)
 	table.clear(rawget(remote, "_sent") or {})
 end
 
+--[[
+	How many handlers are connected to an instance, across its own signals and the per-attribute
+	ones.
+
+	Roblox has no way to ask this, but a connection nothing disconnects is exactly how a leaked
+	teardown shows itself: the count for a surviving instance climbs with every round and never
+	comes back down.
+]]
+function instances.connectionCount(instance: Instance): number
+	local total = 0
+
+	for _, signal in rawget(instance, "_signals") do
+		total += signals.count(signal)
+	end
+
+	for _, signal in rawget(instance, "_attributeSignals") do
+		total += signals.count(signal)
+	end
+
+	return total
+end
+
 --- Whether a value is one of this harness's Instances.
 function instances.is(value: any): boolean
 	return type(value) == "table" and getmetatable(value) == instanceMeta
