@@ -396,6 +396,14 @@ replication works.
 `main.luau` runs the single-realm suites once per realm in separate processes, because a graph
 caches realm-dependent decisions at require time.
 
+**Clean up a tag that can never qualify.** Specs leave their instances in the world on purpose, which
+is harmless for anything that qualifies. An instance tagged for a component it can never satisfy is
+not: every later spec builds a module that rediscovers it, arms a warning timer for it and cancels
+that timer on `extinguish`. Lune holds a cancelled `task.delay` until its deadline, and enough of
+them stall the process long after the last spec has passed -- the suite prints its summary and then
+hangs, with no failure to point at. A spec that tags something which never qualifies should destroy
+it before it ends.
+
 ## Rough edges
 
 - roblox-ts 3.0.0 bundles TypeScript 5.5.3 while the transformer is authored against 5.9.3, so every
