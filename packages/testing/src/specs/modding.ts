@@ -13,8 +13,9 @@ function callsite(
 	width?: Modding.Caller.Width,
 	text?: Modding.Caller.Text,
 	uuid?: Modding.Caller.Uuid,
+	luauLine?: Modding.Caller.LuauLine,
 ) {
-	return { line: line!, character: character!, width: width!, text: text!, uuid: uuid! };
+	return { line: line!, character: character!, width: width!, text: text!, uuid: uuid!, luauLine: luauLine! };
 }
 
 /**
@@ -24,6 +25,15 @@ function callsite(
  * @metadata macro
  */
 function constant(value?: Modding.Caller.Constant<{ marker: true }>) {
+	return value!;
+}
+
+/**
+ * The documented form wraps the metadata in `Emit` as well; it has to hoist just the same.
+ *
+ * @metadata macro
+ */
+function constantEmit(value?: Modding.Caller.Constant<Modding.Emit<{ marker: true }>>) {
 	return value!;
 }
 
@@ -101,6 +111,14 @@ export = suite("modding", [
 			expectTrue(here.line > 0, "line is one-based");
 			expectEqual(here.text, "callsite()", "source text");
 			expectEqual(here.width, here.text.size(), "expression width");
+
+			// The Luau line is read when the call runs, so it is what `debug.info` reports on that line.
+			expectTrue(typeIs(here.luauLine, "number"), "luau line is a number");
+			expectEqual(
+				callsite().luauLine,
+				debug.info(1, "l")[0],
+				"luau line is the line of the call in the emitted script",
+			);
 		},
 	],
 	[
@@ -128,6 +146,15 @@ export = suite("modding", [
 
 			expectTrue(invoke() === invoke(), "the same callsite shares one table");
 			expectTrue(invoke() !== constant(), "a different callsite gets its own table");
+
+			// Regression: with `Emit` inside, the `Emit` marker was found first and the `Constant` was
+			// dropped, so every call got a fresh table.
+			function invokeEmit() {
+				return constantEmit();
+			}
+
+			expectTrue(invokeEmit() === invokeEmit(), "the same callsite shares one table through Emit");
+			expectTrue(invokeEmit().marker, "the shared table carries the emitted value");
 		},
 	],
 	[

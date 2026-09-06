@@ -109,3 +109,25 @@ describe("plugin host", () => {
 		expect(second?.getRegisteredMacroTypes()).toContain("fieldInfo");
 	});
 });
+
+describe("callsite luau line", () => {
+	test("reads the emitted line at the callsite instead of baking in the TypeScript one", () => {
+		// `debug.info(1, "l")` in the caller's function is the line of the call in the emitted script,
+		// which is what the console and tracebacks report. Indexing the tuple's first value truncates it
+		// to one result.
+		expect(emitted("callsites")).toMatch(/emittedLine = luauLine\(\(debug\.info\(1, "l"\)\)\)/);
+	});
+});
+
+describe("constant callsite metadata", () => {
+	test("hoists Constant metadata to the file root whether or not it is wrapped in Emit", () => {
+		const source = normalize(emitted("constant"));
+
+		// Regression: `Constant<Emit<T>>` has both markers and the `Emit` one was found first, so the
+		// documented form was rebuilt on every call instead of being shared.
+		expect(source).toMatch(/local withEmit_\d+ = \{ marker = true, \}/);
+		expect(source).toMatch(/withEmit\(withEmit_\d+\)/);
+		expect(source).toMatch(/local plain_\d+ = \{ marker = true, \}/);
+		expect(source).toMatch(/plain\(plain_\d+\)/);
+	});
+});

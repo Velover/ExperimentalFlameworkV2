@@ -57,9 +57,18 @@ export namespace Modding {
 		};
 
 		/**
-		 * The starting line of the expression, starting at 1.
+		 * The starting line of the expression in the TypeScript source, starting at 1.
 		 */
 		export type Line = CallerHelper<number, "line">;
+
+		/**
+		 * The line of the call in the emitted Luau script, as the console and tracebacks report it.
+		 *
+		 * Unlike the other callsite metadata this is not a constant: the emitted line only exists once
+		 * the script runs, so it compiles to `debug.info(1, "l")` at the callsite and cannot be shared
+		 * through `Constant`.
+		 */
+		export type LuauLine = CallerHelper<number, "luauLine">;
 
 		/**
 		 * The char at the start of the expression relative to the starting line, starting at 1.
