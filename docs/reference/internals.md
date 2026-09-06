@@ -396,6 +396,15 @@ replication works.
 `main.luau` runs the single-realm suites once per realm in separate processes, because a graph
 caches realm-dependent decisions at require time.
 
+**`@rbxts/signal` is deferred in the engine and synchronous here.** The library wraps a
+BindableEvent, so every dispatch through it -- `onComponentAdded`, `onComponentRemoved`,
+`onAttributeChanged` -- arrives at the end of the resumption in a real place, and inline in this
+harness. Anything a handler reads about the state that fired it may therefore have moved on by the
+time the engine delivers it, and no Lune spec can catch that: a link telling its own component's
+removal from a subclass's had to identify the component by its class rather than by looking it up,
+because the lookup only still finds it here. Assertions that need the engine's ordering belong in
+the [Studio battletest](../testing/studio.md).
+
 **Clean up a tag that can never qualify.** Specs leave their instances in the world on purpose, which
 is harmless for anything that qualifies. An instance tagged for a component it can never satisfy is
 not: every later spec builds a module that rediscovers it, arms a warning timer for it and cancels

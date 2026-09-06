@@ -528,15 +528,17 @@ export class Components {
 				}),
 			);
 
-			// Removal is announced before the component leaves the active map, so this cannot go
-			// back through `refresh`: it would still find the component that is on its way out. It
-			// still being there is what lets it be compared, which is what tells this link's
-			// component leaving from another that merely shares an id with it -- a subclass
-			// announces its removal under every id it inherits, its parent class among them.
+			// A component announces its removal under every id it inherits, so a subclass leaving
+			// reaches the signal its parent class is named by; the class of the component that
+			// actually left is what tells the two apart. It has to come from the value itself,
+			// because these signals are BindableEvents: the engine defers them, so by the time this
+			// arrives the component is already out of the active map and cannot be looked up. That
+			// deferral is also why this cannot go back through `refresh`, which would say the link
+			// is still met whenever the tag that would rebuild it is still there.
 			targetMaid.GiveTask(
-				removedSignal.Connect((removed: unknown, changed) => {
+				removedSignal.Connect((removed: object, changed) => {
 					if (changed !== target) return;
-					if (this.activeComponents.get(target)?.get(linkedComponent) !== removed) return;
+					if (getmetatable(removed) !== linkedComponent) return;
 
 					update(criterion, false);
 				}),

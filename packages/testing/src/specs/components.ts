@@ -166,6 +166,10 @@ class ChoosyOwner extends BaseComponent<{}, Folder & { Core: Choosy }> {}
 @Component({ tag: "LooseOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
 class LooseOwner extends BaseComponent<{}, Folder & { Core?: Handler }> {}
 
+/** A required child link alongside an optional one, which is what churns the tree the most. */
+@Component({ tag: "PairOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
+class PairOwner extends BaseComponent<{}, Folder & { Core: Handler; Aux?: Handler }> {}
+
 /** Warns almost at once, so a spec can wait for the warning rather than the default five seconds. */
 @Component({ tag: "Impatient", warningTimeout: 0.1 })
 class Impatient extends BaseComponent<{}, Part> {}
@@ -273,6 +277,7 @@ function createComponentModule() {
 		.registerComponent(Choosy)
 		.registerComponent(ChoosyOwner)
 		.registerComponent(LooseOwner)
+		.registerComponent(PairOwner)
 		.registerComponent(Impatient)
 		.registerComponent(ImpatientOwner)
 		.build();
@@ -331,6 +336,43 @@ function collectionService() {
 }
 
 export = suite("components", [
+	[
+		"keeps a required link watching after an optional one has come and gone",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("ProbeSeq");
+			const core = addCore(instance);
+			collectionService().AddTag(core, "Handler");
+			collectionService().AddTag(instance, "PairOwner");
+			expectDefined(components.getComponent<PairOwner>(instance), "component");
+
+			// The optional child arrives, then leaves, each rebuilding the component.
+			const aux = new Instance("Folder");
+			aux.Name = "Aux";
+			collectionService().AddTag(aux, "Handler");
+			aux.Parent = instance;
+			__harness.flush();
+			expectDefined(components.getComponent<PairOwner>(instance), "component with the optional child");
+
+			aux.Parent = folder("ProbeSeqElsewhere");
+			__harness.flush();
+			expectDefined(components.getComponent<PairOwner>(instance), "component after the optional child left");
+
+			// Now the required link's component goes: this has to take the owner down.
+			collectionService().RemoveTag(core, "Handler");
+			__harness.flush();
+
+			expectEqual(
+				components.getComponent<PairOwner>(instance),
+				undefined,
+				"component after the required link's component went",
+			);
+
+			module.extinguish();
+		},
+	],
 	[
 		"keeps a component when a plain attribute is changed to a value its guard rejects",
 		() => {
