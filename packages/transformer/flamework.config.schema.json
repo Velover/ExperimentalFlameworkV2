@@ -105,6 +105,12 @@
 					"description": "Seconds before a component that never qualifies produces a warning; 0 disables it. Components that set their own warningTimeout keep it.",
 					"default": 5
 				},
+				"attributeWarningTimeout": {
+					"type": "number",
+					"minimum": 0,
+					"description": "Seconds before an instance-valued attribute that has not streamed in produces a warning; 0 disables it. Defaults to warningTimeout.",
+					"default": 5
+				},
 				"streamingMode": {
 					"type": "string",
 					"enum": ["Disabled", "Watching", "Contextual"],

@@ -24,6 +24,21 @@ export interface Criteria {
 	typeGuardPollAtomic?: boolean;
 	dependencies?: ComponentTracker[];
 	warningTimeout?: number;
+
+	/**
+	 * Whether the component's links are all resolved on this instance, right now. Used for
+	 * instances that are not tracked, where there is nothing to wait on.
+	 */
+	checkLinks?: (instance: Instance) => boolean;
+
+	/**
+	 * Watches the component's links on this instance, reporting each one as it is met or lost, and
+	 * returns the cleanup for those subscriptions.
+	 *
+	 * Links live outside the instance -- another instance's component, or one an attribute points
+	 * at -- so unlike the other criteria they cannot be recomputed from the instance alone.
+	 */
+	watchLinks?: (instance: Instance, update: (criterion: string, isMet: boolean) => void) => () => void;
 }
 
 export class ComponentTracker {
@@ -67,7 +82,7 @@ export class ComponentTracker {
 		}
 	}
 
-	private setupTracker(instance: Instance, tracker: InstanceTracker) {
+	private setupTracker(instance: Instance, tracker: InstanceTracker, observeOnly = false) {
 		const { typeGuard, typeGuardPoll, typeGuardPollAtomic, dependencies } = this.criteria;
 
 		const isAtomicModel = instance.IsA("Model") && ATOMIC_MODES.has(instance.ModelStreamingMode);
@@ -152,7 +167,22 @@ export class ComponentTracker {
 			}
 		}
 
-		if (!tracker.isQualified && this.criteria.warningTimeout !== 0) {
+		const { watchLinks } = this.criteria;
+		if (watchLinks) {
+			tracker.cleanup.add(
+				watchLinks(instance, (criterion, isMet) => {
+					if (isMet) {
+						tracker.unmetCriteria.delete(criterion);
+					} else {
+						tracker.unmetCriteria.add(criterion);
+					}
+
+					this.updateListeners(instance, tracker);
+				}),
+			);
+		}
+
+		if (!tracker.isQualified && !observeOnly && this.criteria.warningTimeout !== 0) {
 			tracker.timeoutWarningThread = task.delay(this.criteria.warningTimeout ?? 5, () => {
 				const reasons = new Array<string>();
 
@@ -179,6 +209,11 @@ export class ComponentTracker {
 
 	private testInstance(instance: Instance, tracker?: InstanceTracker) {
 		let result = true;
+
+		if (!tracker && this.criteria.checkLinks && !this.criteria.checkLinks(instance)) {
+			return false;
+		}
+
 		if (this.criteria.dependencies) {
 			for (const dependency of this.criteria.dependencies) {
 				if (!dependency.checkInstance(instance)) {
@@ -251,12 +286,19 @@ export class ComponentTracker {
 		return this.instances.has(instance);
 	}
 
-	public trackInstance(instance: Instance, listener: Listener) {
+	/**
+	 * Starts tracking an instance, calling `listener` whenever it starts or stops qualifying.
+	 *
+	 * `observeOnly` is for a listener that is watching rather than waiting -- a link, whose own
+	 * component already reports the wait. Without it the instance would be reported as one this
+	 * component is being kept from, which is the wrong way round and says it twice.
+	 */
+	public trackInstance(instance: Instance, listener: Listener, observeOnly = false) {
 		const isNewInstance = !this.instances.has(instance);
 		const tracker = this.getInstanceTracker(instance);
 		if (isNewInstance) {
 			this.testInstance(instance, tracker);
-			this.setupTracker(instance, tracker);
+			this.setupTracker(instance, tracker, observeOnly);
 		}
 
 		tracker.listeners.add(listener);

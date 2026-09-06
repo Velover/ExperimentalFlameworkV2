@@ -1,10 +1,35 @@
 import ts from "typescript";
 import { TransformState } from "../../classes/transformState";
-import { buildGuardFromType, buildGuardsFromType } from "../../util/functions/buildGuardFromType";
+import { buildGuardFromType, buildGuardsFromType, isInstanceType } from "../../util/functions/buildGuardFromType";
 import { f } from "../../util/factory";
 import { getSuperClasses } from "../../util/functions/getSuperClasses";
 import { NodeMetadata } from "../../classes/nodeMetadata";
 import { withDiagnosticContext } from "../../util/diagnosticsUtils";
+import { getInstanceTypeFromType } from "../../util/functions/getInstanceTypeFromType";
+import { Diagnostics } from "../../classes/diagnostics";
+import { getTypeUid } from "../../util/uid";
+
+/**
+ * The property every component carries, which is how a component type is told apart from the
+ * Instance types around it.
+ */
+const COMPONENT_BRAND = "_flamework_link_instance";
+
+/**
+ * Reads one of `BaseComponent`'s type parameters through the property that carries it, so that a
+ * subclass gets the instantiated type and an unrelated class gets nothing.
+ */
+function getMarkedType(state: TransformState, node: ts.ClassDeclaration, property: string, marker: string) {
+	const type = state.typeChecker.getTypeAtLocation(node);
+
+	const symbol = type.getProperty(property);
+	if (!symbol) return;
+
+	const metadata = NodeMetadata.fromSymbol(state, symbol);
+	if (!metadata || !metadata.isRequested(marker)) return;
+
+	return state.typeChecker.getTypeOfSymbolAtLocation(symbol, node);
+}
 
 function calculateOmittedGuards(
 	state: TransformState,
@@ -21,14 +46,14 @@ function calculateOmittedGuards(
 	}
 
 	const type = state.typeChecker.getTypeAtLocation(classDeclaration);
-	const property = type.getProperty("attributes");
+	const property = type.getProperty("_flamework_attribute_guards");
 	if (!property) return omittedNames;
 
 	const superClass = getSuperClasses(state.typeChecker, classDeclaration)[0];
 	if (!superClass) return omittedNames;
 
 	const superType = state.typeChecker.getTypeAtLocation(superClass);
-	const superProperty = superType.getProperty("attributes");
+	const superProperty = superType.getProperty("_flamework_attribute_guards");
 	if (!superProperty) return omittedNames;
 
 	const attributes = state.typeChecker.getTypeOfSymbolAtLocation(property, classDeclaration);
@@ -50,15 +75,14 @@ function updateAttributeGuards(
 	node: ts.ClassDeclaration,
 	properties: ts.ObjectLiteralElementLike[],
 ) {
-	const type = state.typeChecker.getTypeAtLocation(node);
-
-	const property = type.getProperty("attributes");
-	if (!property) return;
-
-	const attributesMeta = NodeMetadata.fromSymbol(state, property);
-	if (!attributesMeta || !attributesMeta.isRequested("intrinsic-component-attributes")) return;
-
-	const attributesType = state.typeChecker.getTypeOfSymbolAtLocation(property, node);
+	// The guards come from the written shape of the attributes rather than the declared one: an
+	// instance-valued attribute is stored as an `InstanceHandle`, so that is what is checked.
+	const attributesType = getMarkedType(
+		state,
+		node,
+		"_flamework_attribute_guards",
+		"intrinsic-component-attribute-guards",
+	);
 	if (!attributesType) return;
 
 	const attributes = properties.find((x) => x.name && "text" in x.name && x.name.text === "attributes");
@@ -127,11 +151,171 @@ function updateInstanceGuard(
 	return properties;
 }
 
+/**
+ * The instance a component type is attached to, or nothing when the type is not a component. This
+ * is the resolved tree rather than the declared one, so a linked component's own children are part
+ * of the guard.
+ */
+function getComponentInstanceType(state: TransformState, type: ts.Type, node: ts.Node) {
+	if (!type.getProperty(COMPONENT_BRAND)) return;
+
+	const instance = type.getProperty("instance");
+	if (!instance) return;
+
+	return state.typeChecker.getTypeOfSymbolAtLocation(instance, node);
+}
+
+/**
+ * The members of an instance type that are not part of the Roblox class itself, which is how the
+ * guard builder reads an intersection: as the children the instance must have.
+ */
+function getDeclaredChildren(state: TransformState, node: ts.ClassDeclaration, type: ts.Type) {
+	const instanceType = getInstanceTypeFromType(node.getSourceFile(), type);
+	const children = new Array<[ts.Symbol, ts.Type]>();
+
+	for (const property of type.getProperties()) {
+		if (instanceType.getProperty(property.name)) continue;
+
+		const propertyType = state.typeChecker.getTypeOfSymbolAtLocation(property, node);
+		if (propertyType) children.push([property, propertyType]);
+	}
+
+	return children;
+}
+
+function isOptionalMember(state: TransformState, symbol: ts.Symbol, type: ts.Type) {
+	return (symbol.flags & ts.SymbolFlags.Optional) !== 0 || state.typeChecker.getNonNullableType(type) !== type;
+}
+
+function createLink(
+	state: TransformState,
+	node: ts.ClassDeclaration,
+	kind: "attribute" | "child",
+	name: string,
+	optional: boolean,
+	componentType?: ts.Type,
+	guardType?: ts.Type,
+) {
+	const fields: ts.ObjectLiteralElementLike[] = [
+		f.propertyAssignmentDeclaration("kind", kind),
+		f.propertyAssignmentDeclaration("name", name),
+		f.propertyAssignmentDeclaration("optional", optional),
+	];
+
+	if (guardType) {
+		fields.push(
+			f.propertyAssignmentDeclaration(
+				"guard",
+				withDiagnosticContext(
+					node.name ?? node,
+					() => `Failed to generate a guard for the '${name}' link`,
+					() => buildGuardFromType(state, node.name ?? node, guardType),
+				),
+			),
+		);
+	}
+
+	if (componentType) {
+		fields.push(f.propertyAssignmentDeclaration("component", getTypeUid(state, componentType, node.name ?? node)));
+	}
+
+	return f.object(fields, false);
+}
+
+/**
+ * Discovers the components and instances a component links to, from the attributes it declares and
+ * from its instance tree. `Components` waits for each one and keeps it resolved.
+ */
+function updateLinks(state: TransformState, node: ts.ClassDeclaration, properties: ts.ObjectLiteralElementLike[]) {
+	const attributesType = getMarkedType(
+		state,
+		node,
+		"_flamework_link_attributes",
+		"intrinsic-component-attribute-links",
+	);
+	const instanceType = getMarkedType(state, node, COMPONENT_BRAND, "intrinsic-component-instance-links");
+	if (!attributesType && !instanceType) return;
+
+	const links = new Array<ts.Expression>();
+
+	if (attributesType) {
+		for (const property of attributesType.getProperties()) {
+			const declaredType = state.typeChecker.getTypeOfSymbolAtLocation(property, node);
+			const targetType = state.typeChecker.getNonNullableType(declaredType);
+			const optional = isOptionalMember(state, property, declaredType);
+
+			const componentInstance = getComponentInstanceType(state, targetType, node);
+			if (componentInstance) {
+				links.push(
+					createLink(state, node, "attribute", property.name, optional, targetType, componentInstance),
+				);
+			} else if (isInstanceType(targetType)) {
+				links.push(createLink(state, node, "attribute", property.name, optional, undefined, targetType));
+			}
+		}
+	}
+
+	if (instanceType) {
+		for (const [property, declaredType] of getDeclaredChildren(state, node, instanceType)) {
+			const targetType = state.typeChecker.getNonNullableType(declaredType);
+
+			if (getComponentInstanceType(state, targetType, node)) {
+				// A child's own guard is part of the component's instance guard, so the link only
+				// has to name the component that must exist on it.
+				links.push(
+					createLink(
+						state,
+						node,
+						"child",
+						property.name,
+						isOptionalMember(state, property, declaredType),
+						targetType,
+					),
+				);
+			} else if (isInstanceType(targetType)) {
+				assertNoNestedComponents(state, node, targetType, property.name);
+			}
+		}
+	}
+
+	if (links.length !== 0) {
+		properties.push(f.propertyAssignmentDeclaration("links", f.array(links)));
+	}
+
+	return properties;
+}
+
+/**
+ * A component deeper in the tree cannot be linked: `this.instance` only resolves components it
+ * holds directly, and the guard builder would meet the class itself. Saying so here beats the
+ * "Flamework does not support generating guards for classes" that would follow.
+ */
+function assertNoNestedComponents(state: TransformState, node: ts.ClassDeclaration, type: ts.Type, path: string): void {
+	for (const [property, declaredType] of getDeclaredChildren(state, node, type)) {
+		const targetType = state.typeChecker.getNonNullableType(declaredType);
+
+		if (targetType.getProperty(COMPONENT_BRAND)) {
+			Diagnostics.error(
+				node.name ?? node,
+				`Component '${state.typeChecker.typeToString(targetType)}' is linked at '${path}.${property.name}', which is not a direct child of this component.`,
+				"Only a direct child of the instance tree can name a component. Declare it on the component attached to that child, or look it up with getComponent.",
+			);
+		}
+
+		if (isInstanceType(targetType)) {
+			assertNoNestedComponents(state, node, targetType, `${path}.${property.name}`);
+		}
+	}
+}
+
 export function updateComponentConfig(
 	state: TransformState,
 	node: ts.ClassDeclaration,
 	properties: ts.ObjectLiteralElementLike[],
 ): ts.ObjectLiteralElementLike[] {
+	// Links first: they are what reports a component the guards cannot be generated for, and that
+	// reads far better than the "cannot generate a guard for a class" the guards would raise.
+	properties = updateLinks(state, node, properties) ?? properties;
 	properties = updateAttributeGuards(state, node, properties) ?? properties;
 	properties = updateInstanceGuard(state, node, properties) ?? properties;
 	return properties;

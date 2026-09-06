@@ -174,6 +174,14 @@ describe("networking serialization", () => {
 		expect(source()).toMatch(/outgoingUnreliable = \{\s*tick = true/);
 	});
 
+	test("writes a boolean from the value itself, so a literal argument still compiles", () => {
+		// Regression: this was `value === true`, which TypeScript rejects as a pointless comparison
+		// once the packed argument is a literal -- the shape a call site produces.
+		expect(source()).toMatch(/buffer\.writeu8\(buf\w*, 0, if false then 1 else 0\)/);
+		expect(source()).toMatch(/buffer\.writeu8\(buf\w*, 0, if on then 1 else 0\)/);
+		expect(source()).not.toMatch(/== true then 1 else 0/);
+	});
+
 	test("lays fixed-size argument lists out at constant offsets", () => {
 		expect(source()).toMatch(
 			/Vector3\.new\(buffer\.readf32\(buf\w*, 8\), buffer\.readf32\(buf\w*, 12\), buffer\.readf32\(buf\w*, 16\)\)/,

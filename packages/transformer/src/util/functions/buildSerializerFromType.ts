@@ -1902,14 +1902,11 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				writeVarint(ctx, f.as(value, T.number()));
 				return;
 			case "boolean":
+				// The value is the condition rather than `value === true`: an argument packed at its
+				// call site can be a literal, and `false === true` is a comparison TypeScript rejects
+				// when it checks the emitted code.
 				ctx.out.push(
-					f.statement(
-						bufferCall("writeu8", [
-							ctx.buf,
-							at(ctx),
-							conditional(equals(value, f.bool(true)), num(1), num(0)),
-						]),
-					),
+					f.statement(bufferCall("writeu8", [ctx.buf, at(ctx), conditional(value, num(1), num(0))])),
 				);
 				ctx.cursor.offset += 1;
 				return;

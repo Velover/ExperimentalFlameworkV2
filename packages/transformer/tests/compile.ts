@@ -62,6 +62,30 @@ export function compileFixtureFresh(): CompileResult {
 	return compileFixture();
 }
 
+/**
+ * Compiles the fixture with one extra source file and reports what rbxtsc said about it.
+ *
+ * A file that must not compile cannot live in the fixture itself, which every other test needs to
+ * build. The cached result is left alone, so this does not disturb the emit they read.
+ */
+export function compileProbe(name: string, source: string): CompileResult {
+	const file = path.join(FIXTURE, "src", `${name}.ts`);
+	fs.writeFileSync(file, source);
+
+	try {
+		const result = spawnSync("node", [RBXTSC], { cwd: FIXTURE, encoding: "utf8" });
+
+		return {
+			files: new Map(),
+			output: `${result.stdout ?? ""}${result.stderr ?? ""}`,
+			status: result.status ?? 1,
+		};
+	} finally {
+		fs.rmSync(file, { force: true });
+		fs.rmSync(path.join(FIXTURE, "out", `${name}.luau`), { force: true });
+	}
+}
+
 export function emitted(name: string): string {
 	const file = compileFixture().files.get(name);
 	if (file === undefined) {

@@ -23,6 +23,12 @@ const events = new Array<string>();
 declare const __harness: {
 	/** Component streaming reacts to descendant changes on a deferred task. */
 	flush: () => void;
+
+	/** An `InstanceHandle` for an instance that has not streamed in, so `Get` is empty. */
+	pendingHandle: (instance: Instance) => InstanceHandle;
+
+	/** Streams in the instance a pending handle names, resuming whatever was waiting on it. */
+	streamIn: (handle: InstanceHandle) => void;
 };
 
 interface TaggedAttributes {
@@ -95,6 +101,58 @@ class Car extends BaseComponent<{}, Folder> {
 	}
 }
 
+/** Attached to the instances the linking components below name. */
+@Component({ tag: "Handler" })
+class Handler extends BaseComponent<{}, Folder> {}
+
+/**
+ * Names a component on a child of its own instance tree.
+ *
+ * Watching, so the child arriving late re-runs the instance guard on both realms: contextual
+ * streaming does not watch on a server, and the tree filling in is the case being tested.
+ */
+@Component({ tag: "Owner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
+class Owner extends BaseComponent<{}, Folder & { Core: Handler }> {}
+
+/** The instance a missing link attribute falls back to. */
+const DEFAULT_LINK_TARGET = new Instance("Folder");
+DEFAULT_LINK_TARGET.Name = "DefaultLinkTarget";
+
+/** A link attribute with a default, which stands in when the attribute was never written. */
+@Component({ tag: "PointerDefault", warningTimeout: 0, defaults: { Target: DEFAULT_LINK_TARGET } })
+class PointerDefault extends BaseComponent<{ Target: Folder }, Folder> {}
+
+interface PointerAttributes {
+	/** An instance-valued attribute, which is stored as an `InstanceHandle`. */
+	Target: Folder;
+
+	/** Optional, so the attribute is allowed to be missing entirely. */
+	Spare?: Folder;
+
+	/** A component-valued attribute: the instance it names has to carry that component. */
+	Linked: Handler;
+}
+
+/** Names instances through its attributes rather than through its tree. */
+@Component({ tag: "Pointer", warningTimeout: 0, attributeWarningTimeout: 0 })
+class Pointer extends BaseComponent<PointerAttributes, Folder> {
+	public retarget(target: Folder) {
+		this.attributes.Target = target;
+	}
+
+	public relink(linked: Folder) {
+		this.attributes.Linked = linked;
+	}
+
+	public setSpare(spare: Folder) {
+		this.attributes.Spare = spare;
+	}
+
+	public clearTarget() {
+		this.attributes.Target = undefined!;
+	}
+}
+
 @Component({ tag: "Picky", predicate: (instance) => instance.Name === "Chosen" })
 class Picky extends BaseComponent<{}, Folder> {}
 
@@ -122,6 +180,10 @@ function createComponentModule() {
 		.registerComponent(Car)
 		.registerComponent(Picky)
 		.registerComponent(Static)
+		.registerComponent(Handler)
+		.registerComponent(Owner)
+		.registerComponent(Pointer)
+		.registerComponent(PointerDefault)
 		.build();
 
 	return Flamework.createModule().includePlugin(plugin).ignite();
@@ -152,11 +214,480 @@ function addCore(parent: Instance) {
 	return instance;
 }
 
+/**
+ * A folder tagged `Pointer` with both required links satisfied, which most of the link cases start
+ * from before breaking one of them.
+ */
+function pointer(name: string, target: Instance, linked: Instance) {
+	const instance = folder(name);
+	instance.SetAttribute("Target", new InstanceHandle(target));
+	instance.SetAttribute("Linked", new InstanceHandle(linked));
+	collectionService().AddTag(instance, "Pointer");
+
+	return instance;
+}
+
+/** A folder carrying `Handler`, which is what the component links point at. */
+function handlerFolder(name: string) {
+	const instance = folder(name);
+	collectionService().AddTag(instance, "Handler");
+
+	return instance;
+}
+
 function collectionService() {
 	return game.GetService("CollectionService");
 }
 
 export = suite("components", [
+	[
+		"leaves a component uncreated while a required link attribute is missing",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const linked = handlerFolder("MissingLinked");
+
+			// No `Target` at all: the attribute guard has nothing to check and the link nothing to
+			// resolve, so neither the tag nor `addComponent` can produce a component.
+			const instance = folder("MissingAttribute");
+			instance.SetAttribute("Linked", new InstanceHandle(linked));
+			collectionService().AddTag(instance, "Pointer");
+
+			expectEqual(components.getComponent<Pointer>(instance), undefined, "component with the attribute missing");
+			expectThrows(() => components.addComponent<Pointer>(instance), "addComponent with the attribute missing");
+
+			module.extinguish();
+		},
+	],
+	[
+		"rejects a link attribute that is not a handle",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const linked = handlerFolder("BadTypeLinked");
+
+			const instance = folder("BadAttributeType");
+			instance.SetAttribute("Target", "not a handle");
+			instance.SetAttribute("Linked", new InstanceHandle(linked));
+			collectionService().AddTag(instance, "Pointer");
+
+			expectEqual(components.getComponent<Pointer>(instance), undefined, "component with a bad attribute type");
+
+			const message = expectThrows(() => components.addComponent<Pointer>(instance), "addComponent");
+			expectTrue(message.find("invalid attribute")[0] !== undefined, "message names the attribute");
+
+			module.extinguish();
+		},
+	],
+	[
+		"rejects a handle that names an instance of the wrong class",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const linked = handlerFolder("WrongClassLinked");
+
+			// `Target` is declared as a Folder, so a Part does not pass the link's guard even though
+			// the attribute itself is a perfectly good handle.
+			const part = new Instance("Part");
+			part.Name = "NotAFolder";
+			part.Parent = game.Workspace;
+
+			const instance = folder("WrongClass");
+			instance.SetAttribute("Target", new InstanceHandle(part));
+			instance.SetAttribute("Linked", new InstanceHandle(linked));
+			collectionService().AddTag(instance, "Pointer");
+
+			expectEqual(components.getComponent<Pointer>(instance), undefined, "component with a bad target class");
+			expectThrows(() => components.addComponent<Pointer>(instance), "addComponent with a bad target class");
+
+			module.extinguish();
+		},
+	],
+	[
+		"removes a component when a link attribute is re-pointed at the wrong class",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const linked = handlerFolder("RepointBadLinked");
+			const instance = pointer("RepointBad", folder("RepointBadTarget"), linked);
+			expectDefined(components.getComponent<Pointer>(instance), "component while the link is valid");
+
+			const part = new Instance("Part");
+			part.Name = "RepointBadPart";
+			part.Parent = game.Workspace;
+			instance.SetAttribute("Target", new InstanceHandle(part));
+
+			expectEqual(components.getComponent<Pointer>(instance), undefined, "component after a bad re-point");
+
+			// Pointed back at something valid, it comes back, the way a tag or a tree does.
+			instance.SetAttribute("Target", new InstanceHandle(folder("RepointGoodTarget")));
+			expectDefined(components.getComponent<Pointer>(instance), "component after pointing back at a folder");
+
+			module.extinguish();
+		},
+	],
+	[
+		"removes a component when a required link attribute is cleared",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const linked = handlerFolder("ClearedLinked");
+			const instance = pointer("Cleared", folder("ClearedTarget"), linked);
+			expectDefined(components.getComponent<Pointer>(instance), "component while the attribute is set");
+
+			instance.SetAttribute("Target", undefined);
+
+			expectEqual(
+				components.getComponent<Pointer>(instance),
+				undefined,
+				"component after the attribute was cleared",
+			);
+
+			module.extinguish();
+		},
+	],
+	[
+		"refuses to clear a required link attribute through the component",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const linked = handlerFolder("ClearWriteLinked");
+			const target = folder("ClearWriteTarget");
+			const instance = pointer("ClearWrite", target, linked);
+
+			const component = expectDefined(components.getComponent<Pointer>(instance), "component");
+			expectThrows(() => component.clearTarget(), "clearing a required link");
+			expectEqual(component.attributes.Target, target, "attribute after the refused write");
+
+			module.extinguish();
+		},
+	],
+	[
+		"fills a missing link attribute from its default and writes it back as a handle",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("DefaultedLink");
+			collectionService().AddTag(instance, "PointerDefault");
+
+			const component = expectDefined(components.getComponent<PointerDefault>(instance), "component");
+			expectEqual(component.attributes.Target, DEFAULT_LINK_TARGET, "attribute holds the default instance");
+
+			const written = instance.GetAttribute("Target");
+			expectTrue(typeIs(written, "InstanceHandle"), "the default was written as a handle");
+			expectEqual((written as InstanceHandle).Get(), DEFAULT_LINK_TARGET, "the handle names the default");
+
+			module.extinguish();
+		},
+	],
+	[
+		"builds a component whose optional link has a handle that has not resolved",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const linked = handlerFolder("OptionalPendingLinked");
+			const spare = folder("OptionalPendingSpare");
+
+			const instance = folder("OptionalPending");
+			instance.SetAttribute("Target", new InstanceHandle(folder("OptionalPendingTarget")));
+			instance.SetAttribute("Linked", new InstanceHandle(linked));
+			instance.SetAttribute("Spare", __harness.pendingHandle(spare));
+			collectionService().AddTag(instance, "Pointer");
+
+			// Optional, so an empty handle is not something to wait for.
+			const component = expectDefined(components.getComponent<Pointer>(instance), "component");
+			expectEqual(component.attributes.Spare, undefined, "optional attribute while its handle is empty");
+
+			__harness.streamIn(instance.GetAttribute("Spare") as InstanceHandle);
+			__harness.flush();
+
+			expectEqual(component.attributes.Spare, spare, "optional attribute once its handle resolved");
+
+			module.extinguish();
+		},
+	],
+	[
+		"adds a linked component by hand once its links resolve",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const linked = handlerFolder("ManualOkLinked");
+			const target = folder("ManualOkTarget");
+
+			// No tag: this component only ever exists because it was added.
+			const instance = folder("ManualOk");
+			instance.SetAttribute("Target", new InstanceHandle(target));
+			instance.SetAttribute("Linked", new InstanceHandle(linked));
+
+			const component = components.addComponent<Pointer>(instance);
+			expectEqual(component.attributes.Target, target, "attribute resolved by hand");
+			expectEqual(
+				component.attributeComponents.Linked,
+				components.getComponent<Handler>(linked),
+				"linked component resolved by hand",
+			);
+
+			module.extinguish();
+		},
+	],
+	[
+		"waits for a child that is parented in later, then for its component",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			// Neither the child nor its component exists yet: the instance guard fails first, and
+			// the link only becomes the outstanding criterion once the child is there.
+			const instance = folder("LateChild");
+			collectionService().AddTag(instance, "Owner");
+			expectEqual(components.getComponent<Owner>(instance), undefined, "owner with no child at all");
+
+			const core = folderIn(instance, "Core");
+			__harness.flush();
+			expectEqual(
+				components.getComponent<Owner>(instance),
+				undefined,
+				"owner with a child that has no component",
+			);
+
+			collectionService().AddTag(core, "Handler");
+			const owner = expectDefined(components.getComponent<Owner>(instance), "owner once the child has one");
+			expectEqual(owner.childComponents.Core, components.getComponent<Handler>(core), "linked child component");
+
+			// And the child leaving takes it away again.
+			core.Parent = undefined;
+			__harness.flush();
+			expectEqual(components.getComponent<Owner>(instance), undefined, "owner after the child was removed");
+
+			module.extinguish();
+		},
+	],
+	[
+		"waits for the component a child of the instance tree names",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("Owned");
+			const core = folderIn(instance, "Core");
+
+			collectionService().AddTag(instance, "Owner");
+			expectEqual(components.getComponent<Owner>(instance), undefined, "owner before the child has a component");
+
+			collectionService().AddTag(core, "Handler");
+
+			const owner = expectDefined(components.getComponent<Owner>(instance), "owner once the child has one");
+			expectEqual(owner.childComponents.Core, components.getComponent<Handler>(core), "linked child component");
+			expectEqual(owner.instance.Core, core, "the tree still holds the instance itself");
+
+			module.extinguish();
+		},
+	],
+	[
+		"removes a component when the component its link names goes away",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("Orphaned");
+			const core = folderIn(instance, "Core");
+
+			collectionService().AddTag(core, "Handler");
+			collectionService().AddTag(instance, "Owner");
+			expectDefined(components.getComponent<Owner>(instance), "owner while the link holds");
+
+			collectionService().RemoveTag(core, "Handler");
+
+			expectEqual(components.getComponent<Owner>(instance), undefined, "owner after the link broke");
+
+			module.extinguish();
+		},
+	],
+	[
+		"resolves an instance-valued attribute through its handle",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const target = folder("PointerTarget");
+			const linked = folder("PointerLinked");
+			collectionService().AddTag(linked, "Handler");
+
+			const instance = folder("Pointer1");
+			instance.SetAttribute("Target", new InstanceHandle(target));
+			instance.SetAttribute("Linked", new InstanceHandle(linked));
+			collectionService().AddTag(instance, "Pointer");
+
+			const pointer = expectDefined(components.getComponent<Pointer>(instance), "component");
+
+			// The attribute is written as a handle and read as the instance it resolves to.
+			expectEqual(pointer.attributes.Target, target, "attribute holds the instance");
+			expectEqual(pointer.attributes.Spare, undefined, "optional attribute with no handle");
+			expectEqual(
+				pointer.attributeComponents.Linked,
+				components.getComponent<Handler>(linked),
+				"linked component",
+			);
+
+			module.extinguish();
+		},
+	],
+	[
+		"waits for the instance an attribute names to stream in",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const linked = folder("StreamedLinked");
+			collectionService().AddTag(linked, "Handler");
+
+			const target = folder("StreamedTarget");
+			const handle = __harness.pendingHandle(target);
+
+			const instance = folder("Pointer2");
+			instance.SetAttribute("Target", handle);
+			instance.SetAttribute("Linked", new InstanceHandle(linked));
+			collectionService().AddTag(instance, "Pointer");
+
+			expectEqual(components.getComponent<Pointer>(instance), undefined, "component while the handle is empty");
+
+			__harness.streamIn(handle);
+			__harness.flush();
+
+			const pointer = expectDefined(components.getComponent<Pointer>(instance), "component once it streamed in");
+			expectEqual(pointer.attributes.Target, target, "attribute holds the instance");
+
+			module.extinguish();
+		},
+	],
+	[
+		"reports the instance to onAttributeChanged when a link is re-pointed",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const target = folder("FirstTarget");
+			const linked = folder("RepointLinked");
+			collectionService().AddTag(linked, "Handler");
+
+			const instance = folder("Pointer3");
+			instance.SetAttribute("Target", new InstanceHandle(target));
+			instance.SetAttribute("Linked", new InstanceHandle(linked));
+			collectionService().AddTag(instance, "Pointer");
+
+			const pointer = expectDefined(components.getComponent<Pointer>(instance), "component");
+
+			const changes = new Array<[Folder | undefined, Folder | undefined]>();
+			pointer.onAttributeChanged("Target", (newValue, oldValue) => changes.push([newValue, oldValue]));
+
+			const other = folder("SecondTarget");
+			instance.SetAttribute("Target", new InstanceHandle(other));
+			__harness.flush();
+
+			expectEqual(pointer.attributes.Target, other, "attribute after the write");
+			expectEqual(changes.size(), 1, "change count");
+			expectEqual(changes[0][0], other, "new value is the instance");
+			expectEqual(changes[0][1], target, "old value is the instance");
+
+			module.extinguish();
+		},
+	],
+	[
+		"writes an instance-valued attribute back to the instance as a handle",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const linked = folder("WriteLinked");
+			collectionService().AddTag(linked, "Handler");
+
+			const instance = folder("Pointer4");
+			instance.SetAttribute("Target", new InstanceHandle(folder("WriteTarget")));
+			instance.SetAttribute("Linked", new InstanceHandle(linked));
+			collectionService().AddTag(instance, "Pointer");
+
+			const pointer = expectDefined(components.getComponent<Pointer>(instance), "component");
+
+			const other = folder("WriteOther");
+			pointer.retarget(other);
+
+			// The write lands on the instance and on the component at once, rather than waiting for
+			// the deferred attribute signal.
+			expectEqual(pointer.attributes.Target, other, "component sees its own write");
+
+			const written = instance.GetAttribute("Target");
+			expectTrue(typeIs(written, "InstanceHandle"), "attribute is stored as a handle");
+			expectEqual((written as InstanceHandle).Get(), other, "the handle names the instance");
+
+			pointer.setSpare(other);
+			expectEqual(pointer.attributes.Spare, other, "optional link after a write");
+
+			module.extinguish();
+		},
+	],
+	[
+		"refuses a write that names an instance without the linked component",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const linked = folder("GuardLinked");
+			collectionService().AddTag(linked, "Handler");
+
+			const instance = folder("Pointer5");
+			instance.SetAttribute("Target", new InstanceHandle(folder("GuardTarget")));
+			instance.SetAttribute("Linked", new InstanceHandle(linked));
+			collectionService().AddTag(instance, "Pointer");
+
+			const pointer = expectDefined(components.getComponent<Pointer>(instance), "component");
+
+			const message = expectThrows(() => pointer.relink(folder("Untagged")), "write to a component link");
+			expectTrue(message.find("has no component")[0] !== undefined, "message names the missing component");
+			expectEqual(pointer.attributes.Linked, linked, "attribute after the rejected write");
+
+			module.extinguish();
+		},
+	],
+	[
+		"raises when a component is added by hand before its links resolve",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const linked = folder("ManualLinked");
+			collectionService().AddTag(linked, "Handler");
+
+			const instance = folder("ManualPointer");
+			instance.SetAttribute("Target", __harness.pendingHandle(folder("ManualTarget")));
+			instance.SetAttribute("Linked", new InstanceHandle(linked));
+
+			expectThrows(() => components.addComponent<Pointer>(instance), "addComponent with an empty handle");
+
+			module.extinguish();
+		},
+	],
+	[
+		"refuses a link to a component the plugin does not register",
+		() => {
+			const plugin = ComponentPlugin.createPlugin().registerComponent(Owner).build();
+
+			const message = expectThrows(
+				() => Flamework.createModule().includePlugin(plugin).ignite(),
+				"ignition with an unregistered link",
+			);
+
+			expectTrue(message.find("not registered in this plugin")[0] !== undefined, "message explains the link");
+		},
+	],
 	[
 		"constructs a component when its tag is added",
 		() => {

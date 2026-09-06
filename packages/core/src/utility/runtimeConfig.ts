@@ -14,6 +14,9 @@ export interface ComponentsRuntimeConfig {
 	/** Default `warningTimeout` for components that do not set one. */
 	warningTimeout?: number;
 
+	/** Default `attributeWarningTimeout` for components that do not set one. */
+	attributeWarningTimeout?: number;
+
 	/** Default `streamingMode` for components that do not set one. */
 	streamingMode?: "Disabled" | "Watching" | "Contextual";
 }

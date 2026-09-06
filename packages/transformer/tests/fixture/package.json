@@ -14,6 +14,7 @@
     "roblox-ts": "^3.0.0"
   },
   "dependencies": {
+    "@flamework/components": "workspace:*",
     "@flamework/core": "workspace:*",
     "@rbxts/t": "^3.1.0",
     "@flamework/networking": "workspace:*"

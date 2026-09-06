@@ -6,6 +6,10 @@
 //
 // `--streaming` flips Workspace.StreamingEnabled in the Edit data model before the run and restores
 // the previous value afterwards, so both halves of the streaming matrix can be run unattended.
+//
+// The radii cannot be scripted: StreamingMinRadius and StreamingTargetRadius are not scriptable
+// members, so a snippet that touches them raises. The test parts sit far enough out to be beyond
+// the default radius instead, which is what makes streaming observable without changing the place.
 import { connect } from "./mcp.mjs";
 
 const args = process.argv.slice(2);

@@ -7,6 +7,7 @@
 	else raises so a missing stub is a clear failure rather than a nil index.
 ]]
 
+local luneTask = require("@lune/task")
 local signals = require("./signals")
 
 local instances = {}
@@ -287,6 +288,72 @@ end
 
 instanceMeta.__tostring = function(instance: Instance)
 	return rawget(instance, "_name")
+end
+
+--[[
+	`InstanceHandle`, the datatype an instance-valued attribute is stored as.
+
+	A handle resolves to the instance it names once that instance has streamed in; until then `Get`
+	returns nothing and `Wait` yields, which is the case components have to wait through. Handles
+	made from an instance that is already there resolve straight away, so the specs that do not care
+	about streaming never notice.
+]]
+local handleMeta = {}
+handleMeta.__index = handleMeta
+
+function handleMeta:Get(): Instance?
+	return rawget(self, "_instance")
+end
+
+function handleMeta:Wait(timeout: number?): Instance?
+	local instance = rawget(self, "_instance")
+	if instance ~= nil then
+		return instance
+	end
+
+	local waiter = { thread = coroutine.running(), done = false }
+	table.insert(rawget(self, "_waiters"), waiter)
+
+	if timeout ~= nil then
+		luneTask.delay(timeout, function()
+			if not waiter.done then
+				waiter.done = true
+				luneTask.spawn(waiter.thread, nil)
+			end
+		end)
+	end
+
+	return coroutine.yield()
+end
+
+--- Whether a value is one of this harness's `InstanceHandle`s.
+function instances.isHandle(value: any): boolean
+	return type(value) == "table" and getmetatable(value) == handleMeta
+end
+
+--- Builds a handle. A pending one names an instance that has not streamed in yet.
+function instances.newHandle(instance: Instance?, pending: boolean?): any
+	return setmetatable({
+		_instance = if pending then nil else instance,
+		_target = instance,
+		_waiters = {},
+	}, handleMeta)
+end
+
+--- Streams in the instance a pending handle names, resuming everything waiting on it.
+function instances.streamIn(handle: any)
+	local target = rawget(handle, "_target")
+	rawset(handle, "_instance", target)
+
+	local waiters = rawget(handle, "_waiters")
+	rawset(handle, "_waiters", {})
+
+	for _, waiter in waiters do
+		if not waiter.done then
+			waiter.done = true
+			luneTask.spawn(waiter.thread, target)
+		end
+	end
 end
 
 --- The outbound calls a remote recorded, in order.

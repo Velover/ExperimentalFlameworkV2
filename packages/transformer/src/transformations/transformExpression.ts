@@ -2,8 +2,11 @@ import ts from "typescript";
 import { TransformState } from "../classes/transformState";
 import { catchDiagnostic } from "../util/diagnosticsUtils";
 import { transformAccessExpression } from "./expressions/transformAccessExpression";
+import { transformBinaryExpression } from "./expressions/transformBinaryExpression";
 import { transformCallExpression } from "./expressions/transformCallExpression";
+import { transformDeleteExpression } from "./expressions/transformDeleteExpression";
 import { transformNewExpression } from "./expressions/transformNewExpression";
+import { transformUnaryExpression } from "./expressions/transformUnaryExpression";
 import { transformNode } from "./transformNode";
 
 const TRANSFORMERS = new Map<ts.SyntaxKind, (state: TransformState, node: any) => ts.Expression>([
@@ -11,6 +14,10 @@ const TRANSFORMERS = new Map<ts.SyntaxKind, (state: TransformState, node: any) =
 	[ts.SyntaxKind.NewExpression, transformNewExpression],
 	[ts.SyntaxKind.ElementAccessExpression, transformAccessExpression],
 	[ts.SyntaxKind.PropertyAccessExpression, transformAccessExpression],
+	[ts.SyntaxKind.BinaryExpression, transformBinaryExpression],
+	[ts.SyntaxKind.PrefixUnaryExpression, transformUnaryExpression],
+	[ts.SyntaxKind.PostfixUnaryExpression, transformUnaryExpression],
+	[ts.SyntaxKind.DeleteExpression, transformDeleteExpression],
 ]);
 
 export function transformExpression(state: TransformState, expression: ts.Expression): ts.Expression {

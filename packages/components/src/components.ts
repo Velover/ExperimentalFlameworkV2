@@ -23,7 +23,7 @@ import {
 import Maid from "@rbxts/maid";
 import Signal from "@rbxts/signal";
 import type { ComponentModuleConfig } from "./componentModule";
-import { ComponentStreamingMode, type ComponentConfig } from "./decorator";
+import { ComponentStreamingMode, type ComponentConfig, type ComponentLink } from "./decorator";
 import type { PluginModule } from "@flamework/core";
 
 interface ComponentInfo {
@@ -32,6 +32,39 @@ interface ComponentInfo {
 	identifier: string;
 	config: ComponentConfig;
 	polymorphicIds: string[];
+	links: ComponentLink[];
+	attributeLinks: Map<string, ComponentLink>;
+}
+
+/**
+ * A link attribute whose instance has not streamed in yet, and the thread parked in
+ * `InstanceHandle:Wait` until it does.
+ */
+interface PendingLink {
+	thread?: thread;
+	cancelled: boolean;
+}
+
+/** How long an unresolved attribute is waited on at a time when its warning is disabled. */
+const LINK_POLL_INTERVAL = 5;
+
+/** How a link reads in the warning that lists what a component is still waiting for. */
+function describeLink(link: ComponentLink) {
+	const target = link.kind === "attribute" ? `attribute '${link.name}'` : `child '${link.name}'`;
+	return link.component !== undefined ? `${target} with component '${link.component}'` : target;
+}
+
+function cancelPendingLink(pending: PendingLink) {
+	pending.cancelled = true;
+
+	const thread = pending.thread;
+	const current = coroutine.running();
+
+	// The wait resumes into `resolve`, which releases the link it came from: cancelling there would
+	// be cancelling the thread this is running on.
+	if (thread !== undefined && thread !== current && coroutine.status(thread) === "suspended") {
+		task.cancel(thread);
+	}
 }
 
 const DEFAULT_ANCESTOR_BLACKLIST = [ServerStorage, ReplicatedStorage, StarterPack, StarterGui, StarterPlayer];
@@ -76,7 +109,7 @@ export class Components {
 	private connections = new Array<RBXScriptConnection>();
 	private isStopped = false;
 
-	private componentsIdMapping;
+	private componentsIdMapping: Map<string, Constructor>;
 
 	private getComponentsIdMapping() {
 		const mapping = new Map<string, Constructor>();
@@ -113,13 +146,38 @@ export class Components {
 			}
 
 			const componentConfig = Reflect.getMetadata<ComponentConfig>(ctor, "flamework:componentConfig");
+			const links = componentConfig?.links ?? [];
+			const attributeLinks = new Map<string, ComponentLink>();
+			for (const link of links) {
+				if (link.kind === "attribute") {
+					attributeLinks.set(link.name, link);
+				}
+			}
+
 			components.set(ctor, {
 				ctor: ctor as Constructor<BaseComponent>,
 				config: componentConfig || {},
 				polymorphicIds: this.getPolymorphicIds(ctor),
 				componentDependencies,
+				attributeLinks,
 				identifier,
+				links,
 			});
+		}
+
+		// A link names a component by id, so the component it names has to be registered here too.
+		// Unlike a constructor dependency, which is skipped when it is not a component at all,
+		// there is nothing else a link could mean.
+		for (const [, info] of components) {
+			for (const link of info.links) {
+				if (link.component === undefined) continue;
+				if (this.componentsIdMapping.has(link.component)) continue;
+
+				error(
+					`component '${info.identifier}' links to '${link.component}' through ${describeLink(link)}, ` +
+						`but that component is not registered in this plugin`,
+				);
+			}
 		}
 	}
 
@@ -233,8 +291,11 @@ export class Components {
 			dependencies.push(this.getComponentTracker(dependency));
 		}
 
+		const hasLinks = componentInfo.links.size() !== 0;
 		const streamingMode = componentInfo.config.streamingMode ?? defaultStreamingMode();
 		const tracker = new ComponentTracker(componentInfo.identifier, {
+			checkLinks: hasLinks ? (instance) => this.checkLinks(componentInfo, instance) : undefined,
+			watchLinks: hasLinks ? (instance, update) => this.watchLinks(componentInfo, instance, update) : undefined,
 			tag: componentInfo.config.tag,
 			typeGuard: instanceGuard,
 			typeGuardPoll:
@@ -247,6 +308,372 @@ export class Components {
 
 		this.trackers.set(component, tracker);
 		return tracker;
+	}
+
+	/**
+	 * The instance a link points at, or nothing when it has not resolved yet. An instance-valued
+	 * attribute holds an `InstanceHandle`, which stays empty until the instance it names has
+	 * streamed in at least once.
+	 */
+	private resolveLinkTarget(instance: Instance, componentInfo: ComponentInfo, link: ComponentLink) {
+		if (link.kind === "child") {
+			return instance.FindFirstChild(link.name);
+		}
+
+		const handle = instance.GetAttribute(link.name);
+		if (typeIs(handle, "InstanceHandle")) {
+			return handle.Get();
+		}
+
+		// A default stands in for an attribute that was never written, as it does for a plain one.
+		// It has to be read here rather than left to `getAttributes`, which only runs once the
+		// component is being built -- and it never would be, with the link unresolved.
+		const fallback = this.getConfigValue(componentInfo.ctor, "defaults")?.[link.name];
+		return typeIs(fallback, "Instance") ? fallback : undefined;
+	}
+
+	/** Whether a component is attached to an instance, without constructing one. */
+	private hasComponent(instance: Instance, component: Constructor) {
+		return this.activeComponents.get(instance)?.get(component) !== undefined;
+	}
+
+	private passesLinkGuard(link: ComponentLink, target: Instance) {
+		return link.guard === undefined || link.guard(target);
+	}
+
+	private getLinkedComponent(link: ComponentLink) {
+		const component = this.componentsIdMapping.get(link.component!);
+		assert(component, `Component '${link.component}' is linked but not registered`);
+
+		return component;
+	}
+
+	private getAttributeWarningTimeout(componentInfo: ComponentInfo) {
+		const config = getRuntimeConfig().components;
+
+		return (
+			this.getConfigValue(componentInfo.ctor, "attributeWarningTimeout") ??
+			this.getConfigValue(componentInfo.ctor, "warningTimeout") ??
+			config?.attributeWarningTimeout ??
+			config?.warningTimeout ??
+			5
+		);
+	}
+
+	/**
+	 * Whether every link of a component resolves on this instance right now.
+	 *
+	 * This is the answer for an instance nobody is tracking, where there is nothing to wait on, so
+	 * a linked component has to already exist rather than merely be constructible.
+	 */
+	private checkLinks(componentInfo: ComponentInfo, instance: Instance) {
+		for (const link of componentInfo.links) {
+			const target = this.resolveLinkTarget(instance, componentInfo, link);
+			if (target === undefined) {
+				if (link.optional) continue;
+
+				return false;
+			}
+
+			if (!this.passesLinkGuard(link, target)) return false;
+			if (link.component !== undefined && !this.hasComponent(target, this.getLinkedComponent(link))) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/**
+	 * Watches every link of a component on one instance, so that the component exists only while
+	 * the instances and components it names do.
+	 */
+	private watchLinks(
+		componentInfo: ComponentInfo,
+		instance: Instance,
+		update: (criterion: string, isMet: boolean) => void,
+	) {
+		const maid = new Maid();
+
+		for (const link of componentInfo.links) {
+			this.watchLink(componentInfo, instance, link, update, maid);
+		}
+
+		return () => maid.Destroy();
+	}
+
+	private watchLink(
+		componentInfo: ComponentInfo,
+		instance: Instance,
+		link: ComponentLink,
+		update: (criterion: string, isMet: boolean) => void,
+		maid: Maid,
+	) {
+		const criterion = describeLink(link);
+
+		let targetMaid: Maid | undefined;
+		let pending: PendingLink | undefined;
+
+		const release = () => {
+			targetMaid?.Destroy();
+			targetMaid = undefined;
+
+			if (pending !== undefined) {
+				cancelPendingLink(pending);
+				pending = undefined;
+			}
+		};
+
+		const resolve = () => {
+			release();
+
+			const target = this.resolveLinkTarget(instance, componentInfo, link);
+			if (target === undefined) {
+				update(criterion, link.optional);
+
+				// The attribute names an instance that has never streamed in, which is what
+				// `InstanceHandle:Wait` is for; it resumes once it has, however long that takes.
+				if (link.kind === "attribute") {
+					pending = this.waitForLinkAttribute(componentInfo, instance, link, resolve);
+				}
+
+				return;
+			}
+
+			if (!this.passesLinkGuard(link, target)) {
+				update(criterion, false);
+				return;
+			}
+
+			// A handle that fills in after the component was built changes nothing on the instance,
+			// so no attribute signal reports it; this is the only place that notices. It matters for
+			// an optional link, which does not hold construction up in the first place.
+			if (link.kind === "attribute") {
+				this.refreshLinkAttribute(instance, componentInfo, link);
+			}
+
+			if (link.component === undefined) {
+				update(criterion, true);
+				return;
+			}
+
+			const linkedComponent = this.getLinkedComponent(link);
+			const tracker = this.getComponentTracker(linkedComponent);
+			const hasTag = this.getConfigValue(linkedComponent, "tag") !== undefined;
+
+			targetMaid = new Maid();
+
+			// A tagged component that qualifies is close enough, because `getComponent` constructs
+			// it on the way in. One without a tag only ever exists because somebody added it.
+			const refresh = () =>
+				update(
+					criterion,
+					this.hasComponent(target, linkedComponent) || (hasTag && tracker.checkInstance(target)),
+				);
+
+			// Observing, not waiting: this component's own tracker is the one that reports the link
+			// as a criterion it is still missing.
+			const listener = () => refresh();
+			tracker.trackInstance(target, listener, true);
+			targetMaid.GiveTask(() => tracker.untrackInstance(target, listener));
+
+			let addedSignal = this.componentAddedListeners.get(link.component);
+			if (!addedSignal) this.componentAddedListeners.set(link.component, (addedSignal = new Signal()));
+
+			let removedSignal = this.componentRemovedListeners.get(link.component);
+			if (!removedSignal) this.componentRemovedListeners.set(link.component, (removedSignal = new Signal()));
+
+			targetMaid.GiveTask(
+				addedSignal.Connect((_, changed) => {
+					if (changed === target) refresh();
+				}),
+			);
+
+			// Removal is announced before the component leaves the active map, so this cannot go
+			// back through `refresh`: it would still find the component that is on its way out.
+			targetMaid.GiveTask(
+				removedSignal.Connect((_, changed) => {
+					if (changed === target) update(criterion, false);
+				}),
+			);
+
+			refresh();
+		};
+
+		maid.GiveTask(release);
+
+		if (link.kind === "attribute") {
+			maid.GiveTask(instance.GetAttributeChangedSignal(link.name).Connect(resolve));
+		} else {
+			const childChanged = (child: Instance) => {
+				if (child.Name === link.name) resolve();
+			};
+
+			maid.GiveTask(instance.ChildAdded.Connect(childChanged));
+			maid.GiveTask(instance.ChildRemoved.Connect(childChanged));
+		}
+
+		resolve();
+	}
+
+	/**
+	 * Waits for the instance an attribute names to stream in, warning once the wait has gone on
+	 * too long -- which is usually an attribute pointing at something that will never arrive.
+	 */
+	private waitForLinkAttribute(
+		componentInfo: ComponentInfo,
+		instance: Instance,
+		link: ComponentLink,
+		resolved: () => void,
+	): PendingLink | undefined {
+		const handle = instance.GetAttribute(link.name);
+		if (!typeIs(handle, "InstanceHandle")) return undefined;
+
+		const timeout = this.getAttributeWarningTimeout(componentInfo);
+		const pending: PendingLink = { cancelled: false };
+
+		pending.thread = task.spawn(() => {
+			let warned = false;
+
+			while (!pending.cancelled) {
+				if (handle.Wait(timeout > 0 ? timeout : LINK_POLL_INTERVAL) !== undefined) {
+					pending.thread = undefined;
+					if (!pending.cancelled) resolved();
+
+					return;
+				}
+
+				if (timeout > 0 && !warned) {
+					warned = true;
+
+					warn(`[Flamework] Infinite yield possible on attribute '${link.name}' of instance`);
+					warn(`'${instance.GetFullName()}', which component '${componentInfo.identifier}' links to`);
+					warn(`The instance it names has not streamed in`);
+				}
+			}
+		});
+
+		return pending;
+	}
+
+	/**
+	 * Resolves every link for a component that is about to be constructed, filling in the instances
+	 * its attributes name and the components it is linked to.
+	 */
+	private resolveLinks(instance: Instance, componentInfo: ComponentInfo, attributes: Map<string, unknown>) {
+		const childComponents = new Map<string, unknown>();
+		const attributeComponents = new Map<string, unknown>();
+
+		for (const link of componentInfo.links) {
+			const target = this.resolveLinkTarget(instance, componentInfo, link);
+			if (target === undefined) {
+				if (link.optional) {
+					if (link.kind === "attribute") attributes.delete(link.name);
+					continue;
+				}
+
+				throw `${instance.GetFullName()} has no instance for ${describeLink(link)} of '${componentInfo.identifier}'`;
+			}
+
+			if (!this.passesLinkGuard(link, target)) {
+				throw `${target.GetFullName()} did not pass the guard for ${describeLink(link)} of '${componentInfo.identifier}'`;
+			}
+
+			// The attribute is stored as a handle; the component sees the instance it resolves to.
+			if (link.kind === "attribute") attributes.set(link.name, target);
+
+			if (link.component !== undefined) {
+				const linked = this.getComponent(target, this.getLinkedComponent(link));
+				if (linked === undefined) {
+					throw `${target.GetFullName()} has no component for ${describeLink(link)} of '${componentInfo.identifier}'`;
+				}
+
+				const holder = link.kind === "attribute" ? attributeComponents : childComponents;
+				holder.set(link.name, linked);
+			}
+		}
+
+		return { childComponents, attributeComponents };
+	}
+
+	/**
+	 * Brings a component's view of one link attribute back in line with the instance, firing
+	 * `onAttributeChanged` with the instances rather than the handles.
+	 *
+	 * A target that no longer qualifies is left alone: the tracker sees the same change and removes
+	 * the component, rather than leaving it running against a half-updated link.
+	 */
+	private refreshLinkAttribute(instance: Instance, componentInfo: ComponentInfo, link: ComponentLink) {
+		const component = this.activeComponents.get(instance)?.get(componentInfo.ctor);
+		if (component === undefined) return;
+
+		const attributes = component.attributes as unknown as Map<string, unknown>;
+		const previous = attributes.get(link.name);
+		const target = this.resolveLinkTarget(instance, componentInfo, link);
+		if (previous === target) return;
+
+		if (target !== undefined) {
+			if (!this.passesLinkGuard(link, target)) return;
+
+			if (link.component !== undefined) {
+				const linked = this.getComponent(target, this.getLinkedComponent(link));
+				if (linked === undefined) return;
+
+				(component.attributeComponents as unknown as Map<string, unknown>).set(link.name, linked);
+			}
+		} else {
+			if (!link.optional) return;
+
+			(component.attributeComponents as unknown as Map<string, unknown>).delete(link.name);
+		}
+
+		attributes.set(link.name, target);
+		component[SYMBOL_ATTRIBUTE_HANDLERS].get(link.name)?.Fire(target, previous);
+	}
+
+	/**
+	 * The write path behind `this.attributes.myLink = instance`. The instance is checked against
+	 * the same guards its link was resolved with, so a bad assignment raises where it was written
+	 * rather than quietly removing the component a moment later.
+	 */
+	private createLinkSetter(componentInfo: ComponentInfo, instance: Instance) {
+		if (componentInfo.attributeLinks.size() === 0) return undefined;
+
+		return (key: string, value: Instance | undefined) => {
+			const link = componentInfo.attributeLinks.get(key);
+			if (link === undefined) return false;
+
+			if (value === undefined) {
+				if (!link.optional) {
+					error(`attribute '${key}' of '${componentInfo.identifier}' is required and cannot be cleared`);
+				}
+
+				instance.SetAttribute(key, undefined);
+			} else {
+				if (!this.passesLinkGuard(link, value)) {
+					error(
+						`${value.GetFullName()} did not pass the guard for attribute '${key}' of '${componentInfo.identifier}'`,
+					);
+				}
+
+				if (link.component !== undefined) {
+					const linked = this.getComponent(value, this.getLinkedComponent(link));
+					if (linked === undefined) {
+						error(
+							`${value.GetFullName()} has no component '${link.component}', which attribute '${key}' of '${componentInfo.identifier}' links to`,
+						);
+					}
+				}
+
+				instance.SetAttribute(key, new InstanceHandle(value));
+			}
+
+			// Attribute signals are deferred, so the component would otherwise not see its own
+			// write until the next resumption.
+			this.refreshLinkAttribute(instance, componentInfo, link);
+
+			return true;
+		};
 	}
 
 	private getOrderedParents(ctor: AbstractConstructor, omitBaseComponent = true) {
@@ -295,8 +722,16 @@ export class Components {
 			const attribute = attributes.get(key);
 			if (!guard(attribute)) {
 				if (defaults?.[key] !== undefined) {
-					newAttributes.set(key, defaults[key]);
-					instance.SetAttribute(key, defaults[key] as never);
+					// A link's default is written as the instance it names, but stored the way
+					// every other instance-valued attribute is.
+					const value = defaults[key];
+					const isLink = componentInfo.attributeLinks.has(key);
+
+					newAttributes.set(key, value);
+					instance.SetAttribute(
+						key,
+						(isLink && typeIs(value, "Instance") ? new InstanceHandle(value) : value) as never,
+					);
 				} else {
 					throw `${instance.GetFullName()} has invalid attribute '${key}' for '${componentInfo.identifier}'`;
 				}
@@ -325,8 +760,10 @@ export class Components {
 		instance: Instance,
 		attributes: Map<string, unknown>,
 		component: BaseComponent,
-		{ ctor }: ComponentInfo,
+		componentInfo: ComponentInfo,
 	) {
+		const { ctor } = componentInfo;
+
 		if (Flamework.implements<OnStart>(component)) {
 			safeCall(
 				[`[Flamework] Component '${ctor}' failed to start for`, instance, `[${instance.GetFullName()}]`],
@@ -343,8 +780,16 @@ export class Components {
 			const attributeGuards = this.getAttributeGuards(ctor);
 			for (const [attribute, guard] of pairs(attributeGuards)) {
 				if (typeIs(attribute, "string")) {
+					const link = componentInfo.attributeLinks.get(attribute);
+
 					maid.GiveTask(
 						instance.GetAttributeChangedSignal(attribute).Connect(() => {
+							// A link is stored as a handle and read as the instance it resolves to,
+							// which is a different update from a plain attribute's.
+							if (link !== undefined) {
+								return this.refreshLinkAttribute(instance, componentInfo, link);
+							}
+
 							const signal = component[SYMBOL_ATTRIBUTE_HANDLERS].get(attribute);
 							const value = instance.GetAttribute(attribute);
 							const attributes = component.attributes as Map<string, unknown>;
@@ -433,11 +878,15 @@ export class Components {
 		return this.constructing.get(instance)?.has(component) === true;
 	}
 
-	private getDependencyResolutionOptions(componentInfo: ComponentInfo, instance: Instance, attributes: unknown) {
+	private getDependencyResolutionOptions(
+		componentInfo: ComponentInfo,
+		instance: Instance,
+		metadata: ComponentMetadata,
+	) {
 		return {
 			overrideDependency: (info: Modding.DependencyInfo) => {
 				if (info.id === Flamework.id<ComponentMetadata>()) {
-					return identity<ComponentMetadata>({ instance, attributes });
+					return metadata;
 				}
 
 				const dependency = this.componentsIdMapping.get(info.id);
@@ -587,13 +1036,26 @@ export class Components {
 		}
 
 		if (!constructingSet) this.constructing.set(instance, (constructingSet = new Set()));
-		constructingSet.add(component);
 
-		const resolutionOptions = this.getDependencyResolutionOptions(componentInfo, instance, attributes);
+		// Marked as constructing before the links resolve, so that a component linked back to this
+		// one fails to resolve rather than recursing through `getComponent`.
+		constructingSet.add(component);
 
 		let componentInstance: BaseComponent;
 		try {
-			componentInstance = this.module.createClassInstance(component, resolutionOptions);
+			const { childComponents, attributeComponents } = this.resolveLinks(instance, componentInfo, attributes);
+			const metadata = identity<ComponentMetadata>({
+				instance,
+				attributes,
+				childComponents,
+				attributeComponents,
+				setLinkAttribute: this.createLinkSetter(componentInfo, instance),
+			});
+
+			componentInstance = this.module.createClassInstance(
+				component,
+				this.getDependencyResolutionOptions(componentInfo, instance, metadata),
+			);
 		} finally {
 			constructingSet.delete(component);
 			if (constructingSet.isEmpty()) {

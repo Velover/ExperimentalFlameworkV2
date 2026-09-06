@@ -232,6 +232,9 @@ function roblox.create(initialRealm: "Server" | "Client")
 		context.setGlobal("game", game)
 		context.setGlobal("workspace", Workspace)
 		context.setGlobal("Instance", { new = instances.new })
+		context.setGlobal("InstanceHandle", { new = function(instance: any)
+			return instances.newHandle(instance)
+		end })
 		context.setGlobal("Enum", Enum)
 		context.setGlobal("task", env.task)
 		context.setGlobal("debug", env.debug)
@@ -254,6 +257,9 @@ function roblox.create(initialRealm: "Server" | "Client")
 		local function robloxTypeof(value: any): string
 			if instances.is(value) then
 				return "Instance"
+			end
+			if instances.isHandle(value) then
+				return "InstanceHandle"
 			end
 			return typeof(value)
 		end
@@ -316,6 +322,13 @@ function roblox.create(initialRealm: "Server" | "Client")
 			end,
 			newPlayer = addPlayer,
 			removePlayer = removePlayer,
+			--- An `InstanceHandle` for an instance that has not streamed in, and the streaming of
+			--- it. Roblox resolves a handle the moment its instance replicates; here the spec says
+			--- when, so the waiting a component does is observable.
+			pendingHandle = function(instance: any)
+				return instances.newHandle(instance, true)
+			end,
+			streamIn = instances.streamIn,
 		})
 
 		context.setGlobal("typeof", robloxTypeof)

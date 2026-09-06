@@ -62,6 +62,8 @@ interface ServerEvents {
 	ping(value: number, where: Vector3): void;
 	/** Carries nothing, so it sends nothing. */
 	bump(): void;
+	/** Fired with a literal, which is what packing at the call site has to survive. */
+	toggle(on: boolean): void;
 	/** Declared raw: its arguments travel as they are. */
 	rawPing: Networking.RawReliable<(value: number) => void>;
 }
@@ -105,6 +107,14 @@ export function echo(value: string) {
 // An empty list sends no payload; a raw event is left exactly as written.
 export function bump() {
 	client.bump.fire();
+}
+
+// Regression: a boolean packed at the call site was written as `value === true`, which TypeScript
+// rejects as a pointless comparison once the argument is a literal.
+export function toggle(on: boolean) {
+	client.toggle.fire(false);
+	client.toggle.fire(true);
+	client.toggle.fire(on);
 }
 
 export function raw(value: number) {

@@ -102,6 +102,20 @@ this.onAttributeChanged("speed", (newValue, oldValue) => {
 Only values that pass the guard are applied, so a handler never sees a bad one. Turn tracking off
 with `refreshAttributes: false`, which also disables `onAttributeChanged`.
 
+### Writing an attribute
+
+Assigning to `this.attributes` writes the value back to the instance:
+
+```ts
+this.attributes.speed = 32;
+this.attributes.speed += 8;
+delete this.attributes.label;
+```
+
+The write has to be spelled against `this.attributes` -- that is the shape the transformer rewrites.
+Through a local (`const attributes = this.attributes; attributes.speed = 32`) it is an ordinary table
+write, and the instance never hears about it.
+
 ### Overriding a guard
 
 ```ts
@@ -123,6 +137,99 @@ export class Character extends BaseComponent<{}, Model & { Humanoid: Humanoid }>
 ```
 
 Override it entirely with `instanceGuard` if the generated one is not what you want.
+
+## Links
+
+An attribute or a child can name another instance, and Flamework will wait for it, keep it resolved,
+and take the component down again if it goes away. Two things can be named: an instance, or a
+component on one.
+
+### Instance attributes
+
+An attribute typed as an Instance is stored on the instance as an `InstanceHandle`, which is what
+Roblox's own instance-valued attributes are:
+
+```ts
+interface Attributes {
+    Target: BasePart;
+    Spare?: BasePart;
+}
+
+@Component({ tag: "Turret" })
+export class Turret extends BaseComponent<Attributes, Model> {
+    public onStart() {
+        // The handle is resolved for you; this is the part itself.
+        print(this.attributes.Target.Position);
+    }
+}
+```
+
+The component is not constructed until the handle resolves. A handle is empty until the instance it
+names has streamed in at least once, so under StreamingEnabled a far-away target keeps the component
+waiting -- and once it has streamed in it stays resolved, even if it streams back out.
+
+Assigning writes a fresh handle, after checking the instance the way the link was resolved:
+
+```ts
+this.attributes.Target = otherPart;
+```
+
+An attribute typed `InstanceHandle` is left alone: you get the handle, and no waiting. That is the
+opt-out when you want to do the resolving yourself.
+
+`defaults` works here as it does elsewhere: give an instance and an attribute that was never written
+is filled in with a handle for it, rather than keeping the component waiting.
+
+### Naming a component
+
+Type an attribute or a child as a **component** rather than an Instance, and the instance it names
+has to carry that component:
+
+```ts
+interface Tree extends Model {
+    EffectHandler: EffectHandlerComponent;
+    Barrel: BasePart;
+}
+
+@Component({ tag: "Turret" })
+export class Turret extends BaseComponent<{ Owner: PlayerComponent }, Tree> {
+    public onStart() {
+        // `instance` holds instances, and the components sit beside it.
+        const part: BasePart = this.instance.EffectHandler;
+
+        this.childComponents.EffectHandler.playEffect();
+        this.attributeComponents.Owner.credit();
+    }
+}
+```
+
+`this.instance` keeps holding instances -- `this.instance.EffectHandler` is the part the component is
+attached to, which is what the generated instance guard checks. The components themselves live in
+`childComponents` and `attributeComponents`, whose fields are readonly: Flamework owns them, and
+reassigning one would only put it out of step with the instance.
+
+`Turret` is not constructed until `EffectHandler` exists **and** carries its component, in either tag
+order, and it is removed again if that component goes away. This is the same criteria mechanism
+component dependencies and streaming use, so the warning that lists what a component is waiting for
+names the link.
+
+A component can only be named as a **direct** member of the tree. One further down raises at compile
+time, because `this.instance` would have nowhere to put it -- declare it on the component attached to
+that child instead, or look it up with `getComponent`.
+
+### Waiting and warnings
+
+| Option | Effect |
+|---|---|
+| `warningTimeout` | Seconds before Flamework says what a component is still waiting for, links included. |
+| `attributeWarningTimeout` | Seconds before it says an attribute's instance has not streamed in. Defaults to `warningTimeout`. |
+
+```ts
+@Component({ tag: "Turret", attributeWarningTimeout: 10 })
+```
+
+Both default to 5 and `0` disables them. Keep instances an attribute names somewhere that is always
+loaded -- ReplicatedStorage, or inside the same model -- and the wait never happens.
 
 ## Where components may attach
 
@@ -252,7 +359,16 @@ for.
 - **A component with no `tag` can only be added by hand.**
 - **`@Component` classes are not providers.** They are not picked up by `registerProviders`, and
   `registerComponents` will not pick up providers.
-- **Component dependencies are same-instance only.** There is no cross-instance dependency.
+- **Component dependencies are same-instance only.** There is no cross-instance dependency; a link
+  is how you reach another instance.
+- **A linked component must be registered in the same plugin.** Igniting raises if it is not.
+- **`addComponent` will not wait.** By hand, a link that has not resolved raises instead of yielding;
+  through a tag, the component simply is not created until it has.
+- **A link is only kept current for a tag-driven component.** One added by hand is resolved once,
+  like its instance guard.
+- **`refreshAttributes: false` freezes link attributes too**, so re-pointing one stops updating
+  `this.attributes`.
+- **Clearing a required link raises.** Only an optional one can be set back to `undefined`.
 
 ---
 

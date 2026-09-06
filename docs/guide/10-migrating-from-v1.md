@@ -120,6 +120,12 @@ The component API itself is largely unchanged. What is new:
 - Component-to-component dependencies work: declare the other component as a parameter and Flamework
   waits for it.
 - `ComponentStreamingMode` controls whether instance guards are re-run as the tree streams in.
+- Attributes are writable again, as they were in v1: `this.attributes.speed = 32` writes back to the
+  instance. Alpha releases before this made them `Readonly`.
+- An attribute or a child typed as an Instance or as a component becomes a
+  [link](05-components.md#links): Flamework resolves the `InstanceHandle`, waits for it, and exposes
+  the components through `childComponents` and `attributeComponents`. In v1 an Instance attribute was
+  yours to resolve.
 
 ### 6. Replace `Modding.onListenerAdded`
 

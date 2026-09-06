@@ -32,6 +32,42 @@ export enum ComponentStreamingMode {
 	Default = Contextual,
 }
 
+/**
+ * A link between a component and an instance named by one of its attributes or by its instance
+ * tree. Written by the transformer from the component's type parameters; there is no reason to
+ * write one by hand.
+ */
+export interface ComponentLink {
+	/**
+	 * `attribute` reads an `InstanceHandle` attribute, `child` looks the instance up by name in the
+	 * component's own tree.
+	 */
+	kind: "attribute" | "child";
+
+	/**
+	 * The name of the attribute or of the child.
+	 */
+	name: string;
+
+	/**
+	 * Whether a missing instance is allowed, which it is when the declared type includes
+	 * `undefined`.
+	 */
+	optional: boolean;
+
+	/**
+	 * Guard for the linked instance. Attribute links only: a child is already covered by the
+	 * component's own instance guard.
+	 */
+	guard?: t.check<unknown>;
+
+	/**
+	 * The identifier of the component that has to exist on the linked instance, when the declared
+	 * type is a component rather than an Instance.
+	 */
+	component?: string;
+}
+
 export interface ComponentConfig {
 	/**
 	 * The CollectionService tag this component is associated with.
@@ -92,6 +128,22 @@ export interface ComponentConfig {
 	 * Defaults to 5, set to 0 to disable.
 	 */
 	warningTimeout?: number;
+
+	/**
+	 * How long an instance-valued attribute may go unresolved before Flamework warns about it.
+	 *
+	 * An attribute holds an `InstanceHandle`, which resolves to nothing until the instance it
+	 * points at has streamed in at least once. Defaults to `warningTimeout`, set to 0 to disable.
+	 */
+	attributeWarningTimeout?: number;
+
+	/**
+	 * The links generated from this component's type parameters.
+	 *
+	 * Written by the transformer, which reads them off `BaseComponent`'s type parameters; there is
+	 * no reason to set this by hand.
+	 */
+	links?: ComponentLink[];
 
 	/**
 	 * Override the component streaming mode, defaults to `Contextual`.

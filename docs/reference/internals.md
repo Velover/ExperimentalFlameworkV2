@@ -126,7 +126,7 @@ how the call itself is emitted:
 | `inline` | Emits the macro's result in place of the call rather than as an argument. |
 | `flamework-rewrite` | Redirects the call to a named export of `@flamework/core`, which is what gives a `declare`d macro a runtime target. |
 | `const` | Rejects an argument that is not a literal, because the transformer reads it at compile time. |
-| `component-config` | Rewrites a `@Component` decorator's config with generated attribute and instance guards. |
+| `component-config` | Rewrites a `@Component` decorator's config with generated attribute and instance guards, and with the links read off the component's type parameters. |
 | `middleware` | Obfuscates event names inside a networking middleware object. |
 
 ## Identifiers and guards
@@ -248,6 +248,24 @@ This is what makes dependencies and streaming work with one mechanism:
 - Under `Watching` (or `Contextual` on a client), the tracker subscribes to `DescendantAdded` and
   re-runs the instance guard on a deferred task, flipping the criterion as the tree fills in or
   breaks apart. Atomic models are exempt under `Contextual` because they replicate whole.
+
+**Links** are the criteria that reach outside the instance. `BaseComponent` carries its type
+parameters on three `declare`d properties -- the attributes as declared, the tree as declared, and
+the attributes as *written* -- so the transformer can read each for a different purpose: guards come
+from the written shape, where an instance-valued attribute is an `InstanceHandle`, and links come
+from the declared one, where it is still the Instance or component type it was named as. The
+declared-tree property doubles as the brand that tells a component type apart from an Instance type.
+
+Each link is emitted into the decorator config as `{ kind, name, optional, guard?, component? }`.
+At runtime `Components` supplies the tracker with two callbacks: `checkLinks`, for an instance
+nobody is tracking, where a linked component has to already exist; and `watchLinks`, which
+subscribes per link and reports it as met or lost. An attribute link resolves through
+`InstanceHandle:Get`, and parks a thread in `InstanceHandle:Wait` when it is empty. A component link
+subscribes to the linked component's tracker on the *target* instance, plus that component's
+added and removed signals -- removal is announced before the component leaves the active map, so the
+removed signal marks the criterion unmet outright rather than asking again. The subscription tracks
+the target with `observeOnly`, which keeps the linked component's tracker from warning about an
+instance it is not itself waiting for; the owner's own warning names the link instead.
 
 Polymorphic lookup is a pair of maps from id to component set -- one keyed by instance, one global.
 The ids come from `getPolymorphicIds`, which walks the class's parents plus its

@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import fs from "fs";
 import path from "path";
-import { compileFixture, compileFixtureFresh, emitted, normalize } from "./compile";
+import { compileFixture, compileFixtureFresh, compileProbe, emitted, normalize } from "./compile";
 
 const FIXTURE = path.resolve(import.meta.dir, "fixture");
 
@@ -129,5 +129,69 @@ describe("constant callsite metadata", () => {
 		expect(source).toMatch(/withEmit\(withEmit_\d+\)/);
 		expect(source).toMatch(/local plain_\d+ = \{ marker = true, \}/);
 		expect(source).toMatch(/plain\(plain_\d+\)/);
+	});
+});
+
+describe("component links", () => {
+	test("stores an instance-valued attribute as a handle and links the instance it names", () => {
+		const source = normalize(emitted("components"));
+
+		// The attribute holds an `InstanceHandle`, so that is what the attribute guard checks. The
+		// class it has to resolve to is checked by the link instead.
+		expect(source).toContain(`Target = t.typeof("InstanceHandle")`);
+		expect(source).toContain(`Spare = t.optional(t.typeof("InstanceHandle"))`);
+		expect(source).toContain(
+			`kind = "attribute", name = "Target", optional = false, guard = t.instanceIsA("BasePart"),`,
+		);
+		expect(source).toContain(`kind = "attribute", name = "Spare", optional = true, guard = t.instanceIsA("Part"),`);
+	});
+
+	test("links the component an attribute names, by its identifier", () => {
+		expect(normalize(emitted("components"))).toContain(
+			`kind = "attribute", name = "Handler", optional = false, guard = t.instanceIsA("BasePart"), component = "fw:components@HandlerComponent",`,
+		);
+	});
+
+	test("links a component named by the instance tree, guarding the child as its instance", () => {
+		const source = normalize(emitted("components"));
+
+		// The child's own class is part of the instance guard, so the link only has to name the
+		// component that must be attached to it.
+		expect(source).toContain(`EffectHandler = t.instanceIsA("BasePart")`);
+		expect(source).toContain(
+			`kind = "child", name = "EffectHandler", optional = false, component = "fw:components@HandlerComponent",`,
+		);
+	});
+
+	test("leaves an attribute that asks for the handle itself unlinked", () => {
+		const source = normalize(emitted("components"));
+
+		expect(source).toContain(`Raw = t.typeof("InstanceHandle")`);
+		expect(source).not.toContain(`name = "Raw"`);
+	});
+
+	test("rewrites writes to an attribute into the component's setter", () => {
+		const source = normalize(emitted("components"));
+
+		expect(source).toContain(`self[SYMBOL_ATTRIBUTE_SETTER](self, "label", "renamed")`);
+		expect(source).toContain(`self[SYMBOL_ATTRIBUTE_SETTER](self, "speed", self.attributes.speed + 1)`);
+		expect(source).toContain(`self[SYMBOL_ATTRIBUTE_SETTER](self, "speed", self.attributes.speed + 1, true)`);
+		expect(source).toContain(`self[SYMBOL_ATTRIBUTE_SETTER](self, "label", nil)`);
+		expect(source).toContain(`self[SYMBOL_ATTRIBUTE_SETTER](self, "Target", part)`);
+	});
+
+	test("rejects a component that is not a direct child of the instance tree", () => {
+		const result = compileProbe(
+			"nestedLink",
+			`import { BaseComponent, Component } from "@flamework/components";
+import { HandlerComponent } from "./components";
+
+@Component({ tag: "FixtureNested" })
+export class NestedComponent extends BaseComponent<{}, Model & { Core: Folder & { Handler: HandlerComponent } }> {}
+`,
+		);
+
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("which is not a direct child of this component");
 	});
 });

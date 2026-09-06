@@ -133,6 +133,7 @@
       "name": "transformer-fixture",
       "version": "0.0.0",
       "dependencies": {
+        "@flamework/components": "workspace:*",
         "@flamework/core": "workspace:*",
         "@flamework/networking": "workspace:*",
         "@rbxts/t": "^3.1.0",

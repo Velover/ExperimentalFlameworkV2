@@ -113,7 +113,7 @@ entry the tsconfig needs is `transform`; each package has its own section in the
   },
   "core": { "profiling": true },
   "networking": { "serialization": true },
-  "components": { "warningTimeout": 5, "streamingMode": "Contextual" }
+  "components": { "warningTimeout": 5, "attributeWarningTimeout": 5, "streamingMode": "Contextual" }
 }
 ```
 
@@ -126,7 +126,7 @@ entry the tsconfig needs is `transform`; each package has its own section in the
 | | `salt`, `noSemanticDiagnostics`, `optimizations` | Hash salt, skipping semantic diagnostics, [guard deduplication](#guard-deduplication). |
 | `core` | `profiling` | Default for `LifecyclePlugin` profiling; `createLifecyclePlugin({ profiling })` overrides it per module. |
 | `networking` | `serialization` | Serializes every event and function payload into a buffer with code generated at compile time; see [Networking](06-networking.md#serialization). |
-| `components` | `warningTimeout`, `streamingMode` | Defaults for components that do not set their own. |
+| `components` | `warningTimeout`, `attributeWarningTimeout`, `streamingMode` | Defaults for components that do not set their own. |
 
 The transformer looks for the file in the tsconfig's directory, then in each parent up to the
 package root, so a repository with several places can share one at the root and override it per

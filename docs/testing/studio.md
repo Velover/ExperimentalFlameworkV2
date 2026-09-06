@@ -32,6 +32,7 @@ start and print one line per check:
 | `components` | both | Tagged part gets a component, defaults, attributes and `onAttributeChanged`, component DI, ticking through the parent `LifecyclePlugin`, `getComponent`/`getAllComponents`, clones, tag removal destroying exactly one component, replication to the client. |
 | `ui` | client | The React tree renders with the module supplied through `FlameworkModuleContext`. |
 | `streaming` | client | Reports `StreamingEnabled`, how many `FwTestStreamPart` parts are visible and how many got components; asserts the expectation for the current mode (see the matrix). |
+| `links` | both | Server: what the real `InstanceHandle` does, a child and an attribute naming a component, writing an attribute back as a handle, and a linked component going away taking its owner with it. Client: a link attribute naming a part 6000 studs out, which is only built once that part streams in and survives it streaming back out. |
 
 The server spawns the parts it needs under `Workspace.FwTestParts` at runtime; nothing is saved into
 the place.
@@ -86,9 +87,10 @@ the place.
    networking check runs over serialized payloads; flip it to `false` and rebuild to test the plain
    path. The runtime sections it declares reach the packages through `include/flamework/config.json`.
 5. The place needs `ReplicatedStorage.Assets` and `SoundService.Sounds`; the template's
-   `default.project.json` now creates both. Without them two shared modules `WaitForChild` forever
+   `default.project.json` creates both. Without them two shared modules `WaitForChild` forever
    at require time and ignition never finishes -- the symptom is an "Infinite yield possible"
-   warning and no `[FWTEST]` lines at all.
+   warning and no `[FWTEST]` lines at all. A place made from scratch hits this until Rojo has
+   synced the project file once.
 
 ## Running the generalized tests
 
@@ -120,12 +122,19 @@ Each cell is one `run-studio-tests.mjs` invocation. Everything in the first two 
 | Streaming on (default radii) | `--streaming on` | `visibleTagged=1 components=1`; `streaming(on)` check passes because the far parts sit 6000 units out, beyond `StreamingTargetRadius` (1024 by default). |
 | Streaming off | `--streaming off` | `visibleTagged=4 components=4`; `streaming(off)` check passes. |
 | Streaming on, large radius | set `Workspace.StreamingTargetRadius` ≥ 8500 by hand, then `--streaming on` | `streaming(on)` **fails by design** (`visible=4`): the check encodes the default radius. Read the INFO line instead. |
+| Streaming on, small radius | set `StreamingMinRadius`/`StreamingTargetRadius` to 64/128 by hand, then `--streaming on` | Unchanged: every part the checks rely on sits either right by the spawn or 6000 studs out, so no check depends on the radius. Tightening it only makes instances stream out sooner. |
 | Server-only (Run mode) | Studio's *Run* button; the scripts cannot start it | Server lines only; client lines absent. Confirms nothing server-side depends on a client. |
 | Team Test / multiple clients | Studio's *Team Test* with two clients | Both clients print their own summaries; the server's `Ping`/`Bump` handlers serve each. |
 | Play Solo focus | run with the Studio window minimised | `onRender fires on the client` may take longer: `PreRender` only fires while Studio renders the client viewport, which is why that check waits up to 15 s. |
 
 Add a row whenever a scenario needs a property changed by hand; keep the automated rows to what the
 script can set and restore itself.
+
+**The streaming radii cannot be scripted.** `StreamingMinRadius` and `StreamingTargetRadius` are not
+scriptable members, so reading or writing them from a snippet raises `is not a valid member of
+Workspace`, and Rojo does not apply them from `$properties` either. They can only be set in Studio's
+Properties panel. That is why the parts the streaming checks rely on sit 6000 studs out rather than
+just beyond a narrowed radius: it makes the automated rows independent of what the place is set to.
 
 ## Adding checks
 
