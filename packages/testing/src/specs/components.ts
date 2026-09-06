@@ -41,6 +41,28 @@ class Tagged extends BaseComponent<TaggedAttributes, Folder> implements OnStart 
 	public onStart() {
 		events.push(`start:${this.instance.Name}`);
 	}
+
+	public setSpeed(speed: number) {
+		this.attributes.speed = speed;
+	}
+
+	public accelerate() {
+		this.attributes.speed += 1;
+	}
+
+	/** The write a cast let through: the value is not the type the attribute is declared as. */
+	public misassign(value: string) {
+		this.attributes.speed = value as unknown as number;
+	}
+
+	/** The same mistake in its other shape: a required attribute written away entirely. */
+	public clearSpeed() {
+		this.attributes.speed = undefined as unknown as number;
+	}
+
+	public rename(label?: string) {
+		this.attributes.label = label;
+	}
 }
 
 @Component({ tag: "Defaulted", defaults: { speed: 7 } })
@@ -240,6 +262,59 @@ function collectionService() {
 }
 
 export = suite("components", [
+	[
+		"writes an attribute through to the instance",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("Written", { speed: 3 });
+			collectionService().AddTag(instance, "Tagged");
+
+			const component = expectDefined(components.getComponent<Tagged>(instance), "component");
+
+			component.setSpeed(9);
+			expectEqual(component.attributes.speed, 9, "attribute after the write");
+			expectEqual(instance.GetAttribute("speed"), 9, "instance attribute after the write");
+
+			component.accelerate();
+			expectEqual(instance.GetAttribute("speed"), 10, "instance attribute after a compound write");
+
+			// An optional attribute can be written away, which is what clears it on the instance.
+			component.rename("named");
+			expectEqual(instance.GetAttribute("label"), "named", "optional attribute after the write");
+			component.rename(undefined);
+			expectEqual(instance.GetAttribute("label"), undefined, "optional attribute after being cleared");
+
+			module.extinguish();
+		},
+	],
+	[
+		"refuses a write whose value does not match the attribute it is written to",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("BadWrite", { speed: 3 });
+			collectionService().AddTag(instance, "Tagged");
+
+			const component = expectDefined(components.getComponent<Tagged>(instance), "component");
+
+			// The cast is the point: nothing in the type system stops this, so the guard has to.
+			const message = expectThrows(() => component.misassign("fast"), "writing a string to a number");
+			expectTrue(message.find("not a valid value")[0] !== undefined, "message names the attribute");
+
+			// Neither the component nor the instance is left holding the bad value.
+			expectEqual(component.attributes.speed, 3, "attribute after the refused write");
+			expectEqual(instance.GetAttribute("speed"), 3, "instance attribute after the refused write");
+
+			expectThrows(() => component.clearSpeed(), "clearing a required attribute");
+			expectEqual(component.attributes.speed, 3, "attribute after the refused clear");
+			expectEqual(instance.GetAttribute("speed"), 3, "instance attribute after the refused clear");
+
+			module.extinguish();
+		},
+	],
 	[
 		"leaves a component uncreated while a required link attribute is missing",
 		() => {

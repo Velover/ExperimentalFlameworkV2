@@ -14,7 +14,7 @@ export const SYMBOL_ATTRIBUTE_SETTER: unique symbol = {} as never;
 /**
  * @hidden @internal
  */
-export const SYMBOL_LINK_SETTER: unique symbol = {} as never;
+export const SYMBOL_ATTRIBUTE_WRITER: unique symbol = {} as never;
 
 /**
  * The brand every component carries. It is what tells a component type apart from an Instance type
@@ -91,12 +91,12 @@ export interface ComponentMetadata {
 	attributeComponents?: object;
 
 	/**
-	 * Writes an instance-valued attribute, returning whether the key was one. Provided by
-	 * `Components` for components that have links.
+	 * Checks a write against the attribute's guard, and stores an instance-valued one as a handle.
+	 * Returns whether it did the storing itself. Provided by `Components`.
 	 *
 	 * @hidden
 	 */
-	setLinkAttribute?: (key: string, value: Instance | undefined) => boolean;
+	writeAttribute?: (key: string, value: unknown) => boolean;
 }
 
 /**x
@@ -161,7 +161,7 @@ export class BaseComponent<A = {}, I extends Instance = Instance> {
 		this.instance = metadata.instance as ResolvedInstance<I>;
 		this.childComponents = (metadata.childComponents ?? {}) as LinkedComponents<I>;
 		this.attributeComponents = (metadata.attributeComponents ?? {}) as LinkedComponents<A>;
-		this[SYMBOL_LINK_SETTER] = metadata.setLinkAttribute;
+		this[SYMBOL_ATTRIBUTE_WRITER] = metadata.writeAttribute;
 	}
 
 	/** @hidden */
@@ -171,11 +171,11 @@ export class BaseComponent<A = {}, I extends Instance = Instance> {
 		postfix?: boolean,
 	): ResolvedAttributes<A>[T] {
 		const previousValue = this.attributes[key];
-		const setLink = this[SYMBOL_LINK_SETTER];
+		const write = this[SYMBOL_ATTRIBUTE_WRITER];
 
-		// A link is written as an `InstanceHandle` and validated before it lands, so `Components`
-		// owns that path; everything else is the plain attribute it looks like.
-		if (setLink === undefined || !setLink(key as string, value as never)) {
+		// `Components` holds the guards, so it is what checks the value and what stores an
+		// instance-valued attribute as a handle. Anything it did not store is a plain write.
+		if (write === undefined || !write(key as string, value)) {
 			// Through a local, because an assignment written against `this.attributes` is the very
 			// thing the transformer rewrites into this method.
 			const attributes = this.attributes as ResolvedAttributes<A>;
@@ -188,7 +188,7 @@ export class BaseComponent<A = {}, I extends Instance = Instance> {
 	}
 
 	/** @hidden @internal */
-	public [SYMBOL_LINK_SETTER]: ((key: string, value: Instance | undefined) => boolean) | undefined;
+	public [SYMBOL_ATTRIBUTE_WRITER]: ((key: string, value: unknown) => boolean) | undefined;
 
 	/** @hidden @internal */
 	public [SYMBOL_ATTRIBUTE_HANDLERS] = new Map<string, Signal<(newValue: unknown, oldValue: unknown) => void>>();

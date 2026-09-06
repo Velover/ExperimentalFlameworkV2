@@ -632,16 +632,35 @@ export class Components {
 	}
 
 	/**
-	 * The write path behind `this.attributes.myLink = instance`. The instance is checked against
-	 * the same guards its link was resolved with, so a bad assignment raises where it was written
-	 * rather than quietly removing the component a moment later.
+	 * The write path behind `this.attributes.speed = 32`.
+	 *
+	 * Every write is checked against the guard the attribute was accepted with, so a value that only
+	 * typechecked because of a cast raises where it was written instead of quietly leaving the
+	 * component holding something its own declared type says is impossible -- and leaving that value
+	 * on the instance, where it would reject the component the next time one is built.
+	 *
+	 * An instance-valued attribute is stored as a handle, which is a write this does itself; the
+	 * return value says which of the two happened.
 	 */
-	private createLinkSetter(componentInfo: ComponentInfo, instance: Instance) {
-		if (componentInfo.attributeLinks.size() === 0) return undefined;
+	private createAttributeWriter(
+		componentInfo: ComponentInfo,
+		instance: Instance,
+		guards: Map<string, t.check<unknown>>,
+	) {
+		if (guards.isEmpty() && componentInfo.attributeLinks.size() === 0) return undefined;
 
-		return (key: string, value: Instance | undefined) => {
+		return (key: string, value: unknown) => {
 			const link = componentInfo.attributeLinks.get(key);
-			if (link === undefined) return false;
+			if (link === undefined) {
+				const guard = guards.get(key);
+				if (guard !== undefined && !guard(value)) {
+					error(
+						`'${tostring(value)}' is not a valid value for attribute '${key}' of '${componentInfo.identifier}'`,
+					);
+				}
+
+				return false;
+			}
 
 			if (value === undefined) {
 				if (!link.optional) {
@@ -650,9 +669,9 @@ export class Components {
 
 				instance.SetAttribute(key, undefined);
 			} else {
-				if (!this.passesLinkGuard(link, value)) {
+				if (!typeIs(value, "Instance") || !this.passesLinkGuard(link, value)) {
 					error(
-						`${value.GetFullName()} did not pass the guard for attribute '${key}' of '${componentInfo.identifier}'`,
+						`'${tostring(value)}' did not pass the guard for attribute '${key}' of '${componentInfo.identifier}'`,
 					);
 				}
 
@@ -1049,7 +1068,7 @@ export class Components {
 				attributes,
 				childComponents,
 				attributeComponents,
-				setLinkAttribute: this.createLinkSetter(componentInfo, instance),
+				writeAttribute: this.createAttributeWriter(componentInfo, instance, attributeGuards),
 			});
 
 			componentInstance = this.module.createClassInstance(

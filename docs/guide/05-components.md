@@ -116,6 +116,19 @@ The write has to be spelled against `this.attributes` -- that is the shape the t
 Through a local (`const attributes = this.attributes; attributes.speed = 32`) it is an ordinary table
 write, and the instance never hears about it.
 
+Every write is checked against the same guard the attribute was accepted with, and raises if it
+fails. That is there for the write a cast let through:
+
+```ts
+// Raises: 'fast' is not a valid value for attribute 'speed' of '...'
+this.attributes.speed = someString as unknown as number;
+```
+
+Without the check the component would be left holding a value its own declared type says is
+impossible, and the instance would carry it too -- rejecting the component the next time one is
+built. Writing `undefined` to a required attribute raises for the same reason; an optional one
+accepts it and the attribute is cleared.
+
 ### Overriding a guard
 
 ```ts
@@ -369,6 +382,7 @@ for.
 - **`refreshAttributes: false` freezes link attributes too**, so re-pointing one stops updating
   `this.attributes`.
 - **Clearing a required link raises.** Only an optional one can be set back to `undefined`.
+- **A write that fails its guard raises**, so an attribute never holds a value its type forbids.
 
 ---
 
