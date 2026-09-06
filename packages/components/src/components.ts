@@ -640,7 +640,8 @@ export class Components {
 	 * on the instance, where it would reject the component the next time one is built.
 	 *
 	 * An instance-valued attribute is stored as a handle, which is a write this does itself; the
-	 * return value says which of the two happened.
+	 * return value says whether the key was handled here, so a plain one falls through to the
+	 * component's own write.
 	 */
 	private createAttributeWriter(
 		componentInfo: ComponentInfo,
@@ -675,13 +676,21 @@ export class Components {
 					);
 				}
 
-				if (link.component !== undefined) {
-					const linked = this.getComponent(value, this.getLinkedComponent(link));
-					if (linked === undefined) {
-						error(
-							`${value.GetFullName()} has no component '${link.component}', which attribute '${key}' of '${componentInfo.identifier}' links to`,
-						);
-					}
+				// The instance is the right shape but has no component on it yet, which is a matter
+				// of timing rather than a mistake in the value. Writing it anyway would unqualify
+				// this component and destroy it mid-write, so the write is refused and said out
+				// loud instead -- wait for the component first, then assign.
+				if (
+					link.component !== undefined &&
+					this.getComponent(value, this.getLinkedComponent(link)) === undefined
+				) {
+					warn(
+						`[Flamework] ${value.GetFullName()} has no component '${link.component}', which attribute`,
+						`'${key}' of '${componentInfo.identifier}' links to; the attribute was left alone`,
+					);
+					warn(`Wait for the component with Components.waitForComponent before writing the attribute`);
+
+					return true;
 				}
 
 				instance.SetAttribute(key, new InstanceHandle(value));

@@ -249,7 +249,15 @@ function roblox.create(initialRealm: "Server" | "Client")
 				context.setGlobal(name, luneRoblox[name])
 			end
 		end
+		-- Recorded as well as printed, so a spec can assert on advice Flamework only warns about.
+		local warnings: { string } = {}
 		context.setGlobal("warn", function(...)
+			local parts = {}
+			for index = 1, select("#", ...) do
+				table.insert(parts, tostring((select(index, ...))))
+			end
+
+			table.insert(warnings, table.concat(parts, " "))
 			print("[warn]", ...)
 		end)
 		-- `t.instanceIsA` (and roblox-ts's `typeIs`) gate on `typeof(value) == "Instance"`, so the
@@ -322,6 +330,13 @@ function roblox.create(initialRealm: "Server" | "Client")
 			end,
 			newPlayer = addPlayer,
 			removePlayer = removePlayer,
+			--- Everything `warn` has been called with since the last `clearWarnings`.
+			warnings = function(): { string }
+				return table.clone(warnings)
+			end,
+			clearWarnings = function()
+				table.clear(warnings)
+			end,
 			--- An `InstanceHandle` for an instance that has not streamed in, and the streaming of
 			--- it. Roblox resolves a handle the moment its instance replicates; here the spec says
 			--- when, so the waiting a component does is observable.

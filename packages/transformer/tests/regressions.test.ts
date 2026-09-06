@@ -163,6 +163,14 @@ describe("component links", () => {
 		);
 	});
 
+	test("carries the structure a linked component needs into the link's guard", () => {
+		// Not just the class: a component that declares a tree only accepts an instance that has it,
+		// wherever it is named from.
+		expect(normalize(emitted("components"))).toContain(
+			`name = "Rig", optional = false, guard = t.intersection(t.instanceIsA("Model"), t.children({ Root = t.instanceIsA("BasePart"), })), component =`,
+		);
+	});
+
 	test("leaves an attribute that asks for the handle itself unlinked", () => {
 		const source = normalize(emitted("components"));
 

@@ -24,6 +24,10 @@ declare const __harness: {
 	/** Component streaming reacts to descendant changes on a deferred task. */
 	flush: () => void;
 
+	/** Everything `warn` has been called with since the last `clearWarnings`. */
+	warnings: () => string[];
+	clearWarnings: () => void;
+
 	/** An `InstanceHandle` for an instance that has not streamed in, so `Get` is empty. */
 	pendingHandle: (instance: Instance) => InstanceHandle;
 
@@ -127,6 +131,10 @@ class Car extends BaseComponent<{}, Folder> {
 @Component({ tag: "Handler" })
 class Handler extends BaseComponent<{}, Folder> {}
 
+/** Declares a tree of its own, so the structure it needs is part of the guard on every link to it. */
+@Component({ tag: "Rig", warningTimeout: 0 })
+class Rig extends BaseComponent<{}, Folder & { Root: Folder }> {}
+
 /**
  * Names a component on a child of its own instance tree.
  *
@@ -153,6 +161,9 @@ interface PointerAttributes {
 
 	/** A component-valued attribute: the instance it names has to carry that component. */
 	Linked: Handler;
+
+	/** Optional, and the component it names needs a tree of its own. */
+	Rigged?: Rig;
 }
 
 /** Names instances through its attributes rather than through its tree. */
@@ -172,6 +183,14 @@ class Pointer extends BaseComponent<PointerAttributes, Folder> {
 
 	public clearTarget() {
 		this.attributes.Target = undefined!;
+	}
+
+	/**
+	 * The resolved attribute type already demands the tree, so the cast is what a mistake looks
+	 * like here -- and what leaves the runtime guard as the only thing checking.
+	 */
+	public setRigged(rigged: Folder) {
+		this.attributes.Rigged = rigged as Folder & { Root: Folder };
 	}
 }
 
@@ -206,6 +225,7 @@ function createComponentModule() {
 		.registerComponent(Owner)
 		.registerComponent(Pointer)
 		.registerComponent(PointerDefault)
+		.registerComponent(Rig)
 		.build();
 
 	return Flamework.createModule().includePlugin(plugin).ignite();
@@ -710,24 +730,64 @@ export = suite("components", [
 		},
 	],
 	[
-		"refuses a write that names an instance without the linked component",
+		"refuses a link write whose instance is the wrong shape",
 		() => {
 			const module = createComponentModule();
 			const components = module.resolveDependency<Components>();
 
-			const linked = folder("GuardLinked");
-			collectionService().AddTag(linked, "Handler");
+			const linked = handlerFolder("ShapeLinked");
+			const instance = pointer("ShapeWrite", folder("ShapeTarget"), linked);
+			const component = expectDefined(components.getComponent<Pointer>(instance), "component");
 
-			const instance = folder("Pointer5");
-			instance.SetAttribute("Target", new InstanceHandle(folder("GuardTarget")));
-			instance.SetAttribute("Linked", new InstanceHandle(linked));
-			collectionService().AddTag(instance, "Pointer");
+			// `Rig` needs a `Root` child, and the guard on a link carries that structure, not just
+			// the class. A folder without one can never be right, so this raises.
+			const message = expectThrows(() => component.setRigged(folder("NoRoot")), "writing a rootless folder");
+			expectTrue(message.find("did not pass the guard")[0] !== undefined, "message names the guard");
+			expectEqual(instance.GetAttribute("Rigged"), undefined, "attribute after the refused write");
 
-			const pointer = expectDefined(components.getComponent<Pointer>(instance), "component");
+			module.extinguish();
+		},
+	],
+	[
+		"warns rather than raising when a link write names an instance without the component",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
 
-			const message = expectThrows(() => pointer.relink(folder("Untagged")), "write to a component link");
-			expectTrue(message.find("has no component")[0] !== undefined, "message names the missing component");
-			expectEqual(pointer.attributes.Linked, linked, "attribute after the rejected write");
+			const linked = handlerFolder("AwaitLinked");
+			const instance = pointer("AwaitWrite", folder("AwaitTarget"), linked);
+			const component = expectDefined(components.getComponent<Pointer>(instance), "component");
+
+			// The right shape, but nothing has given it the component yet. Writing it would unqualify
+			// the component doing the writing, so the write is refused and said out loud instead.
+			const rigged = folder("RiggedLater");
+			folderIn(rigged, "Root");
+
+			__harness.clearWarnings();
+			component.setRigged(rigged);
+
+			expectEqual(instance.GetAttribute("Rigged"), undefined, "attribute after the refused write");
+			expectDefined(components.getComponent<Pointer>(instance), "the writing component is still alive");
+			expectTrue(
+				__harness.warnings().some((line) => line.find("has no component")[0] !== undefined),
+				"a warning said the component was missing",
+			);
+			expectTrue(
+				__harness.warnings().some((line) => line.find("waitForComponent")[0] !== undefined),
+				"a warning said what to do about it",
+			);
+
+			// Waiting for the component first is what makes the write land.
+			collectionService().AddTag(rigged, "Rig");
+			expectResolves(components.waitForComponent<Rig>(rigged), "the component being waited for");
+
+			component.setRigged(rigged);
+			expectEqual(component.attributes.Rigged, rigged, "attribute once the component was there");
+			expectEqual(
+				component.attributeComponents.Rigged,
+				components.getComponent<Rig>(rigged),
+				"linked component after the write",
+			);
 
 			module.extinguish();
 		},

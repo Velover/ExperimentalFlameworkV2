@@ -3,6 +3,10 @@ import { BaseComponent, Component } from "@flamework/components";
 @Component({ tag: "FixtureHandler" })
 export class HandlerComponent extends BaseComponent<{ power: number }, BasePart> {}
 
+/** Declares a tree of its own, so the structure it needs is part of every guard that names it. */
+@Component({ tag: "FixtureRig" })
+export class RigComponent extends BaseComponent<{}, Model & { Root: BasePart }> {}
+
 interface LinkedAttributes {
 	/** An instance-valued attribute, which is stored as an `InstanceHandle`. */
 	Target: BasePart;
@@ -12,6 +16,9 @@ interface LinkedAttributes {
 
 	/** A component-valued attribute: the instance it names has to carry that component. */
 	Handler: HandlerComponent;
+
+	/** A component with a tree: the instance it names has to have that tree as well. */
+	Rig: RigComponent;
 
 	/** Asking for the handle itself opts out of linking. */
 	Raw: InstanceHandle;

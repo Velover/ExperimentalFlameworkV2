@@ -187,6 +187,10 @@ Assigning writes a fresh handle, after checking the instance the way the link wa
 this.attributes.Target = otherPart;
 ```
 
+The check is the whole guard, structure included: a link to a component that declares
+`Model & { Root: BasePart }` only accepts a model that has that child. An instance that could never
+be right raises.
+
 An attribute typed `InstanceHandle` is left alone: you get the handle, and no waiting. That is the
 opt-out when you want to do the resolving yourself.
 
@@ -229,6 +233,24 @@ names the link.
 A component can only be named as a **direct** member of the tree. One further down raises at compile
 time, because `this.instance` would have nowhere to put it -- declare it on the component attached to
 that child instead, or look it up with `getComponent`.
+
+#### Writing one
+
+Assigning an instance that is the right shape but does not carry the component **yet** is a matter of
+timing rather than a bad value, so it does not raise. Writing it would unqualify the component doing
+the writing and destroy it mid-method; instead the write is refused and Flamework warns. Wait for the
+component first:
+
+```ts
+// Components has to be injected for this; ComponentMetadata comes first.
+const [ok] = this.components.waitForComponent<Rig>(target).timeout(5).await();
+if (!ok) return warn("that instance never got its component");
+
+this.attributes.Rigged = target;
+```
+
+The resolved attribute type already asks for the linked component's instance type, so most of the
+mistakes here are compile errors; the guard is what catches the ones a cast let through.
 
 ### Waiting and warnings
 
@@ -383,6 +405,8 @@ for.
   `this.attributes`.
 - **Clearing a required link raises.** Only an optional one can be set back to `undefined`.
 - **A write that fails its guard raises**, so an attribute never holds a value its type forbids.
+- **A link write to an instance without the component warns and is refused**, rather than raising or
+  destroying the component that wrote it. Await the component first.
 
 ---
 
