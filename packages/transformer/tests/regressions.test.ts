@@ -87,6 +87,15 @@ describe("glob registration", () => {
 	test("passes the glob through to the runtime as a string", () => {
 		expect(emitted("globs")).toContain('registerProvidersGlob("src/glob/**/*.ts", "src/glob/**/*.ts")');
 	});
+
+	test("fires the path macros on a plugin target", () => {
+		// `PluginTarget`'s members are function-typed properties; a macro on one has to fire as it
+		// does on the builder's method, or the plugin registers nothing and nothing complains.
+		const source = emitted("globs");
+
+		expect(source.match(/registerProvidersGlob\("src\/glob\/\*\*\/\*\.ts", "src\/glob\/\*\*\/\*\.ts"\)/g)).toHaveLength(2);
+		expect(source).toMatch(/registerProviders\("src\/glob", \{/);
+	});
 });
 
 describe("plugin host", () => {
