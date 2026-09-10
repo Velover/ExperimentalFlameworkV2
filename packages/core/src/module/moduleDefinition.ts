@@ -1,6 +1,18 @@
 import type { Modding } from "../modding";
 import type { PluginState } from "../plugin/pluginDefinition";
+import { clearDefaultModule, getDefaultModule, setDefaultModule } from "./defaultModule";
 import { createModuleInstantiation, type Module } from "./module";
+
+export interface IgniteOptions {
+	/**
+	 * Makes this module the one `Dependency<T>()` resolves against, replacing the current default.
+	 *
+	 * The first root module ignited in a realm becomes the default on its own, so a game never needs
+	 * this. Pass it where a realm ignites more than one root -- tests, tools -- and a later one is the
+	 * one `Dependency<T>()` should answer from.
+	 */
+	default?: boolean;
+}
 
 /** The configuration of the module. */
 export interface ModuleState {
@@ -28,8 +40,27 @@ export class ModuleDefinition {
 		return this.moduleState;
 	}
 
-	public ignite() {
-		return createModuleInstantiation(this.moduleState, { modules: new Map() }).ignite();
+	public ignite(options?: IgniteOptions) {
+		const module = createModuleInstantiation(this.moduleState, { modules: new Map() });
+
+		// Claimed before ignition rather than after it, so that `Dependency<T>()` answers inside a
+		// provider constructor, as it did in v1.
+		const claimsDefault = options?.default === true || getDefaultModule() === undefined;
+		if (claimsDefault) {
+			setDefaultModule(module);
+		}
+
+		try {
+			return module.ignite();
+		} catch (err) {
+			// A module that failed to ignite must not stay the default: the next root ignited would
+			// never claim it, and `Dependency<T>()` would keep answering from the wreck.
+			if (claimsDefault) {
+				clearDefaultModule(module);
+			}
+
+			error(err, 0);
+		}
 	}
 }
 

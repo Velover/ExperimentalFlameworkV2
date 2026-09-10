@@ -37,7 +37,7 @@ That is the whole story for a typical game. You do not need `includeModule`, you
 | `setDebugName(name)` | Names the module in error messages. |
 | `apply(fn)` | Runs `fn(builder)` without breaking the chain. |
 | `build()` | Finalises into a `ModuleDefinition`. |
-| `ignite()` | Shorthand for `.build().ignite()`. |
+| `ignite(options?)` | Shorthand for `.build().ignite()`. `{ default: true }` makes this the module `Dependency<T>()` answers from. |
 
 ### `build()` vs `ignite()`
 
@@ -80,6 +80,26 @@ const shop = module.resolveDependency<Shop>();
 
 Use this at the boundary between Flamework and code that is not managed by it. Inside a provider,
 take a constructor parameter instead.
+
+When there is no module handle to hand -- a UI component, a script, a callback registered with
+something outside Flamework -- `Dependency<T>()` resolves against the **default module**:
+
+```ts
+import { Dependency } from "@flamework/core";
+
+const shop = Dependency<Shop>();
+```
+
+The first root module ignited in a realm is the default, which for a game is the one the entry point
+ignites. Pass `{ default: true }` to make a later one the default instead:
+
+```ts
+const module = definition.ignite({ default: true });
+```
+
+Extinguishing the default releases it, so the next root ignited claims it -- a test that ignites and
+extinguishes per case never leaks one into the next. With no default, `Dependency<T>()` raises
+`Dependency<T>() was called before any module was ignited`.
 
 A provider can also inject the module itself:
 
@@ -200,6 +220,9 @@ Flamework.createModule()
 - **You cannot resolve during `PreIgnite`.** Providers do not exist yet;
   `module is in pre-ignite phase, dependency cannot be resolved` tells you a hook tried. Register
   state in `PreIgnite` and resolve in `PostIgnite`.
+- **`Dependency<T>()` answers from one module.** The first root ignited, unless a later one was
+  ignited with `{ default: true }`. A realm with two live roots -- tests, tools -- should say which,
+  or resolve through the handle.
 - **Exports are per-module, not transitive.** If `a` includes `b`, `a` does not automatically
   re-export `b`'s exports. Include `b` where you need it.
 - **`extinguish` does not touch included modules.** They may be shared, so only the modules this one

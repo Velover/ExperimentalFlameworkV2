@@ -97,6 +97,22 @@ You can also inject:
 - `PluginModule` -- inside a plugin, the module the plugin was included in. See
   [Plugins](08-plugins.md).
 
+### Outside a provider
+
+Code with no constructor -- a UI component, a script, a signal handler -- reaches a provider through
+`Dependency<T>()`, which resolves against the default module: the first one ignited, or the one
+ignited with `{ default: true }` (see [Modules](02-modules.md#resolving-by-hand)).
+
+```ts
+import { Dependency } from "@flamework/core";
+
+const economy = Dependency<Economy>();
+```
+
+Prefer a constructor parameter wherever there is one. It declares the dependency where it can be
+read, and it orders construction. `Dependency<T>()` inside a provider's constructor works, as it did
+in v1, but hides the edge from the module.
+
 ### Circular dependencies
 
 Two providers that inject each other cannot both be constructed first, and Flamework will not

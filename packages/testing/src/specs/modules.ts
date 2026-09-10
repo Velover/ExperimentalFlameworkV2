@@ -1,4 +1,4 @@
-import { Flamework, Provider } from "@flamework/core";
+import { Dependency, Flamework, Provider } from "@flamework/core";
 import { expectEqual, expectThrows, expectTrue, suite } from "../testkit";
 
 @Provider()
@@ -98,6 +98,69 @@ export = suite("modules", [
 			module.extinguish();
 
 			expectThrows(() => module.extinguish(), "extinguishing an extinguished module");
+		},
+	],
+	[
+		"Dependency resolves against the first root ignited",
+		() => {
+			// Claim the default explicitly and release it, so that the case does not depend on what
+			// ran before it: the next plain ignite is the first root again.
+			Flamework.createModule().ignite({ default: true }).extinguish();
+
+			const first = Flamework.createModule().registerClassProvider(Exported).ignite();
+			const second = Flamework.createModule().registerClassProvider(Exported).ignite();
+
+			expectTrue(Dependency<Exported>() === first.resolveDependency<Exported>(), "the first root is the default");
+			expectTrue(Dependency<Exported>() !== second.resolveDependency<Exported>(), "a later root is not");
+
+			first.extinguish();
+			second.extinguish();
+		},
+	],
+	[
+		"ignite({ default: true }) makes a later root the default",
+		() => {
+			const first = Flamework.createModule().registerClassProvider(Exported).ignite({ default: true });
+			const second = Flamework.createModule().registerClassProvider(Exported).ignite({ default: true });
+
+			expectTrue(Dependency<Exported>() === second.resolveDependency<Exported>(), "the explicit default wins");
+
+			second.extinguish();
+			first.extinguish();
+		},
+	],
+	[
+		"extinguishing the default releases it",
+		() => {
+			const module = Flamework.createModule().registerClassProvider(Exported).ignite({ default: true });
+			module.extinguish();
+
+			const message = expectThrows(() => Dependency<Exported>(), "Dependency with no default module");
+			expectTrue(message.find("before any module was ignited")[0] !== undefined, "error names the cause");
+		},
+	],
+	[
+		// v1 let a constructor reach for a dependency through the global; the default is claimed
+		// before ignition so that this still works, and the resolution constructs what is missing.
+		"Dependency answers inside a provider constructor during ignition",
+		() => {
+			@Provider()
+			class Reader {
+				public seen = Dependency<Exported>();
+			}
+
+			// `Reader` first, so that `Exported` does not exist yet when the constructor asks for it.
+			const module = Flamework.createModule()
+				.registerClassProvider(Reader)
+				.registerClassProvider(Exported)
+				.ignite({ default: true });
+
+			expectTrue(
+				module.resolveDependency<Reader>().seen === module.resolveDependency<Exported>(),
+				"resolved through the default while igniting",
+			);
+
+			module.extinguish();
 		},
 	],
 ]);

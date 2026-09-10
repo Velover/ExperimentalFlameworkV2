@@ -19,7 +19,7 @@ one, and everything that used to be built into it is now a plugin.
 | `Modding.getObjectFromId`, `Reflect.idToObj` | gone; there is no global registry |
 | `Flamework.ignite()` | `Flamework.createModule()…​.ignite()` |
 | Lifecycle events built in | `.includePlugin(LifecyclePlugin)` |
-| `Dependency<T>()` | `module.resolveDependency<T>()` or constructor injection |
+| `Dependency<T>()` | unchanged; answers from the first module ignited, or the one ignited with `{ default: true }` |
 | `Flamework.registerExternalClass(C)` | `.registerClassProvider(C)` |
 | `Flamework.createDependency(C)` | `module.createClassInstance(C)` with `@Injectable()` |
 | `Modding.onListenerAdded<T>(cb)` | `.registerInterface<T>({ onAdded, onRemoved })` on a plugin |
@@ -80,26 +80,22 @@ include that. `onPhysics` still receives `(dt, time)`.
 
 `OnRender` only connects on the client; a provider implementing it on the server is simply inert.
 
-### 4. Replace `Dependency<T>()`
+### 4. `Dependency<T>()` still works
 
-There is no global container to reach into, so the singleton accessor is gone.
+It answers from the **default module**: the first root ignited in the realm, which for a game is the
+one the entry point ignites. Nothing to change, though constructor injection is still the better
+shape inside a provider:
 
 ```ts
-// v1
+// still fine, anywhere
 const economy = Dependency<Economy>();
 
-// v2, inside a provider
+// better, inside a provider
 constructor(private economy: Economy) {}
-
-// v2, at a boundary
-const economy = module.resolveDependency<Economy>();
 ```
 
-For the boundary case, keep a reference to the module your entry point ignited:
-
-```ts
-export const gameModule = Flamework.createModule()…​.ignite();
-```
+If a realm ignites more than one root -- tests, tools -- pass `{ default: true }` to the one
+`Dependency<T>()` should answer from, or use `module.resolveDependency<T>()` on the handle.
 
 ### 5. Update components
 
@@ -231,7 +227,8 @@ and the error values all behave as they did.
 - Did any `@Service` rely on being server-only? Providers are not realm-gated; the module decides.
 - Did anything rely on `loadOrder`? Replace it with a dependency.
 - Do any constructors yield? They used to be tolerable; now they stall ignition.
-- Is there exactly one `ignite()` per realm? Two containers do not share providers.
+- Is there exactly one `ignite()` per realm? Two containers do not share providers, and
+  `Dependency<T>()` answers from the first.
 
 ---
 

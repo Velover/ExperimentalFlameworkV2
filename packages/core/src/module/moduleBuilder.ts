@@ -1,5 +1,5 @@
 import { Modding } from "../modding";
-import { ModuleDefinition, ModuleState, ProviderConfig } from "./moduleDefinition";
+import { ModuleDefinition, ModuleState, ProviderConfig, type IgniteOptions } from "./moduleDefinition";
 import { getClassesInPath } from "../utility/getClassesInPath";
 import { getClassesInGlob } from "../utility/globs";
 import { Reflect } from "../reflect";
@@ -194,10 +194,10 @@ export class ModuleBuilder {
 	/**
 	 * Ignites this module.
 	 *
-	 * This is shorthand for `.build().ignite()`
+	 * This is shorthand for `.build().ignite(options)`
 	 */
-	public ignite() {
-		return this.build().ignite();
+	public ignite(options?: IgniteOptions) {
+		return this.build().ignite(options);
 	}
 }
 

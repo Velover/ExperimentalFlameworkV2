@@ -12,6 +12,7 @@ import { convertConciseDependencyInfo } from "../utility/convertConciseDependenc
 import { getClassImplements } from "../utility/getClassImplements";
 import type { Destructor, ExtractSingleCallback } from "../utility/types";
 import type { ModuleState } from "./moduleDefinition";
+import { clearDefaultModule } from "./defaultModule";
 import { HookPriority, HookType, type HookConfig, type HookContext } from "./moduleHooks";
 
 interface InternalModule {
@@ -489,6 +490,10 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 
 		assert(temporaryInstances.size() === 0);
 		switchInitState(ModuleInitState.Extinguishing, ModuleInitState.Extinguished);
+
+		// Released last, once nothing in here can resolve any more, so that the next root ignited
+		// becomes the default rather than `Dependency<T>()` answering from a dead module.
+		clearDefaultModule(module);
 	};
 
 	const isExtinguished: Module["isExtinguished"] = () => moduleInitState >= ModuleInitState.Extinguishing;

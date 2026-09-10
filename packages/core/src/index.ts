@@ -3,6 +3,7 @@ export { Modding } from "./modding";
 export { Reflect } from "./reflect";
 export { Provider } from "./provider";
 export { Injectable } from "./injectable";
+export { Dependency } from "./dependency";
 export { Serialization } from "./serialization/types";
 
 export type { ProviderDecoratorConfig } from "./provider";
@@ -14,7 +15,13 @@ export { ModuleBuilder } from "./module/moduleBuilder";
 export { HookPriority, HookType } from "./module/moduleHooks";
 
 export type { Module, PluginModule } from "./module/module";
-export type { InjectionContext, ModuleProvider, ModuleState, ProviderConfig } from "./module/moduleDefinition";
+export type {
+	IgniteOptions,
+	InjectionContext,
+	ModuleProvider,
+	ModuleState,
+	ProviderConfig,
+} from "./module/moduleDefinition";
 export type { HookCallbacks, HookConfig, HookContext } from "./module/moduleHooks";
 
 // Plugins
