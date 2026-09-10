@@ -196,6 +196,23 @@ module.extinguish();
 
 Ignite the *definition* per case, not the module -- a `Module` cannot be re-ignited.
 
+For scenarios that run inside a place -- a test rig, a debug world -- keep them under their own
+folder and tie them to a [scope](11-scopes.md), so that they only exist in builds that ask for
+them, and give them a module of their own that [imports](02-modules.md#importing-a-module) the
+game's:
+
+```ts
+if (Flamework.isScopeActive("components")) {
+    Flamework.createModule()
+        .registerProviders("src/server/Testing/components")
+        .includePlugin(ComponentPlugin.fromPath("src/server/Testing/components"))
+        .ignite({ activeIn: ["components"], imports: [game] });
+}
+```
+
+A provider in there takes the game's services in its constructor like any other, and
+`game.extinguish()` takes the rig down first.
+
 For networking, `predict` runs a receiving handler locally, guards and middleware included, without
 a remote:
 

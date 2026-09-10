@@ -169,7 +169,8 @@ in a plugin both include. That is [Plugins](08-plugins.md).
 | `Flamework has no paths for the glob '...'` | `registerProvidersGlob` in a package, or the include directory is not in the Rojo project, or the glob matched nothing. |
 | `ServerScriptService.TS.services.X failed to load (Nms): ...` | A module under a registered path raised while being required. |
 | `module '...' has been extinguished, cannot ...` | Something resolved from, or created an instance on, a module after `extinguish()`. |
-| `provider ID was registered more than once: ...` | The same class was registered twice, often by two overlapping `registerProviders` paths. |
+| `provider ID was registered more than once: ...` | The same class was registered twice, often by two overlapping `registerProviders` paths. Raised at ignition. |
+| `could not resolve dependency '...': it is registered but inactive` | The class is tied to a [scope](11-scopes.md) that this build does not have active. |
 | `module could not resolve dependency 'X'` | A constructor parameter's type is not registered in this module or any module it includes. |
 
 ---

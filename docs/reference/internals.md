@@ -61,6 +61,23 @@ non-public `TypeFlags` read through
 `ts-expose-internals`, which stopped tracking TypeScript at 5.6.3 and capped the repo to a 2024
 compiler.
 
+### Configuration
+
+`flamework.config.json` is read in `util/projectConfig.ts` on every compilation, which in watch
+mode is every rebuild, since roblox-ts constructs a fresh transformer state per program. After the
+JSON is parsed, `util/env.ts` substitutes `${NAME}` and `${NAME:-fallback}` in every string from
+`.env`, `.env.local` and the process environment, then walks the schema alongside the value to
+convert strings sitting in boolean, number and string-list slots, and only then is the schema
+validated. The runtime sections -- `core`, `networking`, `components`, `scopes` -- are written to
+`include/flamework/config.json` from `saveArtifacts`, which is how a changed `.env` reaches a game
+through a rebuild without a restart.
+
+Two things are compiled into every file rather than read at runtime: the `transformer` section and
+`networking.serialization`. `hashCompiledInOptions` hashes them, the process-level `Cache` keeps the
+first compilation's hash, and a later compilation that sees another prints the restart warning. The
+build info records `idGenerationMode` and drops its identifier table when the mode changes, since
+an identifier once generated is answered from the table without looking at the mode again.
+
 ## Macros
 
 A macro is a function whose declaration carries `@metadata macro` in its JSDoc. When a call to one
@@ -191,23 +208,43 @@ Ignition is a state machine (`Created → PreIgniting → Igniting → Ignited`,
 `Extinguishing → Extinguished`) whose transitions are checked, so a re-entrant ignite fails loudly
 rather than half-working.
 
+0. Before any state changes, every module in `imports` is checked to be `Ignited`. A module that
+   fails here is left as it was, and nothing it names is told about it.
 1. Plugins are set up. Each plugin's setup function runs against the module through a
    `PluginTarget`, registering providers, provided instances, hooks and observers into this one
    instantiation, and including further plugins, which are set up first. A plugin reached twice in
    one ignition is set up once; the set that says so is marked before the setup runs, so a ring of
-   plugins stops on its second arrival.
+   plugins stops on its second arrival. An inclusion given a scope condition that does not hold is
+   skipped outright, setup and all.
 2. `onPreIgnite` hooks run, sorted by priority and then registration order. This is where a plugin
    registers state that providers will resolve during construction.
-3. Objects the plugins provided join the interfaces they implement, now that every observer is in
-   place; then every provider is resolved, which constructs it.
-4. `onPostIgnite` hooks run.
+3. The registrations are judged (`activateProviders`). For each, three conditions are read -- the
+   module's from `ignite`, the registration's own, and the class decorator's -- and all must hold
+   against `scopes.active`; a registration that fails is recorded in `skipped` by id, for the
+   message a later miss gets. A class registration that an import already resolves to the same
+   class is dropped, unless `isolated`, so the import's instance answers. What is left is checked
+   for duplicate ids, which is why the builder no longer checks: two registrations may share an id
+   as long as at most one survives. Lists of conditions hold an empty condition rather than
+   `undefined`, because an array literal with an `undefined` in it compiles to a table with a hole,
+   which Luau can neither measure nor walk.
+4. Objects the plugins provided join the interfaces they implement, now that every observer is in
+   place; then every kept provider is resolved, which constructs it.
+5. `onPostIgnite` hooks run, and the module records itself as an importer on each of its imports.
 
 ### Resolution
 
-`tryResolveDependency` checks the instantiated providers, then the registered ones, constructing a
-class provider on its first resolution. Class providers are constructed by reading `flamework:parameters` off the class, resolving each id,
-and calling the constructor. Function providers are invoked with an `InjectionContext` naming the
-requesting module and origin class. Alias providers forward to another id.
+`tryResolveDependency` checks the instantiated providers, then the kept registrations, constructing
+a class provider on its first resolution, then each import's `tryResolveDependency` in order. Going
+through the import's own resolver is what keeps ownership with the import: a lazy provider is
+constructed by the module that registered it and joins that module's interfaces, so its lifecycle
+plugin starts it and the importer's never sees it. Class providers are constructed by reading
+`flamework:parameters` off the class, resolving each id, and calling the constructor. Function
+providers are invoked with an `InjectionContext` naming the requesting module and origin class.
+Alias providers forward to another id.
+
+A miss consults `skipped`: a registration the scopes left out raises `registered but inactive`
+with the conditions and the active set, and either message names the imports that were searched.
+`lookupProvider` is the non-constructing form of the same walk, used to decide sharing at ignition.
 
 Resolution during `PreIgniting` is refused: providers do not exist yet, and allowing it would make
 construction order depend on hook order.
@@ -219,8 +256,11 @@ listener does not have to be a provider.
 
 ### Extinguishing
 
-`extinguish` runs `onExtinguished` hooks, releases the temporary instances the module created, and
-unregisters every provider from the interfaces it was added to.
+`extinguish` first extinguishes every module that imports this one, each of which does the same
+before returning, so the deepest importer goes first; then it runs `onExtinguished` hooks, releases
+the temporary instances the module created, unregisters every provider from the interfaces it was
+added to, and removes itself from its imports' importer sets. An importer extinguished on its own
+detaches the same way, so the import carries on.
 
 ### Reflection
 
