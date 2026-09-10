@@ -93,7 +93,9 @@ describe("glob registration", () => {
 		// does on the builder's method, or the plugin registers nothing and nothing complains.
 		const source = emitted("globs");
 
-		expect(source.match(/registerProvidersGlob\("src\/glob\/\*\*\/\*\.ts", "src\/glob\/\*\*\/\*\.ts"\)/g)).toHaveLength(2);
+		expect(
+			source.match(/registerProvidersGlob\("src\/glob\/\*\*\/\*\.ts", "src\/glob\/\*\*\/\*\.ts"\)/g),
+		).toHaveLength(2);
 		expect(source).toMatch(/registerProviders\("src\/glob", \{/);
 	});
 });
