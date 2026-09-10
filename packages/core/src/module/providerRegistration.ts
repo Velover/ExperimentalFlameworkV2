@@ -2,6 +2,7 @@ import { Reflect } from "../reflect";
 import type { ProviderDecoratorConfig } from "../provider";
 import type { Constructor } from "../utility/constructors";
 import type { ProviderConfig } from "./moduleDefinition";
+import { NO_CONDITION, type ScopeCondition } from "./scopes";
 
 /**
  * Metadata is inherited through the class hierarchy, so this deliberately checks the class's own
@@ -52,4 +53,22 @@ export function normalizeProviderConfig(config: ProviderConfig): ProviderConfig 
 
 	const decoratorConfig = Reflect.getOwnMetadata<ProviderDecoratorConfig>(config.value, "flamework:providerConfig");
 	return { ...config, lazy: decoratorConfig?.lazy === true };
+}
+
+/**
+ * The scope condition a provider's own decorator set, when it is a class provider with one, and
+ * no condition otherwise. Own metadata, as everywhere else: a subclass does not inherit its
+ * parent's scope.
+ */
+export function getProviderClassScope(config: ProviderConfig): ScopeCondition {
+	if (config.type !== "class") {
+		return NO_CONDITION;
+	}
+
+	const decoratorConfig = Reflect.getOwnMetadata<ProviderDecoratorConfig>(config.value, "flamework:providerConfig");
+	if (decoratorConfig === undefined) {
+		return NO_CONDITION;
+	}
+
+	return { activeIn: decoratorConfig.activeIn, inactiveIn: decoratorConfig.inactiveIn };
 }

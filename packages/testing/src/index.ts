@@ -10,6 +10,7 @@ import networking = require("./specs/networking");
 import plugins = require("./specs/plugins");
 import providers = require("./specs/providers");
 import regressions = require("./specs/regressions");
+import scopes = require("./specs/scopes");
 import serialization = require("./specs/serialization");
 
 /**
@@ -20,6 +21,7 @@ export const suites: TestSuite[] = [
 	providers,
 	modules,
 	plugins,
+	scopes,
 	lifecycle,
 	components,
 	networking,

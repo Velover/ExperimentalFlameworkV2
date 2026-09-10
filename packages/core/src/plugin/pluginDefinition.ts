@@ -1,7 +1,8 @@
 import type { Modding } from "../modding";
 import type { Module } from "../module/module";
-import type { ProviderConfig } from "../module/moduleDefinition";
+import type { ProviderConfig, ProviderRegistrationOptions } from "../module/moduleDefinition";
 import type { HookOptions } from "../module/moduleHooks";
+import type { ScopeCondition } from "../module/scopes";
 import type { Constructor } from "../utility/constructors";
 
 /**
@@ -52,25 +53,48 @@ export interface PluginTarget {
 	readonly module: Module;
 
 	/**
+	 * The module's own scope condition, from `ignite`, when it has one. Everything the module
+	 * registers is subject to it; {@link isActive} folds it in, so this is for messages.
+	 */
+	readonly scope?: ScopeCondition;
+
+	/**
+	 * Whether something with these conditions is registered in this module: the module's own
+	 * condition and every one given must hold. A plugin that keeps a registry of its own -- the
+	 * components plugin, say -- asks this for each class, so that its classes are scoped the way the
+	 * module's providers are.
+	 */
+	isActive: (...conditions: ScopeCondition[]) => boolean;
+
+	/**
 	 * Registers a class provider in the module, constructed with dependency injection during
 	 * ignition like any provider the module registered itself.
 	 */
-	registerClassProvider: (provider: Constructor) => void;
+	registerClassProvider: (provider: Constructor, options?: ProviderRegistrationOptions) => void;
 
 	/**
 	 * Registers every exported `@Provider()` class under a source folder, as the module builder's
-	 * `registerProviders` does. This is how a plugin ships a folder of providers.
+	 * `registerProviders` does. This is how a plugin ships a folder of providers. The options apply
+	 * to every class found.
 	 *
 	 * @metadata macro
 	 */
-	registerProviders: <T extends string>(path: T, resolved?: Modding.Intrinsic<"path", [T], string[]>) => void;
+	registerProviders: <T extends string>(
+		path: T,
+		options?: ProviderRegistrationOptions,
+		resolved?: Modding.Intrinsic<"path", [T], string[]>,
+	) => void;
 
 	/**
 	 * Registers every exported `@Provider()` class under every folder a compile-time glob matches.
 	 *
 	 * @metadata macro
 	 */
-	registerProvidersGlob: <T extends string>(glob: T, resolved?: Modding.Intrinsic<"pathglob", [T], string>) => void;
+	registerProvidersGlob: <T extends string>(
+		glob: T,
+		options?: ProviderRegistrationOptions,
+		resolved?: Modding.Intrinsic<"pathglob", [T], string>,
+	) => void;
 
 	/**
 	 * Registers a class, function or alias provider in the module.
@@ -93,9 +117,9 @@ export interface PluginTarget {
 	/**
 	 * Includes another plugin in the module, set up now, before this one continues. A plugin reached
 	 * more than once in one ignition -- included by the module and by a plugin, or by two plugins --
-	 * is set up once.
+	 * is set up once. With a scope condition that does not hold, the inclusion is skipped.
 	 */
-	includePlugin: (plugin: PluginDefinition) => void;
+	includePlugin: (plugin: PluginDefinition, options?: ScopeCondition) => void;
 
 	/**
 	 * Runs before the module's providers are constructed. Nothing can be resolved yet; this is where

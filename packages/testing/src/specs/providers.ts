@@ -72,11 +72,12 @@ export = suite("providers", [
 		},
 	],
 	[
-		"rejects a duplicate provider id",
+		// Judged at ignition rather than at registration: two registrations may share an id when
+		// their scope conditions keep at most one of them, so the builder cannot know yet.
+		"rejects a duplicate provider id at ignition",
 		() => {
-			expectThrows(() => {
-				Flamework.createModule().registerClassProvider(Counter).registerClassProvider(Counter);
-			}, "registering the same provider twice");
+			const definition = Flamework.createModule().registerClassProvider(Counter).registerClassProvider(Counter);
+			expectThrows(() => definition.ignite(), "igniting with the same provider twice");
 		},
 	],
 	[

@@ -1,5 +1,11 @@
 import { Modding } from "../modding";
-import { ModuleDefinition, ModuleState, ProviderConfig, type IgniteOptions } from "./moduleDefinition";
+import {
+	ModuleDefinition,
+	ModuleState,
+	ProviderConfig,
+	type IgniteOptions,
+	type ProviderRegistrationOptions,
+} from "./moduleDefinition";
 import { getClassesInPath } from "../utility/getClassesInPath";
 import { getClassesInGlob } from "../utility/globs";
 import { Reflect } from "../reflect";
@@ -7,6 +13,7 @@ import type { Constructor } from "../utility/constructors";
 import type { WritableState } from "../utility/writable";
 import { LIFECYCLE_SLOT, type PluginDefinition } from "../plugin/pluginDefinition";
 import { getProviderClassId, normalizeProviderConfig } from "./providerRegistration";
+import type { ScopeCondition } from "./scopes";
 
 type GenericId<T> = string | Modding.Target.Id<T>;
 
@@ -31,20 +38,24 @@ export class ModuleBuilder {
 	 *
 	 * A plugin is set up once per ignition however many times it is included, so including one
 	 * twice is not an error; it is simply not recorded twice.
+	 *
+	 * With a scope condition, the plugin is set up only in a build where the condition holds, and
+	 * is otherwise left out entirely, hooks and all.
 	 */
-	public includePlugin(plugin: PluginDefinition) {
+	public includePlugin(plugin: PluginDefinition, options?: ScopeCondition) {
 		const plugins = this.module.plugins;
-		if (plugins.includes(plugin)) {
+		if (plugins.some((v) => v.plugin === plugin)) {
 			return this;
 		}
 
 		// A slotted plugin takes the place of whatever holds its slot -- the default lifecycle
 		// plugin, usually -- rather than joining it, and keeps that position so hook order is stable.
-		const occupant = plugin.slot !== undefined ? plugins.findIndex((v) => v.slot === plugin.slot) : -1;
+		const occupant = plugin.slot !== undefined ? plugins.findIndex((v) => v.plugin.slot === plugin.slot) : -1;
+		const inclusion = { plugin, scope: options };
 		if (occupant !== -1) {
-			plugins[occupant] = plugin;
+			plugins[occupant] = inclusion;
 		} else {
-			plugins.push(plugin);
+			plugins.push(inclusion);
 		}
 
 		return this;
@@ -58,7 +69,7 @@ export class ModuleBuilder {
 	public disableDefaultLifecycle() {
 		const plugins = this.module.plugins;
 		for (let i = plugins.size() - 1; i >= 0; i--) {
-			if (plugins[i].slot === LIFECYCLE_SLOT) {
+			if (plugins[i].plugin.slot === LIFECYCLE_SLOT) {
 				plugins.remove(i);
 			}
 		}
@@ -88,12 +99,18 @@ export class ModuleBuilder {
 	 * The providers must be exported, and must carry the `@Provider()` decorator themselves: an
 	 * undecorated subclass of a provider is not registered.
 	 *
+	 * The options apply to every provider found: a scope condition here scopes the whole folder.
+	 *
 	 * @metadata macro
 	 */
-	public registerProviders<T extends string>(_stringPath: T, path?: Modding.Intrinsic<"path", [T], string[]>) {
+	public registerProviders<T extends string>(
+		_stringPath: T,
+		options?: ProviderRegistrationOptions,
+		path?: Modding.Intrinsic<"path", [T], string[]>,
+	) {
 		assert(path);
 
-		return this.registerProviderClasses(getClassesInPath(path));
+		return this.registerProviderClasses(getClassesInPath(path), options);
 	}
 
 	/**
@@ -105,16 +122,20 @@ export class ModuleBuilder {
 	 *
 	 * @metadata macro
 	 */
-	public registerProvidersGlob<T extends string>(_glob: T, glob?: Modding.Intrinsic<"pathglob", [T], string>) {
+	public registerProvidersGlob<T extends string>(
+		_glob: T,
+		options?: ProviderRegistrationOptions,
+		glob?: Modding.Intrinsic<"pathglob", [T], string>,
+	) {
 		assert(glob !== undefined);
 
-		return this.registerProviderClasses(getClassesInGlob(glob));
+		return this.registerProviderClasses(getClassesInGlob(glob), options);
 	}
 
-	private registerProviderClasses(classes: object[]) {
+	private registerProviderClasses(classes: object[], options?: ProviderRegistrationOptions) {
 		for (const provider of classes) {
 			if (Reflect.hasOwnMetadata(provider, "flamework:provider")) {
-				this.registerClassProvider(provider as Constructor);
+				this.registerClassProvider(provider as Constructor, options);
 			}
 		}
 
@@ -124,20 +145,15 @@ export class ModuleBuilder {
 	/**
 	 * Register a new provider.
 	 *
+	 * Two registrations may share an id when their scope conditions keep at most one of them in
+	 * any one build; both being kept is refused at ignition.
+	 *
 	 * @metadata macro
 	 */
 	public registerProvider<T>(providerConfig: ProviderConfig, injectionId?: GenericId<T>) {
 		assert(injectionId !== undefined);
 
-		providerConfig = normalizeProviderConfig(providerConfig);
-
-		for (const provider of this.module.providers) {
-			if (provider.injectionId === injectionId) {
-				error(`provider ID was registered more than once: ${injectionId}`);
-			}
-		}
-
-		this.module.providers.push({ config: providerConfig, injectionId });
+		this.module.providers.push({ config: normalizeProviderConfig(providerConfig), injectionId });
 
 		return this;
 	}
@@ -147,8 +163,11 @@ export class ModuleBuilder {
 	 *
 	 * This is just a shorthand for `registerProvider` which uses the generated `identifier` from the class.
 	 */
-	public registerClassProvider(provider: Constructor) {
-		return this.registerProvider({ type: "class", value: provider }, getProviderClassId(provider));
+	public registerClassProvider(provider: Constructor, options?: ProviderRegistrationOptions) {
+		const config: ProviderConfig =
+			options !== undefined ? { type: "class", value: provider, ...options } : { type: "class", value: provider };
+
+		return this.registerProvider(config, getProviderClassId(provider));
 	}
 
 	/**

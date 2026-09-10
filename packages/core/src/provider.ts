@@ -1,6 +1,7 @@
+import type { ScopeCondition } from "./module/scopes";
 import { Reflect } from "./reflect";
 
-export interface ProviderDecoratorConfig {
+export interface ProviderDecoratorConfig extends ScopeCondition {
 	/**
 	 * A lazy provider is not constructed during ignition. It is constructed the first time something
 	 * resolves it -- a constructor parameter, `resolveDependency`, or `createClassInstance` -- and is
@@ -20,6 +21,9 @@ export interface ProviderDecoratorConfig {
  * Unlike Flamework v1's `@Service` and `@Controller`, a provider is not bound to a realm. Which
  * providers exist on which realm is decided by the module that registers them, so this metadata
  * must be defined on both the client and the server.
+ *
+ * `activeIn` and `inactiveIn` scope the class: it is registered only when they hold against the
+ * build's active scopes, on top of whatever condition the module and the registration set.
  *
  * @metadata reflect identifier flamework:dependencies flamework:implements flamework:parameters injectable
  */

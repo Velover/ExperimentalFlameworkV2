@@ -2,8 +2,16 @@ import type { Modding } from "../modding";
 import type { PluginDefinition } from "../plugin/pluginDefinition";
 import { clearDefaultModule, getDefaultModule, setDefaultModule } from "./defaultModule";
 import { createModuleInstantiation, type Module } from "./module";
+import type { ScopeCondition } from "./scopes";
 
-export interface IgniteOptions {
+/**
+ * Options for one ignition of a module.
+ *
+ * `activeIn` and `inactiveIn` are the module's own scope condition. It applies to every provider
+ * and component the module registers, on top of the registration's and the class's own conditions.
+ * A module whose condition does not hold still ignites, holding nothing.
+ */
+export interface IgniteOptions extends ScopeCondition {
 	/**
 	 * Makes this module the one `Dependency<T>()` resolves against, replacing the current default.
 	 *
@@ -12,6 +20,14 @@ export interface IgniteOptions {
 	 * one `Dependency<T>()` should answer from.
 	 */
 	default?: boolean;
+}
+
+/** How a plugin was included: the plugin, and the condition its inclusion was given. */
+export interface PluginInclusion {
+	readonly plugin: PluginDefinition;
+
+	/** The plugin is set up only while this holds; without one it always is. */
+	readonly scope?: ScopeCondition;
 }
 
 /** The configuration of the module. */
@@ -23,14 +39,14 @@ export interface ModuleState {
 	readonly providers: readonly ModuleProvider[];
 
 	/** The plugins to set up on ignition, in inclusion order. */
-	readonly plugins: readonly PluginDefinition[];
+	readonly plugins: readonly PluginInclusion[];
 }
 
 export class ModuleDefinition {
 	constructor(private moduleState: ModuleState) {}
 
 	public ignite(options?: IgniteOptions) {
-		const module = createModuleInstantiation(this.moduleState);
+		const module = createModuleInstantiation(this.moduleState, options);
 
 		// Claimed before ignition rather than after it, so that `Dependency<T>()` answers inside a
 		// provider constructor, as it did in v1.
@@ -55,21 +71,29 @@ export class ModuleDefinition {
 
 export type ModuleProvider = { config: ProviderConfig; injectionId: string };
 
-export type ProviderConfig =
-	| {
-			type: "class";
-			value: object;
+/**
+ * What a registration can say about itself, whichever form it takes: an option on the class and
+ * path registrations, or written on the config of `registerProvider`.
+ */
+export type ProviderRegistrationOptions = ScopeCondition;
 
-			/**
-			 * A lazy class provider is not constructed during ignition. It is constructed the first
-			 * time something resolves it, and is otherwise never created.
-			 *
-			 * Defaults to the `lazy` option of the class's `@Provider()` decorator, or `false`.
-			 */
-			lazy?: boolean;
-	  }
-	| { type: "alias"; injectionId: string }
-	| { type: "function"; callback: (context: InjectionContext) => unknown };
+export type ProviderConfig = ProviderRegistrationOptions &
+	(
+		| {
+				type: "class";
+				value: object;
+
+				/**
+				 * A lazy class provider is not constructed during ignition. It is constructed the first
+				 * time something resolves it, and is otherwise never created.
+				 *
+				 * Defaults to the `lazy` option of the class's `@Provider()` decorator, or `false`.
+				 */
+				lazy?: boolean;
+		  }
+		| { type: "alias"; injectionId: string }
+		| { type: "function"; callback: (context: InjectionContext) => unknown }
+	);
 
 export type InjectionContext = {
 	/**

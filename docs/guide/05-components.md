@@ -425,6 +425,11 @@ so you can still attach a component by hand to something in ReplicatedStorage. T
 gates the eager path in `getComponent`: an instance it rejects never gets a component unless you call
 `addComponent` yourself, which ignores all three.
 
+A component can also be tied to the build's scopes with `activeIn` and `inactiveIn`, on the
+decorator or on the registration (`registerComponent(Class, { ... })`, `fromPath(path, { ... })`).
+A component left out by scope is not registered in the plugin at all: it is never attached, and
+`getComponent` on it raises with the reason. See [Scopes](11-scopes.md).
+
 ## Streaming
 
 With StreamingEnabled an instance can arrive before its descendants, so an instance guard that

@@ -201,6 +201,20 @@ still gets `onInit` and `onStart`, on the next resume point after it is construc
 like any other provider from then on. This is v1's `@Optional()`; there is no equivalent of
 `includeOptionalClass`, because resolving it is how you include it.
 
+### Scoped providers
+
+A provider can be tied to the build's scopes, so that a test scenario or a debug tool only exists in
+builds that ask for it:
+
+```ts
+@Provider({ activeIn: ["components"] })
+export class ComponentProbe {}
+```
+
+The same `activeIn`/`inactiveIn` pair goes on a registration (`registerProviders(path, { ... })`,
+`registerClassProvider(Class, { ... })`, or on the config of `registerProvider`) and on `ignite`,
+and they combine by AND. A provider left out is not registered at all. See [Scopes](11-scopes.md).
+
 ## Classes that are not providers
 
 Sometimes you want dependency injection for a class you create yourself -- a session, a request, a

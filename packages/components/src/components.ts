@@ -124,6 +124,9 @@ export class Components {
 
 	private componentsIdMapping: Map<string, Constructor>;
 
+	/** Components the plugin registered but left out by scope, by identifier, with the reason. */
+	private skipped: Map<string, string>;
+
 	private getComponentsIdMapping() {
 		const mapping = new Map<string, Constructor>();
 		for (const component of this.config.components) {
@@ -140,6 +143,7 @@ export class Components {
 
 		this.componentsIdMapping = this.getComponentsIdMapping();
 		this.components = components;
+		this.skipped = config.skipped ?? new Map();
 
 		for (const ctor of config.components) {
 			if (ctor === undefined) {
@@ -336,7 +340,9 @@ export class Components {
 		if (existingTracker) return existingTracker;
 
 		const componentInfo = this.components.get(component);
-		assert(componentInfo, "Provided component does not exist");
+		if (componentInfo === undefined) {
+			error(this.missingComponentMessage(component));
+		}
 
 		const instanceGuard = this.getConfigValue(component, "instanceGuard");
 		const dependencies = new Array<ComponentTracker>();
@@ -1292,6 +1298,25 @@ export class Components {
 	}
 
 	/**
+	 * Why a component could not be found: left out by its scope conditions, when it was registered
+	 * with this plugin and they did not hold, or simply never registered.
+	 */
+	private missingComponentMessage(specifier: unknown) {
+		const identifier = typeIs(specifier, "string")
+			? specifier
+			: typeIs(specifier, "table")
+				? Reflect.getOwnMetadata<string>(specifier, "identifier")
+				: undefined;
+
+		const inactive = identifier !== undefined ? this.skipped.get(identifier) : undefined;
+		if (inactive !== undefined) {
+			return `component '${identifier}' is registered but inactive (${inactive})`;
+		}
+
+		return `Could not find component from specifier: ${specifier}`;
+	}
+
+	/**
 	 * This returns the specified component associated with the instance.
 	 *
 	 * The specified type must be exact and not a lifecycle event or superclass. If you want to
@@ -1304,7 +1329,9 @@ export class Components {
 	 */
 	getComponent<T extends object>(instance: Instance, componentSpecifier?: ConstructorRef<T>): T | undefined {
 		const component = this.getComponentFromSpecifier(componentSpecifier);
-		assert(component, `Could not find component from specifier: ${componentSpecifier}`);
+		if (component === undefined) {
+			error(this.missingComponentMessage(componentSpecifier));
+		}
 
 		if (this.isConstructing(instance, component)) {
 			return undefined;
@@ -1371,10 +1398,14 @@ export class Components {
 		}
 
 		const component = this.getComponentFromSpecifier(componentSpecifier);
-		assert(component, `Could not find component from specifier: ${componentSpecifier}`);
+		if (component === undefined) {
+			error(this.missingComponentMessage(componentSpecifier));
+		}
 
 		const componentInfo = this.components.get(component);
-		assert(componentInfo, "Provided componentSpecifier does not exist");
+		if (componentInfo === undefined) {
+			error(this.missingComponentMessage(component));
+		}
 
 		const attributeGuards = this.getAttributeGuards(component);
 		const attributes = this.getAttributes(instance, componentInfo, attributeGuards);
@@ -1465,10 +1496,14 @@ export class Components {
 	 */
 	removeComponent<T extends object>(instance: Instance, componentSpecifier?: ConstructorRef<T>) {
 		const component = this.getComponentFromSpecifier(componentSpecifier);
-		assert(component, `Could not find component from specifier: ${componentSpecifier}`);
+		if (component === undefined) {
+			error(this.missingComponentMessage(componentSpecifier));
+		}
 
 		const componentInfo = this.components.get(component);
-		assert(componentInfo, "Provided componentSpecifier does not exist");
+		if (componentInfo === undefined) {
+			error(this.missingComponentMessage(component));
+		}
 
 		const activeComponents = this.activeComponents.get(instance);
 		if (!activeComponents) return;

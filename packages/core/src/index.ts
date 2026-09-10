@@ -20,9 +20,15 @@ export type {
 	InjectionContext,
 	ModuleProvider,
 	ModuleState,
+	PluginInclusion,
 	ProviderConfig,
+	ProviderRegistrationOptions,
 } from "./module/moduleDefinition";
 export type { HookOptions } from "./module/moduleHooks";
+
+// Scopes
+export { describeConditions, holdsCondition, holdsEveryCondition, __setActiveScopes } from "./module/scopes";
+export type { ScopeCondition } from "./module/scopes";
 
 // Plugins
 export { PluginDefinition } from "./plugin/pluginDefinition";

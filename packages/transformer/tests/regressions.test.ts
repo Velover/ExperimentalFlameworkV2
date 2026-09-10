@@ -84,8 +84,10 @@ describe("glob registration", () => {
 		expect(paths!.some((p) => p.replace(/\\/g, "/").startsWith("out/glob/target"))).toBe(true);
 	});
 
-	test("passes the glob through to the runtime as a string", () => {
-		expect(emitted("globs")).toContain('registerProvidersGlob("src/glob/**/*.ts", "src/glob/**/*.ts")');
+	test("passes the glob through to the runtime as a string, past the options parameter", () => {
+		// The registration options sit between the glob and the generated argument, so a call
+		// without them gets a `nil` there and the generated string lands on the right parameter.
+		expect(emitted("globs")).toContain('registerProvidersGlob("src/glob/**/*.ts", nil, "src/glob/**/*.ts")');
 	});
 
 	test("fires the path macros on a plugin target", () => {
@@ -94,9 +96,9 @@ describe("glob registration", () => {
 		const source = emitted("globs");
 
 		expect(
-			source.match(/registerProvidersGlob\("src\/glob\/\*\*\/\*\.ts", "src\/glob\/\*\*\/\*\.ts"\)/g),
+			source.match(/registerProvidersGlob\("src\/glob\/\*\*\/\*\.ts", nil, "src\/glob\/\*\*\/\*\.ts"\)/g),
 		).toHaveLength(2);
-		expect(source).toMatch(/registerProviders\("src\/glob", \{/);
+		expect(source).toMatch(/registerProviders\("src\/glob", nil, \{/);
 	});
 });
 

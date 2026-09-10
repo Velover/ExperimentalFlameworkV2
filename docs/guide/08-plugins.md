@@ -37,17 +37,31 @@ Everything is a method on `target`, and everything registers into the module bei
 | Method | Does |
 |---|---|
 | `provideInstance(value)` | Hands the module an object under its type's id. Providers inject it; `resolveDependency` finds it. |
-| `registerClassProvider(Class)` | Registers a provider, exactly as the module builder would. |
+| `registerClassProvider(Class, options?)` | Registers a provider, exactly as the module builder would. |
 | `registerProvider<T>(config)` | The same, for a function or alias provider. |
-| `registerProviders(path)` / `registerProvidersGlob(glob)` | Registers every `@Provider()` class under a folder, as the module builder does. How a plugin ships a folder of providers. |
-| `includePlugin(plugin)` | Includes another plugin, set up now, before this one continues. |
+| `registerProviders(path, options?)` / `registerProvidersGlob(glob, options?)` | Registers every `@Provider()` class under a folder, as the module builder does. How a plugin ships a folder of providers. |
+| `includePlugin(plugin, options?)` | Includes another plugin, set up now, before this one continues. |
 | `onPreIgnite(cb, options?)` | Runs `cb` before the module's providers are constructed. |
 | `onPostIgnite(cb, options?)` | Runs `cb` after every provider has been constructed. |
 | `onExtinguished(cb, options?)` | Runs `cb` when the module extinguishes. |
 | `observe<T>({ onAdded, onRemoved })` | Tells the plugin about every object implementing `T`. |
+| `isActive(...conditions)` | Whether something with these [scope conditions](11-scopes.md) is registered in this module, the module's own condition included. |
 | `module` | The module itself, for the hooks to close over. It cannot resolve anything until it ignites. |
+| `scope` | The module's own scope condition, when `ignite` was given one. For messages; `isActive` already folds it in. |
 
 Every hook receives the module: `target.onPostIgnite((module) => module.resolveDependency<Shop>())`.
+
+The `options` on the registrations and on `includePlugin` are a scope condition (`activeIn`,
+`inactiveIn`). A plugin that keeps a registry of its own, as the components plugin does, has to ask
+`target.isActive(condition)` for each class it holds, or its classes ignore the module's condition:
+
+```ts
+for (const component of registered) {
+	if (target.isActive(registrationScopes.get(component), decoratorScope(component))) {
+		active.push(component);
+	}
+}
+```
 
 ## Hooks
 

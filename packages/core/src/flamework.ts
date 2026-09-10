@@ -5,6 +5,7 @@ import { AbstractConstructor } from "./utility/constructors";
 import { ModuleBuilder } from "./module/moduleBuilder";
 import { PluginDefinition, type PluginTarget } from "./plugin/pluginDefinition";
 import { LifecyclePlugin } from "./lifecycle/lifecyclePlugin";
+import { getActiveScopes, isScopeActive as isScopeActiveInBuild } from "./module/scopes";
 import { Serialization } from "./serialization/types";
 
 export namespace Flamework {
@@ -25,6 +26,22 @@ export namespace Flamework {
 	 */
 	export function createPlugin(name: string, setup: (target: PluginTarget) => void) {
 		return new PluginDefinition(name, setup);
+	}
+
+	/**
+	 * The scopes this build is compiled with: `scopes.active` in `flamework.config.json`, which
+	 * usually comes from the environment. `"*"` in the list stands for every scope.
+	 */
+	export function activeScopes(): readonly string[] {
+		return getActiveScopes();
+	}
+
+	/**
+	 * Whether a scope is active in this build. What an entry point asks before igniting a module
+	 * that only exists for that scope.
+	 */
+	export function isScopeActive(scope: string): boolean {
+		return isScopeActiveInBuild(scope);
 	}
 
 	/** @hidden */

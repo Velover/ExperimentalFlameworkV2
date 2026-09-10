@@ -149,6 +149,16 @@ export interface ComponentConfig {
 	 * Override the component streaming mode, defaults to `Contextual`.
 	 */
 	streamingMode?: ComponentStreamingMode;
+
+	/**
+	 * Registered only while at least one of these scopes is active in the build, on top of the
+	 * module's and the registration's own conditions. An unregistered component is never attached
+	 * to a tagged instance.
+	 */
+	activeIn?: readonly string[];
+
+	/** Never registered while any of these scopes is active in the build. */
+	inactiveIn?: readonly string[];
 }
 
 /**

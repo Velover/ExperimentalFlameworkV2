@@ -24,6 +24,7 @@ Read in order the first time. Each page ends with the caveats for that topic.
 | 8 | [Plugins](guide/08-plugins.md) | Hooks and interfaces: extending Flamework itself. |
 | 9 | [Project structure](guide/09-project-structure.md) | Folder layout, one module or several, testing. |
 | 10 | [Migrating from v1](guide/10-migrating-from-v1.md) | What changed, and what to do about it. |
+| 11 | [Scopes](guide/11-scopes.md) | Build scopes from `.env`: test scenarios, debug tooling and stand-ins that only exist in the builds that ask for them. |
 
 ## Reference
 
