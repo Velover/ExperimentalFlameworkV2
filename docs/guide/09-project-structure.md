@@ -29,10 +29,9 @@ The entry points are the only files that know how everything is wired:
 ```ts
 // src/server/runtime.server.ts
 import { ComponentPlugin } from "@flamework/components";
-import { Flamework, LifecyclePlugin } from "@flamework/core";
+import { Flamework } from "@flamework/core";
 
 Flamework.createModule()
-    .includePlugin(LifecyclePlugin)
     .includePlugin(ComponentPlugin.fromPath("src/shared/components"))
     .includePlugin(ComponentPlugin.fromPath("src/server/components"))
     .registerProviders("src/server/services")
@@ -42,7 +41,6 @@ Flamework.createModule()
 ```ts
 // src/client/runtime.client.ts
 Flamework.createModule()
-    .includePlugin(LifecyclePlugin)
     .includePlugin(ComponentPlugin.fromPath("src/shared/components"))
     .includePlugin(ComponentPlugin.fromPath("src/client/components"))
     .registerProviders("src/client/controllers")
@@ -153,7 +151,6 @@ mocks-by-injection frameworks:
 
 ```ts
 const definition = Flamework.createModule()
-    .includePlugin(LifecyclePlugin)
     .registerClassProvider(Shop)
     // swap the real implementation for a fake under the same id
     .registerProvider<Storage>({ type: "function", callback: () => new FakeStorage() })

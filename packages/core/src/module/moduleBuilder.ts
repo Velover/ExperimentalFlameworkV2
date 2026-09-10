@@ -5,7 +5,7 @@ import { getClassesInGlob } from "../utility/globs";
 import { Reflect } from "../reflect";
 import type { Constructor } from "../utility/constructors";
 import type { WritableState } from "../utility/writable";
-import type { PluginDefinition } from "../plugin/pluginDefinition";
+import { LIFECYCLE_SLOT, type PluginDefinition } from "../plugin/pluginDefinition";
 import { getProviderClassId, normalizeProviderConfig } from "./providerRegistration";
 
 type GenericId<T> = string | Modding.Target.Id<T>;
@@ -36,8 +36,34 @@ export class ModuleBuilder {
 	 * twice is not an error; it is simply not recorded twice.
 	 */
 	public includePlugin(plugin: PluginDefinition) {
-		if (!this.module.plugins.includes(plugin)) {
-			this.module.plugins.push(plugin);
+		const plugins = this.module.plugins;
+		if (plugins.includes(plugin)) {
+			return this;
+		}
+
+		// A slotted plugin takes the place of whatever holds its slot -- the default lifecycle
+		// plugin, usually -- rather than joining it, and keeps that position so hook order is stable.
+		const occupant = plugin.slot !== undefined ? plugins.findIndex((v) => v.slot === plugin.slot) : -1;
+		if (occupant !== -1) {
+			plugins[occupant] = plugin;
+		} else {
+			plugins.push(plugin);
+		}
+
+		return this;
+	}
+
+	/**
+	 * Leaves out the `LifecyclePlugin` every module otherwise starts with, so that nothing in this
+	 * module receives `onInit`, `onStart` or the per-frame events. Silent by design: a module that
+	 * wants no lifecycle has nothing to be told.
+	 */
+	public disableDefaultLifecycle() {
+		const plugins = this.module.plugins;
+		for (let i = plugins.size() - 1; i >= 0; i--) {
+			if (plugins[i].slot === LIFECYCLE_SLOT) {
+				plugins.remove(i);
+			}
 		}
 
 		return this;

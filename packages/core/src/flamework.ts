@@ -4,14 +4,18 @@ import { Reflect } from "./reflect";
 import { AbstractConstructor } from "./utility/constructors";
 import { ModuleBuilder } from "./module/moduleBuilder";
 import { PluginDefinition, type PluginTarget } from "./plugin/pluginDefinition";
+import { LifecyclePlugin } from "./lifecycle/lifecyclePlugin";
 import { Serialization } from "./serialization/types";
 
 export namespace Flamework {
 	/**
 	 * Creates a new Module which is the core functionality of Flamework.
+	 *
+	 * Every module starts with `LifecyclePlugin` included. `disableDefaultLifecycle()` on the builder
+	 * leaves it out, and including one built with `createLifecyclePlugin` takes its place.
 	 */
 	export function createModule() {
-		return new ModuleBuilder().setDebugName(2);
+		return new ModuleBuilder().setDebugName(2).includePlugin(LifecyclePlugin);
 	}
 
 	/**

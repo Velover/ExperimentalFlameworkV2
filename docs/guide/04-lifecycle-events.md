@@ -1,18 +1,16 @@
 # 4. Lifecycle events
 
-Lifecycle events are **not built in**. They come from `LifecyclePlugin`, and if you do not include
-it, nothing happens and nothing complains:
+Lifecycle events come from `LifecyclePlugin`, and every module starts with it included:
 
 ```ts
-import { Flamework, LifecyclePlugin } from "@flamework/core";
-
 Flamework.createModule()
-    .includePlugin(LifecyclePlugin)
     .registerProviders("src/server/services")
     .ignite();
 ```
 
-That is the single most common "why isn't my code running" in v2.
+It is an ordinary plugin with no special access. `disableDefaultLifecycle()` on the builder leaves
+it out, for a module that wants no per-frame work at all, and including one built with
+`createLifecyclePlugin({ … })` takes its place rather than adding a second.
 
 ## The events
 
@@ -121,9 +119,9 @@ plugin runs its `onInit` and `onStart` for it, on the next resume point, in that
 ## Components
 
 Components are constructed through the module that includes `ComponentPlugin`, so they take their
-per-frame events from **that module's** lifecycle plugin. Include `LifecyclePlugin` in the module
-that includes `ComponentPlugin`, or components will not tick. `onStart` is the one exception:
-`Components` calls it itself, so it works even without the lifecycle plugin.
+per-frame events from **that module's** lifecycle plugin -- the default one, unless the module
+disabled it, in which case components do not tick. `onStart` is the one exception: `Components`
+calls it itself, so it works either way.
 
 ## Profiling
 
@@ -139,7 +137,8 @@ Flamework.createModule()
     .ignite();
 ```
 
-The project-wide default lives in `flamework.config.json` as `core.profiling`; this option overrides it
+Including a configured plugin takes the default's place; the module still runs exactly one. The
+project-wide default lives in `flamework.config.json` as `core.profiling`; this option overrides it
 for one module.
 
 The identifier each object is profiled under is looked up once and remembered until the object
@@ -199,7 +198,9 @@ one provider iterating them over hundreds of `listen` calls.
 
 ## Caveats
 
-- **No `LifecyclePlugin`, no events.** Silent failure.
+- **`disableDefaultLifecycle()` is silent.** Nothing complains that `onStart` never ran.
+- **One lifecycle plugin per module.** Including a configured one on the builder replaces the
+  default; a plugin that includes a second one is refused at ignition, so include it on the module.
 - **Order between providers is unspecified** for every event, not just `onStart`. The listener set is
   unordered.
 - **`listen` does not replay `onStart`.** It attaches from that moment on.

@@ -14,11 +14,11 @@ one, and everything that used to be built into it is now a plugin.
 | `flamework.json` `profiling` | `flamework.config.json` `core.profiling`, or `createLifecyclePlugin({ profiling })` per module |
 | Transformer options inline in `tsconfig.json` | the `transformer` section of `flamework.config.json` (inline still works and wins) |
 | Values sent as-is over remotes | unchanged by default; `networking.serialization` packs them into buffers with generated code |
-| `OnInit` | unchanged, once `LifecyclePlugin` is included |
+| `OnInit` | unchanged |
 | `Modding.createDecorator` / `getDecorators` | your own decorator + `@metadata reflect` + `Reflect`; see below |
 | `Modding.getObjectFromId`, `Reflect.idToObj` | gone; there is no global registry |
 | `Flamework.ignite()` | `Flamework.createModule()…​.ignite()` |
-| Lifecycle events built in | `.includePlugin(LifecyclePlugin)` |
+| Lifecycle events built in | still on: `LifecyclePlugin` is an ordinary plugin every module starts with; `disableDefaultLifecycle()` opts out |
 | `Dependency<T>()` | unchanged; answers from the first module ignited, or the one ignited with `{ default: true }` |
 | `Flamework.registerExternalClass(C)` | `.registerClassProvider(C)` |
 | `Flamework.createDependency(C)` | `module.createClassInstance(C)` with `@Injectable()` |
@@ -45,10 +45,9 @@ Flamework.ignite();
 ```ts
 // v2
 import { ComponentPlugin } from "@flamework/components";
-import { Flamework, LifecyclePlugin } from "@flamework/core";
+import { Flamework } from "@flamework/core";
 
 Flamework.createModule()
-    .includePlugin(LifecyclePlugin)
     .includePlugin(ComponentPlugin.fromPath("src/server/components"))
     .registerProviders("src/server/services")
     .ignite();
@@ -69,14 +68,12 @@ folders, or one class registered by both.
 `loadOrder` is gone. Ordering comes from dependencies: if `A` must exist before `B`, inject `A` into
 `B`.
 
-### 3. Include the lifecycle plugin
+### 3. Lifecycle events are still on
 
-`OnStart`, `OnTick`, `OnPhysics` and `OnRender` are no longer built in. Without
-`.includePlugin(LifecyclePlugin)` they silently never fire. This is the most common thing to miss.
-
-`OnInit` works as it did: it runs after construction, in dependency order, may return a Promise, and
-everything after it waits. It is provided by `LifecyclePlugin`, so it stops firing if you forget to
-include that. `onPhysics` still receives `(dt, time)`.
+`OnInit`, `OnStart`, `OnTick`, `OnPhysics` and `OnRender` work as they did. They are provided by
+`LifecyclePlugin`, an ordinary plugin every module starts with, so there is nothing to add. `OnInit`
+still runs after construction, in dependency order, may return a Promise, and everything after it
+waits; `onPhysics` still receives `(dt, time)`.
 
 `OnRender` only connects on the client; a provider implementing it on the server is simply inert.
 
@@ -218,9 +215,8 @@ and the error values all behave as they did.
 
 ## Things to check after migrating
 
-- Did you include `LifecyclePlugin`? Missing it fails silently, and that now includes `onInit`.
-- Does the module that includes `ComponentPlugin` also include `LifecyclePlugin`? Components tick
-  through it.
+- Did you call `disableDefaultLifecycle()` anywhere? It is now the only way lifecycle events go
+  missing, `onInit` included, and components stop ticking with them.
 - Did anything rely on `@Optional`? Replace it with `@Provider({ lazy: true })`.
 - Did anything rely on `Modding.getDecorators`? Replace it with path scanning and your own metadata.
 - Are your component folders registered with `ComponentPlugin`, not `registerProviders`?

@@ -80,32 +80,32 @@ The entry point builds a module and ignites it:
 
 ```ts
 // src/server/runtime.server.ts
-import { Flamework, LifecyclePlugin } from "@flamework/core";
+import { Flamework } from "@flamework/core";
 
 Flamework.createModule()
-    .includePlugin(LifecyclePlugin)
     .registerProviders("src/server/services")
     .ignite();
 ```
 
-Three things happened:
+Two things happened:
 
 1. **`registerProviders("src/server/services")`** found every exported `@Provider()` class under that
    folder. You do not list them by hand -- see [Providers](03-providers.md#registration) for exactly
    how this works and when it does not.
-2. **`includePlugin(LifecyclePlugin)`** enabled `OnStart`, `OnTick` and the rest. Lifecycle events
-   are not built in; if you forget this line, `onStart` never runs and nothing complains.
-3. **`ignite()`** constructed every provider, injected their dependencies, ran every `onInit` in dependency
-   order, and then ran the hooks.
+2. **`ignite()`** constructed every provider, injected their dependencies, ran every `onInit` in
+   dependency order, and then ran `onStart`.
+
+`onStart` ran because every module starts with `LifecyclePlugin` included. It is an ordinary plugin:
+`disableDefaultLifecycle()` on the builder leaves it out, and including one built with
+`createLifecyclePlugin({ … })` takes its place. See [Lifecycle events](04-lifecycle-events.md).
 
 The client is the same shape:
 
 ```ts
 // src/client/runtime.client.ts
-import { Flamework, LifecyclePlugin } from "@flamework/core";
+import { Flamework } from "@flamework/core";
 
 Flamework.createModule()
-    .includePlugin(LifecyclePlugin)
     .registerProviders("src/client/controllers")
     .ignite();
 ```
@@ -146,8 +146,8 @@ Put anything both realms need in a shared folder and register it from both entry
 
 ## Caveats
 
-- **Lifecycle events need `LifecyclePlugin`.** Forgetting it fails silently: `onStart` simply never
-  runs.
+- **`disableDefaultLifecycle()` is silent.** With it, `onStart` simply never runs and nothing
+  complains.
 - **The path must be a string literal.** `registerProviders(SOME_CONSTANT)` fails to compile with
   `Path is invalid, expected string literal`.
 - **The path is a source path, not a Rojo path.** Write `"src/server/services"`, not

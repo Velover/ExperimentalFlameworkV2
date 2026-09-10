@@ -3,15 +3,17 @@ import {
 	HookPriority,
 	Injectable,
 	LifecyclePlugin,
+	LifecycleProvider,
 	OnExtinguished,
 	OnPhysics,
 	OnRender,
 	OnStart,
 	OnTick,
 	Provider,
+	createLifecyclePlugin,
 } from "@flamework/core";
 import { RunService } from "@rbxts/services";
-import { expectArrayEqual, expectEqual, expectTrue, suite } from "../testkit";
+import { expectArrayEqual, expectEqual, expectThrows, expectTrue, suite } from "../testkit";
 
 declare const __harness: {
 	/** Fires the RunService signals the per-frame lifecycle events hang off. */
@@ -61,10 +63,7 @@ export = suite("lifecycle", [
 		() => {
 			started.clear();
 
-			const module = Flamework.createModule()
-				.includePlugin(LifecyclePlugin)
-				.registerClassProvider(Starter)
-				.ignite();
+			const module = Flamework.createModule().registerClassProvider(Starter).ignite();
 
 			// onStart is spawned on its own thread, so it has already run by the time ignite returns.
 			expectEqual(started.size(), 1, "number of started providers");
@@ -78,7 +77,7 @@ export = suite("lifecycle", [
 		() => {
 			started.clear();
 
-			const module = Flamework.createModule().includePlugin(LifecyclePlugin).ignite();
+			const module = Flamework.createModule().ignite();
 
 			const disconnect = module.listen<OnStart>({
 				onStart() {
@@ -197,10 +196,7 @@ export = suite("lifecycle", [
 	[
 		"createClassInstance injects dependencies without registering a provider",
 		() => {
-			const module = Flamework.createModule()
-				.includePlugin(LifecyclePlugin)
-				.registerClassProvider(Plain)
-				.ignite();
+			const module = Flamework.createModule().registerClassProvider(Plain).ignite();
 
 			@Injectable()
 			class Consumer {
@@ -276,10 +272,7 @@ export = suite("lifecycle", [
 		() => {
 			frames.clear();
 
-			const module = Flamework.createModule()
-				.includePlugin(LifecyclePlugin)
-				.registerClassProvider(Ticker)
-				.ignite();
+			const module = Flamework.createModule().registerClassProvider(Ticker).ignite();
 
 			__harness.step(0.25);
 
@@ -297,10 +290,7 @@ export = suite("lifecycle", [
 		() => {
 			frames.clear();
 
-			const module = Flamework.createModule()
-				.includePlugin(LifecyclePlugin)
-				.registerClassProvider(Ticker)
-				.ignite();
+			const module = Flamework.createModule().registerClassProvider(Ticker).ignite();
 
 			module.extinguish();
 			__harness.step(0.5);
@@ -313,16 +303,97 @@ export = suite("lifecycle", [
 		() => {
 			extinguished.clear();
 
-			const module = Flamework.createModule()
-				.includePlugin(LifecyclePlugin)
-				.registerClassProvider(Closer)
-				.ignite();
+			const module = Flamework.createModule().registerClassProvider(Closer).ignite();
 
 			expectEqual(extinguished.size(), 0, "onExtinguished before extinguish");
 
 			module.extinguish();
 
 			expectArrayEqual(extinguished, ["Closer"], "onExtinguished after extinguish");
+		},
+	],
+	[
+		"starts every module with the lifecycle plugin",
+		() => {
+			started.clear();
+
+			const module = Flamework.createModule().registerClassProvider(Starter).ignite();
+
+			expectEqual(started.size(), 1, "onStart calls without including LifecyclePlugin by hand");
+			expectTrue(module.resolveDependency<LifecycleProvider>() !== undefined, "the provider is there to ask");
+
+			module.extinguish();
+		},
+	],
+	[
+		"disableDefaultLifecycle() leaves lifecycle events out",
+		() => {
+			started.clear();
+			frames.clear();
+
+			const module = Flamework.createModule()
+				.disableDefaultLifecycle()
+				.registerClassProvider(Starter)
+				.registerClassProvider(Ticker)
+				.ignite();
+
+			__harness.step(0.25);
+
+			expectEqual(started.size(), 0, "onStart calls");
+			expectEqual(frames.size(), 0, "per-frame events");
+			expectThrows(() => module.resolveDependency<LifecycleProvider>(), "resolving the lifecycle provider");
+
+			module.extinguish();
+		},
+	],
+	[
+		// Two lifecycle plugins would tick everything twice; a configured one takes the default's place.
+		"replaces the default with a configured lifecycle plugin rather than adding one",
+		() => {
+			frames.clear();
+
+			const module = Flamework.createModule()
+				.includePlugin(createLifecyclePlugin({ profiling: false }))
+				.registerClassProvider(Ticker)
+				.ignite();
+
+			__harness.step(0.25);
+
+			expectEqual(frames.filter((v) => v === "tick:0.25").size(), 1, "ticks in one frame");
+
+			module.extinguish();
+		},
+	],
+	[
+		"including LifecyclePlugin by hand changes nothing",
+		() => {
+			frames.clear();
+
+			const module = Flamework.createModule()
+				.includePlugin(LifecyclePlugin)
+				.registerClassProvider(Ticker)
+				.ignite();
+
+			__harness.step(0.25);
+
+			expectEqual(frames.filter((v) => v === "tick:0.25").size(), 1, "ticks in one frame");
+
+			module.extinguish();
+		},
+	],
+	[
+		"refuses a second lifecycle plugin brought in by a plugin",
+		() => {
+			const sneaky = Flamework.createPlugin("Sneaky", (target) => {
+				target.includePlugin(createLifecyclePlugin({}));
+			});
+
+			const message = expectThrows(
+				() => Flamework.createModule().includePlugin(sneaky).ignite(),
+				"a plugin including a second lifecycle plugin",
+			);
+
+			expectTrue(message.find("slot")[0] !== undefined, "error names the slot");
 		},
 	],
 ]);

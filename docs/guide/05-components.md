@@ -58,9 +58,9 @@ ComponentPlugin.createPlugin()
 ```
 
 Components are constructed through the module that includes `ComponentPlugin`, so they get
-`onTick`, `onPhysics` and `onRender` from **that module's** `LifecyclePlugin` -- include it alongside
-`ComponentPlugin`, as above. `onStart` is the exception: `Components` calls it itself, so it works
-regardless.
+`onTick`, `onPhysics` and `onRender` from **that module's** lifecycle plugin, which every module
+starts with. `onStart` is the exception: `Components` calls it itself, so it works even with
+`disableDefaultLifecycle()`.
 
 Register by glob when the components are spread across feature folders:
 
@@ -540,7 +540,8 @@ for.
   way, so nothing is left firing into a component that has gone. On extinguish the failure is
   warned about and the remaining components still come down, so one component cannot leave a module
   half-extinguished. A hand `removeComponent` still re-raises it, since you asked for the removal.
-- **Per-frame events need `LifecyclePlugin` in the same module** as `ComponentPlugin`.
+- **Per-frame events come from the module's lifecycle plugin.** `disableDefaultLifecycle()` on the
+  module that includes `ComponentPlugin` stops components ticking; `onStart` still runs.
 - **An invalid attribute throws** unless a default is configured.
 - **`onComponentRemoved` runs before `destroy`**, so the component is still usable inside it -- but
   it has already left `getComponent` and `getComponents` by then, and nothing builds a replacement

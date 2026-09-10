@@ -138,6 +138,7 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 	const observers = new Map<string, Array<InterfaceConfiguration<unknown>>>();
 	const hooks = new Array<RegisteredHook>();
 	const includedPlugins = new Set<PluginDefinition>();
+	const filledSlots = new Map<string, PluginDefinition>();
 
 	const submodules = new Array<Module>();
 
@@ -195,6 +196,20 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 	const includePlugin = (plugin: PluginDefinition) => {
 		if (includedPlugins.has(plugin)) {
 			return;
+		}
+
+		// The builder swaps a slotted plugin for the one in its slot, so by the time a module
+		// ignites the only way to reach a second one is through a plugin. That is refused rather
+		// than run: two lifecycle plugins would tick everything twice.
+		if (plugin.slot !== undefined) {
+			const occupant = filledSlots.get(plugin.slot);
+			if (occupant !== undefined) {
+				error(
+					`module '${state.debugName}': plugin '${plugin.name}' fills the '${plugin.slot}' slot that plugin '${occupant.name}' already fills; include it on the module instead`,
+				);
+			}
+
+			filledSlots.set(plugin.slot, plugin);
 		}
 
 		includedPlugins.add(plugin);

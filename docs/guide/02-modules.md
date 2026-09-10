@@ -14,7 +14,6 @@ If that is you, this page's second half is optional reading.
 
 ```ts
 Flamework.createModule()
-    .includePlugin(LifecyclePlugin)
     .registerProviders("src/server/services")
     .ignite();
 ```
@@ -32,6 +31,7 @@ That is the whole story for a typical game. You do not need `includeModule`, you
 | `registerClassProvider(Class)` | Registers one class explicitly. |
 | `registerProvider<T>(config, id?)` | Registers a class, function or alias provider. |
 | `includePlugin(plugin)` | Adds a plugin, which can hook into this module. |
+| `disableDefaultLifecycle()` | Leaves out the `LifecyclePlugin` every module starts with. |
 | `includeModule(definition)` | Makes another module's **exported** providers resolvable here. |
 | `exportProviders<T \| U>()` | Marks providers as visible to modules that include this one. |
 | `setDebugName(name)` | Names the module in error messages. |
@@ -197,7 +197,7 @@ export const CoreModule = Flamework.createModule()
 **A module per test.** Build the definition once, ignite per case, extinguish after:
 
 ```ts
-const definition = Flamework.createModule().includePlugin(LifecyclePlugin).registerClassProvider(Shop).build();
+const definition = Flamework.createModule().registerClassProvider(Shop).build();
 
 const module = definition.ignite();
 // ...assert...

@@ -13,12 +13,27 @@ import type { Constructor } from "../utility/constructors";
  * ignited twice, is set up separately for each and shares nothing between them unless it closes
  * over module-level state on purpose.
  */
+/**
+ * The slot the lifecycle plugin fills: every module starts with one, and a module never runs two.
+ *
+ * @internal
+ */
+export const LIFECYCLE_SLOT = "lifecycle";
+
 export class PluginDefinition {
 	constructor(
 		/** Names the plugin in error messages. */
 		public readonly name: string,
 		/** @internal */
 		public readonly setup: (target: PluginTarget) => void,
+		/**
+		 * A slot at most one plugin fills per module. On the builder, including a plugin whose slot
+		 * is taken replaces the plugin in it; at ignition, a second plugin for a filled slot is
+		 * refused. Two lifecycle plugins would tick everything twice, which is what this prevents.
+		 *
+		 * @internal
+		 */
+		public readonly slot?: string,
 	) {}
 }
 

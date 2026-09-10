@@ -178,6 +178,13 @@ built by `ModuleBuilder` and frozen into a `ModuleDefinition`. Igniting a defini
 `createModuleInstantiation`, which is a closure, not a class: the `Module` interface is a table of
 functions over private state.
 
+`Flamework.createModule()` includes `LifecyclePlugin` before anything else. A `PluginDefinition` may
+carry a *slot*, an internal tag at most one plugin fills per module: on the builder, including a
+plugin whose slot is taken replaces the plugin in it, in place, which is how
+`createLifecyclePlugin({ … })` swaps the default out, and `disableDefaultLifecycle()` removes
+whatever fills the lifecycle slot. At ignition a second plugin for a filled slot is refused, so a
+plugin cannot bring a second lifecycle plugin in behind the module's back.
+
 ### Ignition
 
 Ignition is a state machine (`Created → PreIgniting → Igniting → Ignited`, and

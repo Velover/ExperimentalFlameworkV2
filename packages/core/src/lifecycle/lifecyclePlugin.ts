@@ -5,7 +5,13 @@ import { Provider } from "../provider";
 import type { OnExtinguished, OnInit, OnPhysics, OnRender, OnStart, OnTick } from "./lifecycleInterfaces";
 import { recycleThread } from "../utility/recycleThread";
 import { Reflect } from "../reflect";
-import { PluginDefinition, type InterfaceConfiguration, type InterfaceContext } from "../plugin/pluginDefinition";
+import {
+	LIFECYCLE_SLOT,
+	PluginDefinition,
+	type InterfaceConfiguration,
+	type InterfaceContext,
+	type PluginTarget,
+} from "../plugin/pluginDefinition";
 
 export interface LifecyclePluginOptions {
 	/**
@@ -286,7 +292,7 @@ function observeSet<T>(provider: LifecycleProvider, set: Set<T>): InterfaceConfi
  * different ones, such as forcing profiling on or off.
  */
 export function createLifecyclePlugin(options: LifecyclePluginOptions = {}): PluginDefinition {
-	return new PluginDefinition("Lifecycle", (target) => {
+	const setup = (target: PluginTarget) => {
 		// One per ignition: the setup runs for every module that includes the plugin, and again for
 		// every ignition of a definition, so nothing here is shared between modules.
 		const lifecycle = new LifecycleProvider(options);
@@ -307,11 +313,14 @@ export function createLifecyclePlugin(options: LifecyclePluginOptions = {}): Plu
 		target.observe<OnRender>(observeSet(lifecycle, lifecycle.onRender));
 		target.observe<OnPhysics>(observeSet(lifecycle, lifecycle.onPhysics));
 		target.observe<OnExtinguished>(observeSet(lifecycle, lifecycle.onExtinguished));
-	});
+	};
+
+	return new PluginDefinition("Lifecycle", setup, LIFECYCLE_SLOT);
 }
 
 /**
- * The lifecycle plugin with default options. Include it in every module whose providers, class
- * instances or components should receive lifecycle events.
+ * The lifecycle plugin with default options. Every module made with `Flamework.createModule()`
+ * starts with it; `disableDefaultLifecycle()` on the builder leaves it out, and including one built
+ * with {@link createLifecyclePlugin} takes its place.
  */
 export const LifecyclePlugin = createLifecyclePlugin();
