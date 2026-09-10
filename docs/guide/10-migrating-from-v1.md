@@ -19,7 +19,7 @@ one, and everything that used to be built into it is now a plugin.
 | `Modding.getObjectFromId`, `Reflect.idToObj` | gone; there is no global registry |
 | `Flamework.ignite()` | `Flamework.createModule()…​.ignite()` |
 | Lifecycle events built in | still on: `LifecyclePlugin` is an ordinary plugin every module starts with; `disableDefaultLifecycle()` opts out |
-| `Dependency<T>()` | unchanged; answers from the first module ignited, or the one ignited with `{ default: true }` |
+| `Dependency<T>()` | unchanged; answers from the first module ignited, or the one ignited with `{ default: true }`. `Dependency<T>(module)` answers from a given one |
 | `Flamework.registerExternalClass(C)` | `.registerClassProvider(C)` |
 | `Flamework.createDependency(C)` | `module.createClassInstance(C)` with `@Injectable()` |
 | `Modding.onListenerAdded<T>(cb)` | `target.observe<T>({ onAdded, onRemoved })` in a plugin |

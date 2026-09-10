@@ -99,6 +99,13 @@ Extinguishing the default releases it, so the next root ignited claims it -- a t
 extinguishes per case never leaks one into the next. With no default, `Dependency<T>()` raises
 `Dependency<T>() was called before any module was ignited`.
 
+With more than one module live, pass the one to resolve from. It is `module.resolveDependency<T>()`
+for code that has the handle but prefers the global's shape:
+
+```ts
+const shop = Dependency<Shop>(worldModule);
+```
+
 A provider can also inject the module itself:
 
 ```ts

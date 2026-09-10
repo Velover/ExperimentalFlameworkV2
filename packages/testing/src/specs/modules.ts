@@ -88,6 +88,29 @@ export = suite("modules", [
 		},
 	],
 	[
+		"Dependency resolves against a given module instead of the default",
+		() => {
+			const first = Flamework.createModule().registerClassProvider(Widget).ignite({ default: true });
+			const second = Flamework.createModule().registerClassProvider(Widget).ignite();
+
+			expectTrue(Dependency<Widget>(second) === second.resolveDependency<Widget>(), "the given module answers");
+			expectTrue(Dependency<Widget>(second) !== Dependency<Widget>(), "and not the default");
+
+			second.extinguish();
+			first.extinguish();
+		},
+	],
+	[
+		"Dependency against an extinguished module raises for that module",
+		() => {
+			const module = Flamework.createModule().registerClassProvider(Widget).ignite({ default: true });
+			module.extinguish();
+
+			const message = expectThrows(() => Dependency<Widget>(module), "Dependency on an extinguished module");
+			expectTrue(message.find("has been extinguished")[0] !== undefined, "error names the module's state");
+		},
+	],
+	[
 		// v1 let a constructor reach for a dependency through the global; the default is claimed
 		// before ignition so that this still works, and the resolution constructs what is missing.
 		"Dependency answers inside a provider constructor during ignition",
