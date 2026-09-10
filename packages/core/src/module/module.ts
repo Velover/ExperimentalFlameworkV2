@@ -1,10 +1,10 @@
 import { Flamework } from "../flamework";
 import { Modding } from "../modding";
-import {
-	PluginState,
-	type InterfaceConfiguration,
-	type InterfaceContext,
-	type InterfaceTargetKind,
+import type {
+	InterfaceConfiguration,
+	InterfaceTargetKind,
+	PluginDefinition,
+	PluginTarget,
 } from "../plugin/pluginDefinition";
 import { Reflect } from "../reflect";
 import type { Constructor } from "../utility/constructors";
@@ -13,7 +13,8 @@ import { getClassImplements } from "../utility/getClassImplements";
 import type { Destructor, ExtractSingleCallback } from "../utility/types";
 import type { ModuleState } from "./moduleDefinition";
 import { clearDefaultModule } from "./defaultModule";
-import { HookPriority, HookType, type HookConfig, type HookContext } from "./moduleHooks";
+import { HookPriority, type HookPhase, type RegisteredHook } from "./moduleHooks";
+import { getProviderClassId, normalizeProviderConfig } from "./providerRegistration";
 
 interface InternalModule {
 	/**
@@ -49,7 +50,7 @@ export interface Module extends InternalModule {
 	/**
 	 * Terminates this module.
 	 *
-	 * This will trigger the `HookType.Extinguished` hook.
+	 * This runs the plugins' `onExtinguished` hooks.
 	 */
 	extinguish: () => void;
 
@@ -100,21 +101,11 @@ export interface Module extends InternalModule {
 	isExtinguished: () => boolean;
 }
 
-/**
- * A dependency injection alias for a plugin's parent.
- */
-export interface PluginModule extends Module {}
-
 interface ModuleContext {
 	/**
 	 * The store of included modules.
 	 */
 	modules: Map<ModuleState, Module>;
-
-	/**
-	 * The parent of this plugin, as plugins are created per-module.
-	 */
-	pluginParent?: Module;
 }
 
 interface InstanceCreationConfig {
@@ -124,15 +115,6 @@ interface InstanceCreationConfig {
 	 * If this function returns `undefined`, then dependency resolution will fallback to the module's resolution.
 	 */
 	overrideDependency?: (info: Modding.DependencyInfo) => unknown;
-}
-
-interface ImportedHooks extends HookContext {
-	hook: HookConfig;
-}
-
-interface ImportedInterface {
-	configuration: InterfaceConfiguration<unknown>;
-	context: Omit<InterfaceContext, "kind">;
 }
 
 enum ModuleInitState {
@@ -145,14 +127,18 @@ enum ModuleInitState {
 }
 
 const MODULE_ID = Flamework.id<Module>();
-const PLUGIN_MODULE_ID = Flamework.id<PluginModule>();
 
 export function createModuleInstantiation(state: ModuleState, context: ModuleContext): Module {
+	/** The definition's providers, followed by whatever the plugins register. */
+	const providers = [...state.providers];
 	const instantiatedProviders = new Map<string, defined>();
-	const importedInterfaces = new Map<string, ImportedInterface>();
-	const importedHooks = new Array<ImportedHooks>();
 
-	const plugins = new Map<PluginState, Module>();
+	/** Objects handed over by `provideInstance`, attached to their interfaces once every plugin is set up. */
+	const providedInstances = new Array<object>();
+	const observers = new Map<string, Array<InterfaceConfiguration<unknown>>>();
+	const hooks = new Array<RegisteredHook>();
+	const includedPlugins = new Set<PluginDefinition>();
+
 	const submodules = new Array<Module>();
 
 	/** The subset of {@link submodules} this module created, and is therefore responsible for extinguishing. */
@@ -195,79 +181,74 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		}
 	};
 
-	const setupPlugins = () => {
-		for (const pluginState of state.plugins) {
-			const pluginModule = createModuleInstantiation(pluginState.module, {
-				modules: context.modules,
-				pluginParent: module,
-			});
-
-			for (const [interfaceId, configuration] of pluginState.interfaces) {
-				importedInterfaces.set(interfaceId, {
-					configuration,
-					context: {
-						interfaceId,
-						sourceModule: pluginModule,
-						targetModule: module,
-					},
-				});
-			}
-
-			for (const hook of pluginState.hooks) {
-				importedHooks.push({
-					hook: hook,
-					sourceModule: pluginModule,
-					targetModule: module,
-				});
-			}
-
-			submodules.push(pluginModule);
-			ownedSubmodules.push(pluginModule);
-			plugins.set(pluginState, pluginModule);
+	const assertUnregistered = (injectionId: string) => {
+		if (instantiatedProviders.has(injectionId) || providers.some((v) => v.injectionId === injectionId)) {
+			error(`module '${state.debugName}': provider ID was registered more than once: ${injectionId}`);
 		}
 	};
 
-	const getHookType = (hookType: HookType) => {
-		const matching = importedHooks.filter((v) => v.hook.type === hookType);
+	/**
+	 * Sets a plugin up against this module, once. A plugin reached again -- included by the module
+	 * and by a plugin, or by two plugins -- is skipped, and so is one that includes itself through
+	 * another: it is marked before its setup runs, so the ring stops on the second arrival.
+	 */
+	const includePlugin = (plugin: PluginDefinition) => {
+		if (includedPlugins.has(plugin)) {
+			return;
+		}
+
+		includedPlugins.add(plugin);
+		plugin.setup(pluginTarget);
+	};
+
+	const registerHook = (phase: HookPhase, callback: (module: Module) => void, priority?: number) => {
+		hooks.push({ phase, callback, priority: priority ?? HookPriority.Normal });
+	};
+
+	const runHooks = (phase: HookPhase) => {
+		const matching = hooks.filter((hook) => hook.phase === phase);
 
 		// `table.sort` is not stable, so hooks of equal priority are ordered by the position they
-		// were imported at to keep registration order meaningful.
-		const order = new Map<ImportedHooks, number>();
+		// were registered at to keep registration order meaningful.
+		const order = new Map<RegisteredHook, number>();
 		matching.forEach((hook, index) => order.set(hook, index));
 
 		matching.sort((a, b) => {
-			const priorityA = a.hook.priority ?? HookPriority.Normal;
-			const priorityB = b.hook.priority ?? HookPriority.Normal;
-
-			if (priorityA !== priorityB) {
-				return priorityA < priorityB;
+			if (a.priority !== b.priority) {
+				return a.priority < b.priority;
 			}
 
 			return order.get(a)! < order.get(b)!;
 		});
 
-		return matching;
+		for (const hook of matching) {
+			hook.callback(module);
+		}
 	};
 
 	const registerClassInterfaces = (instance: object, kind: InterfaceTargetKind) => {
-		for (const id of getClassImplements(instance)) {
-			const importedInterface = importedInterfaces.get(id);
-			if (!importedInterface) {
+		for (const interfaceId of getClassImplements(instance)) {
+			const interested = observers.get(interfaceId);
+			if (!interested) {
 				continue;
 			}
 
-			importedInterface.configuration.onAdded?.({ ...importedInterface.context, kind }, instance);
+			for (const observer of interested) {
+				observer.onAdded?.(instance, { interfaceId, kind });
+			}
 		}
 	};
 
 	const unregisterClassInterfaces = (instance: object, kind: InterfaceTargetKind) => {
-		for (const id of getClassImplements(instance)) {
-			const importedInterface = importedInterfaces.get(id);
-			if (!importedInterface) {
+		for (const interfaceId of getClassImplements(instance)) {
+			const interested = observers.get(interfaceId);
+			if (!interested) {
 				continue;
 			}
 
-			importedInterface.configuration.onRemoved?.({ ...importedInterface.context, kind }, instance);
+			for (const observer of interested) {
+				observer.onRemoved?.(instance, { interfaceId, kind });
+			}
 		}
 	};
 
@@ -302,17 +283,12 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 			return instantiatedProvider;
 		}
 
-		// The ModuleInstantiation type always refers to the current module instantiation.
+		// The Module type always refers to the current module instantiation.
 		if (info.id === MODULE_ID) {
 			return module;
 		}
 
-		if (info.id === PLUGIN_MODULE_ID) {
-			assert(context.pluginParent !== undefined, "PluginModule is only available in plugins");
-			return context.pluginParent;
-		}
-
-		const moduleProvider = state.providers.find((v) => v.injectionId === info.id);
+		const moduleProvider = providers.find((v) => v.injectionId === info.id);
 		if (moduleProvider) {
 			const config = moduleProvider.config;
 			if (config.type === "class") {
@@ -429,7 +405,12 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		}
 
 		setupIncludedModules();
-		setupPlugins();
+
+		// Plugins are set up while the module is still `Created`, so a setup that resolves is
+		// refused the same way a `onPreIgnite` hook is.
+		for (const plugin of state.plugins) {
+			includePlugin(plugin);
+		}
 
 		switchInitState(ModuleInitState.Created, ModuleInitState.PreIgniting);
 
@@ -439,22 +420,24 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 			submodule.ignite();
 		}
 
-		for (const context of getHookType(HookType.PreIgnite)) {
-			context.hook.callback(context);
-		}
+		runHooks("preIgnite");
 
 		switchInitState(ModuleInitState.PreIgniting, ModuleInitState.Igniting);
 
-		for (const provider of state.providers) {
+		// Provided instances exist already; here they join the interfaces they implement, now that
+		// every plugin's observers are in place.
+		for (const instance of providedInstances) {
+			registerClassInterfaces(instance, "provider");
+		}
+
+		for (const provider of providers) {
 			// Lazy providers are constructed the first time they are resolved instead.
 			if (provider.config.type === "class" && provider.config.lazy !== true) {
 				resolveDependency(provider.injectionId);
 			}
 		}
 
-		for (const context of getHookType(HookType.PostIgnite)) {
-			context.hook.callback(context);
-		}
+		runHooks("postIgnite");
 
 		switchInitState(ModuleInitState.Igniting, ModuleInitState.Ignited);
 
@@ -464,18 +447,16 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 	const extinguish: Module["extinguish"] = () => {
 		switchInitState(ModuleInitState.Ignited, ModuleInitState.Extinguishing);
 
-		for (const context of getHookType(HookType.Extinguished)) {
-			context.hook.callback(context);
-		}
+		runHooks("extinguished");
 
 		// Copied first: removal callbacks may themselves remove instances.
 		for (const temporaryInstance of [...temporaryInstances]) {
 			removeClassInstance(temporaryInstance);
 		}
 
-		// Providers register their interfaces when they are instantiated, so they have to be
-		// unregistered too. Without this, a plugin such as the lifecycle plugin keeps holding (and
-		// ticking) providers that belong to an extinguished module.
+		// Providers join their interfaces when they are instantiated, so they have to leave them
+		// too. Without this, a plugin such as the lifecycle plugin keeps holding (and ticking)
+		// providers that belong to an extinguished module.
 		for (const [, provider] of instantiatedProviders) {
 			unregisterClassInterfaces(provider, "provider");
 		}
@@ -508,6 +489,41 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		ignite,
 		extinguish,
 		isExtinguished,
+	};
+
+	/** What a plugin's setup is handed. Everything registers into this instantiation. */
+	const pluginTarget: PluginTarget = {
+		module,
+		registerClassProvider: (provider) => {
+			const injectionId = getProviderClassId(provider);
+			assertUnregistered(injectionId);
+			providers.push({ config: normalizeProviderConfig({ type: "class", value: provider }), injectionId });
+		},
+		registerProvider: (config, injectionId) => {
+			assert(injectionId !== undefined);
+			assertUnregistered(injectionId);
+			providers.push({ config: normalizeProviderConfig(config), injectionId });
+		},
+		provideInstance: (instance, injectionId) => {
+			assert(injectionId !== undefined);
+			assertUnregistered(injectionId);
+			instantiatedProviders.set(injectionId, instance);
+			providedInstances.push(instance);
+		},
+		includePlugin,
+		onPreIgnite: (callback, options) => registerHook("preIgnite", callback, options?.priority),
+		onPostIgnite: (callback, options) => registerHook("postIgnite", callback, options?.priority),
+		onExtinguished: (callback, options) => registerHook("extinguished", callback, options?.priority),
+		observe: (config, interfaceId) => {
+			assert(interfaceId !== undefined);
+
+			let interested = observers.get(interfaceId);
+			if (!interested) {
+				observers.set(interfaceId, (interested = []));
+			}
+
+			interested.push(config as InterfaceConfiguration<unknown>);
+		},
 	};
 
 	return module;

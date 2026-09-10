@@ -6,7 +6,7 @@ import { Reflect } from "../reflect";
 import type { Constructor } from "../utility/constructors";
 import type { WritableState } from "../utility/writable";
 import type { PluginDefinition } from "../plugin/pluginDefinition";
-import type { ProviderDecoratorConfig } from "../provider";
+import { getProviderClassId, normalizeProviderConfig } from "./providerRegistration";
 
 type GenericId<T> = string | Modding.Target.Id<T>;
 type MultipleIDs<T> = string[] | Modding.Emit<(T extends T ? Modding.Target.Id<T> : never)[]>;
@@ -29,12 +29,16 @@ export class ModuleBuilder {
 	}
 
 	/**
-	 * Includes a plugin into this module.
+	 * Includes a plugin in this module: its setup runs against every ignition of the module, before
+	 * any provider is constructed.
 	 *
-	 * A plugin is a normal module except it can modify modules it is included on.
+	 * A plugin is set up once per ignition however many times it is included, so including one
+	 * twice is not an error; it is simply not recorded twice.
 	 */
 	public includePlugin(plugin: PluginDefinition) {
-		this.module.plugins.push(plugin.getPluginState());
+		if (!this.module.plugins.includes(plugin)) {
+			this.module.plugins.push(plugin);
+		}
 
 		return this;
 	}
@@ -114,18 +118,7 @@ export class ModuleBuilder {
 	public registerProvider<T>(providerConfig: ProviderConfig, injectionId?: GenericId<T>) {
 		assert(injectionId !== undefined);
 
-		if (providerConfig.type === "class") {
-			assertIsProviderClass(providerConfig.value);
-
-			if (providerConfig.lazy === undefined) {
-				const decoratorConfig = Reflect.getOwnMetadata<ProviderDecoratorConfig>(
-					providerConfig.value,
-					"flamework:providerConfig",
-				);
-
-				providerConfig = { ...providerConfig, lazy: decoratorConfig?.lazy === true };
-			}
-		}
+		providerConfig = normalizeProviderConfig(providerConfig);
 
 		for (const provider of this.module.providers) {
 			if (provider.injectionId === injectionId) {
@@ -144,15 +137,7 @@ export class ModuleBuilder {
 	 * This is just a shorthand for `registerProvider` which uses the generated `identifier` from the class.
 	 */
 	public registerClassProvider(provider: Constructor) {
-		assertIsProviderClass(provider);
-
-		const providerId = Reflect.getOwnMetadata<string>(provider, "identifier");
-		assert(
-			providerId !== undefined,
-			`class '${provider}' has no identifier, was it compiled with the Flamework transformer?`,
-		);
-
-		return this.registerProvider({ type: "class", value: provider }, providerId);
+		return this.registerProvider({ type: "class", value: provider }, getProviderClassId(provider));
 	}
 
 	/**
@@ -199,23 +184,4 @@ export class ModuleBuilder {
 	public ignite(options?: IgniteOptions) {
 		return this.build().ignite(options);
 	}
-}
-
-/**
- * Metadata is inherited through the class hierarchy, so this deliberately checks the class's own
- * metadata: an undecorated subclass of a provider carries the parent's identifier, and registering
- * it would register it under the parent's id.
- */
-function assertIsProviderClass(value: object) {
-	if (Reflect.hasOwnMetadata(value, "flamework:provider")) {
-		return;
-	}
-
-	if (Reflect.hasMetadata(value, "flamework:provider")) {
-		error(
-			`class '${value}' is missing the @Provider() decorator: it inherits one from a parent class, but every provider must be decorated itself`,
-		);
-	}
-
-	error(`class '${value}' is missing the @Provider() decorator`);
 }

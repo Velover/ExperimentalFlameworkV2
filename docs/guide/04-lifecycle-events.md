@@ -147,7 +147,7 @@ leaves its last lifecycle event, so components that come and go leave nothing be
 
 ## Asking what is attached
 
-The plugin exports its provider, so a module can be asked what it is currently running:
+The plugin provides its `LifecycleProvider`, so a module can be asked what it is currently running:
 
 ```ts
 import { LifecycleProvider } from "@flamework/core";

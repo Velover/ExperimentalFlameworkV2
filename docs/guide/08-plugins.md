@@ -1,95 +1,82 @@
 # 8. Plugins
 
-A plugin is a module that can also modify the modules it is included in. `LifecyclePlugin` and
+A plugin is a function that sets a module up before it ignites. `LifecyclePlugin` and
 `ComponentPlugin` are both ordinary plugins with no special access -- anything they do, you can do.
 
 Reach for one when you want behaviour that applies to *whatever providers happen to exist*, rather
 than to a specific class.
 
-## The two things a plugin can do
-
-| | Hook | Interface |
-|---|---|---|
-| Answers | "run something at this point in the module's life" | "tell me about every object implementing this type" |
-| Used for | starting connections, wiring, teardown | lifecycle events, registries, collecting listeners |
-
 ## A minimal plugin
 
 ```ts
-import { Flamework, HookType } from "@flamework/core";
+import { Flamework } from "@flamework/core";
 
-const metricsModule = Flamework.createModule().registerClassProvider(Metrics).build();
+export const MetricsPlugin = Flamework.createPlugin("Metrics", (target) => {
+    const metrics = new Metrics();
 
-export const MetricsPlugin = Flamework.createPlugin(metricsModule)
-    .registerHook({
-        type: HookType.PostIgnite,
-        callback: (context) => {
-            context.sourceModule.resolveDependency<Metrics>().start();
-        },
-    })
-    .build();
+    target.provideInstance(metrics); // providers can now inject Metrics
+    target.onPostIgnite(() => metrics.start()); // once every provider exists
+});
 ```
 
 ```ts
 Flamework.createModule().includePlugin(MetricsPlugin).ignite();
 ```
 
-A plugin is built from a `ModuleDefinition`, which becomes the plugin's own environment. Its
-providers are private to it unless exported.
+The setup function runs **once per ignition** of every module that includes the plugin, and it is
+handed the module being set up. Anything it creates -- the `metrics` above -- belongs to that one
+ignition: two modules including `MetricsPlugin` get one `Metrics` each, and so do two ignitions of one
+definition. Nothing is shared unless you close over something outside the function on purpose.
 
-### `sourceModule` vs `targetModule`
+The name is for error messages.
 
-Every hook and interface callback gets both, and confusing them is the usual first bug:
+## What a plugin can do
 
-- **`sourceModule`** -- the plugin's own module. Resolve the plugin's providers from here.
-- **`targetModule`** -- the module the plugin was included in. This is who the plugin is acting on.
+Everything is a method on `target`, and everything registers into the module being set up.
 
-A plugin's module is instantiated **once per module that includes it**, so two modules including
-`MetricsPlugin` get one `Metrics` each.
+| Method | Does |
+|---|---|
+| `provideInstance(value)` | Hands the module an object under its type's id. Providers inject it; `resolveDependency` finds it. |
+| `registerClassProvider(Class)` | Registers a provider, exactly as the module builder would. |
+| `registerProvider<T>(config)` | The same, for a function or alias provider. |
+| `includePlugin(plugin)` | Includes another plugin, set up now, before this one continues. |
+| `onPreIgnite(cb, options?)` | Runs `cb` before the module's providers are constructed. |
+| `onPostIgnite(cb, options?)` | Runs `cb` after every provider has been constructed. |
+| `onExtinguished(cb, options?)` | Runs `cb` when the module extinguishes. |
+| `observe<T>({ onAdded, onRemoved })` | Tells the plugin about every object implementing `T`. |
+| `module` | The module itself, for the hooks to close over. It cannot resolve anything until it ignites. |
 
-Inside the plugin's own providers, `PluginModule` injects the target:
-
-```ts
-@Provider()
-class Metrics {
-    constructor(private parent: PluginModule) {}
-}
-```
+Every hook receives the module: `target.onPostIgnite((module) => module.resolveDependency<Shop>())`.
 
 ## Hooks
 
-| Type | Runs |
+| Hook | Runs |
 |---|---|
-| `HookType.PreIgnite` | After included modules and plugins have ignited, **before** this module's providers are constructed. |
-| `HookType.PostIgnite` | After every provider has been constructed. |
-| `HookType.Extinguished` | When `extinguish()` runs. |
+| `onPreIgnite` | After every plugin has been set up, **before** the module's providers are constructed. |
+| `onPostIgnite` | After every provider has been constructed. |
+| `onExtinguished` | When `extinguish()` runs, before the providers are released. |
 
-`PreIgnite` is for registering state that providers will look at while being constructed.
-`PostIgnite` is for anything that needs the providers to exist.
+`onPreIgnite` is for registering state that providers will look at while being constructed.
+`onPostIgnite` is for anything that needs the providers to exist.
 
-**You cannot resolve dependencies during `PreIgnite`** -- providers do not exist yet, and trying
+**Nothing can be resolved during setup or `onPreIgnite`** -- providers do not exist yet, and trying
 raises `module is in pre-ignite phase, dependency cannot be resolved`.
 
 ### Ordering
 
-Hooks of the same type on the same module run in `priority` order, lowest first, then in registration
-order:
+Hooks of the same phase run in `priority` order, lowest first, then in registration order:
 
 ```ts
-.registerHook({
-    type: HookType.PostIgnite,
-    callback: (context) => {},
-    priority: HookPriority.First,
-})
+target.onPostIgnite(() => {}, { priority: HookPriority.First });
 ```
 
 `HookPriority.First` is `-1000`, `Normal` is `0` (the default), `Last` is `1000`. They are
 conventions, not an enum -- any number works. They exist so two plugins can order themselves against
 each other without agreeing on magic numbers.
 
-## Interfaces
+## Observing interfaces
 
-An interface lets a plugin observe every object implementing a type -- providers, and anything from
+`observe` lets a plugin see every object implementing a type -- providers, and anything from
 `createClassInstance` or `listen`.
 
 ```ts
@@ -97,22 +84,20 @@ interface OnPlayerJoined {
     onPlayerJoined(player: Player): void;
 }
 
-const listeners = new Set<OnPlayerJoined>();
+export const PlayerPlugin = Flamework.createPlugin("Players", (target) => {
+    const listeners = new Set<OnPlayerJoined>();
 
-export const PlayerPlugin = Flamework.createPlugin(Flamework.createModule().build())
-    .registerInterface<OnPlayerJoined>({
-        onAdded: (context, value) => listeners.add(value),
-        onRemoved: (context, value) => listeners.delete(value),
-    })
-    .registerHook({
-        type: HookType.PostIgnite,
-        callback: () => {
-            Players.PlayerAdded.Connect((player) => {
-                for (const listener of listeners) listener.onPlayerJoined(player);
-            });
-        },
-    })
-    .build();
+    target.observe<OnPlayerJoined>({
+        onAdded: (value) => listeners.add(value),
+        onRemoved: (value) => listeners.delete(value),
+    });
+
+    target.onPostIgnite(() => {
+        Players.PlayerAdded.Connect((player) => {
+            for (const listener of listeners) listener.onPlayerJoined(player);
+        });
+    });
+});
 ```
 
 Now any provider can opt in:
@@ -125,61 +110,58 @@ class Greeter implements OnPlayerJoined {
 ```
 
 `onAdded` fires as each implementing object is constructed; `onRemoved` fires when it is released or
-its module extinguishes. Both are optional.
+its module extinguishes. Both are optional, and both get a second argument saying what kind of
+object it was: `"provider"` for one the module constructed or a plugin provided, `"instance"` for one
+attached through `createClassInstance` or `listen`.
 
 Matching is structural, using metadata the transformer attached from the class's `implements` clause
 -- which is why the class needs a Flamework decorator for this to work.
 
-### Holding the set in a provider
+Several plugins may observe the same interface; each is told, in inclusion order.
 
-The example above uses a module-level `Set`, which is shared by every module that includes the
-plugin. Usually you want one per target module, which is what the plugin's own module is for:
+## Plugins that need other plugins
+
+A plugin includes what it depends on, and the dependency is set up first:
 
 ```ts
-@Provider()
-class Listeners {
-    public readonly all = new Set<OnPlayerJoined>();
-}
+export const DatabasePlugin = Flamework.createPlugin("Database", (target) => {
+    target.registerClassProvider(Connection);
+});
 
-const pluginModule = Flamework.createModule().registerClassProvider(Listeners).build();
-
-Flamework.createPlugin(pluginModule)
-    .registerInterface<OnPlayerJoined>({
-        onAdded: (context, value) => context.sourceModule.resolveDependency<Listeners>().all.add(value),
-        onRemoved: (context, value) => context.sourceModule.resolveDependency<Listeners>().all.delete(value),
-    })
-    .build();
+export const InventoryPlugin = Flamework.createPlugin("Inventory", (target) => {
+    target.includePlugin(DatabasePlugin); // Connection is registered before this line returns
+    target.registerClassProvider(InventoryService);
+});
 ```
 
-This is exactly how `LifecyclePlugin` is built.
+A plugin reached more than once in one ignition -- by the module, by two plugins, or both -- is set
+up **once**. `InventoryPlugin` and `ShopPlugin` both including `DatabasePlugin` get one `Connection`.
+Identity is the plugin object, so two libraries that each build their own database plugin get two.
 
 ## Patterns
 
-**Interface plus hook** is the standard shape: the interface collects implementers, the hook starts
-whatever drives them.
+**Observe plus hook** is the standard shape: the observer collects implementers, the hook starts
+whatever drives them. This is exactly how `LifecyclePlugin` is built.
 
-**Export the plugin's provider** if consumers should reach it. `ComponentPlugin` exports `Components`
-so that any provider in the target module can inject it:
+**Provide what consumers should reach.** `ComponentPlugin` provides `Components`, so any provider in
+the module can inject it.
 
-```ts
-Flamework.createModule().registerClassProvider(Components).exportProviders<Components>().build();
-```
-
-**Clean up in `Extinguished`.** Disconnect anything the plugin connected, so a module that
+**Clean up in `onExtinguished`.** Disconnect anything the plugin connected, so a module that
 extinguishes leaves nothing running. This is not automatic.
 
 **A plugin is the right answer when the alternative is a global registry.** If you find yourself
-writing `SomeRegistry.add(this)` in every provider's constructor, that is an interface.
+writing `SomeRegistry.add(this)` in every provider's constructor, that is `observe`.
 
 ## Caveats
 
-- **`sourceModule` is the plugin, `targetModule` is the consumer.** Resolving the plugin's own
-  provider from `targetModule` will not find it.
-- **No resolving during `PreIgnite`.**
-- **One plugin module per including module.** Do not assume the plugin's providers are global.
+- **No resolving during setup or `onPreIgnite`.** Hold `target.module` for the hooks that run later.
+- **Setup runs per ignition.** State at module level is shared by every module that includes the
+  plugin; state inside the setup function is not. Put it where you mean it.
 - **Interfaces need decorated classes.** A plain class with no Flamework decorator carries no
   `implements` metadata and will never match.
-- **`onRemoved` fires on extinguish** for every provider the plugin claimed. Keep it idempotent.
+- **`onRemoved` fires on extinguish** for every object the plugin was told about. Keep it idempotent.
+- **A provider registered by a plugin collides like any other.** `provider ID was registered more
+  than once` names the id; the module and a plugin, or two plugins, registered the same thing.
 - **Hook order across *different* modules is not something you control** -- priority orders hooks
   within one module.
 

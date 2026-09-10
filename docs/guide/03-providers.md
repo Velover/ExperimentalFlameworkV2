@@ -91,11 +91,8 @@ resolves them, constructing anything that does not exist yet.
 Resolution order: this module's own providers first, then the **exported** providers of every module
 it includes.
 
-You can also inject:
-
-- `Module` -- the module doing the resolving.
-- `PluginModule` -- inside a plugin, the module the plugin was included in. See
-  [Plugins](08-plugins.md).
+You can also inject `Module`, the module doing the resolving, and anything a plugin provided -- see
+[Plugins](08-plugins.md).
 
 ### Outside a provider
 

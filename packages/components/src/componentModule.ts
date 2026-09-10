@@ -1,4 +1,4 @@
-import { Flamework, Reflect, Modding, getClassesInGlob, getClassesInPath, HookType } from "@flamework/core";
+import { Flamework, Reflect, Modding, getClassesInGlob, getClassesInPath } from "@flamework/core";
 import type { Constructor } from "./utility";
 import { Components } from "./components";
 import { BaseComponent } from "./baseComponent";
@@ -94,30 +94,18 @@ export class ComponentPlugin {
 	}
 
 	public build() {
+		const config = this.config;
+
 		// Components are constructed through the module this plugin is included in (see
 		// `Components.module`), so they take their lifecycle events from that module's plugins.
-		// Including the lifecycle plugin here would only tick an empty set.
-		const pluginModule = Flamework.createModule()
-			.setDebugName("ComponentPlugin")
-			.registerProvider<ComponentModuleConfig>({ type: "function", callback: () => this.config })
-			.registerClassProvider(Components)
-			.exportProviders<Components>()
-			.build();
+		return Flamework.createPlugin("Components", (target) => {
+			const components = new Components(target.module, config);
+			target.provideInstance(components);
 
-		return Flamework.createPlugin(pluginModule)
-			.registerHook({
-				type: HookType.PostIgnite,
-				callback: (context) => {
-					// Wait until the parent module has ignited.
-					context.sourceModule.resolveDependency<Components>().startCollectionService();
-				},
-			})
-			.registerHook({
-				type: HookType.Extinguished,
-				callback: (context) => {
-					context.sourceModule.resolveDependency<Components>().stopCollectionService();
-				},
-			})
-			.build();
+			// Tags are only watched once the module has ignited, so that every provider a component
+			// might inject exists by the time one is constructed.
+			target.onPostIgnite(() => components.startCollectionService());
+			target.onExtinguished(() => components.stopCollectionService());
+		});
 	}
 }

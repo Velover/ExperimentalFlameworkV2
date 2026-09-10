@@ -22,9 +22,9 @@ one, and everything that used to be built into it is now a plugin.
 | `Dependency<T>()` | unchanged; answers from the first module ignited, or the one ignited with `{ default: true }` |
 | `Flamework.registerExternalClass(C)` | `.registerClassProvider(C)` |
 | `Flamework.createDependency(C)` | `module.createClassInstance(C)` with `@Injectable()` |
-| `Modding.onListenerAdded<T>(cb)` | `.registerInterface<T>({ onAdded, onRemoved })` on a plugin |
+| `Modding.onListenerAdded<T>(cb)` | `target.observe<T>({ onAdded, onRemoved })` in a plugin |
 | Components auto-registered | `.includePlugin(ComponentPlugin.fromPath(…))` |
-| `Components` injected globally | `Components` is a provider of the component plugin |
+| `Components` injected globally | `Components` is provided by the component plugin; inject it as before |
 | `Flamework.implements` | unchanged |
 | `Flamework.id`, `createGuard` | unchanged |
 | `Networking.createEvent` | unchanged |
@@ -105,7 +105,7 @@ Register them through `ComponentPlugin`, and get `Components` by injection rathe
 // v1
 constructor(private components: Components) {} // worked because Components was a global service
 
-// v2 -- the same code, but it works because ComponentPlugin exports Components
+// v2 -- the same code, but it works because ComponentPlugin provides Components
 constructor(private components: Components) {}
 ```
 
@@ -138,12 +138,12 @@ Modding.onListenerAdded<OnPlayerJoined>((listener) => listeners.add(listener));
 Modding.onListenerRemoved<OnPlayerJoined>((listener) => listeners.delete(listener));
 
 // v2
-Flamework.createPlugin(pluginModule)
-    .registerInterface<OnPlayerJoined>({
-        onAdded: (context, value) => listeners.add(value),
-        onRemoved: (context, value) => listeners.delete(value),
-    })
-    .build();
+Flamework.createPlugin("PlayerListeners", (target) => {
+    target.observe<OnPlayerJoined>({
+        onAdded: (value) => listeners.add(value),
+        onRemoved: (value) => listeners.delete(value),
+    });
+});
 ```
 
 See [Plugins](08-plugins.md) for the full shape.

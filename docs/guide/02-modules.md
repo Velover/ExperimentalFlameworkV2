@@ -62,11 +62,11 @@ test.
 In order:
 
 1. Included modules are instantiated.
-2. Plugins are instantiated -- one plugin module per module that includes it -- and their hooks and
-   interfaces are collected.
-3. `PreIgnite` hooks run.
+2. Plugins are set up -- each one's setup function runs against this module, registering providers,
+   hooks and observers into it. A plugin reached twice is set up once.
+3. `onPreIgnite` hooks run.
 4. Every registered provider is constructed, resolving its constructor dependencies.
-5. `PostIgnite` hooks run. `LifecyclePlugin` starts its `RunService` connections here, and calls
+5. `onPostIgnite` hooks run. `LifecyclePlugin` starts its `RunService` connections here, and calls
    `onStart` on everything that implements it.
 
 Providers are constructed lazily *within* step 4 -- resolving a dependency constructs it if it does
@@ -120,9 +120,9 @@ class Registry {
 module.extinguish();
 ```
 
-This releases the instances the module created, unregisters them from every plugin that claimed them
-(so a lifecycle plugin stops ticking dead providers), runs `Extinguished` hooks, and extinguishes the
-modules **it** created -- not the ones it merely included, which may be shared.
+This runs `onExtinguished` hooks, releases the instances the module created, unregisters them from
+every plugin observing them (so a lifecycle plugin stops ticking dead providers), and extinguishes
+the modules **it** created -- not the ones it merely included, which may be shared.
 
 Games rarely call this. Tests, plugins, and UI that mounts and unmounts do.
 
@@ -217,9 +217,9 @@ Flamework.createModule()
 - **Ignition is a state machine and it is strict.** Igniting a `Module` twice, or extinguishing
   twice, raises `module is in invalid state when transitioning to '...'`. Ignite the *definition*
   again instead if you want a second container.
-- **You cannot resolve during `PreIgnite`.** Providers do not exist yet;
-  `module is in pre-ignite phase, dependency cannot be resolved` tells you a hook tried. Register
-  state in `PreIgnite` and resolve in `PostIgnite`.
+- **You cannot resolve during plugin setup or `onPreIgnite`.** Providers do not exist yet;
+  `module is in pre-ignite phase, dependency cannot be resolved` tells you a plugin tried. Register
+  state early and resolve in `onPostIgnite`.
 - **`Dependency<T>()` answers from one module.** The first root ignited, unless a later one was
   ignited with `{ default: true }`. A realm with two live roots -- tests, tools -- should say which,
   or resolve through the handle.

@@ -1,5 +1,5 @@
 import type { Modding } from "../modding";
-import type { PluginState } from "../plugin/pluginDefinition";
+import type { PluginDefinition } from "../plugin/pluginDefinition";
 import { clearDefaultModule, getDefaultModule, setDefaultModule } from "./defaultModule";
 import { createModuleInstantiation, type Module } from "./module";
 
@@ -25,8 +25,8 @@ export interface ModuleState {
 	/** Contains all the included modules. */
 	readonly include: readonly ModuleState[];
 
-	/** Contains all the included plugins. */
-	readonly plugins: readonly PluginState[];
+	/** The plugins to set up on ignition, in inclusion order. */
+	readonly plugins: readonly PluginDefinition[];
 
 	/** Contains all the exported providers */
 	readonly exportedProviders: ReadonlySet<string>;

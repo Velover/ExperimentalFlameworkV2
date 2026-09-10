@@ -1,7 +1,6 @@
 import {
 	Flamework,
 	HookPriority,
-	HookType,
 	Injectable,
 	LifecyclePlugin,
 	OnExtinguished,
@@ -103,13 +102,12 @@ export = suite("lifecycle", [
 			const added = new Array<string>();
 			const removed = new Array<string>();
 
-			const trackingModule = Flamework.createModule().build();
-			const trackingPlugin = Flamework.createPlugin(trackingModule)
-				.registerInterface<OnStart>({
+			const trackingPlugin = Flamework.createPlugin("Tracking", (target) => {
+				target.observe<OnStart>({
 					onAdded: () => added.push("start"),
 					onRemoved: () => removed.push("start"),
-				})
-				.build();
+				});
+			});
 
 			const module = Flamework.createModule()
 				.includePlugin(trackingPlugin)
@@ -131,10 +129,9 @@ export = suite("lifecycle", [
 		() => {
 			const events = new Array<string>();
 
-			const innerModule = Flamework.createModule().build();
-			const innerPlugin = Flamework.createPlugin(innerModule)
-				.registerHook({ type: HookType.Extinguished, callback: () => events.push("inner") })
-				.build();
+			const innerPlugin = Flamework.createPlugin("Inner", (target) => {
+				target.onExtinguished(() => events.push("inner"));
+			});
 
 			const included = Flamework.createModule().includePlugin(innerPlugin).build();
 			const root = Flamework.createModule().includeModule(included).ignite();
@@ -152,13 +149,9 @@ export = suite("lifecycle", [
 			const order = new Array<string>();
 
 			function hookPlugin(name: string, priority?: number) {
-				return Flamework.createPlugin(Flamework.createModule().build())
-					.registerHook({
-						type: HookType.PostIgnite,
-						callback: () => order.push(name),
-						priority,
-					})
-					.build();
+				return Flamework.createPlugin(name, (target) => {
+					target.onPostIgnite(() => order.push(name), { priority });
+				});
 			}
 
 			const module = Flamework.createModule()
@@ -187,10 +180,10 @@ export = suite("lifecycle", [
 				}
 			}
 
-			const plugin = Flamework.createPlugin(Flamework.createModule().build())
-				.registerHook({ type: HookType.PreIgnite, callback: () => order.push("preIgnite") })
-				.registerHook({ type: HookType.PostIgnite, callback: () => order.push("postIgnite") })
-				.build();
+			const plugin = Flamework.createPlugin("Order", (target) => {
+				target.onPreIgnite(() => order.push("preIgnite"));
+				target.onPostIgnite(() => order.push("postIgnite"));
+			});
 
 			const module = Flamework.createModule().includePlugin(plugin).registerClassProvider(Tracked).ignite();
 
@@ -229,12 +222,12 @@ export = suite("lifecycle", [
 			const added = new Array<string>();
 			const removed = new Array<string>();
 
-			const trackingPlugin = Flamework.createPlugin(Flamework.createModule().build())
-				.registerInterface<OnStart>({
+			const trackingPlugin = Flamework.createPlugin("Tracking", (target) => {
+				target.observe<OnStart>({
 					onAdded: () => added.push("start"),
 					onRemoved: () => removed.push("start"),
-				})
-				.build();
+				});
+			});
 
 			const module = Flamework.createModule().includePlugin(trackingPlugin).ignite();
 
@@ -262,9 +255,9 @@ export = suite("lifecycle", [
 			const order = new Array<string>();
 
 			function hookPlugin(name: string) {
-				return Flamework.createPlugin(Flamework.createModule().build())
-					.registerHook({ type: HookType.PostIgnite, callback: () => order.push(name) })
-					.build();
+				return Flamework.createPlugin(name, (target) => {
+					target.onPostIgnite(() => order.push(name));
+				});
 			}
 
 			const module = Flamework.createModule()

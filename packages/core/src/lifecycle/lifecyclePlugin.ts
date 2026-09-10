@@ -1,14 +1,11 @@
 import { RunService } from "@rbxts/services";
 import { getRuntimeConfig } from "../utility/runtimeConfig";
-import { ModuleBuilder } from "../module/moduleBuilder";
 import type { Module } from "../module/module";
-import { HookType, type HookContext } from "../module/moduleHooks";
 import { Provider } from "../provider";
 import type { OnExtinguished, OnInit, OnPhysics, OnRender, OnStart, OnTick } from "./lifecycleInterfaces";
 import { recycleThread } from "../utility/recycleThread";
 import { Reflect } from "../reflect";
-import { PluginBuilder } from "../plugin/pluginBuilder";
-import type { InterfaceConfiguration, InterfaceContext, PluginDefinition } from "../plugin/pluginDefinition";
+import { PluginDefinition, type InterfaceConfiguration, type InterfaceContext } from "../plugin/pluginDefinition";
 
 export interface LifecyclePluginOptions {
 	/**
@@ -24,9 +21,9 @@ export interface LifecyclePluginOptions {
 /**
  * Tracks the objects attached to each lifecycle event for one module.
  *
- * Plugins are instantiated once per including module, so nothing here is shared between modules.
- * The plugin exports it, so `module.resolveDependency<LifecycleProvider>()` answers what is
- * attached to a module's events right now.
+ * The plugin builds one per ignition of every module that includes it, so nothing here is shared
+ * between modules, and provides it, so `module.resolveDependency<LifecycleProvider>()` answers what
+ * is attached to a module's events right now.
  */
 @Provider()
 export class LifecycleProvider {
@@ -274,13 +271,11 @@ export class LifecycleProvider {
 	}
 }
 
-function createLifecycleSet<T>(get: (provider: LifecycleProvider) => Set<T>): InterfaceConfiguration<T> {
+/** An observer that keeps one of the provider's plain event sets in step with the module. */
+function observeSet<T>(provider: LifecycleProvider, set: Set<T>): InterfaceConfiguration<T> {
 	return {
-		onAdded: (ctx, value) => get(ctx.sourceModule.resolveDependency<LifecycleProvider>()).add(value),
-		onRemoved: (ctx, value) => {
-			const provider = ctx.sourceModule.resolveDependency<LifecycleProvider>();
-			provider.removeFrom(get(provider), value);
-		},
+		onAdded: (value) => set.add(value),
+		onRemoved: (value) => provider.removeFrom(set, value),
 	};
 }
 
@@ -291,43 +286,28 @@ function createLifecycleSet<T>(get: (provider: LifecycleProvider) => Set<T>): In
  * different ones, such as forcing profiling on or off.
  */
 export function createLifecyclePlugin(options: LifecyclePluginOptions = {}): PluginDefinition {
-	const lifecycleModule = new ModuleBuilder()
-		.setDebugName("LifecyclePlugin")
-		.registerProvider<LifecyclePluginOptions>({ type: "function", callback: () => options })
-		.registerClassProvider(LifecycleProvider)
-		.exportProviders<LifecycleProvider>()
-		.build();
+	return new PluginDefinition("Lifecycle", (target) => {
+		// One per ignition: the setup runs for every module that includes the plugin, and again for
+		// every ignition of a definition, so nothing here is shared between modules.
+		const lifecycle = new LifecycleProvider(options);
+		target.provideInstance(lifecycle);
 
-	const getProvider = (context: HookContext | InterfaceContext) =>
-		context.sourceModule.resolveDependency<LifecycleProvider>();
+		target.onPostIgnite((module) => lifecycle.postIgnite(module));
+		target.onExtinguished((module) => lifecycle.extinguished(module));
 
-	return (
-		new PluginBuilder(lifecycleModule)
-			// Hooks
-			.registerHook({
-				type: HookType.PostIgnite,
-				callback: (context) => getProvider(context).postIgnite(context.targetModule),
-			})
-			.registerHook({
-				type: HookType.Extinguished,
-				callback: (context) => getProvider(context).extinguished(context.targetModule),
-			})
-
-			// Lifecycle events
-			.registerInterface<OnInit>({
-				onAdded: (context, value) => getProvider(context).addInit(value, context),
-				onRemoved: (context, value) => getProvider(context).removeInit(value),
-			})
-			.registerInterface<OnStart>({
-				onAdded: (context, value) => getProvider(context).addStart(value, context),
-				onRemoved: (context, value) => getProvider(context).removeStart(value),
-			})
-			.registerInterface(createLifecycleSet((p) => p.onTick))
-			.registerInterface(createLifecycleSet((p) => p.onRender))
-			.registerInterface(createLifecycleSet((p) => p.onPhysics))
-			.registerInterface(createLifecycleSet((p) => p.onExtinguished))
-			.build()
-	);
+		target.observe<OnInit>({
+			onAdded: (value, context) => lifecycle.addInit(value, context),
+			onRemoved: (value) => lifecycle.removeInit(value),
+		});
+		target.observe<OnStart>({
+			onAdded: (value, context) => lifecycle.addStart(value, context),
+			onRemoved: (value) => lifecycle.removeStart(value),
+		});
+		target.observe<OnTick>(observeSet(lifecycle, lifecycle.onTick));
+		target.observe<OnRender>(observeSet(lifecycle, lifecycle.onRender));
+		target.observe<OnPhysics>(observeSet(lifecycle, lifecycle.onPhysics));
+		target.observe<OnExtinguished>(observeSet(lifecycle, lifecycle.onExtinguished));
+	});
 }
 
 /**

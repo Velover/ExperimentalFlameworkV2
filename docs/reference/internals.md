@@ -186,12 +186,16 @@ rather than half-working.
 
 1. Included modules are instantiated. They are keyed by `ModuleState` in a context map shared by the
    whole tree, so including the same definition twice yields one instance.
-2. Plugins are instantiated -- one plugin module per module that includes it -- and their hooks and
-   interfaces are collected.
-3. `PreIgnite` hooks run, sorted by priority and then registration order. This is where a plugin
+2. Plugins are set up. Each plugin's setup function runs against the module through a
+   `PluginTarget`, registering providers, provided instances, hooks and observers into this one
+   instantiation, and including further plugins, which are set up first. A plugin reached twice in
+   one ignition is set up once; the set that says so is marked before the setup runs, so a ring of
+   plugins stops on its second arrival.
+3. `onPreIgnite` hooks run, sorted by priority and then registration order. This is where a plugin
    registers state that providers will resolve during construction.
-4. Every provider is resolved, which constructs it.
-5. `PostIgnite` hooks run.
+4. Objects the plugins provided join the interfaces they implement, now that every observer is in
+   place; then every provider is resolved, which constructs it.
+5. `onPostIgnite` hooks run.
 
 ### Resolution
 
@@ -204,14 +208,14 @@ Resolution during `PreIgniting` is refused: providers do not exist yet, and allo
 construction order depend on hook order.
 
 Every constructed object is passed to `registerClassInterfaces`, which checks its
-`flamework:implements` metadata against the interfaces plugins have registered and calls `onAdded`.
-`createClassInstance` and `listen` go through the same path, which is why a lifecycle listener does
-not have to be a provider.
+`flamework:implements` metadata against the interfaces plugins observe and calls each observer's
+`onAdded`. `createClassInstance` and `listen` go through the same path, which is why a lifecycle
+listener does not have to be a provider.
 
 ### Extinguishing
 
-`extinguish` releases the temporary instances the module created, unregisters every provider from
-the interfaces it was added to, runs `Extinguished` hooks, and extinguishes the submodules this
+`extinguish` runs `onExtinguished` hooks, releases the temporary instances the module created,
+unregisters every provider from the interfaces it was added to, and extinguishes the submodules this
 module created -- tracked separately from the ones it merely included, so a shared module is not
 torn down by whichever includer dies first.
 
@@ -229,9 +233,10 @@ dependencies, so a decorator that does not emit it disables that feature silentl
 
 ## Components
 
-`ComponentPlugin` builds a module containing `Components` and a `ComponentModuleConfig` listing the
-registered classes, includes `LifecyclePlugin`, and registers a `PostIgnite` hook that calls
-`startCollectionService` once the parent module has ignited.
+`ComponentPlugin` is a plugin whose setup constructs `Components` over the registered classes,
+provides it to the module, and hooks `onPostIgnite` to `startCollectionService` and `onExtinguished`
+to `stopCollectionService`. It brings no lifecycle plugin of its own: components are constructed
+through the module, so they take their per-frame events from that module's.
 
 The DataModel is what a tag is announced by, so the DataModel is what the three places that weigh a
 tag ask about: the added handler ignores an instance that is not in it, the removed handler stands by

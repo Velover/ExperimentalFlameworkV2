@@ -24,7 +24,7 @@ import Maid from "@rbxts/maid";
 import Signal from "@rbxts/signal";
 import type { ComponentModuleConfig } from "./componentModule";
 import { ComponentStreamingMode, type ComponentConfig, type ComponentLink } from "./decorator";
-import type { PluginModule } from "@flamework/core";
+import type { Module } from "@flamework/core";
 
 interface ComponentInfo {
 	ctor: Constructor<BaseComponent>;
@@ -133,7 +133,7 @@ export class Components {
 	}
 
 	constructor(
-		private module: PluginModule,
+		private module: Module,
 		private config: ComponentModuleConfig,
 	) {
 		const components = new Map<Constructor, ComponentInfo>();

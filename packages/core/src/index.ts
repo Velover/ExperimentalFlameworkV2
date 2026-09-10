@@ -12,9 +12,9 @@ export type { InjectableDecoratorConfig } from "./injectable";
 // Modules
 export { ModuleDefinition } from "./module/moduleDefinition";
 export { ModuleBuilder } from "./module/moduleBuilder";
-export { HookPriority, HookType } from "./module/moduleHooks";
+export { HookPriority } from "./module/moduleHooks";
 
-export type { Module, PluginModule } from "./module/module";
+export type { Module } from "./module/module";
 export type {
 	IgniteOptions,
 	InjectionContext,
@@ -22,10 +22,9 @@ export type {
 	ModuleState,
 	ProviderConfig,
 } from "./module/moduleDefinition";
-export type { HookCallbacks, HookConfig, HookContext } from "./module/moduleHooks";
+export type { HookOptions } from "./module/moduleHooks";
 
 // Plugins
-export { PluginBuilder } from "./plugin/pluginBuilder";
 export { PluginDefinition } from "./plugin/pluginDefinition";
 export { LifecyclePlugin, LifecycleProvider, createLifecyclePlugin } from "./lifecycle/lifecyclePlugin";
 
@@ -34,7 +33,7 @@ export type {
 	InterfaceConfiguration,
 	InterfaceContext,
 	InterfaceTargetKind,
-	PluginState,
+	PluginTarget,
 } from "./plugin/pluginDefinition";
 
 // Lifecycle events

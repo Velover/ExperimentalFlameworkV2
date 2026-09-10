@@ -3,8 +3,7 @@ import { Modding } from "./modding";
 import { Reflect } from "./reflect";
 import { AbstractConstructor } from "./utility/constructors";
 import { ModuleBuilder } from "./module/moduleBuilder";
-import { PluginBuilder } from "./plugin/pluginBuilder";
-import type { ModuleDefinition } from "./module/moduleDefinition";
+import { PluginDefinition, type PluginTarget } from "./plugin/pluginDefinition";
 import { Serialization } from "./serialization/types";
 
 export namespace Flamework {
@@ -16,12 +15,12 @@ export namespace Flamework {
 	}
 
 	/**
-	 * Creates a new Plugin. The passed in ModuleDefiniton will be used for the plugin's environment.
-	 *
-	 * Plugins are special types of Modules which allow you to add interfaces, hooks, etc to modules.
+	 * Creates a plugin: a setup function, run once per ignition of every module that includes it,
+	 * which registers providers, hooks and observers into that module. See {@link PluginTarget} for
+	 * what it can do. `name` labels the plugin in error messages.
 	 */
-	export function createPlugin(module: ModuleDefinition) {
-		return new PluginBuilder(module);
+	export function createPlugin(name: string, setup: (target: PluginTarget) => void) {
+		return new PluginDefinition(name, setup);
 	}
 
 	/** @hidden */
