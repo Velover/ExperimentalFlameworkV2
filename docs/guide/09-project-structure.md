@@ -106,7 +106,8 @@ entry the tsconfig needs is `transform`; each package has its own section in the
   },
   "core": { "profiling": true },
   "networking": { "serialization": true },
-  "components": { "warningTimeout": 5, "attributeWarningTimeout": 5, "streamingMode": "Contextual" }
+  "components": { "warningTimeout": 5, "attributeWarningTimeout": 5, "streamingMode": "Contextual" },
+  "scopes": { "active": "${FLAMEWORK_SCOPES:-}" }
 }
 ```
 
@@ -120,6 +121,7 @@ entry the tsconfig needs is `transform`; each package has its own section in the
 | `core` | `profiling` | Default for `LifecyclePlugin` profiling; `createLifecyclePlugin({ profiling })` overrides it per module. |
 | `networking` | `serialization` | Serializes every event and function payload into a buffer with code generated at compile time; see [Networking](06-networking.md#serialization). |
 | `components` | `warningTimeout`, `attributeWarningTimeout`, `streamingMode` | Defaults for components that do not set their own. |
+| `scopes` | `active` | The scopes this build is compiled with; see [Scopes](11-scopes.md). |
 
 The transformer looks for the file in the tsconfig's directory, then in each parent up to the
 package root, so a repository with several places can share one at the root and override it per
@@ -136,8 +138,41 @@ that uses it.
 **Do not set `idGenerationMode` or `obfuscation` in a published package.** Ids have to be stable and
 collision-free across every consumer.
 
-The file is read once per compilation. `rbxtsc -w` does not watch it, so restart the watcher after
-editing it.
+### Values from the environment
+
+Any string in the file can reference the environment: `${NAME}` is the variable's value, and
+`${NAME:-fallback}` uses the fallback when it is not set. `$$` writes a literal dollar. The
+environment is `.env` and then `.env.local` next to `flamework.config.json`, with the process
+environment on top of both, so a shell variable wins over `.env.local`, which wins over `.env`.
+Commit `.env` with the defaults and ignore `.env.local` for personal overrides.
+
+A variable is always a string, so a string sitting where a boolean, a number or a list is expected
+is converted: `"obfuscation": "${OBFUSCATE:-false}"` becomes a boolean, and
+`"active": "${FLAMEWORK_SCOPES:-}"` splits on commas into a list, with an empty value giving an
+empty list. A variable that is not set and has no fallback fails the build, naming the variable and
+the key that used it.
+
+```ini
+# .env
+FLAMEWORK_SCOPES=
+OBFUSCATE=false
+
+# .env.local (ignored by git)
+FLAMEWORK_SCOPES=components,collections
+```
+
+### Watching
+
+The file and the environment are read on every compilation, and the runtime sections are rewritten
+into `include/flamework/config.json` each time. Under `rbxtsc -w` a change to them, or to `.env`,
+reaches the game on the next rebuild: the watcher does not watch either file, so save any source
+file to trigger one.
+
+The `transformer` section and `networking.serialization` are compiled into every emitted file, and
+a watcher only recompiles the files that changed. When one of those changes under a running
+watcher the transformer prints `flamework.config.json changed since the watcher started`; restart
+it to apply the change everywhere. Changing `idGenerationMode` or `obfuscation` also regenerates
+every identifier, which the next full build does on its own.
 
 ## Testing
 

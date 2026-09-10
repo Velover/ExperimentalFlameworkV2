@@ -1,8 +1,10 @@
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import ts from "typescript";
 import { Logger } from "../classes/logger";
-import { getSchemaErrors, validateSchema } from "./schema";
+import { coerceBySchema, loadEnv, substituteEnv, type Env } from "./env";
+import { getSchema, getSchemaErrors, validateSchema } from "./schema";
 import type { TransformerConfig } from "../classes/transformState";
 
 /** The file every Flamework package reads its options from, found from the tsconfig's directory up to the package root. */
@@ -32,6 +34,14 @@ export interface ComponentsRuntimeConfig {
 	streamingMode?: "Disabled" | "Watching" | "Contextual";
 }
 
+export interface ScopesRuntimeConfig {
+	/**
+	 * The scopes this build is compiled with. Usually `"${FLAMEWORK_SCOPES:-}"`, which the
+	 * environment fills in and the loader splits on commas; `"*"` stands for every scope.
+	 */
+	active?: string[];
+}
+
 /**
  * The sections the runtime packages read. Game projects get them written to
  * `include/flamework/config.json`, which the packages find by walking up from their own script.
@@ -40,6 +50,7 @@ export interface RuntimeConfig {
 	core?: CoreRuntimeConfig;
 	networking?: NetworkingRuntimeConfig;
 	components?: ComponentsRuntimeConfig;
+	scopes?: ScopesRuntimeConfig;
 }
 
 /** The whole `flamework.config.json`. */
@@ -48,7 +59,7 @@ export interface ProjectConfig extends RuntimeConfig {
 	transformer?: TransformerOptions;
 }
 
-export const RUNTIME_SECTIONS = ["core", "networking", "components"] as const;
+export const RUNTIME_SECTIONS = ["core", "networking", "components", "scopes"] as const;
 
 export interface LoadedProjectConfig {
 	/** The effective transformer options: the file's `transformer` section with inline tsconfig options on top. */
@@ -107,14 +118,23 @@ export function findProjectConfig(
 
 /**
  * Reads and validates a `flamework.config.json`. Comments and trailing commas are allowed, as in tsconfig.
+ *
+ * Every string in the file can reference the environment as `${NAME}` or `${NAME:-fallback}`
+ * (`$$` for a literal dollar). The environment is `.env` and `.env.local` next to the file with the
+ * process environment on top, unless one is given. A string sitting where the schema expects a
+ * boolean, a number or a list of strings is converted before validation, since a variable is
+ * always a string.
  */
-export function readProjectConfig(configPath: string): ProjectConfig {
+export function readProjectConfig(configPath: string, env: Env = loadEnv(path.dirname(configPath))): ProjectConfig {
 	const text = fs.readFileSync(configPath, "utf8");
 	// TypeScript asserts a forward-slash path when it attaches a diagnostic to the JSON source file.
-	const { config, error } = ts.parseConfigFileTextToJson(configPath.replace(/\\/g, "/"), text);
+	const { config: parsed, error } = ts.parseConfigFileTextToJson(configPath.replace(/\\/g, "/"), text);
 	if (error) {
 		throw new Error(`Failed to parse ${configPath}: ${ts.flattenDiagnosticMessageText(error.messageText, "\n")}`);
 	}
+
+	const describe = (pointer: string) => `${configPath}: '${pointer === "" ? "/" : pointer}'`;
+	const config = coerceBySchema(substituteEnv(parsed, env, describe).value, getSchema("projectConfig"), describe);
 
 	if (!validateSchema("projectConfig", config)) {
 		const details = getSchemaErrors().map((v) => {
@@ -174,6 +194,41 @@ export function getRuntimeConfig(project: ProjectConfig): RuntimeConfig | undefi
 	}
 
 	return any ? runtime : undefined;
+}
+
+/**
+ * A hash of the options that are compiled into every emitted file: the effective transformer
+ * options and `networking.serialization`, whose codecs are generated at the call sites. The runtime
+ * sections are not part of it, since they are rewritten into `config.json` on every compilation.
+ *
+ * A watcher compares this across compilations: when it changes, files that did not recompile are
+ * out of date and nothing but a restart brings them back.
+ */
+export function hashCompiledInOptions(config: TransformerConfig, project: ProjectConfig): string {
+	const { configFile, ...transformer } = config;
+	void configFile;
+
+	const stable = (value: unknown): unknown => {
+		if (Array.isArray(value)) {
+			return value.map(stable);
+		}
+
+		if (value !== null && typeof value === "object") {
+			return Object.fromEntries(
+				Object.keys(value)
+					.sort()
+					.map((key) => [key, stable((value as Record<string, unknown>)[key])]),
+			);
+		}
+
+		return value;
+	};
+
+	const compiledIn = { transformer, networking: { serialization: project.networking?.serialization ?? false } };
+	return crypto
+		.createHash("sha1")
+		.update(JSON.stringify(stable(compiledIn)))
+		.digest("hex");
 }
 
 /**

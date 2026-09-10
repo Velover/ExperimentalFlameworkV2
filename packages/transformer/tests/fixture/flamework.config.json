@@ -2,9 +2,10 @@
 	"$schema": "../../flamework.config.schema.json",
 	"transformer": {
 		"hashPrefix": "fw",
-		"optimizations": { "guardGenerationDedupLimit": 3 },
+		"optimizations": { "guardGenerationDedupLimit": "${FLAMEWORK_FIXTURE_DEDUP:-3}" },
 		"plugins": [{ "path": "./fieldInfoPlugin.cjs", "options": { "prefix": "fx" } }]
 	},
 	"networking": { "serialization": true },
-	"components": { "warningTimeout": 2 }
+	"components": { "warningTimeout": 2 },
+	"scopes": { "active": "${FLAMEWORK_FIXTURE_SCOPES:-unset}" }
 }

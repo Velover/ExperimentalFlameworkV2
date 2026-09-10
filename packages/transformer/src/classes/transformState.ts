@@ -22,7 +22,7 @@ import glob from "glob";
 import type { PathTranslator } from "@roblox-ts/path-translator";
 import { createPluginHost, type PluginHost } from "../transformations/plugins/pluginHost";
 import { tryResolveTS } from "../util/functions/tryResolve";
-import { getRuntimeConfig, loadProjectConfig, ProjectConfig } from "../util/projectConfig";
+import { getRuntimeConfig, hashCompiledInOptions, loadProjectConfig, ProjectConfig } from "../util/projectConfig";
 import { Diagnostics } from "./diagnostics";
 
 export interface TransformerConfig {
@@ -283,6 +283,27 @@ export class TransformState {
 		this.setupBuildInfo();
 
 		this.config.idGenerationMode ??= this.config.obfuscation ? "obfuscated" : "full";
+
+		const previousMode = this.buildInfo.setIdGenerationMode(this.config.idGenerationMode);
+		if (previousMode !== undefined) {
+			Logger.info(
+				`idGenerationMode changed from '${previousMode}' to '${this.config.idGenerationMode}'; every identifier is regenerated`,
+			);
+		}
+
+		// The runtime sections are rewritten into config.json on every compilation, so a change to
+		// them reaches the game through the watcher. The options hashed here are compiled into each
+		// file, and a watcher only recompiles the files that changed.
+		const compiledOptionsHash = hashCompiledInOptions(this.config, this.projectConfig);
+		if (Cache.compiledOptionsHash === undefined) {
+			Cache.compiledOptionsHash = compiledOptionsHash;
+		} else if (Cache.compiledOptionsHash !== compiledOptionsHash) {
+			Logger.warn(
+				"flamework.config.json changed since the watcher started",
+				"The transformer section and networking.serialization are compiled into every file, and only the files that changed are recompiled.",
+				"Restart the watcher to apply them everywhere.",
+			);
+		}
 
 		this.packageName = packageJson.name;
 		this.isGame = !this.packageName.startsWith("@");

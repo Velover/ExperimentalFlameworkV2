@@ -2,7 +2,7 @@
 	"$schema": "http://json-schema.org/draft-07/schema#",
 	"$id": "flamework.config.schema.json",
 	"title": "Flamework project configuration",
-	"description": "One file for every Flamework package, read from flamework.config.json next to (or above) your tsconfig.json. The transformer section can also be written inline on the transformer entry in tsconfig.json, where it overrides the file; the other sections are compiled into include/flamework/config.json for the runtime packages.",
+	"description": "One file for every Flamework package, read from flamework.config.json next to (or above) your tsconfig.json. The transformer section can also be written inline on the transformer entry in tsconfig.json, where it overrides the file; the other sections are compiled into include/flamework/config.json for the runtime packages. Any string may reference the environment as ${NAME} or ${NAME:-fallback} ($$ for a literal dollar), read from .env and .env.local next to this file with the process environment on top; a string where a boolean, number or list is expected is converted.",
 	"type": "object",
 	"additionalProperties": false,
 	"properties": {
@@ -116,6 +116,19 @@
 					"enum": ["Disabled", "Watching", "Contextual"],
 					"description": "Default ComponentStreamingMode for components that do not set one.",
 					"default": "Contextual"
+				}
+			}
+		},
+		"scopes": {
+			"type": "object",
+			"additionalProperties": false,
+			"description": "Build scopes: which scoped modules, registrations, providers and components are active in this build. Usually driven by the environment, as \"active\": \"${FLAMEWORK_SCOPES:-}\".",
+			"properties": {
+				"active": {
+					"type": "array",
+					"items": { "type": "string" },
+					"description": "The active scopes. A string from the environment is split on commas; \"*\" activates every scope and an empty list activates none.",
+					"default": []
 				}
 			}
 		}

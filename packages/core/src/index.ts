@@ -48,5 +48,6 @@ export type {
 	CoreRuntimeConfig,
 	NetworkingRuntimeConfig,
 	RuntimeConfig,
+	ScopesRuntimeConfig,
 } from "./utility/runtimeConfig";
 export type { AbstractConstructor, Constructor } from "./utility/constructors";

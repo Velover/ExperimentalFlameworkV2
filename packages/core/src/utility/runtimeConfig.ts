@@ -21,6 +21,14 @@ export interface ComponentsRuntimeConfig {
 	streamingMode?: "Disabled" | "Watching" | "Contextual";
 }
 
+export interface ScopesRuntimeConfig {
+	/**
+	 * The scopes this build was compiled with, usually taken from the environment at compile time.
+	 * `"*"` stands for every scope. Read by the scope checks in `@flamework/core`.
+	 */
+	active?: string[];
+}
+
 /**
  * The runtime sections of the project's `flamework.config.json`. The transformer writes them to
  * `include/flamework/config.json` for game projects; a project without them gets an empty object.
@@ -29,6 +37,7 @@ export interface RuntimeConfig {
 	core?: CoreRuntimeConfig;
 	networking?: NetworkingRuntimeConfig;
 	components?: ComponentsRuntimeConfig;
+	scopes?: ScopesRuntimeConfig;
 }
 
 let cached: RuntimeConfig | undefined;

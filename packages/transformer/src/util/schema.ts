@@ -35,6 +35,16 @@ export function getSchemaErrors() {
 	return SCHEMA.errors ?? [];
 }
 
+/** The parsed schema itself, for code that walks it alongside a value. */
+export function getSchema<K extends keyof Schemas>(key: K): object {
+	const validate = SCHEMA.getSchema(key in STANDALONE_SCHEMAS ? key : `root#/properties/${key}`);
+	if (!validate || typeof validate.schema !== "object") {
+		throw new Error(`No schema registered for '${key}'`);
+	}
+
+	return validate.schema;
+}
+
 export function validateSchema<K extends keyof Schemas>(key: K, value: unknown): value is Schemas[K] {
 	return SCHEMA.validate(key in STANDALONE_SCHEMAS ? key : `root#/properties/${key}`, value);
 }

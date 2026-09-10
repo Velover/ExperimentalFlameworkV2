@@ -18,6 +18,7 @@ export interface FlameworkBuildInfo {
 	version: number;
 	flameworkVersion: string;
 	identifierPrefix?: string;
+	idGenerationMode?: string;
 	salt?: string;
 	metadata?: FlameworkMetadata;
 	stringHashes?: { [key: string]: string };
@@ -317,5 +318,30 @@ export class BuildInfo {
 	 */
 	getIdentifierPrefix() {
 		return this.buildInfo.identifierPrefix;
+	}
+
+	/**
+	 * Records the mode identifiers are generated in. An identifier, once generated, is answered from
+	 * the table without looking at the mode again, so a build info written in another mode would
+	 * hand out a mix. When the mode differs from the recorded one the table is dropped and every id
+	 * is generated afresh; the previous mode is returned so that the caller can say so.
+	 *
+	 * A build info from before the mode was recorded keeps its table: there is no telling what
+	 * mode it was made in, and dropping ids without cause is worse than keeping them.
+	 */
+	setIdGenerationMode(mode: string): string | undefined {
+		const previous = this.buildInfo.idGenerationMode;
+		this.buildInfo.idGenerationMode = mode;
+
+		if (previous !== undefined && previous !== mode) {
+			this.buildInfo.identifiers = {};
+			this.identifiersLookup.clear();
+			return previous;
+		}
+	}
+
+	/** The mode the identifiers in the table were generated in, if it was recorded. */
+	getIdGenerationMode() {
+		return this.buildInfo.idGenerationMode;
 	}
 }

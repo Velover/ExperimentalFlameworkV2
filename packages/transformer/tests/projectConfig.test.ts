@@ -4,8 +4,10 @@ import os from "os";
 import path from "path";
 import { compileFixture, emitted } from "./compile";
 
-const { findProjectConfig, getRuntimeConfig, loadProjectConfig, readProjectConfig } =
+const { findProjectConfig, getRuntimeConfig, hashCompiledInOptions, loadProjectConfig, readProjectConfig } =
 	await import("../out/util/projectConfig.js");
+const { loadEnv, parseEnvFile } = await import("../out/util/env.js");
+const { BuildInfo } = await import("../out/classes/buildInfo.js");
 
 const FIXTURE = path.resolve(import.meta.dir, "fixture");
 
@@ -122,6 +124,150 @@ describe("reading flamework.config.json", () => {
 	});
 });
 
+describe("environment substitution", () => {
+	test("fills ${NAME} and ${NAME:-fallback} from the given environment", () => {
+		const file = write(
+			"flamework.config.json",
+			`{ "transformer": { "hashPrefix": "${"${PREFIX}"}", "salt": "${"${SALT:-fixed}"}" } }`,
+		);
+
+		expect(readProjectConfig(file, { PREFIX: "$e" })).toEqual({
+			transformer: { hashPrefix: "$e", salt: "fixed" },
+		});
+		expect(readProjectConfig(file, { PREFIX: "$e", SALT: "given" }).transformer?.salt).toBe("given");
+		remove("flamework.config.json");
+	});
+
+	test("converts a substituted string to what the schema expects", () => {
+		const file = write(
+			"flamework.config.json",
+			`{
+				"transformer": { "obfuscation": "${"${OBFUSCATE:-false}"}", "optimizations": { "guardGenerationDedupLimit": "${"${DEDUP}"}" } },
+				"scopes": { "active": "${"${SCOPES:-}"}" }
+			}`,
+		);
+
+		expect(readProjectConfig(file, { OBFUSCATE: "TRUE", DEDUP: "4", SCOPES: "components, providers" })).toEqual({
+			transformer: { obfuscation: true, optimizations: { guardGenerationDedupLimit: 4 } },
+			scopes: { active: ["components", "providers"] },
+		});
+
+		// An empty variable is an empty list, and `*` is passed through for the runtime to read.
+		expect(readProjectConfig(file, { DEDUP: "2", SCOPES: "" }).scopes).toEqual({ active: [] });
+		expect(readProjectConfig(file, { DEDUP: "2", SCOPES: "*" }).scopes).toEqual({ active: ["*"] });
+		remove("flamework.config.json");
+	});
+
+	test("rejects a converted value that does not parse, naming where it was used", () => {
+		const file = write("flamework.config.json", `{ "transformer": { "obfuscation": "${"${OBFUSCATE}"}" } }`);
+		expect(() => readProjectConfig(file, { OBFUSCATE: "maybe" })).toThrow(
+			/\/transformer\/obfuscation.*not a boolean/,
+		);
+
+		write("flamework.config.json", `{ "components": { "warningTimeout": "${"${TIMEOUT}"}" } }`);
+		expect(() => readProjectConfig(file, { TIMEOUT: "soon" })).toThrow(
+			/\/components\/warningTimeout.*not a number/,
+		);
+		remove("flamework.config.json");
+	});
+
+	test("raises on a variable that is not set and has no fallback", () => {
+		const file = write("flamework.config.json", `{ "transformer": { "hashPrefix": "${"${PREFIX}"}" } }`);
+		expect(() => readProjectConfig(file, {})).toThrow(/\/transformer\/hashPrefix.*\$PREFIX.*not set/);
+		remove("flamework.config.json");
+	});
+
+	test("writes a literal dollar with $$ and leaves other strings alone", () => {
+		const file = write("flamework.config.json", `{ "transformer": { "hashPrefix": "$$g", "salt": "plain" } }`);
+		expect(readProjectConfig(file, {}).transformer).toEqual({ hashPrefix: "$g", salt: "plain" });
+		remove("flamework.config.json");
+	});
+
+	test("reads .env, then .env.local over it, then the process environment over both", () => {
+		write(
+			"flamework.config.json",
+			`{ "transformer": { "hashPrefix": "${"${FW_TEST_PREFIX}"}", "salt": "${"${FW_TEST_SALT}"}" }, "scopes": { "active": "${"${FW_TEST_SCOPES}"}" } }`,
+		);
+		write(".env", "FW_TEST_PREFIX=$a\nFW_TEST_SALT=from-env\nFW_TEST_SCOPES=a\n");
+		write(".env.local", "FW_TEST_SALT=from-local\nFW_TEST_SCOPES=b\n");
+
+		process.env.FW_TEST_SCOPES = "c";
+		try {
+			expect(loadProjectConfig(root, root, {}).project).toEqual({
+				transformer: { hashPrefix: "$a", salt: "from-local" },
+				scopes: { active: ["c"] },
+			});
+		} finally {
+			delete process.env.FW_TEST_SCOPES;
+		}
+
+		expect(loadEnv(root, {})).toEqual({ FW_TEST_PREFIX: "$a", FW_TEST_SALT: "from-local", FW_TEST_SCOPES: "b" });
+
+		remove("flamework.config.json");
+		remove(".env");
+		remove(".env.local");
+	});
+
+	test("parses quotes, escapes, comments and an export prefix in an env file", () => {
+		expect(
+			parseEnvFile(
+				[
+					"# a comment",
+					"",
+					"PLAIN=value # trailing comment",
+					'DOUBLE="a \\"quoted\\" line\\nnext"',
+					"SINGLE='kept \\n as written'",
+					"export EXPORTED=yes",
+					"not a line",
+					"SPACED =  padded  ",
+				].join("\n"),
+			),
+		).toEqual({
+			PLAIN: "value",
+			DOUBLE: 'a "quoted" line\nnext',
+			SINGLE: "kept \\n as written",
+			EXPORTED: "yes",
+			SPACED: "padded",
+		});
+	});
+});
+
+describe("compiled-in options", () => {
+	test("hash the transformer options and networking.serialization, and nothing else", () => {
+		const base = hashCompiledInOptions({ hashPrefix: "$a" }, { networking: { serialization: false } });
+
+		expect(hashCompiledInOptions({ hashPrefix: "$a" }, {})).toBe(base);
+		expect(
+			hashCompiledInOptions({ hashPrefix: "$a" }, { core: { profiling: true }, scopes: { active: ["x"] } }),
+		).toBe(base);
+		expect(hashCompiledInOptions({ hashPrefix: "$a", configFile: "other.json" }, {})).toBe(base);
+
+		expect(hashCompiledInOptions({ hashPrefix: "$b" }, {})).not.toBe(base);
+		expect(hashCompiledInOptions({ hashPrefix: "$a" }, { networking: { serialization: true } })).not.toBe(base);
+	});
+
+	test("drop the identifier table when idGenerationMode changes", () => {
+		const info = new BuildInfo(path.join(root, "flamework.build"));
+		info.addIdentifier("pkg:file@Class", "pkg:file@Class");
+
+		expect(info.setIdGenerationMode("full")).toBeUndefined();
+		expect(info.getIdentifierFromInternal("pkg:file@Class")).toBe("pkg:file@Class");
+
+		expect(info.setIdGenerationMode("obfuscated")).toBe("full");
+		expect(info.getIdentifierFromInternal("pkg:file@Class")).toBeUndefined();
+		expect(info.getIdGenerationMode()).toBe("obfuscated");
+
+		// A table from before the mode was recorded is kept.
+		const older = new BuildInfo(path.join(root, "flamework.build"), {
+			version: 1,
+			flameworkVersion: "0",
+			identifiers: { "pkg:file@Class": "x" },
+		});
+		expect(older.setIdGenerationMode("obfuscated")).toBeUndefined();
+		expect(older.getIdentifierFromInternal("pkg:file@Class")).toBe("x");
+	});
+});
+
 describe("merging with tsconfig options", () => {
 	test("inline options override the transformer section, one level deep for optimizations", () => {
 		write(
@@ -152,8 +298,9 @@ describe("runtime sections", () => {
 				transformer: { hashPrefix: "$x" },
 				core: { profiling: false },
 				networking: { serialization: true },
+				scopes: { active: ["a"] },
 			}),
-		).toEqual({ core: { profiling: false }, networking: { serialization: true } });
+		).toEqual({ core: { profiling: false }, networking: { serialization: true }, scopes: { active: ["a"] } });
 	});
 
 	test("are absent when the file only configures the transformer", () => {
@@ -170,13 +317,16 @@ describe("the fixture", () => {
 		expect(emitted("nested")).toContain("fw:nested@Target");
 	});
 
-	test("writes the runtime sections to include/flamework/config.json", () => {
+	test("writes the runtime sections to include/flamework/config.json, with its .env substituted", () => {
+		// The fixture's `scopes.active` is `${FLAMEWORK_FIXTURE_SCOPES:-unset}` and its `.env` sets
+		// the variable, so the artifact only holds the split list if the file was read and applied.
 		compileFixture();
 		const artifact = path.join(FIXTURE, "include", "flamework", "config.json");
 		expect(fs.existsSync(artifact)).toBe(true);
 		expect(JSON.parse(fs.readFileSync(artifact, "utf8"))).toEqual({
 			networking: { serialization: true },
 			components: { warningTimeout: 2 },
+			scopes: { active: ["fixture", "demo"] },
 		});
 	});
 });

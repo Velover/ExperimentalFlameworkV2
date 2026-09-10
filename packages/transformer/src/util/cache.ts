@@ -6,6 +6,13 @@ export interface Cache {
 	rojoResolver?: RojoResolver;
 	buildInfoCandidates?: string[];
 	isInitialCompile: boolean;
+
+	/**
+	 * A hash of the config options that are compiled into every file, from the first compilation of
+	 * this process. A later compilation that sees a different one is a watcher whose output is now
+	 * partly stale, and says so.
+	 */
+	compiledOptionsHash?: string;
 	pkgJsonCache: Map<string, PackageJsonResult>;
 }
 

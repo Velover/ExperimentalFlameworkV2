@@ -41,6 +41,9 @@
 				"identifierPrefix": {
 					"type": "string"
 				},
+				"idGenerationMode": {
+					"type": "string"
+				},
 				"identifiers": {
 					"type": "object",
 					"additionalProperties": {
