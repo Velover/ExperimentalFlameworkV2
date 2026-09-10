@@ -40,6 +40,9 @@ export class PluginDefinition {
 /**
  * What a plugin's setup is handed: the module the plugin is being included in, and the ways a
  * plugin can act on it. Everything here registers into that module.
+ *
+ * These are function-typed properties rather than methods, as on `Module`: roblox-ts tells the two
+ * apart, and the implementation is a table of closures with no `this`.
  */
 export interface PluginTarget {
 	/**
@@ -52,14 +55,29 @@ export interface PluginTarget {
 	 * Registers a class provider in the module, constructed with dependency injection during
 	 * ignition like any provider the module registered itself.
 	 */
-	registerClassProvider(provider: Constructor): void;
+	registerClassProvider: (provider: Constructor) => void;
+
+	/**
+	 * Registers every exported `@Provider()` class under a source folder, as the module builder's
+	 * `registerProviders` does. This is how a plugin ships a folder of providers.
+	 *
+	 * @metadata macro
+	 */
+	registerProviders: <T extends string>(path: T, resolved?: Modding.Intrinsic<"path", [T], string[]>) => void;
+
+	/**
+	 * Registers every exported `@Provider()` class under every folder a compile-time glob matches.
+	 *
+	 * @metadata macro
+	 */
+	registerProvidersGlob: <T extends string>(glob: T, resolved?: Modding.Intrinsic<"pathglob", [T], string>) => void;
 
 	/**
 	 * Registers a class, function or alias provider in the module.
 	 *
 	 * @metadata macro
 	 */
-	registerProvider<T>(config: ProviderConfig, id?: string | Modding.Target.Id<T>): void;
+	registerProvider: <T>(config: ProviderConfig, id?: string | Modding.Target.Id<T>) => void;
 
 	/**
 	 * Provides a ready-made object under its type's id, so that the module's providers can inject it
@@ -70,26 +88,26 @@ export interface PluginTarget {
 	 *
 	 * @metadata macro
 	 */
-	provideInstance<T extends object>(instance: T, id?: string | Modding.Target.Id<T>): void;
+	provideInstance: <T extends object>(instance: T, id?: string | Modding.Target.Id<T>) => void;
 
 	/**
 	 * Includes another plugin in the module, set up now, before this one continues. A plugin reached
 	 * more than once in one ignition -- included by the module and by a plugin, or by two plugins --
 	 * is set up once.
 	 */
-	includePlugin(plugin: PluginDefinition): void;
+	includePlugin: (plugin: PluginDefinition) => void;
 
 	/**
 	 * Runs before the module's providers are constructed. Nothing can be resolved yet; this is where
 	 * a plugin registers state that providers will look at while being constructed.
 	 */
-	onPreIgnite(callback: (module: Module) => void, options?: HookOptions): void;
+	onPreIgnite: (callback: (module: Module) => void, options?: HookOptions) => void;
 
 	/** Runs after every provider has been constructed. */
-	onPostIgnite(callback: (module: Module) => void, options?: HookOptions): void;
+	onPostIgnite: (callback: (module: Module) => void, options?: HookOptions) => void;
 
 	/** Runs when the module extinguishes, before its providers are released. */
-	onExtinguished(callback: (module: Module) => void, options?: HookOptions): void;
+	onExtinguished: (callback: (module: Module) => void, options?: HookOptions) => void;
 
 	/**
 	 * Observes every object in the module that implements `T`: providers as they are constructed,
@@ -98,7 +116,7 @@ export interface PluginTarget {
 	 *
 	 * @metadata macro
 	 */
-	observe<T>(config: InterfaceConfiguration<T>, id?: string | Modding.Target.Id<T>): void;
+	observe: <T>(config: InterfaceConfiguration<T>, id?: string | Modding.Target.Id<T>) => void;
 }
 
 export interface InterfaceConfiguration<T> {

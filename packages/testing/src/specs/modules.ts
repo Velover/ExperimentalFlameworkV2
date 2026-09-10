@@ -1,89 +1,22 @@
 import { Dependency, Flamework, Provider } from "@flamework/core";
-import { expectEqual, expectThrows, expectTrue, suite } from "../testkit";
+import { expectThrows, expectTrue, suite } from "../testkit";
 
 @Provider()
-class SharedState {
-	public instances = 0;
-
-	constructor() {
-		SharedState.constructed += 1;
-		this.instances = SharedState.constructed;
-	}
-
-	public static constructed = 0;
-}
-
-@Provider()
-class Exported {
-	public tag = "exported";
-}
-
-@Provider()
-class Private {
-	public tag = "private";
-}
+class Widget {}
 
 export = suite("modules", [
-	[
-		// Regression: setupIncludedModules cached the new instantiation under the *parent's* state
-		// instead of the included module's, so the cache never hit and every includer built its own
-		// copy -- contradicting "included modules are shared across all modules under the root".
-		"shares an included module between two includers",
-		() => {
-			SharedState.constructed = 0;
-
-			const shared = Flamework.createModule()
-				.registerClassProvider(SharedState)
-				.exportProviders<SharedState>()
-				.build();
-
-			const left = Flamework.createModule().includeModule(shared).exportProviders<SharedState>().build();
-			const right = Flamework.createModule().includeModule(shared).exportProviders<SharedState>().build();
-
-			const root = Flamework.createModule().includeModule(left).includeModule(right).ignite();
-
-			expectEqual(SharedState.constructed, 1, "number of SharedState instances");
-
-			const fromLeft = root.resolveDependency<SharedState>();
-			expectEqual(fromLeft.instances, 1, "instance index");
-
-			root.extinguish();
-		},
-	],
-	[
-		"exposes exported providers to the including module",
-		() => {
-			const inner = Flamework.createModule().registerClassProvider(Exported).exportProviders<Exported>().build();
-			const outer = Flamework.createModule().includeModule(inner).ignite();
-
-			expectEqual(outer.resolveDependency<Exported>().tag, "exported", "exported provider");
-
-			outer.extinguish();
-		},
-	],
-	[
-		"keeps unexported providers private to their module",
-		() => {
-			const inner = Flamework.createModule().registerClassProvider(Private).build();
-			const outer = Flamework.createModule().includeModule(inner).ignite();
-
-			expectThrows(() => outer.resolveDependency<Private>(), "resolving an unexported provider");
-
-			outer.extinguish();
-		},
-	],
 	[
 		// A definition is a blueprint: each ignition builds an isolated container, which is what
 		// makes a module testable in the first place.
 		"igniting a definition twice yields independent containers",
 		() => {
-			const definition = Flamework.createModule().registerClassProvider(Exported).build();
+			const definition = Flamework.createModule().registerClassProvider(Widget).build();
 
 			const first = definition.ignite();
 			const second = definition.ignite();
 
 			expectTrue(
-				first.resolveDependency<Exported>() !== second.resolveDependency<Exported>(),
+				first.resolveDependency<Widget>() !== second.resolveDependency<Widget>(),
 				"each ignition builds its own providers",
 			);
 
@@ -94,10 +27,25 @@ export = suite("modules", [
 	[
 		"refuses to extinguish twice",
 		() => {
-			const module = Flamework.createModule().registerClassProvider(Exported).ignite();
+			const module = Flamework.createModule().registerClassProvider(Widget).ignite();
 			module.extinguish();
 
 			expectThrows(() => module.extinguish(), "extinguishing an extinguished module");
+		},
+	],
+	[
+		// Igniting a module twice used to return quietly, the one transition the state machine let
+		// slide; it was there for a shared submodule ignited by each includer, which no longer exists.
+		"refuses to ignite a module twice",
+		() => {
+			const module = Flamework.createModule().registerClassProvider(Widget).ignite();
+
+			// `ignite` on a module is internal -- a definition is what gets ignited -- so it is
+			// reached through a cast here, to pin the transition down rather than the API.
+			const internal = module as unknown as { ignite: (this: void) => unknown };
+			expectThrows(() => internal.ignite(), "igniting an ignited module");
+
+			module.extinguish();
 		},
 	],
 	[
@@ -107,11 +55,11 @@ export = suite("modules", [
 			// ran before it: the next plain ignite is the first root again.
 			Flamework.createModule().ignite({ default: true }).extinguish();
 
-			const first = Flamework.createModule().registerClassProvider(Exported).ignite();
-			const second = Flamework.createModule().registerClassProvider(Exported).ignite();
+			const first = Flamework.createModule().registerClassProvider(Widget).ignite();
+			const second = Flamework.createModule().registerClassProvider(Widget).ignite();
 
-			expectTrue(Dependency<Exported>() === first.resolveDependency<Exported>(), "the first root is the default");
-			expectTrue(Dependency<Exported>() !== second.resolveDependency<Exported>(), "a later root is not");
+			expectTrue(Dependency<Widget>() === first.resolveDependency<Widget>(), "the first root is the default");
+			expectTrue(Dependency<Widget>() !== second.resolveDependency<Widget>(), "a later root is not");
 
 			first.extinguish();
 			second.extinguish();
@@ -120,10 +68,10 @@ export = suite("modules", [
 	[
 		"ignite({ default: true }) makes a later root the default",
 		() => {
-			const first = Flamework.createModule().registerClassProvider(Exported).ignite({ default: true });
-			const second = Flamework.createModule().registerClassProvider(Exported).ignite({ default: true });
+			const first = Flamework.createModule().registerClassProvider(Widget).ignite({ default: true });
+			const second = Flamework.createModule().registerClassProvider(Widget).ignite({ default: true });
 
-			expectTrue(Dependency<Exported>() === second.resolveDependency<Exported>(), "the explicit default wins");
+			expectTrue(Dependency<Widget>() === second.resolveDependency<Widget>(), "the explicit default wins");
 
 			second.extinguish();
 			first.extinguish();
@@ -132,10 +80,10 @@ export = suite("modules", [
 	[
 		"extinguishing the default releases it",
 		() => {
-			const module = Flamework.createModule().registerClassProvider(Exported).ignite({ default: true });
+			const module = Flamework.createModule().registerClassProvider(Widget).ignite({ default: true });
 			module.extinguish();
 
-			const message = expectThrows(() => Dependency<Exported>(), "Dependency with no default module");
+			const message = expectThrows(() => Dependency<Widget>(), "Dependency with no default module");
 			expectTrue(message.find("before any module was ignited")[0] !== undefined, "error names the cause");
 		},
 	],
@@ -146,17 +94,17 @@ export = suite("modules", [
 		() => {
 			@Provider()
 			class Reader {
-				public seen = Dependency<Exported>();
+				public seen = Dependency<Widget>();
 			}
 
-			// `Reader` first, so that `Exported` does not exist yet when the constructor asks for it.
+			// `Reader` first, so that `Widget` does not exist yet when the constructor asks for it.
 			const module = Flamework.createModule()
 				.registerClassProvider(Reader)
-				.registerClassProvider(Exported)
+				.registerClassProvider(Widget)
 				.ignite({ default: true });
 
 			expectTrue(
-				module.resolveDependency<Reader>().seen === module.resolveDependency<Exported>(),
+				module.resolveDependency<Reader>().seen === module.resolveDependency<Widget>(),
 				"resolved through the default while igniting",
 			);
 

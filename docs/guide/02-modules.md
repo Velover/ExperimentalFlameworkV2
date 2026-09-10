@@ -2,13 +2,13 @@
 
 A module is two things at once:
 
-1. **A dependency-injection container.** It holds a set of providers, resolves their dependencies
-   from each other, and decides which of them the outside world can see.
+1. **A dependency-injection container.** It holds a set of providers and resolves their
+   dependencies from each other.
 2. **A lifecycle unit.** It ignites as a whole and extinguishes as a whole.
 
-In v1 there was exactly one, global and implicit. In v2 you create it, which is what makes tests,
-tools and libraries possible -- but **most games have exactly one module and never extinguish it**.
-If that is you, this page's second half is optional reading.
+In v1 there was exactly one, global and implicit. In v2 you create it, which is what makes tests and
+tools possible -- but **most games have exactly one module per realm and never extinguish it**. If
+that is you, this page's second half is optional reading.
 
 ## The one-module case
 
@@ -18,8 +18,8 @@ Flamework.createModule()
     .ignite();
 ```
 
-That is the whole story for a typical game. You do not need `includeModule`, you do not need
-`exportProviders`, and you never call `extinguish`.
+That is the whole story for a typical game. You never call `build()` or `extinguish`, and
+`Dependency<T>()` reaches this module from anywhere.
 
 ## The builder
 
@@ -28,12 +28,11 @@ That is the whole story for a typical game. You do not need `includeModule`, you
 | Method | Does |
 |---|---|
 | `registerProviders(path)` | Registers every exported `@Provider()` class under a source folder. |
+| `registerProvidersGlob(glob)` | The same, for every folder a compile-time glob matches. |
 | `registerClassProvider(Class)` | Registers one class explicitly. |
 | `registerProvider<T>(config, id?)` | Registers a class, function or alias provider. |
 | `includePlugin(plugin)` | Adds a plugin, which can hook into this module. |
 | `disableDefaultLifecycle()` | Leaves out the `LifecyclePlugin` every module starts with. |
-| `includeModule(definition)` | Makes another module's **exported** providers resolvable here. |
-| `exportProviders<T \| U>()` | Marks providers as visible to modules that include this one. |
 | `setDebugName(name)` | Names the module in error messages. |
 | `apply(fn)` | Runs `fn(builder)` without breaking the chain. |
 | `build()` | Finalises into a `ModuleDefinition`. |
@@ -41,8 +40,8 @@ That is the whole story for a typical game. You do not need `includeModule`, you
 
 ### `build()` vs `ignite()`
 
-`ignite()` is `build().ignite()`. Use `build()` when the module is going to be included in another
-one, or ignited later, or ignited more than once:
+`ignite()` is `build().ignite()`. Use `build()` when the module is going to be ignited later, or more
+than once:
 
 ```ts
 // Full form
@@ -61,15 +60,14 @@ test.
 
 In order:
 
-1. Included modules are instantiated.
-2. Plugins are set up -- each one's setup function runs against this module, registering providers,
+1. Plugins are set up -- each one's setup function runs against this module, registering providers,
    hooks and observers into it. A plugin reached twice is set up once.
-3. `onPreIgnite` hooks run.
-4. Every registered provider is constructed, resolving its constructor dependencies.
-5. `onPostIgnite` hooks run. `LifecyclePlugin` starts its `RunService` connections here, and calls
+2. `onPreIgnite` hooks run.
+3. Every registered provider is constructed, resolving its constructor dependencies.
+4. `onPostIgnite` hooks run. `LifecyclePlugin` starts its `RunService` connections here, and calls
    `onStart` on everything that implements it.
 
-Providers are constructed lazily *within* step 4 -- resolving a dependency constructs it if it does
+Providers are constructed lazily *within* step 3 -- resolving a dependency constructs it if it does
 not exist yet -- so a provider's constructor can safely use anything injected into it.
 
 ## Resolving by hand
@@ -120,79 +118,37 @@ class Registry {
 module.extinguish();
 ```
 
-This runs `onExtinguished` hooks, releases the instances the module created, unregisters them from
-every plugin observing them (so a lifecycle plugin stops ticking dead providers), and extinguishes
-the modules **it** created -- not the ones it merely included, which may be shared.
+This runs `onExtinguished` hooks, releases the instances the module created, and unregisters them
+from every plugin observing them, so a lifecycle plugin stops ticking dead providers.
 
-Games rarely call this. Tests, plugins, and UI that mounts and unmounts do.
+Games rarely call this. Tests, and tools that mount and unmount, do.
 
-## Several modules
+## More than one module?
 
-Reach for a second module when you have a genuine boundary:
+A second module is a second container: nothing in one can inject anything from the other, and
+`Dependency<T>()` answers from only one of them. Reach for one only when that separation is the
+point:
 
-- **A library** that ships its own providers and wants to expose two of them, not eight.
-- **Tests**, where each case needs a fresh container.
-- **A tool or plugin** with a lifetime shorter than the game's.
-- **Feature isolation**, where you want a compile error if the matchmaking code touches the shop's
-  internals.
+- **Tests**, where each case wants a fresh container. Build the definition once, ignite per case.
+- **A tool** with a lifetime shorter than the game's, extinguished when it closes.
 
-If none of those apply, one module is the right answer.
-
-### Including and exporting
+What used to be a reason for a second module -- a library that ships providers, code both realms
+share -- is a [plugin](08-plugins.md): its setup registers the providers into whichever module
+includes it, and a plugin two others both include is set up once.
 
 ```ts
-const database = Flamework.createModule()
-    .registerClassProvider(Connection)
-    .registerClassProvider(QueryCache) // not exported: private to this module
-    .exportProviders<Connection>()
-    .build();
+// src/shared/plugins/core.ts
+export const CorePlugin = Flamework.createPlugin("Core", (target) => {
+    target.registerProviders("src/shared/services");
+});
 
-const game = Flamework.createModule()
-    .includeModule(database)
-    .registerProviders("src/server/services")
-    .ignite();
-
-game.resolveDependency<Connection>(); // fine
-game.resolveDependency<QueryCache>(); // raises: not exported
+// both entry points
+.includePlugin(CorePlugin)
 ```
 
-Export several at once with a union:
-
-```ts
-.exportProviders<Connection | Session | Migrations>()
-```
-
-Anything in `src/server/services` can now take a `Connection` constructor parameter. Nothing there
-can reach `QueryCache`.
-
-### Sharing
-
-An included module is **shared** between everything that includes it under the same root. Two
-services that both include `database` get the same `Connection`:
-
-```ts
-const a = Flamework.createModule().includeModule(database).build();
-const b = Flamework.createModule().includeModule(database).build();
-
-const root = Flamework.createModule().includeModule(a).includeModule(b).ignite();
-// one Connection, not two
-```
-
-Ignite two separate roots and you get two independent trees, each with its own `Connection`.
+Each realm ignites its own module, which is what you want -- they are different processes.
 
 ## Patterns
-
-**A shared module for cross-realm code.** Build one definition in a shared folder and include it from
-both entry points. Each realm ignites its own copy, which is what you want -- they are different
-processes.
-
-```ts
-// src/shared/coreModule.ts
-export const CoreModule = Flamework.createModule()
-    .registerProviders("src/shared/services")
-    .exportProviders<Config | Logger>()
-    .build();
-```
 
 **A module per test.** Build the definition once, ignite per case, extinguish after:
 
@@ -223,14 +179,9 @@ Flamework.createModule()
 - **`Dependency<T>()` answers from one module.** The first root ignited, unless a later one was
   ignited with `{ default: true }`. A realm with two live roots -- tests, tools -- should say which,
   or resolve through the handle.
-- **Exports are per-module, not transitive.** If `a` includes `b`, `a` does not automatically
-  re-export `b`'s exports. Include `b` where you need it.
-- **`extinguish` does not touch included modules.** They may be shared, so only the modules this one
-  created are torn down with it.
 - **Duplicate registration raises.** `provider ID was registered more than once` usually means two
-  `registerProviders` paths overlap, or a class is registered both by path and by hand.
-- **Exporting the same provider twice warns** rather than raising:
-  `module already exports the provider '...'`.
+  `registerProviders` paths overlap, or a class is registered both by path and by hand -- or by the
+  module and by a plugin.
 
 ---
 

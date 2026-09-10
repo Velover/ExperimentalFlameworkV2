@@ -10,6 +10,8 @@ import { Reflect } from "../reflect";
 import type { Constructor } from "../utility/constructors";
 import { convertConciseDependencyInfo } from "../utility/convertConciseDependencyInfo";
 import { getClassImplements } from "../utility/getClassImplements";
+import { getClassesInPath } from "../utility/getClassesInPath";
+import { getClassesInGlob } from "../utility/globs";
 import type { Destructor, ExtractSingleCallback } from "../utility/types";
 import type { ModuleState } from "./moduleDefinition";
 import { clearDefaultModule } from "./defaultModule";
@@ -22,21 +24,14 @@ interface InternalModule {
 	 *
 	 * @internal
 	 */
-	tryResolveDependency: (
-		info: Modding.DependencyInfo,
-		requestingModule?: Module,
-		requestingOrigin?: object,
-	) => unknown;
+	tryResolveDependency: (info: Modding.DependencyInfo, requestingOrigin?: object) => unknown;
 
 	/**
-	 * Initializes all providers, nested modules and invokes the hooks.
+	 * Sets up the plugins, constructs the providers and runs the hooks.
 	 *
 	 * @internal
 	 */
 	ignite: () => Module;
-
-	/** @internal */
-	getModuleState: () => ModuleState;
 }
 
 export interface Module extends InternalModule {
@@ -101,13 +96,6 @@ export interface Module extends InternalModule {
 	isExtinguished: () => boolean;
 }
 
-interface ModuleContext {
-	/**
-	 * The store of included modules.
-	 */
-	modules: Map<ModuleState, Module>;
-}
-
 interface InstanceCreationConfig {
 	/**
 	 * When specified, this allows you to override dependency resolution.
@@ -128,7 +116,7 @@ enum ModuleInitState {
 
 const MODULE_ID = Flamework.id<Module>();
 
-export function createModuleInstantiation(state: ModuleState, context: ModuleContext): Module {
+export function createModuleInstantiation(state: ModuleState): Module {
 	/** The definition's providers, followed by whatever the plugins register. */
 	const providers = [...state.providers];
 	const instantiatedProviders = new Map<string, defined>();
@@ -139,11 +127,6 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 	const hooks = new Array<RegisteredHook>();
 	const includedPlugins = new Set<PluginDefinition>();
 	const filledSlots = new Map<string, PluginDefinition>();
-
-	const submodules = new Array<Module>();
-
-	/** The subset of {@link submodules} this module created, and is therefore responsible for extinguishing. */
-	const ownedSubmodules = new Array<Module>();
 	const temporaryInstances = new Set<object>();
 
 	let moduleInitState = ModuleInitState.Created;
@@ -164,27 +147,24 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		}
 	};
 
-	const setupIncludedModules = () => {
-		for (const submodule of state.include) {
-			const existingModule = context.modules.get(submodule);
-			if (existingModule) {
-				submodules.push(existingModule);
-				continue;
-			}
-
-			const module = createModuleInstantiation(submodule, context);
-			submodules.push(module);
-			ownedSubmodules.push(module);
-
-			// Keyed by the included module's own state, so that every module including it under the
-			// same root resolves to this single instantiation.
-			context.modules.set(submodule, module);
-		}
-	};
-
 	const assertUnregistered = (injectionId: string) => {
 		if (instantiatedProviders.has(injectionId) || providers.some((v) => v.injectionId === injectionId)) {
 			error(`module '${state.debugName}': provider ID was registered more than once: ${injectionId}`);
+		}
+	};
+
+	const registerClassProvider = (provider: Constructor) => {
+		const injectionId = getProviderClassId(provider);
+		assertUnregistered(injectionId);
+		providers.push({ config: normalizeProviderConfig({ type: "class", value: provider }), injectionId });
+	};
+
+	/** Own metadata only, as the builder does: an undecorated subclass of a provider is skipped. */
+	const registerProviderClasses = (classes: object[]) => {
+		for (const provider of classes) {
+			if (Reflect.hasOwnMetadata(provider, "flamework:provider")) {
+				registerClassProvider(provider as Constructor);
+			}
 		}
 	};
 
@@ -280,9 +260,7 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 		return new constructor(...(resolvedParameters as never[]));
 	};
 
-	const getModuleState: Module["getModuleState"] = () => state;
-
-	const tryResolveDependency: Module["tryResolveDependency"] = (info, requestingModule, requestingOrigin) => {
+	const tryResolveDependency: Module["tryResolveDependency"] = (info, requestingOrigin) => {
 		if (moduleInitState <= ModuleInitState.PreIgniting) {
 			error(`module '${state.debugName}' is in pre-ignite phase, dependency cannot be resolved: ${info.id}`);
 		}
@@ -318,32 +296,17 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 				return config.callback({
 					injectionId: info.id,
 					dependencyInfo: info,
-					sourceModule: module,
-					targetModule: requestingModule ?? module,
+					module,
 					origin: requestingOrigin,
 				});
 			} else if (config.type === "alias") {
-				return tryResolveDependency(
-					convertConciseDependencyInfo(config.injectionId),
-					requestingModule,
-					requestingOrigin,
-				);
-			}
-		}
-
-		for (const submodule of submodules) {
-			// We only want to resolve module IDs if they are explicitly exported.
-			if (submodule.getModuleState().exportedProviders.has(info.id)) {
-				const moduleProvider = submodule.tryResolveDependency(info, module, requestingOrigin);
-				if (moduleProvider !== undefined) {
-					return moduleProvider;
-				}
+				return tryResolveDependency(convertConciseDependencyInfo(config.injectionId), requestingOrigin);
 			}
 		}
 	};
 
 	const resolveDependencyWithOrigin = <T>(info: Modding.DependencyInfo, requestingOrigin?: object): T => {
-		const dependency = tryResolveDependency(info, undefined, requestingOrigin);
+		const dependency = tryResolveDependency(info, requestingOrigin);
 		if (dependency === undefined) {
 			error(`module '${state.debugName}' could not resolve dependency '${info.id}'`);
 		}
@@ -408,31 +371,13 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 	};
 
 	const ignite: Module["ignite"] = () => {
-		// We're already ignited, so we can ignore repeated calls.
-		if (moduleInitState === ModuleInitState.Ignited) {
-			return module;
-		}
-
-		// Checked before anything below runs, so that igniting a dead or half-ignited module fails
-		// cleanly instead of duplicating its submodules first.
-		if (moduleInitState !== ModuleInitState.Created) {
-			switchInitState(ModuleInitState.Created, ModuleInitState.PreIgniting);
-		}
-
-		setupIncludedModules();
-
-		// Plugins are set up while the module is still `Created`, so a setup that resolves is
-		// refused the same way a `onPreIgnite` hook is.
-		for (const plugin of state.plugins) {
-			includePlugin(plugin);
-		}
-
+		// Raises on a module that has ignited already: a definition is what gets ignited twice.
 		switchInitState(ModuleInitState.Created, ModuleInitState.PreIgniting);
 
-		// We initialize any nested modules first.
-		// They are isolated and so we don't have to worry about side effects besides exports.
-		for (const submodule of submodules) {
-			submodule.ignite();
+		// Plugins are set up before any provider exists, so a setup that resolves is refused the
+		// same way an `onPreIgnite` hook is.
+		for (const plugin of state.plugins) {
+			includePlugin(plugin);
 		}
 
 		runHooks("preIgnite");
@@ -478,12 +423,6 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 
 		instantiatedProviders.clear();
 
-		// Modules this one created are owned by it, and so are extinguished with it. Included
-		// modules that were already instantiated elsewhere belong to whoever created them.
-		for (const submodule of ownedSubmodules) {
-			submodule.extinguish();
-		}
-
 		assert(temporaryInstances.size() === 0);
 		switchInitState(ModuleInitState.Extinguishing, ModuleInitState.Extinguished);
 
@@ -495,7 +434,6 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 	const isExtinguished: Module["isExtinguished"] = () => moduleInitState >= ModuleInitState.Extinguishing;
 
 	const module: Module = {
-		getModuleState,
 		tryResolveDependency,
 		resolveDependency,
 		listen,
@@ -509,10 +447,14 @@ export function createModuleInstantiation(state: ModuleState, context: ModuleCon
 	/** What a plugin's setup is handed. Everything registers into this instantiation. */
 	const pluginTarget: PluginTarget = {
 		module,
-		registerClassProvider: (provider) => {
-			const injectionId = getProviderClassId(provider);
-			assertUnregistered(injectionId);
-			providers.push({ config: normalizeProviderConfig({ type: "class", value: provider }), injectionId });
+		registerClassProvider,
+		registerProviders: (_path, resolved) => {
+			assert(resolved !== undefined);
+			registerProviderClasses(getClassesInPath(resolved));
+		},
+		registerProvidersGlob: (_glob, resolved) => {
+			assert(resolved !== undefined);
+			registerProviderClasses(getClassesInGlob(resolved));
 		},
 		registerProvider: (config, injectionId) => {
 			assert(injectionId !== undefined);

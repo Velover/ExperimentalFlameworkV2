@@ -1,4 +1,4 @@
-import { Flamework, Provider } from "@flamework/core";
+import { Flamework, Provider, type Module } from "@flamework/core";
 import { expectEqual, expectNoThrow, expectThrows, expectTrue, suite } from "../testkit";
 
 @Provider()
@@ -82,14 +82,23 @@ export = suite("providers", [
 	[
 		"supports function providers with an injection context",
 		() => {
+			let resolvedFrom: Module | undefined;
+
 			const module = Flamework.createModule()
 				.registerProvider<string>(
-					{ type: "function", callback: (ctx) => `made:${ctx.injectionId}` },
+					{
+						type: "function",
+						callback: (ctx) => {
+							resolvedFrom = ctx.module;
+							return `made:${ctx.injectionId}`;
+						},
+					},
 					"greeting",
 				)
 				.ignite();
 
 			expectEqual(module.resolveDependency<string>("greeting"), "made:greeting", "function provider result");
+			expectTrue(resolvedFrom === module, "the context names the resolving module");
 
 			module.extinguish();
 		},

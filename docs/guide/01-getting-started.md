@@ -141,8 +141,8 @@ Both are under `src/server/services`, so both are registered by the same `regist
 
 ## Sharing code between realms
 
-Put anything both realms need in a shared folder and register it from both entry points, or -- better
--- put it in its own module and include it. That is [Modules](02-modules.md).
+Put anything both realms need in a shared folder and register it from both entry points, or wrap it
+in a plugin both include. That is [Plugins](08-plugins.md).
 
 ## Caveats
 

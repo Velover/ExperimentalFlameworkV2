@@ -173,8 +173,8 @@ is gone.
 
 ## The module runtime
 
-A module is described by a `ModuleState` -- providers, included modules, plugins, exported ids --
-built by `ModuleBuilder` and frozen into a `ModuleDefinition`. Igniting a definition calls
+A module is described by a `ModuleState` -- providers and plugins -- built by `ModuleBuilder` and
+frozen into a `ModuleDefinition`. Igniting a definition calls
 `createModuleInstantiation`, which is a closure, not a class: the `Module` interface is a table of
 functions over private state.
 
@@ -191,23 +191,21 @@ Ignition is a state machine (`Created → PreIgniting → Igniting → Ignited`,
 `Extinguishing → Extinguished`) whose transitions are checked, so a re-entrant ignite fails loudly
 rather than half-working.
 
-1. Included modules are instantiated. They are keyed by `ModuleState` in a context map shared by the
-   whole tree, so including the same definition twice yields one instance.
-2. Plugins are set up. Each plugin's setup function runs against the module through a
+1. Plugins are set up. Each plugin's setup function runs against the module through a
    `PluginTarget`, registering providers, provided instances, hooks and observers into this one
    instantiation, and including further plugins, which are set up first. A plugin reached twice in
    one ignition is set up once; the set that says so is marked before the setup runs, so a ring of
    plugins stops on its second arrival.
-3. `onPreIgnite` hooks run, sorted by priority and then registration order. This is where a plugin
+2. `onPreIgnite` hooks run, sorted by priority and then registration order. This is where a plugin
    registers state that providers will resolve during construction.
-4. Objects the plugins provided join the interfaces they implement, now that every observer is in
+3. Objects the plugins provided join the interfaces they implement, now that every observer is in
    place; then every provider is resolved, which constructs it.
-5. `onPostIgnite` hooks run.
+4. `onPostIgnite` hooks run.
 
 ### Resolution
 
-`tryResolveDependency` walks: this module's own providers, then the exports of included modules.
-Class providers are constructed by reading `flamework:parameters` off the class, resolving each id,
+`tryResolveDependency` checks the instantiated providers, then the registered ones, constructing a
+class provider on its first resolution. Class providers are constructed by reading `flamework:parameters` off the class, resolving each id,
 and calling the constructor. Function providers are invoked with an `InjectionContext` naming the
 requesting module and origin class. Alias providers forward to another id.
 
@@ -221,10 +219,8 @@ listener does not have to be a provider.
 
 ### Extinguishing
 
-`extinguish` runs `onExtinguished` hooks, releases the temporary instances the module created,
-unregisters every provider from the interfaces it was added to, and extinguishes the submodules this
-module created -- tracked separately from the ones it merely included, so a shared module is not
-torn down by whichever includer dies first.
+`extinguish` runs `onExtinguished` hooks, releases the temporary instances the module created, and
+unregisters every provider from the interfaces it was added to.
 
 ### Reflection
 

@@ -22,26 +22,15 @@ export interface ModuleState {
 	/** Contains all the included providers, as well as their configuration. */
 	readonly providers: readonly ModuleProvider[];
 
-	/** Contains all the included modules. */
-	readonly include: readonly ModuleState[];
-
 	/** The plugins to set up on ignition, in inclusion order. */
 	readonly plugins: readonly PluginDefinition[];
-
-	/** Contains all the exported providers */
-	readonly exportedProviders: ReadonlySet<string>;
 }
 
 export class ModuleDefinition {
 	constructor(private moduleState: ModuleState) {}
 
-	/** @internal */
-	public getModuleState() {
-		return this.moduleState;
-	}
-
 	public ignite(options?: IgniteOptions) {
-		const module = createModuleInstantiation(this.moduleState, { modules: new Map() });
+		const module = createModuleInstantiation(this.moduleState);
 
 		// Claimed before ignition rather than after it, so that `Dependency<T>()` answers inside a
 		// provider constructor, as it did in v1.
@@ -94,16 +83,9 @@ export type InjectionContext = {
 	dependencyInfo: Modding.DependencyInfo;
 
 	/**
-	 * This is the module that this provider is registered in.
+	 * The module resolving the dependency, which is the one the provider is registered in.
 	 */
-	sourceModule: Module;
-
-	/**
-	 * This is the module resolving the dependency.
-	 *
-	 * This isn't necessarily the same module the provider is registered in, if this provider is exported.
-	 */
-	targetModule: Module;
+	module: Module;
 
 	/**
 	 * This is the class requesting the dependency.

@@ -122,25 +122,6 @@ export = suite("lifecycle", [
 		},
 	],
 	[
-		// Regression: extinguish() never propagated to included or plugin modules, so nested modules
-		// stayed ignited forever while their parent reported itself extinguished.
-		"propagates extinguish to modules it created",
-		() => {
-			const events = new Array<string>();
-
-			const innerPlugin = Flamework.createPlugin("Inner", (target) => {
-				target.onExtinguished(() => events.push("inner"));
-			});
-
-			const included = Flamework.createModule().includePlugin(innerPlugin).build();
-			const root = Flamework.createModule().includeModule(included).ignite();
-
-			root.extinguish();
-
-			expectEqual(events.size(), 1, "extinguish hooks fired in the included module");
-		},
-	],
-	[
 		// Regression: HookConfig.priority was a TODO'd enum that nothing read, so hook ordering was
 		// whatever order plugins happened to be registered in.
 		"runs hooks in priority order",

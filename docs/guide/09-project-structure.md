@@ -20,7 +20,7 @@ src/
   shared/
     network.ts                 Networking.createEvent / createFunction
     components/                components that exist on both realms
-    modules/                   reusable ModuleDefinitions
+    plugins/                   plugins both entry points include
     types/
 ```
 
@@ -50,34 +50,30 @@ Flamework.createModule()
 `services` and `controllers` are just names -- there is no `@Service`/`@Controller` distinction in v2.
 Keeping the folders separate is what keeps server code off the client.
 
-## Choosing how many modules
+## One module per realm
 
-**One module per realm** is the default and is right for most games. Everything is in one container,
-anything can inject anything, and you never think about it again.
-
-Add a second module when there is a boundary you actually want enforced:
+**One module per realm** is right for every game. Everything is in one container, anything can
+inject anything, and you never think about it again. What varies is what goes *into* it:
 
 | Situation | Shape |
 |---|---|
-| Shared code both realms need | A `ModuleDefinition` in `shared/modules`, included by both entry points. |
-| A library you publish | Its own definition, exporting only its public providers. |
-| A feature you want isolated | Its own definition; the root includes it and only sees its exports. |
+| Shared code both realms need | A plugin in `shared/plugins`, included by both entry points. |
+| A library you publish | A plugin; its setup registers the library's providers. |
 | Tests | Build the definition once, ignite per case, extinguish after. |
 
 ```ts
-// src/shared/modules/core.ts
-export const CoreModule = Flamework.createModule()
-    .registerProviders("src/shared/services")
-    .exportProviders<Config | Logger>()
-    .build();
+// src/shared/plugins/core.ts
+export const CorePlugin = Flamework.createPlugin("Core", (target) => {
+    target.registerProviders("src/shared/services");
+});
 ```
 
 ```ts
 // both entry points
-.includeModule(CoreModule)
+.includePlugin(CorePlugin)
 ```
 
-Each realm ignites its own copy, which is correct -- they are different processes.
+Each realm ignites its own module, which is correct -- they are different processes.
 
 ## Where things go
 
@@ -87,11 +83,10 @@ Each realm ignites its own copy, which is correct -- they are different processe
 | Components used on both realms | `shared/components` | Registered by both entry points. |
 | Components for one realm | `<realm>/components` | Same tag, different class per realm, is a normal pattern. |
 | Interfaces for plugin dispatch | `shared/` | Both the plugin and the implementers need them. |
-| `ModuleDefinition`s | `shared/modules` | Not `shared/services`, or path registration will pick up their providers too. |
+| Plugins | `shared/plugins` | Not `shared/services`: path registration requires everything under the folder, and a plugin built with `ComponentPlugin.fromPath` registers its folder as a side effect. |
 
-That last row is a real trap: `registerProviders("src/shared/services")` requires **every** module
-under that folder. If a `ModuleDefinition` lives there, building it runs as a side effect of
-registration.
+That last row matters because `registerProviders("src/shared/services")` requires **every** module
+under that folder, so whatever a file there does at load time happens during registration.
 
 ## Configuration
 

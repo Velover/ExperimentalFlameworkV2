@@ -9,7 +9,6 @@ import { LIFECYCLE_SLOT, type PluginDefinition } from "../plugin/pluginDefinitio
 import { getProviderClassId, normalizeProviderConfig } from "./providerRegistration";
 
 type GenericId<T> = string | Modding.Target.Id<T>;
-type MultipleIDs<T> = string[] | Modding.Emit<(T extends T ? Modding.Target.Id<T> : never)[]>;
 
 export class ModuleBuilder {
 	/** A global count of the number of module builders. Used to disambiguate identical module debug names. */
@@ -22,9 +21,7 @@ export class ModuleBuilder {
 		this.module = {
 			debugName: "Anonymous",
 			providers: [],
-			include: [],
 			plugins: [],
-			exportedProviders: new Set(),
 		};
 	}
 
@@ -65,18 +62,6 @@ export class ModuleBuilder {
 				plugins.remove(i);
 			}
 		}
-
-		return this;
-	}
-
-	/**
-	 * Includes a module into this module.
-	 *
-	 * This will allow you to access this module's exports.
-	 * Included modules are shared across all modules under the root module.
-	 */
-	public includeModule(module: ModuleDefinition) {
-		this.module.include.push(module.getModuleState());
 
 		return this;
 	}
@@ -164,28 +149,6 @@ export class ModuleBuilder {
 	 */
 	public registerClassProvider(provider: Constructor) {
 		return this.registerProvider({ type: "class", value: provider }, getProviderClassId(provider));
-	}
-
-	/**
-	 * Export the specified providers from this module.
-	 * You can specify multiple providers at one time using union syntax.
-	 *
-	 * Exporting providers allows them to be accessed when this module is included in another module.
-	 *
-	 * @metadata macro
-	 */
-	public exportProviders<T>(injectionIds?: MultipleIDs<T>) {
-		assert(injectionIds !== undefined);
-
-		for (const injectionId of injectionIds) {
-			if (this.module.exportedProviders.has(injectionId)) {
-				warn(`module already exports the provider '${injectionId}'`);
-			}
-
-			this.module.exportedProviders.add(injectionId);
-		}
-
-		return this;
 	}
 
 	/**

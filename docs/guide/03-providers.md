@@ -88,8 +88,8 @@ export class Shop {
 There is nothing to annotate. The transformer records each parameter's identifier, and the module
 resolves them, constructing anything that does not exist yet.
 
-Resolution order: this module's own providers first, then the **exported** providers of every module
-it includes.
+Resolution stays inside the module: its own providers, and whatever its plugins registered or
+provided.
 
 You can also inject `Module`, the module doing the resolving, and anything a plugin provided -- see
 [Plugins](08-plugins.md).
@@ -154,8 +154,7 @@ The callback receives an `InjectionContext` describing *who asked*:
 |---|---|
 | `injectionId` | The id being resolved. |
 | `dependencyInfo` | The id plus any metadata carried on the type. |
-| `sourceModule` | The module the provider is registered in. |
-| `targetModule` | The module resolving it, which differs when the provider is exported. |
+| `module` | The module resolving the dependency. |
 | `origin` | The class being constructed, if any. |
 
 `origin` is what makes a per-consumer logger possible:
@@ -273,7 +272,7 @@ that registers it decides:
 .registerProviders("src/client/controllers")
 ```
 
-Shared providers go in a shared folder registered by both, or in a shared module included by both.
+Shared providers go in a shared folder registered by both, or in a shared plugin included by both.
 
 ## Patterns
 
