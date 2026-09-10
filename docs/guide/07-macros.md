@@ -50,7 +50,6 @@ Ordinary parameters come first, generated ones after. A caller passes only the o
 | Type | Is |
 |---|---|
 | `Line` | The line number in the TypeScript source, from 1. |
-| `LuauLine` | The line of the call in the emitted Luau, as the console and tracebacks report it. Read when the call runs. |
 | `Character` | The column, from 1. |
 | `Width` | The width of the call expression. |
 | `Text` | The source text of the call. |
@@ -180,10 +179,8 @@ callsite -- caches, network objects, hooks -- can take one instead of asking the
   variable fails to compile.
 - **A macro does not fire without the transformer**, which is a silent `nil` rather than an error.
 - **`Line` and `Character` are numbers**, not strings, despite being callsite "text" information.
-- **`LuauLine` is the one callsite value that is not a constant.** The emitted line does not exist
-  until roblox-ts has run, so it compiles to `debug.info(1, "l")` at the callsite: one cheap call per
-  invocation, and a compile error inside `Constant`, which would hoist it away from the line it
-  reports.
+- **`Line` is the TypeScript line.** For the line in the emitted Luau -- what the console and
+  tracebacks report -- call `debug.info(1, "l")` yourself where you need it.
 - **Macros are resolved at each callsite.** A wrapper function around a macro captures *the
   wrapper's* callsite, not its caller's -- if you want the caller's, take the metadata as a parameter
   and pass it through.

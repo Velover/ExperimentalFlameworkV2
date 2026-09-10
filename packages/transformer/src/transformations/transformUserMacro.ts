@@ -220,13 +220,6 @@ function buildUserMacro(state: TransformState, node: ts.Node, macro: UserMacro):
 	} else if (macro.kind === "intrinsic") {
 		return f.asNever(buildIntrinsicMacro(state, node, macro));
 	} else if (macro.kind === "sharedRef") {
-		if (isReadAtRuntime(macro.value)) {
-			Diagnostics.error(
-				node,
-				"Modding.Caller.LuauLine is read each time the call runs, so it cannot be shared through Modding.Caller.Constant.",
-			);
-		}
-
 		const result = buildUserMacro(state, node, macro.value);
 		if (ts.isSimpleInlineableExpression(result.expression)) {
 			return result;
@@ -280,18 +273,6 @@ function buildUserMacro(state: TransformState, node: ts.Node, macro: UserMacro):
 
 		if (macro.metadata === "line") {
 			return f.number(lineAndCharacter.line + 1);
-		}
-
-		if (macro.metadata === "luauLine") {
-			// The line in the emitted script only exists once it runs, so it is read at the callsite:
-			// `debug.info(1, "l")[0]` compiles to `(debug.info(1, "l"))`, the caller's current line.
-			return f.elementAccessExpression(
-				f.call(f.propertyAccessExpression(f.identifier("debug"), f.identifier("info")), [
-					f.number(1),
-					f.string("l"),
-				]),
-				f.number(0),
-			);
 		}
 
 		if (macro.metadata === "character") {
@@ -444,17 +425,10 @@ function getMetadataFromType(metadataType: ts.Type) {
 function getUserMacroOfMany(state: TransformState, node: ts.Node, target: ts.Type): UserMacro {
 	const sharedRefMetadata = state.typeChecker.getTypeOfPropertyOfType(target, "_flamework_macro_shared_ref");
 
-	// A basic macro is a constant already (or, for `LuauLine`, cannot be one), so `Constant` around
-	// it changes nothing and the value stays inline.
+	// A basic macro is a constant already, so `Constant` around it changes nothing and the value
+	// stays inline.
 	const basicUserMacro = getBasicUserMacro(state, node, target);
 	if (basicUserMacro) {
-		if (sharedRefMetadata && isReadAtRuntime(basicUserMacro)) {
-			Diagnostics.error(
-				node,
-				"Modding.Caller.LuauLine is read each time the call runs, so it cannot be shared through Modding.Caller.Constant.",
-			);
-		}
-
 		return basicUserMacro;
 	}
 
@@ -711,27 +685,6 @@ function getNodeDebugName(state: TransformState, node: ts.Node) {
 	}
 
 	return `macro`;
-}
-
-/**
- * Whether any metadata in the tree is produced by the call itself rather than being a compile-time
- * constant, which rules out hoisting it into a table shared between invocations.
- */
-function isReadAtRuntime(macro: UserMacro): boolean {
-	if (macro.kind === "caller") {
-		return macro.metadata === "luauLine";
-	}
-
-	if (macro.kind === "many") {
-		const members = Array.isArray(macro.members) ? macro.members : [...macro.members.values()];
-		return members.some(isReadAtRuntime);
-	}
-
-	if (macro.kind === "sharedRef") {
-		return isReadAtRuntime(macro.value);
-	}
-
-	return false;
 }
 
 export type UserMacro =

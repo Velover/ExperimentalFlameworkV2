@@ -13,9 +13,8 @@ function callsite(
 	width?: Modding.Caller.Width,
 	text?: Modding.Caller.Text,
 	uuid?: Modding.Caller.Uuid,
-	luauLine?: Modding.Caller.LuauLine,
 ) {
-	return { line: line!, character: character!, width: width!, text: text!, uuid: uuid!, luauLine: luauLine! };
+	return { line: line!, character: character!, width: width!, text: text!, uuid: uuid! };
 }
 
 /**
@@ -111,14 +110,6 @@ export = suite("modding", [
 			expectTrue(here.line > 0, "line is one-based");
 			expectEqual(here.text, "callsite()", "source text");
 			expectEqual(here.width, here.text.size(), "expression width");
-
-			// The Luau line is read when the call runs, so it is what `debug.info` reports on that line.
-			expectTrue(typeIs(here.luauLine, "number"), "luau line is a number");
-			expectEqual(
-				callsite().luauLine,
-				debug.info(1, "l")[0],
-				"luau line is the line of the call in the emitted script",
-			);
 		},
 	],
 	[

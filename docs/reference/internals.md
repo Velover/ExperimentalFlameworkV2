@@ -73,7 +73,7 @@ type intersected with a hidden property the transformer looks for:
 | Marker | Declared as | Produces |
 |---|---|---|
 | `_flamework_macro_many` | `Modding.Emit<T>` | A runtime value for the type: objects, tuples, unions via `Array<T>`. |
-| `_flamework_macro_caller` | `Modding.Caller.*` | Callsite information: line, character, width, text, uuid; `luauLine` reads `debug.info(1, "l")` at the callsite instead of a constant. |
+| `_flamework_macro_caller` | `Modding.Caller.*` | Callsite information: line, character, width, text, uuid. |
 | `_flamework_macro_generic` | `Modding.Target.*` | Information about a type argument: id, text, guard, dependency info. |
 | `_flamework_macro_shared_ref` | `Modding.Caller.Constant<T>` | The nested metadata, hoisted to one shared table per callsite. |
 | `_flamework_macro_tuple_labels` | `Modding.Target.Labels<T>` | The parameter names of a tuple. |
@@ -98,8 +98,7 @@ Three details are easy to get wrong when changing this:
 - **`Modding.Caller.Constant`** hoists to a file-root local named after the callsite's line, so two
   callsites get two tables and every invocation of one callsite shares a table. Its marker is checked
   before `Emit`'s, because `Constant<Emit<T>>` carries both and finding `Emit` first dropped the
-  `Constant`. `Constant` around a basic macro changes nothing, and around `LuauLine` it is an error,
-  since that value is read each time the call runs.
+  `Constant`. `Constant` around a basic macro changes nothing.
 
 ### Intrinsics
 

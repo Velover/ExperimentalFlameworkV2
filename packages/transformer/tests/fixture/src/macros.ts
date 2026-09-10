@@ -28,8 +28,3 @@ export function counter<T>(
 export function callsiteId(id?: Modding.Caller.Uuid): string {
 	return id!;
 }
-
-/** @metadata macro */
-export function luauLine(line?: Modding.Caller.LuauLine): number {
-	return line!;
-}

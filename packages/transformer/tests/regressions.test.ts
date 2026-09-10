@@ -110,15 +110,6 @@ describe("plugin host", () => {
 	});
 });
 
-describe("callsite luau line", () => {
-	test("reads the emitted line at the callsite instead of baking in the TypeScript one", () => {
-		// `debug.info(1, "l")` in the caller's function is the line of the call in the emitted script,
-		// which is what the console and tracebacks report. Indexing the tuple's first value truncates it
-		// to one result.
-		expect(emitted("callsites")).toMatch(/emittedLine = luauLine\(\(debug\.info\(1, "l"\)\)\)/);
-	});
-});
-
 describe("constant callsite metadata", () => {
 	test("hoists Constant metadata to the file root whether or not it is wrapped in Emit", () => {
 		const source = normalize(emitted("constant"));
