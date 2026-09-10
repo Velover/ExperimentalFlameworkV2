@@ -32,6 +32,12 @@ import {
 	type ScopeCondition,
 } from "./scopes";
 
+/** What a lookup through a module and its imports found: where, and which class when it is a class provider. */
+export interface ProviderLookup {
+	module: Module;
+	classValue?: object;
+}
+
 interface InternalModule {
 	/**
 	 * Try to resolve this dependency.
@@ -46,9 +52,35 @@ interface InternalModule {
 	 * @internal
 	 */
 	ignite: () => Module;
+
+	/**
+	 * Finds where an id is registered -- this module, or one of its imports -- without constructing
+	 * anything.
+	 *
+	 * @internal
+	 */
+	lookupProvider: (injectionId: string) => ProviderLookup | undefined;
+
+	/**
+	 * Records a module that imports this one, so that extinguishing this one takes it down first.
+	 *
+	 * @internal
+	 */
+	addImporter: (importer: Module) => void;
+
+	/** @internal */
+	removeImporter: (importer: Module) => void;
 }
 
 export interface Module extends InternalModule {
+	/** The name the module reports itself by: set on the builder, or generated from where it was created. */
+	readonly debugName: string;
+
+	/**
+	 * Whether ignition has completed and {@link extinguish} has not been called. What a module has
+	 * to be before another can import it.
+	 */
+	isIgnited: () => boolean;
 	/**
 	 * This function manually fetches a dependency from this module, as opposed to dependency injection.
 	 *
@@ -151,6 +183,12 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 	/** The registrations left out, by id, with the conditions that were judged: for the error a miss gets. */
 	const skipped = new Map<string, ReadonlyArray<ScopeCondition>>();
 
+	/** Modules searched after this one's own providers, in order. Ignited before this one, and extinguished after. */
+	const imports = options?.imports ?? [];
+
+	/** Modules that import this one. They go down before this one does. */
+	const importers = new Set<Module>();
+
 	const instantiatedProviders = new Map<string, defined>();
 
 	/** Objects handed over by `provideInstance`, attached to their interfaces once every plugin is set up. */
@@ -240,11 +278,24 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		plugin.setup(pluginTarget);
 	};
 
+	const lookupInImports = (injectionId: string) => {
+		for (const imported of imports) {
+			const found = imported.lookupProvider(injectionId);
+			if (found !== undefined) {
+				return found;
+			}
+		}
+	};
+
 	/**
 	 * Decides which registrations this ignition keeps: those whose conditions -- the module's, the
 	 * registration's own, and the class's decorator -- all hold. Two registrations may share an id
 	 * as long as at most one of them is kept, which is how a fake takes a real provider's place
 	 * under one scope.
+	 *
+	 * A class an import already resolves to is not constructed again here: the import's instance
+	 * answers, so the registration is dropped unless it asked to be isolated. A different class
+	 * under the same id is kept, and answers ahead of the import's.
 	 */
 	const activateProviders = () => {
 		const active = new Array<ModuleProvider>();
@@ -255,6 +306,13 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 			if (!holdsEveryCondition(conditions)) {
 				skipped.set(entry.injectionId, conditions);
 				continue;
+			}
+
+			if (entry.config.type === "class" && entry.config.isolated !== true) {
+				const found = lookupInImports(entry.injectionId);
+				if (found !== undefined && found.classValue === entry.config.value) {
+					continue;
+				}
 			}
 
 			assertNotProvided(entry.injectionId);
@@ -376,22 +434,48 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 				return tryResolveDependency(convertConciseDependencyInfo(config.injectionId), requestingOrigin);
 			}
 		}
+
+		// Through the owner's resolver, so that a lazy provider is constructed by the module that
+		// registered it and joins that module's interfaces, not this one's.
+		for (const imported of imports) {
+			const found = imported.tryResolveDependency(info, requestingOrigin);
+			if (found !== undefined) {
+				return found;
+			}
+		}
 	};
 
 	const resolveDependencyWithOrigin = <T>(info: Modding.DependencyInfo, requestingOrigin?: object): T => {
 		const dependency = tryResolveDependency(info, requestingOrigin);
 		if (dependency === undefined) {
+			const searched =
+				imports.size() > 0 ? `; not found in imports [${imports.map((v) => v.debugName).join(", ")}]` : "";
+
 			const inactive = skipped.get(info.id);
 			if (inactive !== undefined) {
 				error(
-					`module '${state.debugName}' could not resolve dependency '${info.id}': it is registered but inactive (${describeConditions(inactive)})`,
+					`module '${state.debugName}' could not resolve dependency '${info.id}': it is registered but inactive (${describeConditions(inactive)})${searched}`,
 				);
 			}
 
-			error(`module '${state.debugName}' could not resolve dependency '${info.id}'`);
+			error(`module '${state.debugName}' could not resolve dependency '${info.id}'${searched}`);
 		}
 
 		return dependency as T;
+	};
+
+	const lookupProvider: Module["lookupProvider"] = (injectionId) => {
+		const own = providers.find((v) => v.injectionId === injectionId);
+		if (own !== undefined) {
+			return { module, classValue: own.config.type === "class" ? own.config.value : undefined };
+		}
+
+		// A provided instance is an object, not a class, so nothing registered here is the same class as it.
+		if (instantiatedProviders.has(injectionId)) {
+			return { module };
+		}
+
+		return lookupInImports(injectionId);
 	};
 
 	const resolveDependency: Module["resolveDependency"] = (info) => {
@@ -451,6 +535,16 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 	};
 
 	const ignite: Module["ignite"] = () => {
+		// Checked before anything changes: an import that is not ready leaves this module as it was,
+		// and `ignite()` being synchronous is what makes "ignite it first" a line order.
+		for (const imported of imports) {
+			if (!imported.isIgnited()) {
+				error(
+					`module '${state.debugName}': imported module '${imported.debugName}' is not ignited; ignite it first`,
+				);
+			}
+		}
+
 		// Raises on a module that has ignited already: a definition is what gets ignited twice.
 		switchInitState(ModuleInitState.Created, ModuleInitState.PreIgniting);
 
@@ -485,11 +579,26 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 
 		switchInitState(ModuleInitState.Igniting, ModuleInitState.Ignited);
 
+		// Told last, once this module is whole: an importer only counts once it can be extinguished.
+		for (const imported of imports) {
+			imported.addImporter(module);
+		}
+
 		return module;
 	};
 
 	const extinguish: Module["extinguish"] = () => {
 		switchInitState(ModuleInitState.Ignited, ModuleInitState.Extinguishing);
+
+		// Importers hold this module's instances, so they go first, and each takes its own importers
+		// down before it returns: the deepest goes first. Copied, since each removes itself.
+		for (const importer of [...importers]) {
+			if (!importer.isExtinguished()) {
+				importer.extinguish();
+			}
+		}
+
+		importers.clear();
 
 		runHooks("extinguished");
 
@@ -510,14 +619,20 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		assert(temporaryInstances.size() === 0);
 		switchInitState(ModuleInitState.Extinguishing, ModuleInitState.Extinguished);
 
+		for (const imported of imports) {
+			imported.removeImporter(module);
+		}
+
 		// Released last, once nothing in here can resolve any more, so that the next root ignited
 		// becomes the default rather than `Dependency<T>()` answering from a dead module.
 		clearDefaultModule(module);
 	};
 
 	const isExtinguished: Module["isExtinguished"] = () => moduleInitState >= ModuleInitState.Extinguishing;
+	const isIgnited: Module["isIgnited"] = () => moduleInitState === ModuleInitState.Ignited;
 
 	const module: Module = {
+		debugName: state.debugName,
 		tryResolveDependency,
 		resolveDependency,
 		listen,
@@ -526,6 +641,10 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		ignite,
 		extinguish,
 		isExtinguished,
+		isIgnited,
+		lookupProvider,
+		addImporter: (importer) => importers.add(importer),
+		removeImporter: (importer) => importers.delete(importer),
 	};
 
 	/** What a plugin's setup is handed. Everything registers into this instantiation. */

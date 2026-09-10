@@ -14,7 +14,7 @@ export { ModuleDefinition } from "./module/moduleDefinition";
 export { ModuleBuilder } from "./module/moduleBuilder";
 export { HookPriority } from "./module/moduleHooks";
 
-export type { Module } from "./module/module";
+export type { Module, ProviderLookup } from "./module/module";
 export type {
 	IgniteOptions,
 	InjectionContext,

@@ -132,12 +132,53 @@ Games rarely call this. Tests, and tools that mount and unmount, do.
 
 ## More than one module?
 
-A second module is a second container: nothing in one can inject anything from the other, and
-`Dependency<T>()` answers from only one of them. Reach for one only when that separation is the
-point:
+A second module is a second container: nothing in one can inject anything from the other unless it
+imports it, and `Dependency<T>()` answers from only one of them. Reach for one only when that
+separation is the point:
 
 - **Tests**, where each case wants a fresh container. Build the definition once, ignite per case.
 - **A tool** with a lifetime shorter than the game's, extinguished when it closes.
+- **A scenario** that runs against the game -- a test rig, a debug world -- and is torn down on its
+  own. It imports the game module, below.
+
+### Importing a module
+
+A module ignited with `imports` can inject and resolve the providers of the modules it names, after
+its own:
+
+```ts
+const game = Flamework.createModule()
+    .registerProviders("src/server/services")
+    .ignite();
+
+const rig = Flamework.createModule()
+    .registerProviders("src/server/Testing/rig")
+    .ignite({ imports: [game] });
+```
+
+A provider in `rig` takes `DataService` in its constructor like any provider in `game` does.
+Resolution looks in `rig` first, then in each import in order, each through its own imports, and a
+miss names the imports it searched. Nothing is copied: the import keeps its providers, their
+lifecycle, their observers and their extinguish, and `rig` only resolves them. A lazy provider of
+the import is constructed by the import, the first time either module asks.
+
+Every import has to be ignited already. `ignite()` is synchronous, so in one entry script that is
+the order of the lines; getting it wrong raises `imported module '...' is not ignited` before
+anything in the importer is constructed.
+
+Two rules decide what happens when both modules register the same id:
+
+- **The same class is shared.** An own registration of a class an import already resolves to is
+  dropped, and the import's instance answers, so a folder matched by both modules' paths does not
+  produce two of everything. `registerClassProvider(Class, { isolated: true })` keeps an own
+  instance instead.
+- **A different class wins.** `rig.registerProvider<DataService>({ type: "class", value: FakeDataService })`
+  is kept and answers ahead of the import's, which is how a scenario stands a fake in for one of
+  the game's providers, for itself only. The game keeps the real one.
+
+Extinguishing an import extinguishes every module that imports it first, deepest first, so
+`game.extinguish()` takes `rig` down before the game. An importer extinguished on its own detaches,
+and the import carries on.
 
 What used to be a reason for a second module -- a library that ships providers, code both realms
 share -- is a [plugin](08-plugins.md): its setup registers the providers into whichever module
@@ -186,9 +227,12 @@ Flamework.createModule()
 - **`Dependency<T>()` answers from one module.** The first root ignited, unless a later one was
   ignited with `{ default: true }`. A realm with two live roots -- tests, tools -- should say which,
   or resolve through the handle.
-- **Duplicate registration raises.** `provider ID was registered more than once` usually means two
-  `registerProviders` paths overlap, or a class is registered both by path and by hand -- or by the
-  module and by a plugin.
+- **Duplicate registration raises at ignition.** `provider ID was registered more than once` usually
+  means two `registerProviders` paths overlap, or a class is registered both by path and by hand --
+  or by the module and by a plugin. Two registrations whose [scope conditions](11-scopes.md) keep
+  at most one of them are fine.
+- **Imports are one way.** A module sees its imports' providers; an import never sees the
+  importer's. A fake registered in the importer replaces nothing in the import.
 
 ---
 

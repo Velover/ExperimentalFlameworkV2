@@ -15,7 +15,7 @@ Read in order the first time. Each page ends with the caveats for that topic.
 | | Page | Covers |
 |---|---|---|
 | 1 | [Getting started](guide/01-getting-started.md) | Install, `tsconfig`, Rojo, your first working module on both realms. |
-| 2 | [Modules](guide/02-modules.md) | What a module actually is, ignition and teardown, `Dependency<T>()`. |
+| 2 | [Modules](guide/02-modules.md) | What a module actually is, ignition and teardown, `Dependency<T>()`, importing one module into another. |
 | 3 | [Providers](guide/03-providers.md) | `@Provider`, automatic registration, dependency injection, `@Injectable`. |
 | 4 | [Lifecycle events](guide/04-lifecycle-events.md) | `OnStart`, `OnTick` and friends, ad-hoc listeners. |
 | 5 | [Components](guide/05-components.md) | Instance-bound classes, attributes, guards, streaming, dependencies. |

@@ -20,6 +20,18 @@ export interface IgniteOptions extends ScopeCondition {
 	 * one `Dependency<T>()` should answer from.
 	 */
 	default?: boolean;
+
+	/**
+	 * Modules whose providers this one can inject and resolve, searched in order after its own,
+	 * each through its own imports. Every one has to be ignited already.
+	 *
+	 * An import keeps its providers: their lifecycle, observers and extinguish stay with it, and
+	 * this module only resolves them. An own registration of a class an import already resolves to
+	 * is dropped in favour of the import's instance, unless it is `isolated`; a different class
+	 * under the same id is kept, which is how a fake stands in for an import's provider here.
+	 * Extinguishing an import extinguishes this module first.
+	 */
+	imports?: readonly Module[];
 }
 
 /** How a plugin was included: the plugin, and the condition its inclusion was given. */
@@ -75,7 +87,14 @@ export type ModuleProvider = { config: ProviderConfig; injectionId: string };
  * What a registration can say about itself, whichever form it takes: an option on the class and
  * path registrations, or written on the config of `registerProvider`.
  */
-export type ProviderRegistrationOptions = ScopeCondition;
+export interface ProviderRegistrationOptions extends ScopeCondition {
+	/**
+	 * Keeps an own instance of a class that an imported module already holds. Without it, an own
+	 * registration of the same class as one an import resolves to is dropped, and the import's
+	 * instance answers. Class providers only.
+	 */
+	isolated?: boolean;
+}
 
 export type ProviderConfig = ProviderRegistrationOptions &
 	(
