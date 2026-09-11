@@ -271,6 +271,12 @@ export class Components {
 				};
 
 				this.connections.push(CollectionService.GetInstanceAddedSignal(tag).Connect(instanceAdded));
+				const removeFor = (instance: Instance) => {
+					tracker.untrackInstance(instance, listener);
+					tracker.setHasTag(instance, false);
+					this.removeComponent(instance, ctor);
+				};
+
 				this.connections.push(
 					CollectionService.GetInstanceRemovedSignal(tag).Connect((instance) => {
 						// The same deferral can deliver a removal for a tag that has since been added back;
@@ -278,12 +284,24 @@ export class Components {
 						// a removal announced because the instance left it stands, however tagged the
 						// instance still is, and whether it lost its own parent or an ancestor's.
 						if (instance.IsDescendantOf(game) && CollectionService.HasTag(instance, tag)) {
+							// Both halves read true during the change itself, which is when this
+							// handler runs under immediate signal behaviour: `Destroy()` and an
+							// unparenting announce the removal before the instance has actually
+							// left, so the instance still reads as tagged and in the tree, and
+							// taking that for a stale removal left the component attached for good.
+							// Looked at again one resumption later, a genuine removal reads as one
+							// and a stale one still reads as stale.
+							task.defer(() => {
+								if (instance.IsDescendantOf(game) && CollectionService.HasTag(instance, tag)) {
+									return;
+								}
+
+								removeFor(instance);
+							});
 							return;
 						}
 
-						tracker.untrackInstance(instance, listener);
-						tracker.setHasTag(instance, false);
-						this.removeComponent(instance, ctor);
+						removeFor(instance);
 					}),
 				);
 
