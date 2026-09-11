@@ -644,7 +644,9 @@ module lives at `main` (`lib/ts.lua`).
 emulation with attributes, ancestry and signals, CollectionService, RemoteEvents, Players. `typeof`
 is shadowed, because `t.instanceIsA` gates on `typeof(value) == "Instance"` and the harness's
 instances are tables. A Heartbeat pump drives `Promise.delay`, which every request timeout is built
-on.
+on; Promise.lua is loaded with a `game` of its own (`context.setPromiseGlobal`) so that the pump
+does not touch the graph's `RunService.Heartbeat`, which carries `onTick` and only fires from
+`__harness.step(delta)`.
 
 **Two graphs.** `harness.create()` returns an independent module graph and `roblox.create(realm)` an
 independent world, which is what lets `replication.luau` hold a real server and a real client in one

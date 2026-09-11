@@ -255,6 +255,8 @@ function harness.create()
 
 	local loaded: { [string]: any } = {}
 	local globals: { [string]: any } = {}
+	--- Globals Promise.lua sees instead of the graph's, for the few it must not share.
+	local promiseGlobals: { [string]: any } = {}
 	local TS = {}
 
 	context.globals = globals
@@ -281,6 +283,9 @@ function harness.create()
 
 		local environment = {}
 		for key, value in globals do
+			environment[key] = value
+		end
+		for key, value in promiseGlobals do
 			environment[key] = value
 		end
 
@@ -485,6 +490,11 @@ function harness.create()
 
 	function context.setGlobal(name: string, value: any)
 		globals[name] = value
+	end
+
+	--- Overrides one global for Promise.lua only; takes effect if set before `context.loadPromise`.
+	function context.setPromiseGlobal(name: string, value: any)
+		promiseGlobals[name] = value
 	end
 
 	function context.require(specifier: string, ...: string): any

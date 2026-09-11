@@ -33,7 +33,8 @@ export interface OnStart {
 
 /**
  * Hook into the OnTick lifecycle event.
- * Equivalent to: RunService.PostSimulation
+ * Equivalent to: RunService.Heartbeat (the same point of the frame as PostSimulation in a running
+ * game, and it also fires in edit mode and in Open Cloud tasks, where PostSimulation does not).
  */
 export interface OnTick {
 	/**

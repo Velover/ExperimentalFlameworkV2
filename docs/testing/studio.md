@@ -54,19 +54,23 @@ the place.
    cd ../networking       && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
    cd ../testing          && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
    cd ../transformer      && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
+   cd ../cloud-testing    && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
    cd ../../../CommisionTemplate
-   bun remove @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking @flamework-experimental/testing @flamework-experimental/transformer
+   bun remove @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking @flamework-experimental/testing @flamework-experimental/transformer @flamework-experimental/cloud-testing
    bun add ./vendor/flamework-v2/flamework-experimental-core-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-components-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-networking-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-testing-2.0.0-alpha.0.tgz
-   bun add -d ./vendor/flamework-v2/flamework-experimental-transformer-2.0.0-alpha.0.tgz
+   bun add -d ./vendor/flamework-v2/flamework-experimental-transformer-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-cloud-testing-2.0.0-alpha.0.tgz
    bun run build
    ```
 
    Tarballs rather than `bun link`: symlinked packages drag this repository's `node_modules` layout
-   into the template. The `remove`/`add` pair is only needed the first time. After **every later
-   repack** run
+   into the template. The `remove`/`add` pair is only needed the first time. The template's
+   `package.json` also carries an `overrides` entry pointing `@flamework-experimental/core` and
+   `/transformer` at the same tarballs: the packages name each other as peers, and without it bun
+   looks the scoped names up on npm, where they are not published. After **every later repack**
+   run
 
    ```console
-   bun update @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking @flamework-experimental/testing @flamework-experimental/transformer
+   bun update @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking @flamework-experimental/testing @flamework-experimental/transformer @flamework-experimental/cloud-testing
    ```
 
    which re-extracts the changed tarballs and refreshes their integrity in the lockfile. Skipping it

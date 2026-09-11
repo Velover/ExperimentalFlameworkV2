@@ -39,6 +39,13 @@ function roblox.create(initialRealm: "Server" | "Client")
 		Heartbeat = createSignal(),
 	}
 
+	--- The RunService roblox-ts's Promise sees. `Promise.delay` schedules on `Heartbeat`, which the
+	--- harness pumps on every scheduler tick with no delta; Flamework's `onTick` hangs off Heartbeat
+	--- as well and must only fire from `env.step`, with a delta, so Promise gets a signal of its own.
+	local promiseRunService = {
+		Heartbeat = createSignal(),
+	}
+
 	function RunService:IsServer()
 		return realm == "Server"
 	end
@@ -233,20 +240,33 @@ function roblox.create(initialRealm: "Server" | "Client")
 
 	env.remotes = remotes
 
-	--- Advances one frame, firing the signals the per-frame lifecycle events hang off.
+	--- Advances one frame, firing the signals the per-frame lifecycle events hang off, in Roblox's
+	--- order: PreSimulation, then PostSimulation and Heartbeat (the same point), then PreRender.
 	function env.step(delta: number)
 		RunService.PreSimulation:Fire(delta)
 		RunService.PostSimulation:Fire(delta)
+		RunService.Heartbeat:Fire(delta)
 		RunService.PreRender:Fire(delta)
 	end
 
-	--- Fires `Heartbeat`, which roblox-ts's Promise schedules `Promise.delay` on.
+	--- Pumps the Heartbeat roblox-ts's Promise schedules `Promise.delay` on. Not the graph's own
+	--- `RunService.Heartbeat`: that one carries `onTick` and only fires from `env.step`.
 	function env.heartbeat()
-		RunService.Heartbeat:Fire()
+		promiseRunService.Heartbeat:Fire()
 	end
 
 	function env.install(context)
 		context.setGlobal("game", game)
+		-- Promise.lua reads `game:GetService("RunService").Heartbeat` once, at load, in its own
+		-- environment; hand it the pump's RunService there and nothing else sees the difference.
+		context.setPromiseGlobal("game", {
+			GetService = function(_, name: string)
+				if name == "RunService" then
+					return promiseRunService
+				end
+				return game:GetService(name)
+			end,
+		})
 		context.setGlobal("workspace", Workspace)
 		context.setGlobal("Instance", { new = instances.new })
 		context.setGlobal("InstanceHandle", { new = function(instance: any)

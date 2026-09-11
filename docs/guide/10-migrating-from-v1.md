@@ -73,7 +73,8 @@ folders, or one class registered by both.
 `OnInit`, `OnStart`, `OnTick`, `OnPhysics` and `OnRender` work as they did. They are provided by
 `LifecyclePlugin`, an ordinary plugin every module starts with, so there is nothing to add. `OnInit`
 still runs after construction, in dependency order, may return a Promise, and everything after it
-waits; `onPhysics` still receives `(dt, time)`.
+waits; `onPhysics` still receives `(dt, time)`. The signals are v1's too: `onTick` on `Heartbeat`,
+`onPhysics` on `PreSimulation` (v1 called it `Stepped`), `onRender` on `PreRender`.
 
 `OnRender` only connects on the client; a provider implementing it on the server is simply inert.
 

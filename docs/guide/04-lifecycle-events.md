@@ -35,13 +35,16 @@ export class Spawner implements OnStart, OnTick {
 |---|---|---|
 | `OnInit` | `onInit()` | Once, during ignition, in dependency order, before any `onStart`. May return a Promise. |
 | `OnStart` | `onStart()` | Once, at the end of ignition. |
-| `OnTick` | `onTick(dt)` | `RunService.PostSimulation` |
+| `OnTick` | `onTick(dt)` | `RunService.Heartbeat` |
 | `OnPhysics` | `onPhysics(dt, time)` | `RunService.PreSimulation`; `time` is the elapsed game time. |
 | `OnRender` | `onRender(dt)` | `RunService.PreRender` -- client only |
 | `OnExtinguished` | `onExtinguished()` | `module.extinguish()` |
 
 Within a frame the order is `onPhysics`, then `onTick`, then `onRender`, matching Roblox's own
-signal order.
+signal order. `Heartbeat` is the same point of the frame as `PostSimulation` in a running game; it
+is used because it also fires where nothing is simulated -- an edit-mode plugin, an Open Cloud
+task -- so `onTick` keeps working there. `PreSimulation` has no such alias, so `onPhysics` is
+silent in those environments.
 
 There is nothing to register. Flamework checks each constructed object against the interfaces
 plugins have claimed, structurally, using metadata the transformer attached -- which is why the

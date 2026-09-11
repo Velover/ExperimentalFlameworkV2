@@ -10,15 +10,28 @@ tests are the same `defineTests` sections, and what the CLI gets back is the sam
 A Luau execution task loads the place into a fresh server and runs the script you submit. That
 is all it runs: **the place's own Scripts do not execute** (verified with a sentinel Script on
 2026-09-11), `RunService:IsRunning()` is false, `RunService:Run()` and the other plugin-level
-calls raise, and no client ever joins. Heartbeat fires, `task.wait` works, and `IsServer()` is
-true, so a Flamework module ignited from the task behaves as it would on a server.
+calls raise, and no client ever joins. `task.wait` works and `IsServer()` is true, so a Flamework
+module ignited from the task behaves as it would on a server, with one difference in what fires
+per frame (the probe of 2026-09-11, counts over one second):
+
+| Signal | Fires |
+|---|---|
+| `Heartbeat` | 60 |
+| `PostSimulation`, `PreSimulation`, `Stepped`, `PreAnimation` | 0 |
+| `PreRender` | raises |
+
+`onTick` hangs off `Heartbeat`, so it runs in a task; `onPhysics` (`PreSimulation`) and
+`onRender` never do, and a test that waits for either times out.
 
 So something in the task has to start the game. The runner package ships a fixed cloud module
-for that; the script the CLI submits requires it and nothing else:
+for that; the script the CLI submits imports it through roblox-ts's runtime and nothing else:
 
 ```lua
-local cloud = ReplicatedStorage.rbxts_include.node_modules["@flamework-experimental"].testing.out.cloud
-return require(cloud).run(FILTER, OPTIONS)
+local include = game:GetService("ReplicatedStorage").rbxts_include
+local TS = require(include.RuntimeLib)
+local cloud = include.node_modules["@flamework-experimental"].testing.out.cloud
+-- `script` is nil in a task; the import only needs a key for its cycle detection.
+return TS.import(script or {}, cloud).run(FILTER, OPTIONS)
 ```
 
 `run` looks for `Workspace.FlameworkTests`. When it is not there, it requires the ModuleScript

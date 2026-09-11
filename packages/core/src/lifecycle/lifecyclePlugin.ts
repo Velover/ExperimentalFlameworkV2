@@ -226,8 +226,11 @@ export class LifecycleProvider {
 		const onRender = this.onRender;
 		const connections = new Array<RBXScriptConnection>();
 
+		// Heartbeat rather than PostSimulation: the same point of the frame in a running game, but
+		// Heartbeat also fires where no simulation runs (an edit-mode plugin, an Open Cloud Luau
+		// task), so onTick works there too. PreSimulation has no such alias; onPhysics stays silent.
 		connections.push(
-			RunService.PostSimulation.Connect((dt) => {
+			RunService.Heartbeat.Connect((dt) => {
 				for (const provider of onTick) {
 					this.profile(() => provider.onTick(dt), provider);
 				}

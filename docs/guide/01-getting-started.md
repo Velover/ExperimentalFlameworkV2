@@ -26,6 +26,16 @@ arguments are simply missing at runtime.
 }
 ```
 
+A roblox-ts project also lists the scope among its `typeRoots`, next to `@rbxts`, since the
+compiler only accepts imports from scopes named there:
+
+```jsonc
+"typeRoots": ["node_modules/@rbxts", "node_modules/@flamework-experimental"]
+```
+
+(TypeScript treats every package under a `typeRoots` directory as a type library, which is why
+the transformer and the CLI ship an empty declaration file.)
+
 That is the whole required configuration. Everything optional goes in a `flamework.config.json` next
 to `tsconfig.json`, one section per package; it is covered in
 [Project structure](09-project-structure.md#configuration).
