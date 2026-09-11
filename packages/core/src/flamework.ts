@@ -61,7 +61,8 @@ export namespace Flamework {
 	/**
 	 * Inlines an environment variable at compile time: the call becomes the variable's value as a
 	 * string literal, read from `.env`, `.env.local` and the process environment when the compiler
-	 * started. A variable that is not set and has no fallback fails the build at the call site.
+	 * started, or `undefined` when it is not set. With a fallback -- a string literal -- that is
+	 * inlined instead, and the result is a `string`.
 	 *
 	 * For deployment values -- a place id, a build channel, a version -- and not for secrets: the
 	 * value is written into the emitted Luau, where anyone with the place can read it.
@@ -71,8 +72,8 @@ export namespace Flamework {
 	export declare function env<N extends string, F extends string | undefined = undefined>(
 		name: N,
 		fallback?: F,
-		value?: Modding.Intrinsic<"env", [N, F], string>,
-	): string;
+		value?: Modding.Intrinsic<"env", [N, F], F extends string ? string : string | undefined>,
+	): F extends string ? string : string | undefined;
 
 	/**
 	 * Check if the constructor implements the specified interface.

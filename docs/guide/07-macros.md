@@ -19,10 +19,22 @@ Modding.inspect<Array<"a" | "b">>();      // ["a", "b"] at runtime
 
 `Flamework.env` reads the variable from `.env`, `.env.local` and the process environment when the
 compiler starts (see [values from the environment](09-project-structure.md#values-from-the-environment))
-and replaces the call with the value, so nothing is looked up at runtime. A variable that is not
-set and has no fallback fails the build at the call site. It is for deployment values -- a place
-id, a channel, a version -- and not for secrets: the value ends up in the emitted Luau, where
-anyone with the place can read it.
+and replaces the call with the value, so nothing is looked up at runtime:
+
+```ts
+const channel = Flamework.env("BUILD_CHANNEL", "dev");   // string: the fallback is inlined if unset
+const tests = Flamework.env("TESTS_ENABLED");            // string | undefined: nil if unset
+```
+
+```lua
+local channel = "dev"
+local tests = "true"
+```
+
+The value is always the string as written in `.env`; compare or convert it yourself. The fallback
+has to be a string literal, since it is inlined too. It is for deployment values -- a place id, a
+channel, a version -- and not for secrets: the value ends up in the emitted Luau, where anyone
+with the place can read it.
 
 `Modding.inspect` is the general "give me this type as a value" escape hatch:
 

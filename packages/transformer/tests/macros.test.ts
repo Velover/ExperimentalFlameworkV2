@@ -54,26 +54,41 @@ describe("identifier generation", () => {
 });
 
 describe("Flamework.env", () => {
-	test("inlines a variable from .env, and a fallback for one that is not set", () => {
-		// `FLAMEWORK_FIXTURE_SCOPES` is in the fixture's .env; `FLAMEWORK_FIXTURE_CHANNEL` is not.
+	test("inlines a variable from .env, a fallback for one that is not set, and nil for one with neither", () => {
+		// `FLAMEWORK_FIXTURE_SCOPES` is in the fixture's .env; the other two are not. The fixture
+		// file also pins the types: `string | undefined` without a fallback, `string` with one.
 		const source = normalize(emitted("env"));
 
 		expect(source).toContain('local scopes = "fixture, demo"');
 		expect(source).toContain('local channel = "dev"');
+		expect(source).toMatch(/local missing = nil/);
 		expect(source).not.toContain("Flamework.env");
 	});
 
-	test("fails the build at the call site for a variable that is not set and has no fallback", () => {
+	test("types the result as a plain string only when a fallback is given", () => {
 		const result = compileProbe(
-			"envMissing",
+			"envType",
 			`import { Flamework } from "@flamework/core";
 
-export const missing = Flamework.env("FLAMEWORK_FIXTURE_MISSING");
+export const value: string = Flamework.env("FLAMEWORK_FIXTURE_SCOPES");
 `,
 		);
 
 		expect(result.status).not.toBe(0);
-		expect(result.output).toContain("$FLAMEWORK_FIXTURE_MISSING is not set");
-		expect(result.output).toContain("was given no fallback");
+		expect(result.output).toContain("TS2322");
+	});
+
+	test("rejects a fallback that is not a string literal", () => {
+		const result = compileProbe(
+			"envFallback",
+			`import { Flamework } from "@flamework/core";
+
+declare const computed: string;
+export const value = Flamework.env("FLAMEWORK_FIXTURE_SCOPES", computed);
+`,
+		);
+
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("expects the fallback as a string literal");
 	});
 });

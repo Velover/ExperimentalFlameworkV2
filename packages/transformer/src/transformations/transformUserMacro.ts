@@ -79,7 +79,7 @@ export function transformUserMacro(
 
 	const inlineIntrinsic = nodeMetadata.getSymbol("intrinsic-inline");
 	if (inlineIntrinsic && inlineIntrinsic.length === 1) {
-		return inlineMacroIntrinsic(signature, args, inlineIntrinsic[0]);
+		return inlineMacroIntrinsic(state, node, signature, args, inlineIntrinsic[0]);
 	}
 
 	validateParameterConstIntrinsic(node, signature, nodeMetadata.getSymbol("intrinsic-const") ?? []);
