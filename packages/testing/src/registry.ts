@@ -120,6 +120,11 @@ export function __setCurrentModule(module: Module | undefined) {
 }
 
 /** @internal */
+export function __getCurrentModule(): Module | undefined {
+	return currentModule;
+}
+
+/** @internal */
 export function __resetTests() {
 	sections.clear();
 	sectionsByName.clear();

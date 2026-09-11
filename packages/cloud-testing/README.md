@@ -73,7 +73,8 @@ tasks per place, 300 seconds per task. One task per run.
 | `403 PERMISSION_DENIED` naming a scope | The key lacks that scope for this experience. |
 | `409 Conflict: Save failed. Server is busy` on publish | The place is open in Roblox Studio; close it and publish again. |
 | `429` | The creation limit. |
-| Task `FAILED`: `@flamework-experimental/testing is not in this place` | Built without `FLAMEWORK_TESTS=true`, or the package is not installed. |
+| Task `FAILED`: `@flamework-experimental/testing is not in this place` | The package is not installed, or nothing the entry module imports includes `TestingPlugin`. |
+| Task `COMPLETE` but `Workspace.FlameworkTests did not appear` | The place was built without the `testing` scope active (`FLAMEWORK_SCOPES` in `.env`), so the plugin stayed inert. |
 | Task `FAILED`: `... has no testing.entry` | The game's entry is a Script; the config needs the ModuleScript that exports `ignite()`. |
 
 ## Development

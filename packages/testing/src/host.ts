@@ -126,7 +126,7 @@ export namespace Testing {
 
 		const remote = Workspace.WaitForChild(REMOTE_NAME, CLIENT_WAIT) as RemoteFunction | undefined;
 		if (remote === undefined) {
-			error(`Workspace.${REMOTE_NAME} does not exist: is testing.enabled true on the server?`, 2);
+			error(`Workspace.${REMOTE_NAME} does not exist: is the testing scope active on the server?`, 2);
 		}
 
 		return remote.InvokeServer(filter, options) as RunResult;

@@ -305,7 +305,7 @@ describe("run", () => {
 					error: {
 						code: "SCRIPT_ERROR",
 						message:
-							"@flamework-experimental/testing is not in this place: build it with FLAMEWORK_TESTS=true and publish again",
+							"@flamework-experimental/testing is not in this place: include TestingPlugin in the module testing.entry ignites and publish again",
 					},
 				}),
 				json({ luauExecutionSessionTaskLogs: [], nextPageToken: "" }),
@@ -315,7 +315,7 @@ describe("run", () => {
 		expect(run.code).toBe(1);
 		expect(run.err).toContain("task FAILED");
 		expect(run.err).toContain("SCRIPT_ERROR");
-		expect(run.err).toContain("FLAMEWORK_TESTS=true");
+		expect(run.err).toContain("include TestingPlugin");
 	});
 
 	test("--json prints the raw result instead of the summary", async () => {

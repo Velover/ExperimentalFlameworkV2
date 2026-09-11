@@ -43,8 +43,17 @@ export interface ScopesRuntimeConfig {
 }
 
 export interface TestingRuntimeConfig {
-	/** Whether the testing plugin loads test folders and answers the bindable and remote. */
+	/**
+	 * Whether the plugin attaches the host at all. Unset, it follows the scope condition below, so
+	 * this is an override for either direction.
+	 */
 	enabled?: boolean;
+
+	/** Scopes under which tests are on: the host attaches when at least one is active. Default `["testing"]`. */
+	activeIn?: readonly string[];
+
+	/** Scopes under which tests stay off, whatever else is active. */
+	inactiveIn?: readonly string[];
 
 	/** Runs every test right after ignition, instead of only on request. */
 	autoRun?: boolean;

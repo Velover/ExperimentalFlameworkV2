@@ -1,20 +1,34 @@
 import {
 	Flamework,
-	Modding,
-	getGlobPaths,
+	HookPriority,
 	getRuntimeConfig,
-	requireModulesInPath,
+	type Module,
 	type PluginDefinition,
 	type ScopeCondition,
 } from "@flamework-experimental/core";
 import { attach, detach, Testing } from "./host";
-import { __setCurrentModule } from "./registry";
+import { __getCurrentModule, __setCurrentModule } from "./registry";
 import { DEFAULT_TIMEOUT } from "./runner";
+
+/** The scope tests are on under when the config names none. */
+export const DEFAULT_TESTING_SCOPE = "testing";
 
 /** The `testing` section of `flamework.config.json`; options given in code override it. */
 export interface TestingOptions {
-	/** Whether the plugin does anything. Off, no test file is loaded and no instance is made. */
+	/**
+	 * Whether the plugin attaches the host at all. Unset, it follows the scope condition, so this
+	 * is an override for either direction.
+	 */
 	enabled?: boolean;
+
+	/**
+	 * Scopes under which tests are on: the host attaches when at least one is active, the way
+	 * `activeIn` works everywhere else. Defaults to `["testing"]`.
+	 */
+	activeIn?: readonly string[];
+
+	/** Scopes under which tests stay off, whatever else is active. */
+	inactiveIn?: readonly string[];
 
 	/** Runs every test right after ignition, instead of only when the bindable is invoked. */
 	autoRun?: boolean;
@@ -23,121 +37,62 @@ export interface TestingOptions {
 	timeout?: number;
 }
 
-interface Registration {
-	readonly paths: ReadonlyArray<readonly string[]>;
-	readonly scope?: ScopeCondition;
+/** The options in effect: what was given in code, else the config file, else the defaults. */
+export interface ResolvedTestingOptions {
+	/** The override, when one was given; the condition decides otherwise. */
+	enabled: boolean | undefined;
+	condition: ScopeCondition;
+	autoRun: boolean;
+	timeout: number;
 }
 
-/** No condition: what a registration that was not given one contributes to a list. */
-const NO_CONDITION: ScopeCondition = {};
-
-/** The options in effect: what was given in code, else the config file, else the defaults. */
-export function resolveTestingOptions(options?: TestingOptions): Required<TestingOptions> {
+export function resolveTestingOptions(options?: TestingOptions): ResolvedTestingOptions {
 	const config = getRuntimeConfig().testing ?? {};
 	return {
-		enabled: options?.enabled ?? config.enabled ?? false,
+		enabled: options?.enabled ?? config.enabled,
+		condition: {
+			activeIn: options?.activeIn ?? config.activeIn ?? [DEFAULT_TESTING_SCOPE],
+			inactiveIn: options?.inactiveIn ?? config.inactiveIn,
+		},
 		autoRun: options?.autoRun ?? config.autoRun ?? false,
 		timeout: options?.timeout ?? config.timeout ?? DEFAULT_TIMEOUT,
 	};
 }
 
 /**
- * The plugin that loads test folders and answers `Workspace.FlameworkTests`. Include it in the
- * module whose providers the tests exercise: the test files are required after that module has
- * ignited, so `Dependency<T>()` and top-level imports of its providers work in them.
+ * A plugin that answers `Workspace.FlameworkTests` (and, on the server, `FlameworkTestsServer`)
+ * for the sections the module's providers define. Include it in the module whose providers the
+ * tests exercise; the tests themselves are ordinary providers, usually scoped to `testing`, that
+ * call `defineTests` as they start.
+ *
+ * Tests are on when the scope condition holds, the `testing` scope by default, unless `enabled`
+ * says otherwise. Off, the plugin is inert: no instance is made.
  */
-export class TestingPlugin {
-	public static createPlugin(options?: TestingOptions) {
-		return new TestingPlugin(options);
-	}
+export function createTestingPlugin(options?: TestingOptions): PluginDefinition {
+	return Flamework.createPlugin("Testing", (target) => {
+		const resolved = resolveTestingOptions(options);
+		const enabled = resolved.enabled ?? target.isActive(resolved.condition);
+		if (!enabled) {
+			return;
+		}
 
-	/**
-	 * A plugin that loads every module under a source folder.
-	 *
-	 * @metadata macro
-	 */
-	public static fromPath<T extends string>(
-		_stringPath: T,
-		scope?: ScopeCondition,
-		path?: Modding.Intrinsic<"path", [T], string[]>,
-	) {
-		return this.createPlugin().registerTests(_stringPath, scope, path).build();
-	}
-
-	/**
-	 * A plugin that loads every module under every folder a compile-time glob matches.
-	 *
-	 * @metadata macro
-	 */
-	public static fromGlob<T extends string>(
-		_glob: T,
-		scope?: ScopeCondition,
-		glob?: Modding.Intrinsic<"pathglob", [T], string>,
-	) {
-		return this.createPlugin().registerTestsGlob(_glob, scope, glob).build();
-	}
-
-	private registrations = new Array<Registration>();
-
-	private constructor(private readonly options?: TestingOptions) {}
-
-	/**
-	 * Loads every module under the specified path when the module ignites, so that the
-	 * `defineTests` calls in them register. With a scope condition, only in a build where it
-	 * holds, on top of the module's condition.
-	 *
-	 * @metadata macro
-	 */
-	public registerTests<T extends string>(
-		_stringPath: T,
-		scope?: ScopeCondition,
-		path?: Modding.Intrinsic<"path", [T], string[]>,
-	) {
-		assert(path !== undefined);
-		this.registrations.push({ paths: [path], scope });
-		return this;
-	}
-
-	/**
-	 * Loads every module under every path a compile-time glob matches.
-	 *
-	 * @metadata macro
-	 */
-	public registerTestsGlob<T extends string>(
-		_glob: T,
-		scope?: ScopeCondition,
-		glob?: Modding.Intrinsic<"pathglob", [T], string>,
-	) {
-		assert(glob !== undefined);
-		this.registrations.push({ paths: getGlobPaths(glob), scope });
-		return this;
-	}
-
-	public build(): PluginDefinition {
-		const registrations = this.registrations;
-		const options = this.options;
-
-		return Flamework.createPlugin("Testing", (target) => {
-			const resolved = resolveTestingOptions(options);
-			if (!resolved.enabled) {
-				return;
-			}
-
-			const active = registrations.filter((registration) => target.isActive(registration.scope ?? NO_CONDITION));
-			let attached = false;
-
-			// After ignition, so that a test file can import the module's providers at its top level.
-			target.onPostIgnite((module) => {
+		// The module is current from before its providers construct until after they have started,
+		// so a section defined in a constructor, `onInit` or `onStart` knows the module it belongs
+		// to. First and Last, so that the window holds whatever order the plugins were included in.
+		let previous: Module | undefined;
+		target.onPreIgnite(
+			(module) => {
+				previous = __getCurrentModule();
 				__setCurrentModule(module);
-				try {
-					for (const registration of active) {
-						for (const path of registration.paths) {
-							requireModulesInPath(path);
-						}
-					}
-				} finally {
-					__setCurrentModule(undefined);
-				}
+			},
+			{ priority: HookPriority.First },
+		);
+
+		let attached = false;
+		target.onPostIgnite(
+			() => {
+				__setCurrentModule(previous);
+				previous = undefined;
 
 				attach({ timeout: resolved.timeout });
 				attached = true;
@@ -147,19 +102,18 @@ export class TestingPlugin {
 				if (resolved.autoRun) {
 					task.defer(() => Testing.run());
 				}
-			});
+			},
+			{ priority: HookPriority.Last },
+		);
 
-			target.onExtinguished(() => {
-				if (attached) {
-					attached = false;
-					detach();
-				}
-			});
+		target.onExtinguished(() => {
+			if (attached) {
+				attached = false;
+				detach();
+			}
 		});
-	}
+	});
 }
 
-/** A plugin with no folders to load, for tests defined in files the game requires anyway. */
-export function createTestingPlugin(options?: TestingOptions) {
-	return TestingPlugin.createPlugin(options).build();
-}
+/** The plugin with the config file's settings. */
+export const TestingPlugin: PluginDefinition = createTestingPlugin();

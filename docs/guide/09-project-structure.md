@@ -122,8 +122,8 @@ entry the tsconfig needs is `transform`; each package has its own section in the
 | `networking` | `serialization` | Serializes every event and function payload into a buffer with code generated at compile time; see [Networking](06-networking.md#serialization). |
 | `components` | `warningTimeout`, `attributeWarningTimeout`, `streamingMode` | Defaults for components that do not set their own. |
 | `scopes` | `active` | The scopes this build is compiled with; see [Scopes](11-scopes.md). |
-| `testing` | `enabled`, `autoRun`, `timeout`, `entry` | In-place tests: whether the plugin loads them, whether they run at start, the per-test timeout, and the entry a cloud task ignites from; see [Testing in the place](12-testing.md). |
-| `cloud` | `universeId`, `placeId`, `apiKey`, `project` | Where `flamework-cloud` publishes and runs; read by that CLI only, never compiled in; see [Testing in the cloud](../testing/place.md). |
+| `testing` | `activeIn`, `inactiveIn`, `enabled`, `autoRun`, `timeout`, `entry` | In-place tests: the scopes under which the plugin attaches (`["testing"]` by default) and an override, whether tests run at start, the per-test timeout, and the entry a cloud task ignites from; see [Testing in the place](12-testing.md). |
+| `cloud` | `universeId`, `placeId`, `apiKey` | Where `flamework-cloud` publishes and runs; read by that CLI only, never compiled in; see [Testing in the cloud](../testing/place.md). |
 
 The transformer looks for the file in the tsconfig's directory, then in each parent up to the
 package root, so a repository with several places can share one at the root and override it per

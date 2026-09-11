@@ -1,4 +1,5 @@
-import { Flamework } from "@flamework-experimental/core";
+import * as core from "@flamework-experimental/core";
+import { Flamework, Provider, type Module, type OnStart } from "@flamework-experimental/core";
 import * as testing from "@flamework-experimental/testing";
 import {
 	Testing,
@@ -11,6 +12,7 @@ import {
 	scratch,
 	test,
 	type RunResult,
+	type TestingOptions,
 } from "@flamework-experimental/testing";
 import { RunService, Workspace } from "@rbxts/services";
 import { expectArrayEqual, expectDefined, expectEqual, expectFalse, expectThrows, expectTrue, suite } from "../testkit";
@@ -20,6 +22,22 @@ import { expectArrayEqual, expectDefined, expectEqual, expectFalse, expectThrows
  * the attachment probe are internal and stripped from the package's types, hence the cast.
  */
 const internal = testing as unknown as { __resetTests: () => void; __isAttached: () => boolean };
+
+/** The active scopes are compiled in; the specs set them the way the scopes suite does. */
+const scopeHarness = core as unknown as { __setActiveScopes: (scopes: readonly string[] | undefined) => void };
+
+/** What a provider sees as its section's module when it defines tests as it starts. */
+let moduleSeenFromStart: Module | undefined;
+
+@Provider()
+class StartTests implements OnStart {
+	onStart() {
+		defineTests("provider", ({ module }) => {
+			moduleSeenFromStart = module;
+			test("registered from onStart", () => {});
+		});
+	}
+}
 
 function fresh(define: () => void) {
 	internal.__resetTests();
@@ -457,6 +475,51 @@ export = suite("testing", [
 			task.wait();
 			expectTrue(ran, "after it");
 			module.extinguish();
+		},
+	],
+
+	[
+		"a provider defining tests as it starts gets the igniting module as the section's context",
+		() => {
+			if (!RunService.IsServer()) return;
+
+			fresh(() => {});
+			moduleSeenFromStart = undefined;
+			const module = Flamework.createModule()
+				.includePlugin(createTestingPlugin({ enabled: true }))
+				.registerClassProvider(StartTests)
+				.ignite();
+
+			expectEqual(moduleSeenFromStart, module, "the section's module");
+			expectTrue(Testing.run("provider").ok, "its test runs");
+			module.extinguish();
+		},
+	],
+
+	[
+		"without enabled the host follows the scope condition, the testing scope by default, and enabled overrides it",
+		() => {
+			if (!RunService.IsServer()) return;
+
+			fresh(() => {});
+			const attachedWith = (scopes: readonly string[] | undefined, options?: TestingOptions) => {
+				scopeHarness.__setActiveScopes(scopes);
+				try {
+					const module = Flamework.createModule().includePlugin(createTestingPlugin(options)).ignite();
+					const attached = internal.__isAttached();
+					module.extinguish();
+					return attached;
+				} finally {
+					scopeHarness.__setActiveScopes(undefined);
+				}
+			};
+
+			expectFalse(attachedWith(undefined), "no scope active");
+			expectTrue(attachedWith(["testing"]), "the testing scope");
+			expectTrue(attachedWith(["qa"], { activeIn: ["qa", "testing"] }), "any of the listed scopes");
+			expectFalse(attachedWith(["testing"], { inactiveIn: ["testing"] }), "inactiveIn wins");
+			expectFalse(attachedWith(["testing"], { enabled: false }), "enabled false overrides an active scope");
+			expectTrue(attachedWith(undefined, { enabled: true }), "enabled true overrides no scope");
 		},
 	],
 ]);

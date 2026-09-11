@@ -1,45 +1,51 @@
 # 12. Testing in the place
 
 `@flamework-experimental/testing` runs tests inside a real place: in Studio, in a live server, or
-in an Open Cloud task. Tests are plain functions grouped into **sections**, they live in your
-project next to the code they exercise, and nothing about them exists in a build that did not ask
-for them.
+in an Open Cloud task. Tests are plain functions grouped into **sections**; they are defined by
+providers, so they get their dependencies injected like any other code, and they are tied to a
+[scope](11-scopes.md), so a build that did not ask for them does not register them.
 
 ```ts
 // src/server/Tests/economy.ts
+import { OnStart, Provider } from "@flamework-experimental/core";
 import { defer, defineTests, expectEqual, test } from "@flamework-experimental/testing";
-import { Dependency } from "@flamework-experimental/core";
 import { Shop } from "server/services/shop";
 
-defineTests("economy", () => {
-    test("buying deducts the price", () => {
-        const shop = Dependency<Shop>();
-        const wallet = shop.open("test");
-        defer(() => shop.close("test"));
+@Provider({ activeIn: ["testing"] })
+export class EconomyTests implements OnStart {
+    constructor(private readonly shop: Shop) {}
 
-        shop.buy("test", "sword");
-        expectEqual(wallet.balance, 90);
-    });
-});
+    onStart() {
+        defineTests("economy", () => {
+            test("buying deducts the price", () => {
+                const wallet = this.shop.open("test");
+                defer(() => this.shop.close("test"));
+
+                this.shop.buy("test", "sword");
+                expectEqual(wallet.balance, 90);
+            });
+        });
+    }
+}
 ```
 
 ```ts
-// src/server/runtime.server.ts
+// src/server/main.ts
 Flamework.createModule()
-    .includePlugin(LifecyclePlugin)
     .registerProviders("src/server/services")
-    .includePlugin(TestingPlugin.fromPath("src/server/Tests"))
+    .registerProviders("src/server/Tests", { activeIn: ["testing"] })
+    .includePlugin(TestingPlugin)
     .ignite();
 ```
 
 ```jsonc
 // flamework.config.json
-"testing": { "enabled": "${FLAMEWORK_TESTS:-false}" }
+"scopes": { "active": "${FLAMEWORK_SCOPES:-}" }
 ```
 
-With `FLAMEWORK_TESTS=true` in `.env`, the plugin loads every module under `src/server/Tests`
-once the module has ignited, creates `Workspace.FlameworkTests`, and waits. Nothing runs until
-something invokes it:
+With `FLAMEWORK_SCOPES=testing` in `.env`, the test providers register like any other, define
+their sections as they start, and the plugin creates `Workspace.FlameworkTests` and waits.
+Nothing runs until something invokes it:
 
 ```lua
 -- the Studio command bar, a debug UI, or scripts/studio/luau-tests.mjs
@@ -47,27 +53,44 @@ local result = workspace.FlameworkTests:Invoke()          -- every section
 local result = workspace.FlameworkTests:Invoke("economy") -- one section
 ```
 
-With `FLAMEWORK_TESTS` unset the plugin does nothing at all: the test files are never required,
-no instance is made, and a release build carries no test code path.
+Without the scope, the test providers are not registered (with the condition on the folder
+registration, the files are never even required), the plugin is inert, and no instance is made.
+One switch, `FLAMEWORK_SCOPES`, turns on both the tests and the host that runs them.
+
+## Where tests live
+
+`defineTests` is an ordinary function, so anything may call it; a provider's `onStart` is the
+natural place, since by then every provider is constructed and every `onInit` has run. The scope
+condition goes on the class, `@Provider({ activeIn: ["testing"] })`, or on the folder registration,
+`registerProviders("src/server/Tests", { activeIn: ["testing"] })`, or both; these are the usual
+[scope rules](11-scopes.md), nothing testing-specific.
+
+Client tests are the same shape in a client provider, with the plugin included in the client
+module; each realm has its own host.
 
 ## Sections and tests
 
 `defineTests(name, body)` runs `body` at once; inside it, `test(name, fn)` registers a test and
 `beforeEach` / `afterEach` register hooks. `name` may be `undefined`, which is the section
-`"default"`. The same section name in several files is one section, so a feature's tests can sit
-in several files. Sections do not nest, and a name may not contain `/`.
+`"default"`. The same section name from several providers is one section, so a feature's tests
+can sit in several files. Sections do not nest, and a name may not contain `/`.
 
-The body of a section receives a context with the section's `name` and, when the plugin loaded
-the file, the `module` it was loaded for:
+The body receives a context with the section's `name` and the `module` that was igniting when the
+section was defined:
 
 ```ts
 defineTests("components", ({ module }) => {
     test("finds the tagged part", () => {
-        const components = module.resolveDependency<Components>();
+        const components = module!.resolveDependency<Components>();
         // ...
     });
 });
 ```
+
+`onStart` runs on its own thread and the module is only marked current until ignition finishes,
+so define sections before the first yield of `onStart`; a section defined after a `task.wait`
+still registers, but without a module. Few tests need it: a provider already has what it
+injected.
 
 A test may yield (`task.wait`, `WaitForChild`, a signal), and a Promise it returns is awaited.
 Each test runs on its own thread with a timeout, `testing.timeout` seconds (30 by default): one
@@ -127,19 +150,22 @@ server's. A second invoke while a run is in progress raises.
 
 ```jsonc
 "testing": {
-  "enabled": "${FLAMEWORK_TESTS:-false}",  // load test folders and create the instances
-  "autoRun": false,                          // run everything right after ignition
-  "timeout": 30,                             // seconds per test
-  "entry": "src/server/main"                 // ModuleScript exporting ignite(), for cloud tasks
+  "activeIn": ["testing"],     // scopes under which the plugin attaches: any of them; the default
+  "inactiveIn": [],            // scopes under which it never does
+  "enabled": true,             // when set, overrides the two above in either direction
+  "autoRun": false,            // run everything right after ignition
+  "timeout": 30,               // seconds per test
+  "entry": "src/server/main"   // ModuleScript exporting ignite(), for cloud tasks
 }
 ```
 
-`TestingPlugin.createPlugin({ enabled, autoRun, timeout })` overrides the file per plugin, which is
-what a test harness of your own would use. The plugin takes the usual scope condition as its
-second argument, `TestingPlugin.fromPath("src/server/Tests", { activeIn: ["qa"] })`, and
-`fromGlob` / `registerTestsGlob` take a compile-time glob.
+`activeIn` and `inactiveIn` follow the same rules as everywhere else: at least one active name,
+none of the names active, and an empty `activeIn` is no constraint. `TestingPlugin` is the plugin
+with the file's settings; `createTestingPlugin({ ... })` overrides them per plugin, which is what
+a test harness of your own would use.
 
-Never ship a build with `enabled` on: the remote lets any client run the server's tests.
+Never ship a build with tests on: the remote lets any client run the server's tests. Keep the
+`testing` scope out of the release `.env`.
 
 ---
 

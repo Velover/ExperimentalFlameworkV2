@@ -45,7 +45,7 @@ export function run(filter?: TestFilter, options?: RunOptions): string {
 		bindable = Workspace.WaitForChild(BINDABLE_NAME, ENTRY_WAIT);
 		if (bindable === undefined) {
 			error(
-				`ignite() ran but Workspace.${BINDABLE_NAME} did not appear within ${ENTRY_WAIT} seconds: is testing.enabled true, and is the TestingPlugin included in that module?`,
+				`ignite() ran but Workspace.${BINDABLE_NAME} did not appear within ${ENTRY_WAIT} seconds: are tests on in this build (the testing scope in FLAMEWORK_SCOPES, or testing.enabled), and is TestingPlugin included in that module?`,
 				0,
 			);
 		}

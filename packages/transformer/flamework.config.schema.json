@@ -135,12 +135,23 @@
 		"testing": {
 			"type": "object",
 			"additionalProperties": false,
-			"description": "Options for @flamework-experimental/testing. Usually driven by the environment, as \"enabled\": \"${FLAMEWORK_TESTS:-false}\", so that a release build carries no tests.",
+			"description": "Options for @flamework-experimental/testing. Tests are on when the \"testing\" scope is active (scopes.active, usually FLAMEWORK_SCOPES in .env), so a release build carries none; \"activeIn\" renames that scope and \"enabled\" overrides it.",
 			"properties": {
 				"enabled": {
 					"type": "boolean",
-					"description": "Whether the testing plugin does anything: requires the registered test folders, creates Workspace.FlameworkTests (a BindableFunction) and Workspace.FlameworkTestsServer (a RemoteFunction) and answers them. Off, the plugin is inert and no test file is ever loaded.",
-					"default": false
+					"description": "Whether the plugin attaches the host at all: Workspace.FlameworkTests (a BindableFunction) and Workspace.FlameworkTestsServer (a RemoteFunction). Unset, it follows activeIn and inactiveIn, so this is an override for either direction."
+				},
+				"activeIn": {
+					"type": "array",
+					"items": { "type": "string" },
+					"description": "Scopes under which tests are on: the host attaches when at least one is active, the way activeIn works everywhere else (an empty list is no constraint). A string from the environment is split on commas.",
+					"default": ["testing"]
+				},
+				"inactiveIn": {
+					"type": "array",
+					"items": { "type": "string" },
+					"description": "Scopes under which tests stay off, whatever else is active. A string from the environment is split on commas.",
+					"default": []
 				},
 				"autoRun": {
 					"type": "boolean",

@@ -10,7 +10,7 @@ if not runtime then
     error("this place has no ReplicatedStorage.rbxts_include.RuntimeLib: it was not built by roblox-ts")
 end
 if not cloud then
-    error("@flamework-experimental/testing is not in this place: build it with FLAMEWORK_TESTS=true and publish again")
+    error("@flamework-experimental/testing is not in this place: include TestingPlugin in the module testing.entry ignites and publish again")
 end
 -- Through the roblox-ts runtime, the way a compiled module imports another: a plain require leaves
 -- the module without its `_G[script]` hook and it fails on its first import.

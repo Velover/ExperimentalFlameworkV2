@@ -45,7 +45,8 @@ export function ignite() {
     return Flamework.createModule()
         .includePlugin(LifecyclePlugin)
         .registerProviders("src/server/services")
-        .includePlugin(TestingPlugin.fromPath("src/server/Tests"))
+        .registerProviders("src/server/Tests", { activeIn: ["testing"] })
+        .includePlugin(TestingPlugin)
         .ignite();
 }
 ```
@@ -58,8 +59,12 @@ ignite();
 
 ```jsonc
 // flamework.config.json
-"testing": { "enabled": "${FLAMEWORK_TESTS:-false}", "entry": "src/server/main" }
+"scopes":  { "active": "${FLAMEWORK_SCOPES:-}" },
+"testing": { "entry": "src/server/main" }
 ```
+
+The place has to be built with the `testing` scope active (`FLAMEWORK_SCOPES=testing` in `.env`),
+or the test providers are not registered and the plugin stays inert.
 
 Client tests cannot run in the cloud; there is no client. They run in Studio, through the same
 bindable, with `scripts/studio/luau-tests.mjs --mode client`.
@@ -132,6 +137,7 @@ the suite more often than every 12 seconds is throttled.
 | `403 PERMISSION_DENIED ... luau-execution-session ... missing` | The key lacks the task scopes for this experience. |
 | `409 Conflict: Save failed. Server is busy` on publish | The place is open in Roblox Studio. Close it; the upload succeeds at once afterwards. |
 | `429` | The five-per-minute creation limit. |
-| Task `FAILED` with `@flamework-experimental/testing is not in this place` | The build was made with `FLAMEWORK_TESTS` unset, or the package is not installed. |
+| Task `FAILED` with `@flamework-experimental/testing is not in this place` | The package is not installed, or nothing the entry module imports includes `TestingPlugin`. |
+| Task `FAILED` with `Workspace.FlameworkTests did not appear` | The build was made without the `testing` scope active (`FLAMEWORK_SCOPES` in `.env`), so the plugin stayed inert. |
 | Task `FAILED` with `... has no testing.entry` | The game's entry is a Script; give the config the ModuleScript that exports `ignite()`. |
 | Task `COMPLETE` but `ok` is false with `unknown` names | A `--sections` entry matched no section or test. |
