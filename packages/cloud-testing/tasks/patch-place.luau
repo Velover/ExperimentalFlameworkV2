@@ -1,0 +1,196 @@
+--[[
+	Lays a Rojo build over a copy of the original place, following the plan `flamework-cloud`
+	computed from the project file, and writes the result as a new place file.
+
+	  lune run patch-place.luau <original.rbxl> <built.rbxl> <out.rbxl> <plan.json>
+
+	Each operation names an instance by its path from the DataModel:
+	  replace  the build's instance takes the place of the original's, whatever was under it
+	  ensure   the original's instance is kept; when the original has none, the build's is taken
+	Then the properties the project file sets are applied, typed from the reflection database.
+]]
+local fs = require("@lune/fs")
+local process = require("@lune/process")
+local roblox = require("@lune/roblox")
+local serde = require("@lune/serde")
+
+local originalPath, builtPath, outPath, planPath = table.unpack(process.args)
+if not planPath then
+	error("usage: patch-place.luau <original.rbxl> <built.rbxl> <out.rbxl> <plan.json>", 0)
+end
+
+local original = roblox.deserializePlace(fs.readFile(originalPath))
+local built = roblox.deserializePlace(fs.readFile(builtPath))
+local plan = serde.decode("json", fs.readFile(planPath))
+local database = roblox.getReflectionDatabase()
+
+local replaced, added, kept, propertiesSet = 0, 0, 0, 0
+local skipped = {}
+--- One line per change, so what the patch did to the original is on record.
+local changes = {}
+
+local function note(kind, path, detail)
+	table.insert(changes, string.format("  %-8s %s%s", kind, table.concat(path, "."), detail and (" " .. detail) or ""))
+end
+
+--- Follows a path from a DataModel; the first segment is a service.
+local function find(root, path, create)
+	local node = root
+	for index, name in path do
+		local child
+		if index == 1 then
+			local ok, service = pcall(function()
+				return root:GetService(name)
+			end)
+			child = ok and service or root:FindFirstChild(name)
+		else
+			child = node:FindFirstChild(name)
+		end
+		if child == nil then
+			return nil, node
+		end
+		node = child
+	end
+	return node
+end
+
+--- The property as the reflection database describes it, looked for up the class hierarchy:
+--- `Anchored` is BasePart's, whatever kind of part asks.
+local function findProperty(className, propertyName)
+	local class = database:GetClass(className)
+	while class ~= nil do
+		local property = class.Properties[propertyName]
+		if property ~= nil then
+			return property
+		end
+		class = class.Superclass and database:GetClass(class.Superclass) or nil
+	end
+	return nil
+end
+
+--- Converts a project-file property value to what the property's datatype wants.
+local function convert(className, propertyName, value)
+	local property = findProperty(className, propertyName)
+	if property == nil then
+		return nil, "not a property the reflection database knows"
+	end
+
+	local datatype = tostring(property.Datatype)
+	-- The explicit form: { "Vector3": [1, 2, 3] }, { "Enum": "Grass" }.
+	if type(value) == "table" and not value[1] then
+		local key, inner = next(value)
+		if key ~= nil then
+			value = inner
+		end
+	end
+
+	if datatype == "Bool" then
+		if type(value) ~= "boolean" then return nil, "expected a boolean" end
+		return value
+	elseif datatype == "Float32" or datatype == "Float64" or datatype == "Int32" or datatype == "Int64" or datatype == "Float" or datatype == "Int" then
+		if type(value) ~= "number" then return nil, "expected a number" end
+		return value
+	elseif datatype == "String" or datatype == "Content" or datatype == "ContentId" then
+		if type(value) ~= "string" then return nil, "expected a string" end
+		return value
+	elseif datatype:sub(1, 5) == "Enum." then
+		local enumName = datatype:sub(6)
+		local enum = roblox.Enum[enumName]
+		if enum == nil then return nil, "unknown enum " .. enumName end
+		local item = type(value) == "string" and enum[value] or nil
+		if item == nil then return nil, "no item '" .. tostring(value) .. "' in Enum." .. enumName end
+		return item
+	elseif datatype == "Vector3" then
+		if type(value) ~= "table" or #value ~= 3 then return nil, "expected [x, y, z]" end
+		return roblox.Vector3.new(value[1], value[2], value[3])
+	elseif datatype == "Vector2" then
+		if type(value) ~= "table" or #value ~= 2 then return nil, "expected [x, y]" end
+		return roblox.Vector2.new(value[1], value[2])
+	elseif datatype == "Color3" then
+		if type(value) ~= "table" or #value ~= 3 then return nil, "expected [r, g, b]" end
+		return roblox.Color3.new(value[1], value[2], value[3])
+	end
+
+	return nil, "datatype " .. datatype .. " is not handled here"
+end
+
+local function applyProperties(instance, path, properties)
+	for name, value in properties do
+		local converted, why = convert(instance.ClassName, name, value)
+		local label = table.concat(path, ".") .. "." .. name
+		if converted == nil then
+			table.insert(skipped, label .. " (" .. why .. ")")
+			continue
+		end
+
+		local ok, err = pcall(function()
+			instance[name] = converted
+		end)
+		if ok then
+			propertiesSet += 1
+			note("set", path, name .. " = " .. tostring(converted))
+		else
+			table.insert(skipped, label .. " (" .. tostring(err) .. ")")
+		end
+	end
+end
+
+for _, op in plan do
+	local path = op.path
+	local fromBuild = find(built, path)
+	local existing, parent = find(original, path)
+
+	if op.kind == "replace" then
+		if fromBuild == nil then
+			table.insert(skipped, table.concat(path, ".") .. " (not in the build)")
+			continue
+		end
+		if parent == nil and existing ~= nil then
+			parent = existing.Parent
+		end
+		if parent == nil then
+			table.insert(skipped, table.concat(path, ".") .. " (its parent is in neither place)")
+			continue
+		end
+
+		local descendants = #fromBuild:GetDescendants()
+		if existing ~= nil then
+			existing:Destroy()
+			replaced += 1
+			note("replaced", path, string.format("(%d instances from the build)", descendants + 1))
+		else
+			added += 1
+			note("added", path, string.format("(%d instances from the build)", descendants + 1))
+		end
+		local copy = fromBuild:Clone()
+		copy.Parent = parent
+		existing = copy
+	elseif op.kind == "ensure" then
+		if existing ~= nil then
+			kept += 1
+		elseif fromBuild ~= nil and parent ~= nil then
+			local copy = fromBuild:Clone()
+			copy.Parent = parent
+			existing = copy
+			added += 1
+			note("added", path, "(declared in the project file, missing from the original)")
+		else
+			table.insert(skipped, table.concat(path, ".") .. " (in neither place)")
+			continue
+		end
+	end
+
+	if existing ~= nil and next(op.properties) ~= nil then
+		applyProperties(existing, path, op.properties)
+	end
+end
+
+fs.writeFile(outPath, roblox.serializePlace(original))
+
+for _, line in changes do
+	print(line)
+end
+for _, entry in skipped do
+	print("  skipped  " .. entry)
+end
+print(string.format("patched: %d replaced, %d added, %d kept as the original had them, %d properties set, %d skipped", replaced, added, kept, propertiesSet, #skipped))

@@ -1,144 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { join } from "node:path";
 
-import { main, parseArgs, UsageError, type CliDeps } from "../src/cli.ts";
-import type { CloudSettings } from "../src/config.ts";
-import type { FetchLike } from "../src/openCloud.ts";
-
-const SECRET = "secret-key-that-must-never-be-printed";
-const UNIVERSE = "10765968722";
-const PLACE = "108973151455286";
-const TASKS_DIR = join(import.meta.dir, "..", "tasks");
-
-const ENV = {
-	TESTING_PLACE_API_KEY: SECRET,
-	UNIVERSE_ID: UNIVERSE,
-	PLACE_ID: PLACE,
-};
-
-const TASK_PATH = `universes/${UNIVERSE}/places/${PLACE}/versions/4/luau-execution-sessions/s/tasks/t`;
-
-interface Call {
-	url: string;
-	init: RequestInit;
-}
-
-interface Harness {
-	code: number;
-	out: string;
-	err: string;
-	all: string;
-	calls: Call[];
-	written: Record<string, string>;
-}
-
-function json(body: unknown, status = 200): Response {
-	return new Response(JSON.stringify(body), { status });
-}
-
-async function runCli(
-	argv: string[],
-	options: {
-		responses?: Response[];
-		files?: Record<string, string>;
-		env?: Record<string, string | undefined>;
-		/** What the config reader answers; by default nothing, so no real .env is read. */
-		settings?: Partial<CloudSettings>;
-	} = {},
-): Promise<Harness> {
-	const out: string[] = [];
-	const err: string[] = [];
-	const calls: Call[] = [];
-	const written: Record<string, string> = {};
-	const queue = [...(options.responses ?? [])];
-	const files = options.files ?? {};
-
-	// Files given up front, plus whatever the CLI wrote during the run (build/version.json).
-	const find = (path: string): string | undefined => {
-		const normalized = path.replaceAll("\\", "/");
-		for (const [suffix, content] of [...Object.entries(files), ...Object.entries(written)]) {
-			if (normalized.endsWith(suffix)) return content;
-		}
-		return undefined;
-	};
-
-	const fetchImpl: FetchLike = async (url, init = {}) => {
-		calls.push({ url, init });
-		const next = queue.shift();
-		if (!next) throw new Error(`unexpected fetch call: ${url}`);
-		return next;
-	};
-
-	const deps: CliDeps = {
-		fetch: fetchImpl,
-		sleep: async () => {},
-		readFile: async () => new Uint8Array([0x89, 0x01]).buffer,
-		readTextFile: async (path) => {
-			const content = find(path);
-			if (content === undefined) {
-				// fall through to the real tasks/ files
-				return await Bun.file(path).text();
-			}
-			return content;
-		},
-		writeTextFile: async (path, text) => {
-			written[path.replaceAll("\\", "/")] = text;
-		},
-		exists: async (path) => find(path) !== undefined,
-		log: (message) => out.push(message),
-		error: (message) => err.push(message),
-		env: options.env ?? ENV,
-		cwd: join(import.meta.dir, "..", "fixture-cwd"),
-		tasksDir: TASKS_DIR,
-		now: () => new Date("2026-09-11T12:00:00.000Z"),
-		loadSettings: () => ({ env: {}, ...options.settings }),
-	};
-
-	const code = await main(argv, deps);
-	return {
-		code,
-		out: out.join("\n"),
-		err: err.join("\n"),
-		all: [...out, ...err].join("\n"),
-		calls,
-		written,
-	};
-}
-
-function resultJson(overrides: Record<string, unknown> = {}): string {
-	return JSON.stringify({
-		ok: true,
-		realm: "server",
-		passed: 2,
-		failed: 0,
-		durationMs: 12,
-		sections: [
-			{
-				name: "economy",
-				passed: 2,
-				failed: 0,
-				tests: [
-					{ name: "buys", ok: true, durationMs: 1 },
-					{ name: "sells", ok: true, durationMs: 2 },
-				],
-			},
-		],
-		unknown: [],
-		...overrides,
-	});
-}
-
-/** create -> poll(COMPLETE) -> logs */
-function happyPath(results: string[], logLines: string[] = []): Response[] {
-	return [
-		json({ path: TASK_PATH, state: "QUEUED" }),
-		json({ path: TASK_PATH, state: "COMPLETE", output: { results } }),
-		json({
-			luauExecutionSessionTaskLogs: [{ messages: logLines }],
-			nextPageToken: "",
-		}),
-	];
-}
+import { parseArgs, UsageError } from "../src/cli.ts";
+import { PLACE, SECRET, TASK_PATH, UNIVERSE, happyPath, json, resultJson, runCli, type Harness } from "./harness.ts";
 
 describe("argument parsing", () => {
 	test("publish and test take the place file as an argument", () => {
@@ -348,7 +211,7 @@ describe("run", () => {
 
 	test("a missing key is reported without a stack", async () => {
 		const run = await runCli(["run"], {
-			env: { UNIVERSE_ID: UNIVERSE, PLACE_ID: PLACE },
+			env: { TESTING_UNIVERSE_ID: UNIVERSE, TESTING_PLACE_ID: PLACE },
 		});
 		expect(run.code).toBe(1);
 		expect(run.err).toContain("no Open Cloud API key");
@@ -389,7 +252,7 @@ describe("publish", () => {
 	test("--key, then the shell, then .env supply the key", async () => {
 		const upload = () => [json({ versionNumber: 5 })];
 		const files = { "build/place.rbxl": "binary" };
-		const ids = { UNIVERSE_ID: UNIVERSE, PLACE_ID: PLACE };
+		const ids = { TESTING_UNIVERSE_ID: UNIVERSE, TESTING_PLACE_ID: PLACE };
 		const keyOf = (run: Harness) => (run.calls[0]!.init.headers as Record<string, string>)["x-api-key"];
 
 		const flag = await runCli(["publish", "build/place.rbxl", "--key", "flag-key"], {

@@ -48,7 +48,7 @@ their sections as they start, and the plugin creates `Workspace.FlameworkTests` 
 Nothing runs until something invokes it:
 
 ```lua
--- the Studio command bar, a debug UI, or scripts/studio/luau-tests.mjs
+-- the Studio command bar, a debug UI, or `flamework-cloud studio run` from a terminal
 local result = workspace.FlameworkTests:Invoke()          -- every section
 local result = workspace.FlameworkTests:Invoke("economy") -- one section
 ```

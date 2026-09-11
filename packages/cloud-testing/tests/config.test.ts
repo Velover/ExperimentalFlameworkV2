@@ -18,8 +18,8 @@ describe("loadCloudSettings", () => {
 		const dir = scratch({
 			"flamework.config.json": JSON.stringify({
 				cloud: {
-					universeId: "10765968722",
-					placeId: "108973151455286",
+					testingUniverseId: "10765968722",
+					testingPlaceId: "108973151455286",
 					apiKey: "${FLAMEWORK_CLOUD_TEST_KEY:-}",
 				},
 			}),
@@ -27,8 +27,8 @@ describe("loadCloudSettings", () => {
 		});
 		try {
 			const settings = loadCloudSettings(dir, {});
-			expect(settings.universeId).toBe("10765968722");
-			expect(settings.placeId).toBe("108973151455286");
+			expect(settings.testingUniverseId).toBe("10765968722");
+			expect(settings.testingPlaceId).toBe("108973151455286");
 			expect(settings.apiKey).toBe("from-dotenv");
 			expect(settings.configPath).toBe(join(dir, "flamework.config.json"));
 		} finally {
@@ -55,8 +55,9 @@ describe("loadCloudSettings", () => {
 		try {
 			const settings = loadCloudSettings(dir, {});
 			expect(settings).toEqual({
-				universeId: undefined,
-				placeId: undefined,
+				testingUniverseId: undefined,
+				testingPlaceId: undefined,
+				originalPlace: undefined,
 				apiKey: undefined,
 				configPath: undefined,
 				env: {},
@@ -78,11 +79,11 @@ describe("loadCloudSettings", () => {
 
 	test("a config file found above the working directory is used", () => {
 		const dir = scratch({
-			"flamework.config.json": JSON.stringify({ cloud: { placeId: "42" } }),
+			"flamework.config.json": JSON.stringify({ cloud: { testingPlaceId: "42" } }),
 			"src/server/.keep": "",
 		});
 		try {
-			expect(loadCloudSettings(join(dir, "src", "server"), {}).placeId).toBe("42");
+			expect(loadCloudSettings(join(dir, "src", "server"), {}).testingPlaceId).toBe("42");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

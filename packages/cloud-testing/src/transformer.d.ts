@@ -3,9 +3,10 @@
 // every place's program. This is the one function and the one shape the CLI uses from it.
 declare module "@flamework-experimental/transformer/out/util/projectConfig.js" {
 	export interface CloudConfig {
-		universeId?: string;
-		placeId?: string;
+		testingUniverseId?: string;
+		testingPlaceId?: string;
 		apiKey?: string;
+		originalPlace?: string;
 	}
 
 	export interface LoadedProjectConfig {

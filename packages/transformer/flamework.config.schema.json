@@ -173,19 +173,23 @@
 		"cloud": {
 			"type": "object",
 			"additionalProperties": false,
-			"description": "Where @flamework-experimental/cloud-testing publishes the place and runs its tests. Read by that CLI only; never compiled into the place. Keep the key in the environment: \"apiKey\": \"${ROBLOX_API_KEY:-}\".",
+			"description": "Where @flamework-experimental/cloud-testing publishes the build and runs its tests: a testing place, never the original. Read by that CLI only; never compiled into the place. Keep the key in the environment: \"apiKey\": \"${ROBLOX_API_KEY:-}\".",
 			"properties": {
-				"universeId": {
+				"testingUniverseId": {
 					"type": "string",
-					"description": "The experience's universe id, from the Creator Dashboard URL (game.GameId in Studio)."
+					"description": "The testing experience's universe id, from the Creator Dashboard URL (game.GameId in Studio)."
 				},
-				"placeId": {
+				"testingPlaceId": {
 					"type": "string",
-					"description": "The place to publish to and run tests in. Never the live place."
+					"description": "The place to publish to, run tests in, and open in Studio. Never the original place."
 				},
 				"apiKey": {
 					"type": "string",
-					"description": "An Open Cloud API key with universe-places:write and universe.place.luau-execution-session:read and :write for the experience. Reference the environment, \"${ROBLOX_API_KEY:-}\", so the key is never in the file."
+					"description": "An Open Cloud API key with universe-places:write and universe.place.luau-execution-session:read and :write for the testing experience. Reference the environment, \"${ROBLOX_API_KEY:-}\", so the key is never in the file."
+				},
+				"originalPlace": {
+					"type": "string",
+					"description": "A copy of the original place (File > Save to File in Studio), relative to this file. When set, the CLI lays the Rojo build over a copy of it before publishing, following the project file, so the tests see assets that exist only in the original. Needs lune."
 				}
 			}
 		}

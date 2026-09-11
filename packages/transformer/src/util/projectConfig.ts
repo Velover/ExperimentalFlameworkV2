@@ -85,10 +85,14 @@ export interface RuntimeConfig {
  * that CLI only: it is not a runtime section and never reaches the place.
  */
 export interface CloudConfig {
-	universeId?: string;
-	placeId?: string;
+	/** The experience the testing place is in; named so nothing confuses it with the original. */
+	testingUniverseId?: string;
+	/** The place tests are published to and run in. Never the original place. */
+	testingPlaceId?: string;
 	/** Usually `"${ROBLOX_API_KEY:-}"`, so that the key stays in the environment. */
 	apiKey?: string;
+	/** A copy of the original place the build is laid over before publishing, relative to the config file. */
+	originalPlace?: string;
 }
 
 /** The whole `flamework.config.json`. */

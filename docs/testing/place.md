@@ -67,11 +67,12 @@ The place has to be built with the `testing` scope active (`FLAMEWORK_SCOPES=tes
 or the test providers are not registered and the plugin stays inert.
 
 Client tests cannot run in the cloud; there is no client. They run in Studio, through the same
-bindable, with `scripts/studio/luau-tests.mjs --mode client`.
+bindable: `flamework-cloud studio run --realm client` (see [Studio](#studio) below).
 
 ## Setup
 
-1. An experience and a place to test in. Use a place of its own, never the live one.
+1. A *testing* experience and place. Never the original: everything the CLI takes is named
+   `testing...` so the two cannot be confused.
 2. An API key from the Creator Dashboard with, for that experience, `universe-places:write`
    (publishing) and `universe.place.luau-execution-session:read` and `:write` (tasks). Two
    settings cause most 401s: an IP allowlist narrower than `0.0.0.0/0`, and an expiry date.
@@ -82,14 +83,16 @@ bindable, with `scripts/studio/luau-tests.mjs --mode client`.
    ROBLOX_API_KEY=...
    ```
 
-4. The place in `flamework.config.json`, or as `UNIVERSE_ID` and `PLACE_ID` in the same
-   `.env.local`. This section is read by the CLI only and is never compiled into the place:
+4. The testing place in `flamework.config.json`, or as `TESTING_UNIVERSE_ID` and
+   `TESTING_PLACE_ID` in the same `.env.local`. This section is read by the CLI only and is
+   never compiled into the place:
 
    ```jsonc
    "cloud": {
-     "universeId": "10765968722",
-     "placeId": "108973151455286",
-     "apiKey": "${ROBLOX_API_KEY}"
+     "testingUniverseId": "10765968722",
+     "testingPlaceId": "108973151455286",
+     "apiKey": "${ROBLOX_API_KEY}",
+     "originalPlace": "places/original.rbxl"   // optional, see below
    }
    ```
 
@@ -105,11 +108,13 @@ bunx flamework-cloud test place.rbxl            # publish, then run
 bunx flamework-cloud run --list                 # what would run
 bunx flamework-cloud run --code "return 1 + 1"  # any Luau, for a hypothesis about a real server
 bunx flamework-cloud probe                      # what the task environment reports
+bunx flamework-cloud patch place.rbxl --original original.rbxl   # the build laid over a copy of the original
 ```
 
-The key and the ids come from flags (`--key`, `--universe`, `--place`), else the shell, else
-`.env` and `.env.local` next to the config file, else the `cloud` section; a `.env.local` with
-`ROBLOX_API_KEY`, `UNIVERSE_ID` and `PLACE_ID` needs no config section at all.
+The key and the ids come from flags (`--key`, `--testing-universe`, `--testing-place`), else
+the shell, else `.env` and `.env.local` next to the config file, else the `cloud` section; a
+`.env.local` with `ROBLOX_API_KEY`, `TESTING_UNIVERSE_ID` and `TESTING_PLACE_ID` needs no
+config section at all.
 
 `run` prints every log line the task produced, then a summary per section with each failure's
 message, and exits non-zero when a test failed, a filter entry matched nothing, or the task
@@ -117,6 +122,41 @@ itself failed. `--json` prints the raw result table instead.
 
 A version is published as `Saved`, which uploads it and gives it a number without making it live,
 and the tests run against that number. Nothing here publishes to players.
+
+## The original place's assets
+
+A Rojo build holds the code and whatever the project file declares, and nothing a game keeps only
+in its place: models, terrain, sounds, the map. Tests that need those run against a copy of the
+original with the build laid over it. Save one from Studio (File > Save to File), name it with
+`--original`, `ORIGINAL_PLACE` or `cloud.originalPlace`, and `publish` and `test` patch it
+before uploading; `patch` writes the result without uploading.
+
+What the patch replaces is read from the project file, so it is exactly what a build changes: a
+node with `$path` is replaced by the build's (the fresh code, whatever the original had under that
+name), a node with only `$className` keeps the original's instance and everything in it, and
+`$properties` are applied. Everything else in the original stays. The patch prints each change.
+It runs under Lune; without `lune` on the path a command given an original stops before
+uploading anything.
+
+## Studio
+
+The same CLI opens the testing place in Roblox Studio on this machine and runs the tests there,
+which is how the client's sections run and how a run can be watched:
+
+```console
+bunx flamework-cloud studio open                # from the cloud; or: studio open place.patched.rbxl
+bunx flamework-cloud studio run                 # the server's sections, in a play session it starts and stops
+bunx flamework-cloud studio run --realm client  # the client's
+bunx flamework-cloud studio exec --code "return workspace.FlameworkTests:Invoke('economy').passed" --realm server
+bunx flamework-cloud studio status | play | stop | close
+```
+
+It drives Studio through Roblox's own MCP proxy, so "MCP server" has to be enabled in Studio's
+Assistant settings; a window without it is not listed. The commands drive the window with the
+testing place open, or the only one with a local place file open (what `studio open <file>`
+leaves), or whatever `--studio <name|id>` names, and say so when nothing matches. The place has to be closed in Studio while `publish`
+runs, since Roblox refuses to save a version of an open place.
+
 
 ## Limits
 

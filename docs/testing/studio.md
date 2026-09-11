@@ -91,13 +91,20 @@ the place.
 4. The template's `flamework.config.json` enables `networking.serialization`, so every `[FWTEST]`
    networking check runs over serialized payloads; flip it to `false` and rebuild to test the plain
    path. The runtime sections it declares reach the packages through `include/flamework/config.json`.
-5. The place needs `ReplicatedStorage.Assets` and `SoundService.Sounds`; the template's
-   `default.project.json` creates both. Without them two shared modules `WaitForChild` forever
-   at require time and ignition never finishes -- the symptom is an "Infinite yield possible"
-   warning and no `[FWTEST]` lines at all. A place made from scratch hits this until Rojo has
-   synced the project file once.
+5. The place needs `ReplicatedStorage.Assets` and `SoundService.Sounds`, which the template's
+   project file deliberately does not declare: they stand for assets that exist only in the
+   original place, and come from `original.rbxl` laid over the build (`bun run original` makes
+   one; `ORIGINAL_PLACE` in `.env` names it). Without them two shared modules `WaitForChild`
+   forever at require time and ignition never finishes -- the symptom is an "Infinite yield
+   possible" warning and no `[FWTEST]` lines at all. A Rojo-served session needs them added by
+   hand, or the patched place opened instead: `flamework-cloud studio open place.patched.rbxl`.
 
 ## Running the generalized tests
+
+For the in-place specs (`defineTests` sections) the CLI does this itself: `flamework-cloud studio
+open`, then `flamework-cloud studio run [--realm client]`, starting and stopping the play session
+around the run; see [Testing in the cloud](place.md#studio). What follows is the older battletest of
+`[FWTEST]` lines the template's providers print on start, which the same proxy drives.
 
 `scripts/studio/run-studio-tests.mjs` drives Studio through the MCP proxy: it starts a play session,
 waits for the providers, prints every `[FWTEST]` line, stops the session and exits non-zero on a

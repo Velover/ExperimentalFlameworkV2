@@ -6,15 +6,19 @@ import { dirname, join, resolve } from "node:path";
 import { loadProjectConfig } from "@flamework-experimental/transformer/out/util/projectConfig.js";
 
 export interface CloudSettings {
-	universeId?: string;
-	placeId?: string;
+	/** The experience the testing place is in. Named so nothing confuses it with the original. */
+	testingUniverseId?: string;
+	/** The place tests are published to and run in. Never the original place. */
+	testingPlaceId?: string;
 	apiKey?: string;
+	/** A copy of the original place to lay the build over, resolved against the config file's directory. */
+	originalPlace?: string;
 	/** Where the settings were read from, when a file was found. */
 	configPath?: string;
 	/**
 	 * `.env`, then `.env.local`, then the process environment, later ones winning: the CLI reads
-	 * its own variables (ROBLOX_API_KEY, UNIVERSE_ID, PLACE_ID, PROJECT) from here, so a `.env`
-	 * works without the config file referencing it.
+	 * its own variables (ROBLOX_API_KEY, TESTING_UNIVERSE_ID, TESTING_PLACE_ID, ORIGINAL_PLACE)
+	 * from here, so a `.env` works without the config file referencing it.
 	 */
 	env: Record<string, string>;
 }
@@ -27,12 +31,17 @@ export interface CloudSettings {
 export function loadCloudSettings(cwd: string, env: Record<string, string | undefined>): CloudSettings {
 	const loaded = loadProjectConfig(cwd, packageRoot(cwd), {}, env as Record<string, string>);
 	const cloud = loaded.project.cloud ?? {};
+	const base = loaded.configPath !== undefined ? dirname(loaded.configPath) : cwd;
 
 	return {
-		universeId: cloud.universeId,
-		placeId: cloud.placeId,
+		testingUniverseId: cloud.testingUniverseId,
+		testingPlaceId: cloud.testingPlaceId,
 		// An empty string is what `${ROBLOX_API_KEY:-}` gives when the variable is not set.
 		apiKey: cloud.apiKey !== undefined && cloud.apiKey !== "" ? cloud.apiKey : undefined,
+		originalPlace:
+			cloud.originalPlace !== undefined && cloud.originalPlace !== ""
+				? resolve(base, cloud.originalPlace)
+				: undefined,
 		configPath: loaded.configPath,
 		env: loaded.env,
 	};
