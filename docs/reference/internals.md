@@ -743,3 +743,11 @@ it before it ends.
   README now documents the monorepo's development workflow rather than the framework.
 - The plugin host loads plugins with `require` at transform time. A plugin that throws takes the
   build with it, which is intended, but there is no isolation if one misbehaves.
+- **The harness announces a tag's removal after the instance has left, where the engine announces
+  it during the change.** `instance.luau`'s `Destroy` clears the parent and then reports the tags
+  gone, so a handler reading `IsDescendantOf(game)` sees the tree it will be rather than the tree it
+  was. A real place is the other way round, which hid a components bug from every Lune spec until
+  the in-place suite found it (see [testing in the place](../guide/12-testing.md)). Treat anything
+  that reads instance state from inside a CollectionService handler as untested here.
+- `resolveRbxPath` walks with `WaitForChild` and no timeout, so a registered path naming a folder
+  that does not exist stalls ignition with an "Infinite yield possible" warning instead of raising.
