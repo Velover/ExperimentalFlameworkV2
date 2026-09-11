@@ -10,11 +10,11 @@ own `node_modules` and a stub Roblox. Three classes of bug only show up in a rea
 - **Consumer experience**: does a real roblox-ts game compile, sync through Rojo and start.
 
 This page describes the battletest that covers them. It was first run on 2026-09-05 against the
-`CommisionTemplate` project and found three bugs the Lune suites could not (recorded at the end).
+`TestingPlace` project and found three bugs the Lune suites could not (recorded at the end).
 
 ## What the battletest consists of
 
-The template project (`E:/Projects/TS/Flamework/CommisionTemplate`) carries a set of **test
+The template project (`E:/Projects/TS/Flamework/TestingPlace`) carries a set of **test
 providers and components** under `src/{server,client,shared}/Features/Testing`. They run once on
 start and print one line per check:
 
@@ -43,19 +43,19 @@ the place.
    Assistant settings. The MCP proxy is `%LOCALAPPDATA%\Roblox\Versions\version-*\StudioMCP.exe`;
    the first proxy becomes a hub on a local port and every later proxy joins it, so any number of
    clients can talk to the same Studio.
-2. **Rojo** serving the template (`rojo serve` in `CommisionTemplate`, default port 34872) and the
+2. **Rojo** serving the template (`rojo serve` in `TestingPlace`, default port 34872) and the
    Rojo plugin connected in that Studio window.
 3. **The template built against the packages under test.** From this repository:
 
    ```console
    bun run build
-   cd packages/core       && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
-   cd ../components       && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
-   cd ../networking       && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
-   cd ../testing          && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
-   cd ../transformer      && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
-   cd ../cloud-testing    && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
-   cd ../../../CommisionTemplate
+   cd packages/core       && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
+   cd ../components       && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
+   cd ../networking       && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
+   cd ../testing          && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
+   cd ../transformer      && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
+   cd ../cloud-testing    && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
+   cd ../../../TestingPlace
    bun remove @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking @flamework-experimental/testing @flamework-experimental/transformer @flamework-experimental/cloud-testing
    bun add ./vendor/flamework-v2/flamework-experimental-core-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-components-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-networking-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-testing-2.0.0-alpha.0.tgz
    bun add -d ./vendor/flamework-v2/flamework-experimental-transformer-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-cloud-testing-2.0.0-alpha.0.tgz
@@ -85,7 +85,7 @@ the place.
    watch alive:
 
    ```console
-   cp -r packages/components/out/. ../CommisionTemplate/node_modules/@flamework-experimental/components/out/
+   cp -r packages/components/out/. ../TestingPlace/node_modules/@flamework-experimental/components/out/
    ```
 
 4. The template's `flamework.config.json` enables `networking.serialization`, so every `[FWTEST]`
