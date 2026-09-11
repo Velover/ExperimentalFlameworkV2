@@ -7,6 +7,7 @@ import { buildGuardFromTypeWithDedup } from "../util/functions/buildGuardFromTyp
 import { getTypeUid } from "../util/uid";
 import { NodeMetadata } from "../classes/nodeMetadata";
 import { buildPathGlobIntrinsic, buildPathIntrinsic } from "./macros/intrinsics/paths";
+import { buildEnvIntrinsic } from "./macros/intrinsics/env";
 import { validateParameterConstIntrinsic } from "./macros/intrinsics/parameters";
 import {
 	transformNetworkingMiddlewareIntrinsic,
@@ -310,6 +311,15 @@ function buildIntrinsicMacro(state: TransformState, node: ts.Node, macro: UserMa
 		}
 
 		return buildPathIntrinsic(state, node, pathType);
+	}
+
+	if (macro.id === "env") {
+		const [nameType, fallbackType] = macro.inputs;
+		if (!nameType) {
+			throw new Error(`Invalid intrinsic usage`);
+		}
+
+		return buildEnvIntrinsic(state, node, nameType, fallbackType);
 	}
 
 	if (macro.id === "obfuscate-obj") {

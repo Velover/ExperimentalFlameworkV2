@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { compileFixture, emitted, normalize } from "./compile";
+import { compileFixture, compileProbe, emitted, normalize } from "./compile";
 
 beforeAll(() => {
 	const result = compileFixture();
@@ -50,5 +50,30 @@ describe("guard generation", () => {
 describe("identifier generation", () => {
 	test("uses the configured hash prefix", () => {
 		expect(emitted("nested")).toContain("fw:nested@Target");
+	});
+});
+
+describe("Flamework.env", () => {
+	test("inlines a variable from .env, and a fallback for one that is not set", () => {
+		// `FLAMEWORK_FIXTURE_SCOPES` is in the fixture's .env; `FLAMEWORK_FIXTURE_CHANNEL` is not.
+		const source = normalize(emitted("env"));
+
+		expect(source).toContain('local scopes = "fixture, demo"');
+		expect(source).toContain('local channel = "dev"');
+		expect(source).not.toContain("Flamework.env");
+	});
+
+	test("fails the build at the call site for a variable that is not set and has no fallback", () => {
+		const result = compileProbe(
+			"envMissing",
+			`import { Flamework } from "@flamework/core";
+
+export const missing = Flamework.env("FLAMEWORK_FIXTURE_MISSING");
+`,
+		);
+
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("$FLAMEWORK_FIXTURE_MISSING is not set");
+		expect(result.output).toContain("was given no fallback");
 	});
 });

@@ -161,6 +161,10 @@ OBFUSCATE=false
 FLAMEWORK_SCOPES=components,collections
 ```
 
+The same environment is what `Flamework.env("NAME", fallback?)` inlines into code, as a string
+literal, at compile time. Use it for deployment values, never for secrets: the value is written
+into the emitted Luau. See [Macros](07-macros.md#what-you-already-used).
+
 ### Watching
 
 The file and the environment are read once, when `rbxtsc` starts, and a watcher keeps what it

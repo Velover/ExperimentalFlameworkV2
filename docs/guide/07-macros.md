@@ -13,8 +13,16 @@ an error.**
 Flamework.id<Shop>();                     // the type's generated identifier, as a string
 Flamework.implements<OnTick>(value);      // does this object implement the interface?
 Flamework.createGuard<{ x: number }>();   // a `t` guard generated from the type
+Flamework.env("BUILD_CHANNEL", "dev");    // an environment variable, inlined as a string literal
 Modding.inspect<Array<"a" | "b">>();      // ["a", "b"] at runtime
 ```
+
+`Flamework.env` reads the variable from `.env`, `.env.local` and the process environment when the
+compiler starts (see [values from the environment](09-project-structure.md#values-from-the-environment))
+and replaces the call with the value, so nothing is looked up at runtime. A variable that is not
+set and has no fallback fails the build at the call site. It is for deployment values -- a place
+id, a channel, a version -- and not for secrets: the value ends up in the emitted Luau, where
+anyone with the place can read it.
 
 `Modding.inspect` is the general "give me this type as a value" escape hatch:
 

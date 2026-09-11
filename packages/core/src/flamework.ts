@@ -59,6 +59,22 @@ export namespace Flamework {
 	export declare function id<T>(id?: Modding.Target.Id<T>): string;
 
 	/**
+	 * Inlines an environment variable at compile time: the call becomes the variable's value as a
+	 * string literal, read from `.env`, `.env.local` and the process environment when the compiler
+	 * started. A variable that is not set and has no fallback fails the build at the call site.
+	 *
+	 * For deployment values -- a place id, a build channel, a version -- and not for secrets: the
+	 * value is written into the emitted Luau, where anyone with the place can read it.
+	 *
+	 * @metadata macro {@link value intrinsic-inline}
+	 */
+	export declare function env<N extends string, F extends string | undefined = undefined>(
+		name: N,
+		fallback?: F,
+		value?: Modding.Intrinsic<"env", [N, F], string>,
+	): string;
+
+	/**
 	 * Check if the constructor implements the specified interface.
 	 *
 	 * @metadata macro {@link _implements intrinsic-flamework-rewrite}
