@@ -57,6 +57,42 @@ Without the scope, the test providers are not registered (with the condition on 
 registration, the files are never even required), the plugin is inert, and no instance is made.
 One switch, `FLAMEWORK_SCOPES`, turns on both the tests and the host that runs them.
 
+## Setting up
+
+Everything a project needs, in the order it is needed:
+
+1. The package: `bun add @flamework-experimental/testing`. It brings the roblox-ts side and the
+   `flamework-test` CLI, nothing else.
+2. The switch: the `scopes` line above in `flamework.config.json`, and `FLAMEWORK_SCOPES=testing`
+   in `.env`. A release build leaves the variable out and gets no tests and no host.
+3. A `Tests` folder per realm, registered under the scope, and `TestingPlugin` in each realm's
+   module. The server is shown above; the client is the same shape:
+
+   ```ts
+   // src/client/runtime.client.ts
+   Flamework.createModule()
+       .registerProviders("src/client/controllers")
+       .registerProviders("src/client/Tests", { activeIn: ["testing"] })
+       .registerProviders("src/shared/Tests", { activeIn: ["testing"] }) // sections both realms run
+       .includePlugin(TestingPlugin)
+       .ignite();
+   ```
+
+   A shared folder registered by both modules gives sections that run in both realms, one copy
+   each; the component specs of the template live there.
+4. A script that builds and runs, with `*.rbxl` in `.gitignore`:
+
+   ```jsonc
+   // package.json
+   "scripts": { "test": "rojo build -o place.rbxl && flamework-test test place.rbxl" }
+   ```
+
+5. Roblox Studio with "MCP server" enabled in its Assistant settings, which is what lets the CLI
+   open a window, run the tests in it and close it again.
+
+`bun run test` then prints one summary per realm. That is the whole setup for Studio; the cloud
+route needs an API key and a testing place on top, see [Running the tests](../testing/place.md).
+
 ## Where tests live
 
 `defineTests` is an ordinary function, so anything may call it; a provider's `onStart` is the
@@ -146,6 +182,32 @@ the table.
 Each realm has its own instance callback: a client with the plugin answers on the same
 `Workspace.FlameworkTests` for its own tests, and `FlameworkTestsServer` is how it reaches the
 server's. A second invoke while a run is in progress raises.
+
+### Both realms in one session
+
+`flamework-test test` runs the server's sections and then the client's in the same play session,
+so the client's tests run against a server whose own tests have already run, and they see
+whatever those left on the wire. One engine fact matters there: a RemoteEvent message fired at a
+client before it has connected `OnClientEvent` is not dropped, the engine queues it and delivers
+it the first time anything connects. A server test that `predict`s with the real player, through
+a handler that answers with `fire(player, ...)`, therefore leaves a reply waiting, and it lands in
+the middle of the client's cases as an answer nobody asked for. Predict with a stand-in that is
+not a `Player` (`scratch()` will do) and have the answering handler skip it:
+
+```ts
+function fromPlayer(player: Player) {
+    return typeIs(player, "Instance") && player.IsA("Player");
+}
+server.setScore.connect((player, score) => {
+    if (fromPlayer(player)) server.scoreChanged.fire(player, score);
+});
+
+test("accepts a message through its guards", () => {
+    server.setScore.predict(scratch() as unknown as Player, 5);
+});
+```
+
+The template's `networking` sections are written this way.
 
 ## Configuration
 

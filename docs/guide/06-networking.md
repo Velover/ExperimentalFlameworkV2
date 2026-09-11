@@ -77,6 +77,10 @@ export class MatchService implements OnStart {
 
 `predict(...)` runs the *receiving* half locally, middleware and guards included, without touching a
 remote. It is meant for client prediction, and it is also the easiest way to test a handler.
+When the handler answers back with `fire(player, ...)`, predict with a stand-in rather than a real
+player in a test: the engine queues a message fired at a client that has not connected yet and
+delivers it once it does, so the reply would surface in that client's own tests later. See
+[both realms in one session](12-testing.md#both-realms-in-one-session).
 
 ## Functions
 

@@ -36,6 +36,13 @@ A window that already has a file of the same name open is from an earlier build 
 stale code, so `test` closes it before opening the fresh file. `--keep` leaves the window and the
 session for a look around; the next `test` closes it.
 
+Both realms share the one play session, so the client's sections run against a server whose own
+tests have already run. A RemoteEvent message fired at a client before it connected
+`OnClientEvent` is queued by the engine and delivered on the first connection, so a server test
+that predicts with the real player and gets an answer fired back leaves that answer waiting for the
+client's tests. Predict with a stand-in and skip it in the answering handler; see
+[both realms in one session](../guide/12-testing.md#both-realms-in-one-session).
+
 The pieces `test` is made of are commands of their own, for driving a window by hand: `studio
 open [file]`, `studio close`, `studio status`, `studio play`, `studio stop`, `studio exec --code`
 and `studio run [--realm server|client|both]`, which runs the tests in whatever window has the
