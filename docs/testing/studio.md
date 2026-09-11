@@ -39,7 +39,7 @@ the place.
 
 ## Prerequisites
 
-1. **Studio** with the place open (`Place1` in the runs so far) and *MCP server* enabled in its
+1. **Studio** with the place open (`Place1`, then `TestingExperience`, in the runs so far) and *MCP server* enabled in its
    Assistant settings. The MCP proxy is `%LOCALAPPDATA%\Roblox\Versions\version-*\StudioMCP.exe`;
    the first proxy becomes a hub on a local port and every later proxy joins it, so any number of
    clients can talk to the same Studio.
@@ -113,6 +113,96 @@ tree or the console when a run does not behave.
 If an MCP-aware client (Claude Code, VS Code) has the `Roblox_Studio` server configured for this
 directory, the same tools are available directly; the scripts exist so the run does not depend on that.
 
+## Testing one hypothesis directly
+
+The battletest above answers "does the framework still work". The other question a real place
+answers is "what does the engine actually do here", which comes up constantly while finishing v2:
+the Lune stub delivers signals immediately, has no replication and no streaming, so a guess about
+ordering is only settled in game. `scripts/studio/luau-tests.mjs` is the runner for that. It takes
+Luau snippets, sends them to Studio through the same MCP proxy one at a time, and prints PASS/FAIL
+per snippet.
+
+```console
+node scripts/studio/luau-tests.mjs --code "return workspace.StreamingEnabled"
+node scripts/studio/luau-tests.mjs scripts/studio/cases/deferred-signals.luau
+node scripts/studio/luau-tests.mjs scripts/studio/cases --studio TestingExperience
+node scripts/studio/luau-tests.mjs scripts/studio/cases --list
+```
+
+A case is a `.luau` file (with `-- @mode`, `-- @timeout`, `-- @skip`, `-- @sweep false` headers), a
+folder of them, or a `.mjs` exporting an array of `{ name, mode, code | file, timeout, skip, sweep }`
+-- useful when one hypothesis should run over several inputs. `--studio` takes a name or an id from
+`mcp.mjs --studios`; with exactly one Studio connected it can be left out.
+
+### Realms
+
+| `--mode` | Session | Snippet runs in | What it proves |
+|---|---|---|---|
+| `console`, `edit` | none | Edit data model | Pure Luau and anything about the edit data model. No engine loop, no `Players`. |
+| `server` | Studio's **Run** | Edit data model | Server behaviour with **no client and no player** at all. |
+| `client` | Play Solo | Client data model | What a client sees, with a server behind it. |
+| `play-server`, `play` | Play Solo | Server data model | Server behaviour with a client connected. |
+| `both` | Play Solo | Server, then Client | The same snippet in both realms, reported as two results. |
+
+**Server-only is startable from code.** `start_stop_play` only offers Play Solo, but the MCP's
+execution context may call `RunService:Run()`, which is Studio's *Run* button: server scripts start,
+`Players` stays empty and `LocalPlayer` is `nil`. Two things about it are worth knowing:
+
+- Run mode uses the **edit data model**, so what a snippet builds during it is still in the place
+  after the session stops -- verified by hand, a part made during Run survived the stop. That is why
+  the runner sweeps (below).
+- `RunService:IsClient()` is **`true`** in Run mode even though no client exists, while in Play Solo
+  the two data models report `IsServer`/`IsClient` the way a live game does. Realm detection that
+  branches on `IsClient()` alone will take the client path under Run.
+
+There is no client-only session: the closest is Play Solo with `--mode client`.
+
+### Inside a snippet
+
+`check(name, condition, detail?)` records a check and any failing one fails the case; `log(...)`
+records a line; `defer(fn)` runs after the body, in reverse order, even when the body errored; and
+`scratch()` is a Folder created in Workspace on first use and destroyed afterwards. Whatever the
+snippet returns is reported as the case's value, and anything game scripts printed during it is
+captured alongside. Yielding is expected -- `task.wait`, signals, `WaitForChild` all work, and the
+MCP call only returns once the snippet has stopped yielding, which is what keeps the cases from
+overlapping.
+
+```lua
+-- @mode server
+-- @timeout 20
+local CollectionService = game:GetService("CollectionService")
+local seen = {}
+local connection = CollectionService:GetInstanceAddedSignal("Probe"):Connect(function(instance)
+	table.insert(seen, instance.Name)
+end)
+defer(function() connection:Disconnect() end)
+
+local part = Instance.new("Part")
+part.Parent = scratch()
+CollectionService:AddTag(part, "Probe")
+check("the added signal is deferred", #seen == 0)
+task.wait(0.2)
+check("and arrives on the next resumption", #seen == 1, table.concat(seen, " "))
+```
+
+### Cleanup and timeouts
+
+Cleanup is not left to the case. Around every snippet the runner notes each direct child of the
+usual service containers and every `CollectionService` tag, then afterwards destroys the instances
+and removes the tags that appeared, reporting them as `swept`. An error thrown inside a `defer`
+fails the case, because the next case would be running against whatever was left. `--keep-leftovers`
+reports instead of destroying, and `sweep: false` on one case hands its state to the next -- only
+worth doing inside a Play session, which is discarded wholesale anyway.
+
+Each case has a timeout (`--timeout`, `timeout:`, `-- @timeout`; 30s by default). The snippet
+watchdogs itself, so a case that exceeds it is cancelled, its cleanup still runs, and the **run is
+aborted**: a snippet that hung has likely left the data model in a state the later cases would only
+report noise about. Remaining cases are printed as `ABORT` and the exit code is non-zero.
+
+Sessions are started once per group rather than once per case -- all `console` cases first, then the
+Run-mode ones, then one Play session for the rest -- and whatever was started is stopped at the end
+unless `--keep-open` is passed.
+
 ## The matrix
 
 Each cell is one `run-studio-tests.mjs` invocation. Everything in the first two rows is automated.
@@ -123,7 +213,7 @@ Each cell is one `run-studio-tests.mjs` invocation. Everything in the first two 
 | Streaming off | `--streaming off` | `visibleTagged=4 components=4`; `streaming(off)` check passes. |
 | Streaming on, large radius | set `Workspace.StreamingTargetRadius` ≥ 8500 by hand, then `--streaming on` | `streaming(on)` **fails by design** (`visible=4`): the check encodes the default radius. Read the INFO line instead. |
 | Streaming on, small radius | set `StreamingMinRadius`/`StreamingTargetRadius` to 64/128 by hand, then `--streaming on` | Unchanged: every part the checks rely on sits either right by the spawn or 6000 studs out, so no check depends on the radius. Tightening it only makes instances stream out sooner. |
-| Server-only (Run mode) | Studio's *Run* button; the scripts cannot start it | Server lines only; client lines absent. Confirms nothing server-side depends on a client. |
+| Server-only (Run mode) | Studio's *Run* button, or `RunService:Run()` from a snippet (see above) | Server lines only; client lines absent. Confirms nothing server-side depends on a client. |
 | Team Test / multiple clients | Studio's *Team Test* with two clients | Both clients print their own summaries; the server's `Ping`/`Bump` handlers serve each. |
 | Play Solo focus | run with the Studio window minimised | `onRender fires on the client` may take longer: `PreRender` only fires while Studio renders the client viewport, which is why that check waits up to 15 s. |
 

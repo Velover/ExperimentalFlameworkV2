@@ -110,10 +110,27 @@ export async function connect() {
 		return match.id;
 	}
 
+	/**
+	 * The Studio to drive: the one named, or the only one connected. With several connected and
+	 * no name given this refuses rather than guessing, since a Play or Run session in the wrong
+	 * window would act on someone's real place.
+	 */
+	async function pickStudio(name) {
+		if (name !== undefined) return studioId(name);
+		const list = await studios();
+		if (list.length === 1) return list[0].id;
+		throw new Error(
+			list.length === 0
+				? "no Studio is connected; enable 'MCP server' in Studio's Assistant settings"
+				: `several Studios are connected, pass --studio <name|id>: ${list.map((s) => s.name).join(", ")}`,
+		);
+	}
+
 	return {
 		call,
 		studios,
 		studioId,
+		pickStudio,
 		tools: async () => (await request("tools/list", {})).result.tools,
 		luau: (studio_id, datamodel_type, code, timeoutMs) =>
 			call("execute_luau", { studio_id, datamodel_type, code }, timeoutMs),
@@ -133,8 +150,7 @@ if (isMain) {
 			console.log(
 				(await mcp.tools()).map((t) => `${t.name}(${(t.inputSchema.required ?? []).join(", ")})`).join("\n"),
 			);
-		else if (mode === "--luau")
-			console.log(await mcp.luau(await mcp.studioId(c ?? "Place1"), a, fs.readFileSync(b, "utf8")));
+		else if (mode === "--luau") console.log(await mcp.luau(await mcp.pickStudio(c), a, fs.readFileSync(b, "utf8")));
 		else if (mode) console.log(await mcp.call(mode, JSON.parse(a ?? "{}")));
 		else console.log("usage: mcp.mjs --studios | --tools | --luau <DM> <file> [studio] | <tool> [json]");
 	} finally {

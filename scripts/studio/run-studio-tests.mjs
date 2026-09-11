@@ -2,7 +2,7 @@
 // `[FWTEST]` lines the template's test providers print, stops the session and exits non-zero on
 // any failure. See docs/testing/studio.md for the setup this expects.
 //
-//   node scripts/studio/run-studio-tests.mjs [--studio Place1] [--streaming on|off|keep] [--wait 30]
+//   node scripts/studio/run-studio-tests.mjs [--studio <name|id>] [--streaming on|off|keep] [--wait 30]
 //
 // `--streaming` flips Workspace.StreamingEnabled in the Edit data model before the run and restores
 // the previous value afterwards, so both halves of the streaming matrix can be run unattended.
@@ -17,12 +17,13 @@ const option = (name, fallback) => {
 	const index = args.indexOf(`--${name}`);
 	return index >= 0 ? args[index + 1] : fallback;
 };
-const studioName = option("studio", "Place1");
+const studioName = option("studio", undefined);
 const streaming = option("streaming", "keep");
 const waitSeconds = Number(option("wait", "30"));
 
 const mcp = await connect();
-const studio_id = await mcp.studioId(studioName);
+// The named Studio, or the only one connected; several connected without a name is refused.
+const studio_id = await mcp.pickStudio(studioName);
 const edit = (code) => mcp.luau(studio_id, "Edit", code);
 
 let previousStreaming;
@@ -42,7 +43,9 @@ try {
 		console.log(`StreamingEnabled set to ${streaming === "on"} (was ${previousStreaming})`);
 	}
 
-	console.log(`starting play in '${studioName}' and waiting ${waitSeconds}s for the test providers`);
+	console.log(
+		`starting play in '${studioName ?? "the connected Studio"}' and waiting ${waitSeconds}s for the test providers`,
+	);
 	await mcp.call("start_stop_play", { studio_id, is_start: true }, 120_000);
 	started = true;
 	await new Promise((r) => setTimeout(r, waitSeconds * 1000));
