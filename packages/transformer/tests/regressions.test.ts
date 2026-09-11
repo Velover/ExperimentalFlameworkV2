@@ -1,7 +1,14 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import fs from "fs";
 import path from "path";
-import { compileFixture, compileFixtureFresh, compileProbe, emitted, normalize } from "./compile";
+import {
+	compileFixture,
+	compileFixtureFresh,
+	compileFixtureWithEnv,
+	compileProbe,
+	emitted,
+	normalize,
+} from "./compile";
 
 const FIXTURE = path.resolve(import.meta.dir, "fixture");
 
@@ -72,6 +79,40 @@ describe("callsite uuids", () => {
 		}
 
 		expect(uuids(emitted("callsites"))).toEqual(before);
+	});
+
+	test("change with every build under obfuscation", () => {
+		// The uuids name every remote, so ones that survived a release could be mapped once and
+		// reused against the next. A plain build recreates flamework.build and with it the seed
+		// they are derived from, so two builds disagree; the plain run above is the control.
+		const plain = uuids(emitted("callsites"));
+
+		const first = compileFixtureWithEnv({ FLAMEWORK_FIXTURE_OBFUSCATE: "true" });
+		if (first.status !== 0) {
+			throw new Error(`fixture failed to compile obfuscated:\n${first.output}`);
+		}
+
+		const second = compileFixtureWithEnv({ FLAMEWORK_FIXTURE_OBFUSCATE: "true" });
+		if (second.status !== 0) {
+			throw new Error(`fixture failed to compile obfuscated again:\n${second.output}`);
+		}
+
+		try {
+			const firstIds = uuids(first.files.get("callsites")!);
+			const secondIds = uuids(second.files.get("callsites")!);
+
+			expect(firstIds).toHaveLength(2);
+			expect(secondIds).toHaveLength(2);
+			expect(firstIds).not.toEqual(secondIds);
+			expect(firstIds).not.toEqual(plain);
+			expect(firstIds[0]).not.toBe(firstIds[1]);
+		} finally {
+			// Back to the ordinary build on disk, which later tests read artifacts from.
+			const restored = compileFixtureFresh();
+			if (restored.status !== 0) {
+				throw new Error(`fixture failed to restore:\n${restored.output}`);
+			}
+		}
 	});
 });
 

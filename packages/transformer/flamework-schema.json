@@ -44,6 +44,9 @@
 				"idGenerationMode": {
 					"type": "string"
 				},
+				"buildSeed": {
+					"type": "string"
+				},
 				"identifiers": {
 					"type": "object",
 					"additionalProperties": {

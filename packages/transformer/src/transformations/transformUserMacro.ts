@@ -652,11 +652,16 @@ function getParameterCount(state: TransformState, signature: ts.Signature) {
 const CALLSITE_UUID_NAMESPACE = "6f4c1d2e-8b3a-4e5f-9c7d-2a1b0e9f8d7c";
 
 /**
- * A uuid that is unique per callsite and identical across compilations.
+ * A uuid that is unique per callsite and identical across the compilations of one build.
  *
  * It is derived from the package, the file, the enclosing declaration and the offset within it, so
- * two builds of the same source emit the same value and a game's output is reproducible. A random
- * uuid per compile would rename every remote folder on every build.
+ * every file a watcher recompiles agrees with the ones it did not, and without obfuscation two
+ * builds of the same source emit the same value. A random uuid per compilation would rename every
+ * remote folder on every rebuild.
+ *
+ * Under obfuscation the namespace is the build seed instead of a constant, so the uuids -- the
+ * names of every remote -- change with every build. A cheat that mapped them once would otherwise
+ * keep its map through every release.
  */
 function getCallsiteUuid(state: TransformState, node: ts.Node) {
 	const file = state.getSourceFile(node);
@@ -665,7 +670,8 @@ function getCallsiteUuid(state: TransformState, node: ts.Node) {
 	const offset = declaration ? node.getStart() - declaration.getStart() : node.getStart();
 	const key = `${state.packageName}:${state.getFileId(file)}@${declarationName}+${offset}`;
 
-	return uuidv5(key, CALLSITE_UUID_NAMESPACE);
+	const namespace = state.config.obfuscation ? state.buildInfo.getBuildSeed() : CALLSITE_UUID_NAMESPACE;
+	return uuidv5(key, namespace);
 }
 
 /**

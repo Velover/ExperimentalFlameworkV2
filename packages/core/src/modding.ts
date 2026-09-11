@@ -75,6 +75,11 @@ export namespace Modding {
 		/**
 		 * A unique identifier that can be used to identify exact callsites.
 		 * This can be used for hooks.
+		 *
+		 * Derived from the callsite's position, so it is the same in every file of one build and,
+		 * without obfuscation, across builds. With obfuscation on it changes with every build, so
+		 * that what it names -- a remote, say -- cannot be mapped once and found again in the next
+		 * release.
 		 */
 		export type Uuid = CallerHelper<string, "uuid">;
 

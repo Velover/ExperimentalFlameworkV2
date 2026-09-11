@@ -63,6 +63,46 @@ export function compileFixtureFresh(): CompileResult {
 }
 
 /**
+ * Compiles the fixture in a fresh rbxtsc process with extra environment variables, which its
+ * `flamework.config.json` reads, and returns that emit without caching it.
+ *
+ * The files on disk are left as this compilation wrote them: a test that changes the fixture's
+ * options this way should end with `compileFixtureFresh()` so that what later tests read from disk
+ * is the ordinary build again.
+ */
+export function compileFixtureWithEnv(env: Record<string, string>): CompileResult {
+	fs.rmSync(path.join(FIXTURE, "out"), { recursive: true, force: true });
+
+	const result = spawnSync("node", [RBXTSC], { cwd: FIXTURE, encoding: "utf8", env: { ...process.env, ...env } });
+	const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+
+	return { files: readEmitted(), output, status: result.status ?? 1 };
+}
+
+function readEmitted() {
+	const files = new Map<string, string>();
+	const outDir = path.join(FIXTURE, "out");
+
+	if (fs.existsSync(outDir)) {
+		for (const entry of fs.readdirSync(outDir, { recursive: true, withFileTypes: true })) {
+			if (!entry.isFile() || !entry.name.endsWith(".luau")) {
+				continue;
+			}
+
+			const absolute = path.join(entry.parentPath ?? entry.path, entry.name);
+			const key = path
+				.relative(outDir, absolute)
+				.replace(/\\/g, "/")
+				.replace(/\.luau$/, "");
+
+			files.set(key, fs.readFileSync(absolute, "utf8"));
+		}
+	}
+
+	return files;
+}
+
+/**
  * Compiles the fixture with one extra source file and reports what rbxtsc said about it.
  *
  * A file that must not compile cannot live in the fixture itself, which every other test needs to

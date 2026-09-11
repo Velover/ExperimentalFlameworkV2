@@ -2,6 +2,7 @@
 	"$schema": "../../flamework.config.schema.json",
 	"transformer": {
 		"hashPrefix": "fw",
+		"obfuscation": "${FLAMEWORK_FIXTURE_OBFUSCATE:-false}",
 		"optimizations": { "guardGenerationDedupLimit": "${FLAMEWORK_FIXTURE_DEDUP:-3}" },
 		"plugins": [{ "path": "./fieldInfoPlugin.cjs", "options": { "prefix": "fx" } }]
 	},

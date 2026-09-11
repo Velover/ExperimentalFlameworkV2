@@ -281,6 +281,23 @@ describe("the watcher's fingerprint", () => {
 		expect(older.setIdGenerationMode("obfuscated")).toBeUndefined();
 		expect(older.getIdentifierFromInternal("pkg:file@Class")).toBe("x");
 	});
+
+	test("keep a build seed for as long as the build info lives, and start a new one with a new build info", () => {
+		// The seed follows the salt's lifecycle: a plain build recreates the build info, a watcher
+		// keeps reading the saved one. Obfuscated callsite uuids take their namespace from it.
+		const file = path.join(root, "seeded.build");
+		const info = new BuildInfo(file);
+		const seed = info.getBuildSeed();
+
+		expect(seed).toMatch(/^[0-9a-f-]{36}$/);
+		expect(info.getBuildSeed()).toBe(seed);
+
+		info.save();
+		expect(BuildInfo.fromPath(file).getBuildSeed()).toBe(seed);
+		expect(new BuildInfo(file).getBuildSeed()).not.toBe(seed);
+
+		fs.rmSync(file, { force: true });
+	});
 });
 
 describe("merging with tsconfig options", () => {

@@ -20,6 +20,7 @@ export interface FlameworkBuildInfo {
 	identifierPrefix?: string;
 	idGenerationMode?: string;
 	salt?: string;
+	buildSeed?: string;
 	metadata?: FlameworkMetadata;
 	stringHashes?: { [key: string]: string };
 	identifiers: { [key: string]: string };
@@ -132,6 +133,22 @@ export class BuildInfo {
 		this.buildInfo.salt = salt;
 
 		return salt;
+	}
+
+	/**
+	 * A random seed that lives as long as this build info does: made when the build info is
+	 * created, kept while it is reused. A plain build recreates the build info and so gets a new
+	 * seed; a watcher reuses it across rebuilds and keeps the same one. Under obfuscation the
+	 * callsite uuids -- the names of every remote -- are derived from it, so that they change with
+	 * every build and cannot be mapped once and reused against the next release.
+	 */
+	getBuildSeed() {
+		if (this.buildInfo.buildSeed) return this.buildInfo.buildSeed;
+
+		const seed = uuid();
+		this.buildInfo.buildSeed = seed;
+
+		return seed;
 	}
 
 	/**

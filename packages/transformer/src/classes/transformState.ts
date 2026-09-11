@@ -112,6 +112,13 @@ export class TransformState {
 	public nextRootStatements = new Array<ts.Statement>();
 	public flameworkGuardLibraryPath?: string;
 
+	/**
+	 * Whether this process started from the previous build's `flamework.build` rather than a fresh
+	 * one, which an incremental build does so that the files it does not recompile keep their ids.
+	 * Under obfuscation that also keeps the ids a release was meant to rotate.
+	 */
+	private buildInfoReused = false;
+
 	private setupBuildInfo() {
 		let baseBuildInfo = BuildInfo.fromDirectory(this.currentDirectory);
 		if (!baseBuildInfo || (Cache.isInitialCompile && isCleanBuildDirectory(this.options))) {
@@ -121,6 +128,8 @@ export class TransformState {
 				}
 			}
 			baseBuildInfo = new BuildInfo(path.join(this.currentDirectory, "flamework.build"));
+		} else if (Cache.isInitialCompile) {
+			this.buildInfoReused = true;
 		}
 		this.buildInfo = baseBuildInfo;
 
@@ -309,6 +318,26 @@ export class TransformState {
 			Logger.info(
 				`idGenerationMode changed from '${previousMode}' to '${this.config.idGenerationMode}'; every identifier is regenerated`,
 			);
+		}
+
+		// Obfuscation is only worth something if a release's ids differ from the last release's.
+		// A plain build recreates flamework.build, and with it the salt and the build seed, so
+		// that holds on its own; these are the two ways of undoing it.
+		if (this.config.obfuscation && Cache.isInitialCompile) {
+			if (this.config.salt !== undefined) {
+				Logger.warn(
+					"transformer.salt is set with obfuscation on",
+					"A fixed salt gives every build the same obfuscated ids; leave it unset so each build gets fresh ones.",
+				);
+			}
+
+			if (this.buildInfoReused) {
+				Logger.warn(
+					"obfuscated ids were kept from the previous build",
+					"This is an incremental build, so files that do not recompile keep their ids and the rest have to match.",
+					`Delete ${this.options.tsBuildInfoFile ?? "the tsbuildinfo"} before a release build to rotate every id.`,
+				);
+			}
 		}
 
 		this.packageName = packageJson.name;

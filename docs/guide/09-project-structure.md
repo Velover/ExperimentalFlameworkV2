@@ -114,7 +114,7 @@ entry the tsconfig needs is `transform`; each package has its own section in the
 | Section | Key | Effect |
 |---|---|---|
 | `transformer` | `hashPrefix` | Prefix for generated ids. Defaults to the package name; set a short one in a game. |
-| | `obfuscation` | Obfuscates identifiers: random remote names, shuffled metadata, short ids. Game projects only. |
+| | `obfuscation` | Obfuscates identifiers: random remote names, shuffled metadata, short ids, all different on every build. Game projects only; see [obfuscation](#obfuscation). |
 | | `idGenerationMode` | `"full"` (default), `"short"`, `"tiny"` or `"obfuscated"`. Only shorten in a game. |
 | | `plugins` | Transformer plugins; see [transformer plugins](../reference/transformer-plugins.md). |
 | | `salt`, `noSemanticDiagnostics`, `optimizations` | Hash salt, skipping semantic diagnostics, [guard deduplication](#guard-deduplication). |
@@ -137,6 +137,27 @@ that uses it.
 
 **Do not set `idGenerationMode` or `obfuscation` in a published package.** Ids have to be stable and
 collision-free across every consumer.
+
+### Obfuscation
+
+With `obfuscation` on, every generated name -- class ids, hashed strings, and the callsite uuids
+that name every remote -- is different on every build. A name mapped in one release is worthless
+against the next, which is the point: a cheat cannot carry a map of your remotes from one version
+to another.
+
+What makes that hold is `flamework.build`. A plain `rbxtsc` recreates it, and with it the hash salt
+and the build seed the names come from. A running `rbxtsc -w` keeps reading the file it started
+with, so the names hold for the watcher's lifetime and every rebuild agrees with the files it did
+not recompile. Two things keep names the same across builds, and the transformer warns about
+both:
+
+- **`transformer.salt`**, which fixes the hash the class ids come from. Leave it unset with
+  obfuscation on.
+- **An incremental build** (`incremental` with a `tsBuildInfoFile`), which reuses the previous
+  `flamework.build` so that the files it does not recompile still match. Delete the tsbuildinfo
+  before a release build.
+
+Without obfuscation the names are stable across builds, which is what you want while debugging.
 
 ### Values from the environment
 

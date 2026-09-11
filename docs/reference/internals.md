@@ -590,6 +590,12 @@ receives and what it sends. `createRemoteInstance` finds or creates a folder per
 ReplicatedStorage and a remote per id inside it, matching on an `id` attribute rather than the name
 -- names are for debugging and may be obfuscated or duplicated.
 
+The global name is a `Modding.Caller.Uuid`: a uuid v5 of `package:file@declaration+offset`, so it
+is the same in every file of one build and, without obfuscation, across builds. Under obfuscation
+its namespace is the build seed `flamework.build` carries instead of a constant, and since a plain
+build recreates that file, every build names its remotes afresh while a watcher, which reuses the
+file, keeps them for its lifetime.
+
 An **event** uses one remote for both directions, so its id is the bare event name. A **function**
 needs two channels, because a request and its response travel over the same remote in opposite
 directions, so ids are prefixed: the server receives on `$name` and sends on `@name`, and the client
