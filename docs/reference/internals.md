@@ -275,6 +275,17 @@ The transformer writes this metadata from a decorator's `@metadata reflect ...` 
 decorator reflects matters: `Components` reads `flamework:parameters` to discover component
 dependencies, so a decorator that does not emit it disables that feature silently.
 
+### Paths
+
+The `path` intrinsic emits a Rojo path as the resolver gives it, relative to the tree's root: in a
+place that starts with a service, in a model or plugin with the root's own children. Neither the
+emitted code nor `globs.json` says which, so the runtime cannot start from `game` unconditionally.
+`saveArtifacts` writes `paths.json` with the depth of the include folder below the root, and
+`utility/pathRoot.ts` finds the root once by climbing that far from the `flamework` metadata
+folder's parent; with no metadata to climb from it is `game`. `resolveRbxPath` walks a path from
+there, with the `StarterPlayer` rewrite to `PlayerScripts` kept for the `game` case, and
+`getClassesInPath` and the glob runtime both go through it.
+
 ## Components
 
 `ComponentPlugin` is a plugin whose setup constructs `Components` over the registered classes,

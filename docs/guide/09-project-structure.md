@@ -227,6 +227,24 @@ events.setReady.predict(player, true);
 Flamework's own runtime specs use exactly this shape; see
 [`packages/testing`](../../packages/testing) if you want a worked example.
 
+## Studio plugins and models
+
+A place is a `DataModel` tree, so a registered path starts at a service: `registerProviders("src/server/services")`
+becomes `ServerScriptService/TS/services` and the runtime walks there from `game`. A Studio plugin
+or a model is a tree of its own -- a `Folder` at the top of `default.project.json`, with nothing
+above it -- and its paths are relative to that root instead.
+
+Nothing changes in what you write. The transformer emits every path relative to the tree's root,
+records in `include/flamework/paths.json` how far below that root the include folder sits, and the
+runtime climbs from the include folder to find the root the first time a path is resolved. A
+plugin therefore registers folders and globs exactly as a place does, and `@Provider` has no
+notion of a realm to get in the way. `getPathRoot()` from `@flamework/core` is that instance, and
+`resolveRbxPath(path)` walks a compile-time path from it, for a plugin of your own that resolves
+paths by hand.
+
+The one requirement is the usual one: the include directory has to be in the Rojo tree, as it is
+in every roblox-ts template.
+
 ## Caveats
 
 - **Overlapping registration paths raise.** `registerProviders("src/server")` and

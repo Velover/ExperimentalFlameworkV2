@@ -7,6 +7,7 @@ import middleware = require("./specs/middleware");
 import modding = require("./specs/modding");
 import modules = require("./specs/modules");
 import networking = require("./specs/networking");
+import paths = require("./specs/paths");
 import plugins = require("./specs/plugins");
 import providers = require("./specs/providers");
 import regressions = require("./specs/regressions");
@@ -18,6 +19,7 @@ import serialization = require("./specs/serialization");
  */
 export const suites: TestSuite[] = [
 	modding,
+	paths,
 	providers,
 	modules,
 	plugins,

@@ -338,12 +338,20 @@ export class TransformState {
 
 		if (this.isGame) {
 			const writtenFiles = new Map<string, string>();
-			const files = ["globs.json", "config.json"];
+			const files = ["globs.json", "config.json", "paths.json"];
 
 			// The runtime sections of flamework.config.json, for the packages to read at runtime.
 			const runtimeConfig = getRuntimeConfig(this.projectConfig);
 			if (runtimeConfig) {
 				writtenFiles.set("config.json", JSON.stringify(runtimeConfig));
+			}
+
+			// Paths are emitted relative to the Rojo tree's root, which is `game` in a place but the
+			// model's own root in a plugin. The runtime finds that root by climbing from the include
+			// folder, so this records how far below the root the include folder sits.
+			const includeRbxPath = this.rojoResolver?.getRbxPathFromFilePath(this.includeDirectory);
+			if (includeRbxPath !== undefined) {
+				writtenFiles.set("paths.json", JSON.stringify({ includeDepth: includeRbxPath.length }));
 			}
 
 			const packageGlobs = this.buildInfo.getChildrenMetadata("globs");

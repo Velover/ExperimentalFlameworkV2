@@ -84,6 +84,15 @@ describe("glob registration", () => {
 		expect(paths!.some((p) => p.replace(/\\/g, "/").startsWith("out/glob/target"))).toBe(true);
 	});
 
+	test("records how deep the include folder sits, so paths resolve from the tree's root", () => {
+		// The fixture's Rojo tree is a plain Folder, as a plugin's is: paths are emitted relative to
+		// it (`{ "out", "glob" }`, no service) and the runtime climbs from the include folder to it.
+		const paths = JSON.parse(fs.readFileSync(path.join(FIXTURE, "include", "flamework", "paths.json"), "utf8"));
+
+		expect(paths).toEqual({ includeDepth: 1 });
+		expect(emitted("globs")).toContain('registerProviders("src/glob", nil, { "out", "glob" })');
+	});
+
 	test("passes the glob through to the runtime as a string, past the options parameter", () => {
 		// The registration options sit between the glob and the generated argument, so a call
 		// without them gets a `nil` there and the generated string lands on the right parameter.

@@ -1,32 +1,20 @@
-import { Players, RunService, StarterPlayer } from "@rbxts/services";
 import { tsImport } from "./tsImport";
 import { Reflect } from "../reflect";
+import { resolveRbxPath } from "./pathRoot";
 
 /**
  * Requires every ModuleScript at and under the specified Rojo path and returns every exported value
  * that carries its own Flamework identifier.
  *
- * A module that fails to load raises, as it did in v1: a class that silently fails to register would
- * otherwise only show up later as an unresolvable dependency, far from the cause.
+ * The path is relative to the tree's root (`game` in a place, the model's root in a plugin), which
+ * `resolveRbxPath` finds. A module that fails to load raises, as it did in v1: a class that silently
+ * fails to register would otherwise only show up later as an unresolvable dependency, far from the
+ * cause.
  */
 export function getClassesInPath(rbxPath: readonly string[]): Array<object> {
 	assert(rbxPath);
 
-	// Copied so that the generated path literal is not consumed by this call.
-	const path = [...rbxPath];
-
-	/** @hidden */
-	let preloadPath: Instance = game.GetService(path.shift() as keyof Services);
-	if (preloadPath === StarterPlayer) {
-		assert(path.shift() === "StarterPlayerScripts", "StarterPlayer only supports StarterPlayerScripts");
-		assert(RunService.IsClient(), "The server cannot load StarterPlayer content");
-
-		preloadPath = Players.LocalPlayer.WaitForChild("PlayerScripts");
-	}
-
-	for (let i = 0; i < path.size(); i++) {
-		preloadPath = preloadPath.WaitForChild(path[i]);
-	}
+	const preloadPath = resolveRbxPath(rbxPath);
 
 	const foundClasses = new Array<object>();
 	const search = (moduleScript: ModuleScript) => {

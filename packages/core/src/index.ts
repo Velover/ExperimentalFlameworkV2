@@ -48,6 +48,7 @@ export type { OnExtinguished, OnInit, OnPhysics, OnRender, OnStart, OnTick } fro
 // Utilities that plugins need in order to implement path-based registration.
 export { getClassesInPath } from "./utility/getClassesInPath";
 export { getClassesInGlob, getGlobPaths } from "./utility/globs";
+export { getPathRoot, resolveRbxPath, __setPathRoot } from "./utility/pathRoot";
 export { getRuntimeConfig } from "./utility/runtimeConfig";
 export type {
 	ComponentsRuntimeConfig,
