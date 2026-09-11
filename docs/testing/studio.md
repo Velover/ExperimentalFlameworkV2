@@ -54,11 +54,10 @@ the place.
    cd ../networking       && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
    cd ../testing          && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
    cd ../transformer      && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
-   cd ../cloud-testing    && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
    cd ../../../TestingPlace
-   bun remove @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking @flamework-experimental/testing @flamework-experimental/transformer @flamework-experimental/cloud-testing
+   bun remove @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking @flamework-experimental/testing @flamework-experimental/transformer
    bun add ./vendor/flamework-v2/flamework-experimental-core-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-components-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-networking-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-testing-2.0.0-alpha.0.tgz
-   bun add -d ./vendor/flamework-v2/flamework-experimental-transformer-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-cloud-testing-2.0.0-alpha.0.tgz
+   bun add -d ./vendor/flamework-v2/flamework-experimental-transformer-2.0.0-alpha.0.tgz
    bun run build
    ```
 
@@ -70,7 +69,7 @@ the place.
    run
 
    ```console
-   bun update @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking @flamework-experimental/testing @flamework-experimental/transformer @flamework-experimental/cloud-testing
+   bun update @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking @flamework-experimental/testing @flamework-experimental/transformer
    ```
 
    which re-extracts the changed tarballs and refreshes their integrity in the lockfile. Skipping it
@@ -78,6 +77,10 @@ the place.
    and version) can otherwise hand back the previous contents. Then check one shipped file actually
    changed, for example
    `grep -c "HasTag(instance, tag)" node_modules/@flamework-experimental/components/out/components.luau`.
+
+   `bun update` refreshes a package's files but not what the lockfile knows about its `bin`: after a
+   repack that adds or renames a binary (the `flamework-test` CLI lives in the `testing` package), the
+   shim under `node_modules/.bin` stays stale until the package is `bun remove`d and `bun add`ed again.
 
    **Reinstalling replaces `node_modules/@flamework-experimental`, and Rojo stops watching a folder that was
    deleted and recreated.** Restart `rojo serve` and reconnect the plugin after every reinstall, or
@@ -97,13 +100,14 @@ the place.
    one; `ORIGINAL_PLACE` in `.env` names it). Without them two shared modules `WaitForChild`
    forever at require time and ignition never finishes -- the symptom is an "Infinite yield
    possible" warning and no `[FWTEST]` lines at all. A Rojo-served session needs them added by
-   hand, or the patched place opened instead: `flamework-cloud studio open place.patched.rbxl`.
+   hand, or the patched place opened instead: `flamework-test studio open place.patched.rbxl`.
 
 ## Running the generalized tests
 
-For the in-place specs (`defineTests` sections) the CLI does this itself: `flamework-cloud studio
-open`, then `flamework-cloud studio run [--realm client]`, starting and stopping the play session
-around the run; see [Testing in the cloud](place.md#studio). What follows is the older battletest of
+For the in-place specs (`defineTests` sections) the CLI does this itself: `rojo build -o place.rbxl
+&& flamework-test test place.rbxl` opens the build in Studio, runs both realms in a play session
+and closes it again (`studio open` + `studio run [--realm client]` do the same by hand); see
+[Running the tests](place.md). What follows is the older battletest of
 `[FWTEST]` lines the template's providers print on start, which the same proxy drives.
 
 `scripts/studio/run-studio-tests.mjs` drives Studio through the MCP proxy: it starts a play session,

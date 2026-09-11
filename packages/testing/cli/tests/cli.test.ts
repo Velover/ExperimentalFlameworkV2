@@ -4,44 +4,48 @@ import { parseArgs, UsageError } from "../src/cli.ts";
 import { PLACE, SECRET, TASK_PATH, UNIVERSE, happyPath, json, resultJson, runCli, type Harness } from "./harness.ts";
 
 describe("argument parsing", () => {
-	test("publish and test take the place file as an argument", () => {
+	test("test and cloud publish take the place file as an argument", () => {
 		expect(parseArgs(["test", "dist/place.rbxl"]).flags.file).toBe("dist/place.rbxl");
-		expect(parseArgs(["publish", "dist/place.rbxl", "--published"]).flags).toEqual({
-			file: "dist/place.rbxl",
-			published: true,
+		expect(parseArgs(["cloud", "publish", "dist/place.rbxl", "--published"])).toEqual({
+			command: "cloud publish",
+			flags: { file: "dist/place.rbxl", published: true },
 		});
-		expect(() => parseArgs(["run", "dist/place.rbxl"])).toThrow(UsageError);
+		expect(() => parseArgs(["cloud", "run", "dist/place.rbxl"])).toThrow(UsageError);
+		expect(() => parseArgs(["cloud"])).toThrow(/cloud needs a subcommand/);
+		expect(() => parseArgs(["publish", "dist/place.rbxl"])).toThrow(/unknown command: publish/);
 		expect(() => parseArgs(["test", "a.rbxl", "b.rbxl"])).toThrow(UsageError);
 		expect(() => parseArgs(["test", "a.rbxl", "--file", "b.rbxl"])).toThrow(UsageError);
 	});
 
 	test("flags work before and after the command", () => {
-		expect(parseArgs(["run", "--version", "4"])).toEqual({
-			command: "run",
+		expect(parseArgs(["cloud", "run", "--version", "4"])).toEqual({
+			command: "cloud run",
 			flags: { version: "4" },
 		});
-		expect(parseArgs(["--version", "4", "run"])).toEqual({
-			command: "run",
+		expect(parseArgs(["--version", "4", "cloud", "run"])).toEqual({
+			command: "cloud run",
 			flags: { version: "4" },
 		});
-		expect(parseArgs(["--version=4", "run"]).flags.version).toBe("4");
+		expect(parseArgs(["--version=4", "cloud", "run"]).flags.version).toBe("4");
 	});
 
 	test("unknown flags and commands are usage errors", () => {
-		expect(() => parseArgs(["run", "--nope"])).toThrow(UsageError);
+		expect(() => parseArgs(["cloud", "run", "--nope"])).toThrow(UsageError);
 		expect(() => parseArgs(["fly"])).toThrow(/unknown command/);
-		expect(() => parseArgs(["run", "--version"])).toThrow(/needs a value/);
-		expect(() => parseArgs(["run", "extra"])).toThrow(/unexpected argument/);
+		expect(() => parseArgs(["cloud", "run", "--version"])).toThrow(/needs a value/);
+		expect(() => parseArgs(["cloud", "run", "extra"])).toThrow(/unexpected argument/);
 	});
 
 	test("a flag from another command is rejected", () => {
-		expect(() => parseArgs(["publish", "--sections", "a"])).toThrow(/not a flag of "publish"/);
-		// but "test" takes the flags of both phases
-		expect(parseArgs(["test", "--sections", "a"]).flags.sections).toBe("a");
+		expect(() => parseArgs(["cloud", "publish", "--sections", "a"])).toThrow(/not a flag of "cloud publish"/);
+		// but "cloud test" takes the flags of both phases, and "test" those of a Studio run
+		expect(parseArgs(["cloud", "test", "--sections", "a", "--published"]).flags.sections).toBe("a");
+		expect(parseArgs(["test", "--sections", "a", "--realm", "client", "--keep"]).flags.keep).toBe(true);
+		expect(() => parseArgs(["test", "--version", "4"])).toThrow(/not a flag of "test"/);
 	});
 
 	test("an unknown flag exits 2 and prints the usage", async () => {
-		const run = await runCli(["run", "--wat"]);
+		const run = await runCli(["cloud", "run", "--wat"]);
 		expect(run.code).toBe(2);
 		expect(run.err).toContain("unknown flag: --wat");
 		expect(run.err).toContain("Usage:");
@@ -56,14 +60,14 @@ describe("argument parsing", () => {
 	test("--help exits 0", async () => {
 		const run = await runCli(["--help"]);
 		expect(run.code).toBe(0);
-		expect(run.out).toContain("flamework-cloud");
+		expect(run.out).toContain("flamework-test");
 		expect(run.out).toContain("test <file>");
 	});
 });
 
 describe("dry run", () => {
 	test("prints the request and the script, never the key", async () => {
-		const run = await runCli(["run", "--dry-run", "--version", "4", "--sections", "economy,shop/buys"]);
+		const run = await runCli(["cloud", "run", "--dry-run", "--version", "4", "--sections", "economy,shop/buys"]);
 
 		expect(run.code).toBe(0);
 		expect(run.calls).toHaveLength(0);
@@ -79,19 +83,19 @@ describe("dry run", () => {
 	});
 
 	test("without --version the url is unversioned", async () => {
-		const run = await runCli(["run", "--dry-run"]);
+		const run = await runCli(["cloud", "run", "--dry-run"]);
 		expect(run.out).toContain(`/places/${PLACE}/luau-execution-session-tasks`);
 		expect(run.out).toContain(".run(nil, nil)");
 		expect(run.all).not.toContain(SECRET);
 	});
 
 	test("--list is passed to the runner", async () => {
-		const run = await runCli(["run", "--dry-run", "--list"]);
+		const run = await runCli(["cloud", "run", "--dry-run", "--list"]);
 		expect(run.out).toContain(".run(nil, { list = true })");
 	});
 
 	test("--code replaces the shim", async () => {
-		const run = await runCli(["run", "--dry-run", "--code", "return 1 + 1"]);
+		const run = await runCli(["cloud", "run", "--dry-run", "--code", "return 1 + 1"]);
 		expect(run.out).toContain("return 1 + 1");
 		expect(run.out).not.toContain("@flamework-experimental");
 	});
@@ -99,7 +103,7 @@ describe("dry run", () => {
 
 describe("run", () => {
 	test("pins the version from build/version.json", async () => {
-		const run = await runCli(["run"], {
+		const run = await runCli(["cloud", "run"], {
 			responses: happyPath([resultJson()]),
 			files: {
 				"build/version.json": JSON.stringify({ versionNumber: 4 }),
@@ -112,7 +116,7 @@ describe("run", () => {
 	});
 
 	test("prints logs, the summary and exits 0 when ok", async () => {
-		const run = await runCli(["run"], {
+		const run = await runCli(["cloud", "run"], {
 			responses: happyPath([resultJson()], ["boot", "done"]),
 		});
 
@@ -141,7 +145,7 @@ describe("run", () => {
 				},
 			],
 		});
-		const run = await runCli(["run"], { responses: happyPath([failing]) });
+		const run = await runCli(["cloud", "run"], { responses: happyPath([failing]) });
 
 		expect(run.code).toBe(1);
 		expect(run.out).toContain("x refunds");
@@ -150,7 +154,7 @@ describe("run", () => {
 	});
 
 	test("unknown section names fail the run", async () => {
-		const run = await runCli(["run", "--sections", "ghost"], {
+		const run = await runCli(["cloud", "run", "--sections", "ghost"], {
 			responses: happyPath([resultJson({ ok: false, unknown: ["ghost"] })]),
 		});
 
@@ -159,7 +163,7 @@ describe("run", () => {
 	});
 
 	test("a FAILED task prints the error code and message and exits 1", async () => {
-		const run = await runCli(["run"], {
+		const run = await runCli(["cloud", "run"], {
 			responses: [
 				json({ path: TASK_PATH, state: "QUEUED" }),
 				json({
@@ -182,7 +186,7 @@ describe("run", () => {
 	});
 
 	test("--json prints the raw result instead of the summary", async () => {
-		const run = await runCli(["run", "--json"], {
+		const run = await runCli(["cloud", "run", "--json"], {
 			responses: happyPath([resultJson()]),
 		});
 
@@ -193,7 +197,7 @@ describe("run", () => {
 	});
 
 	test("--code prints output.results", async () => {
-		const run = await runCli(["run", "--code", "return 1 + 1"], {
+		const run = await runCli(["cloud", "run", "--code", "return 1 + 1"], {
 			responses: happyPath(["2"]),
 		});
 
@@ -204,13 +208,13 @@ describe("run", () => {
 	});
 
 	test("a result that is not the runner's JSON exits 1", async () => {
-		const run = await runCli(["run"], { responses: happyPath(["nil"]) });
+		const run = await runCli(["cloud", "run"], { responses: happyPath(["nil"]) });
 		expect(run.code).toBe(1);
 		expect(run.err).toContain("not JSON");
 	});
 
 	test("a missing key is reported without a stack", async () => {
-		const run = await runCli(["run"], {
+		const run = await runCli(["cloud", "run"], {
 			env: { TESTING_UNIVERSE_ID: UNIVERSE, TESTING_PLACE_ID: PLACE },
 		});
 		expect(run.code).toBe(1);
@@ -221,7 +225,7 @@ describe("run", () => {
 
 describe("test", () => {
 	test("uploads the place Rojo built, then runs against the version it made", async () => {
-		const run = await runCli(["test", "dist/place.rbxl"], {
+		const run = await runCli(["cloud", "test", "dist/place.rbxl"], {
 			responses: [json({ versionNumber: 9 }), ...happyPath([resultJson()])],
 			files: { "dist/place.rbxl": "binary" },
 		});
@@ -234,16 +238,16 @@ describe("test", () => {
 	});
 
 	test("without the file it is a usage error that names the rojo command", async () => {
-		const run = await runCli(["test"]);
+		const run = await runCli(["cloud", "test"]);
 		expect(run.code).toBe(2);
-		expect(run.err).toContain("rojo build -o place.rbxl && flamework-cloud test place.rbxl");
+		expect(run.err).toContain("rojo build -o place.rbxl && flamework-test test place.rbxl");
 		expect(run.calls).toHaveLength(0);
 	});
 });
 
 describe("publish", () => {
 	test("without the file it is a usage error", async () => {
-		const run = await runCli(["publish"]);
+		const run = await runCli(["cloud", "publish"]);
 		expect(run.code).toBe(2);
 		expect(run.err).toContain("publish needs the place Rojo built");
 		expect(run.calls).toHaveLength(0);
@@ -255,14 +259,14 @@ describe("publish", () => {
 		const ids = { TESTING_UNIVERSE_ID: UNIVERSE, TESTING_PLACE_ID: PLACE };
 		const keyOf = (run: Harness) => (run.calls[0]!.init.headers as Record<string, string>)["x-api-key"];
 
-		const flag = await runCli(["publish", "build/place.rbxl", "--key", "flag-key"], {
+		const flag = await runCli(["cloud", "publish", "build/place.rbxl", "--key", "flag-key"], {
 			env: ids,
 			responses: upload(),
 			files,
 		});
 		expect(keyOf(flag)).toBe("flag-key");
 
-		const shell = await runCli(["publish", "build/place.rbxl"], {
+		const shell = await runCli(["cloud", "publish", "build/place.rbxl"], {
 			env: { ...ids, ROBLOX_API_KEY: "shell-key" },
 			settings: { env: { ROBLOX_API_KEY: "dotenv-key" } },
 			responses: upload(),
@@ -270,7 +274,7 @@ describe("publish", () => {
 		});
 		expect(keyOf(shell)).toBe("shell-key");
 
-		const dotenv = await runCli(["publish", "build/place.rbxl"], {
+		const dotenv = await runCli(["cloud", "publish", "build/place.rbxl"], {
 			env: {},
 			settings: { env: { ROBLOX_API_KEY: "dotenv-key", ...ids } },
 			responses: upload(),
@@ -282,7 +286,7 @@ describe("publish", () => {
 	});
 
 	test("uploads a Saved version and records it", async () => {
-		const run = await runCli(["publish", "build/place.rbxl"], {
+		const run = await runCli(["cloud", "publish", "build/place.rbxl"], {
 			responses: [json({ versionNumber: 5 })],
 			files: { "build/place.rbxl": "binary" },
 		});
@@ -302,7 +306,7 @@ describe("publish", () => {
 	});
 
 	test("--published goes live", async () => {
-		const run = await runCli(["publish", "build/place.rbxl", "--published"], {
+		const run = await runCli(["cloud", "publish", "build/place.rbxl", "--published"], {
 			responses: [json({ versionNumber: 6 })],
 			files: { "build/place.rbxl": "binary" },
 		});
@@ -314,7 +318,7 @@ describe("publish", () => {
 			new Response('{"message":"Save failed. Server is busy ..."}', {
 				status: 409,
 			});
-		const run = await runCli(["publish", "build/place.rbxl"], {
+		const run = await runCli(["cloud", "publish", "build/place.rbxl"], {
 			responses: [busy(), busy()],
 			files: { "build/place.rbxl": "binary" },
 		});
@@ -328,7 +332,7 @@ describe("publish", () => {
 	});
 
 	test("a missing place file is caught before any request", async () => {
-		const run = await runCli(["publish", "build/place.rbxl"]);
+		const run = await runCli(["cloud", "publish", "build/place.rbxl"]);
 		expect(run.code).toBe(1);
 		expect(run.err).toContain("build/place.rbxl does not exist");
 		expect(run.err).toContain("rojo build -o build/place.rbxl");
@@ -338,7 +342,7 @@ describe("publish", () => {
 
 describe("probe", () => {
 	test("prints the decoded answer", async () => {
-		const run = await runCli(["probe"], {
+		const run = await runCli(["cloud", "probe"], {
 			responses: happyPath([
 				JSON.stringify({
 					isRunning: false,

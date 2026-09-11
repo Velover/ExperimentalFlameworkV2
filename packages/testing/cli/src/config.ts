@@ -13,6 +13,11 @@ export interface CloudSettings {
 	apiKey?: string;
 	/** A copy of the original place to lay the build over, resolved against the config file's directory. */
 	originalPlace?: string;
+	/**
+	 * The ModuleScript exporting `ignite()` that a cloud task requires to start the game, from the
+	 * config's `testing.entry`; Studio needs none, the place runs itself.
+	 */
+	testingEntry?: string;
 	/** Where the settings were read from, when a file was found. */
 	configPath?: string;
 	/**
@@ -32,6 +37,7 @@ export function loadCloudSettings(cwd: string, env: Record<string, string | unde
 	const loaded = loadProjectConfig(cwd, packageRoot(cwd), {}, env as Record<string, string>);
 	const cloud = loaded.project.cloud ?? {};
 	const base = loaded.configPath !== undefined ? dirname(loaded.configPath) : cwd;
+	const entry = loaded.project.testing?.entry;
 
 	return {
 		testingUniverseId: cloud.testingUniverseId,
@@ -42,6 +48,7 @@ export function loadCloudSettings(cwd: string, env: Record<string, string | unde
 			cloud.originalPlace !== undefined && cloud.originalPlace !== ""
 				? resolve(base, cloud.originalPlace)
 				: undefined,
+		testingEntry: entry !== undefined && entry !== "" ? entry : undefined,
 		configPath: loaded.configPath,
 		env: loaded.env,
 	};

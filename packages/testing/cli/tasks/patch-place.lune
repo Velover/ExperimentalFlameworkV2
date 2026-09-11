@@ -1,5 +1,5 @@
 --[[
-	Lays a Rojo build over a copy of the original place, following the plan `flamework-cloud`
+	Lays a Rojo build over a copy of the original place, following the plan `flamework-test`
 	computed from the project file, and writes the result as a new place file.
 
 	  lune run patch-place.luau <original.rbxl> <built.rbxl> <out.rbxl> <plan.json>

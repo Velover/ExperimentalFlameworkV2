@@ -36,8 +36,7 @@ bun run lint
 | `packages/core` | Modules, dependency injection, plugins and lifecycle events |
 | `packages/components` | CollectionService components, built on the core plugin system |
 | `packages/networking` | Remote events and functions |
-| `packages/testing` | In-place tests: sections, cleanup, a bindable and a remote to run them, a cloud entry |
-| `packages/cloud-testing` | CLI that publishes a place and runs its tests through Open Cloud |
+| `packages/testing` | In-place tests: sections, cleanup, a bindable and a remote to run them, a cloud entry; and `flamework-test`, the CLI that runs them in Roblox Studio on this machine or through Open Cloud (`cli/`) |
 | `packages/transformer` | The roblox-ts transformer |
 | `packages/transformer-plugin` | Public API for writing transformer plugins |
 | `packages/specs` | Runtime specs, compiled by `rbxtsc` and executed under Lune |

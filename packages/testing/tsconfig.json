@@ -1,5 +1,7 @@
 {
 	"extends": "../../tsconfig.roblox-ts.json",
+	// The roblox-ts side only: cli/ is the Bun CLI, typechecked by cli/tsconfig.json.
+	"include": ["src"],
 	"compilerOptions": {
 		"typeRoots": ["./node_modules/@rbxts", "./node_modules/@flamework-experimental"],
 		// Pin @rbxts/t to this package's own copy. @flamework-experimental/core's declaration files import it too, and with

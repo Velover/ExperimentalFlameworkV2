@@ -23,20 +23,6 @@
         "typescript-eslint": "^8.2.0",
       },
     },
-    "packages/cloud-testing": {
-      "name": "@flamework-experimental/cloud-testing",
-      "version": "2.0.0-alpha.0",
-      "bin": {
-        "flamework-cloud": "./src/cli.ts",
-      },
-      "dependencies": {
-        "@flamework-experimental/transformer": "workspace:*",
-      },
-      "devDependencies": {
-        "@types/bun": "^1.2.0",
-        "typescript": "^5.9.3",
-      },
-    },
     "packages/components": {
       "name": "@flamework-experimental/components",
       "version": "2.0.0-alpha.0",
@@ -111,18 +97,25 @@
     "packages/testing": {
       "name": "@flamework-experimental/testing",
       "version": "2.0.0-alpha.0",
+      "bin": {
+        "flamework-test": "./cli/src/cli.ts",
+      },
       "dependencies": {
         "@rbxts/services": "^1.1.5",
         "@rbxts/t": "^3.1.0",
       },
       "devDependencies": {
         "@flamework-experimental/core": "workspace:*",
+        "@flamework-experimental/transformer": "workspace:*",
         "@rbxts/compiler-types": "^3.0.0-types.0",
         "@rbxts/types": "^1.0.948",
+        "@types/bun": "^1.2.0",
         "roblox-ts": "^3.0.0",
+        "typescript": "^5.9.3",
       },
       "peerDependencies": {
         "@flamework-experimental/core": "*",
+        "@flamework-experimental/transformer": "*",
       },
     },
     "packages/transformer": {
@@ -194,8 +187,6 @@
     "@eslint/object-schema": ["@eslint/object-schema@2.1.7", "", {}, "sha512-VtAOaymWVfZcmZbp6E2mympDIHvyjXs/12LqWYjVw6qjrfF+VK+fyG33kChz3nnK+SU5/NeHOqrTEHS8sXO3OA=="],
 
     "@eslint/plugin-kit": ["@eslint/plugin-kit@0.4.1", "", { "dependencies": { "@eslint/core": "^0.17.0", "levn": "^0.4.1" } }, "sha512-43/qtrDUokr7LJqoF2c3+RInu/t4zfrpYdoSDfYyhg52rwLV6TnOvdG4fXm7IkSB3wErkcmJS9iEhjVtOSEjjA=="],
-
-    "@flamework-experimental/cloud-testing": ["@flamework-experimental/cloud-testing@workspace:packages/cloud-testing"],
 
     "@flamework-experimental/components": ["@flamework-experimental/components@workspace:packages/components"],
 

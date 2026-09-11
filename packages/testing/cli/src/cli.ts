@@ -1,17 +1,18 @@
 #!/usr/bin/env bun
 /**
- * flamework-cloud - runs a place's Flamework tests where the engine is real: publishes what Rojo
- * built to a testing place and runs the tests through the Open Cloud Luau Execution API, or opens
- * that place in Roblox Studio on this machine and runs them there through Studio's MCP proxy. A
- * copy of the original place can be patched with the build first, so the tests see the assets
- * only the original has.
+ * flamework-test - runs a place's Flamework tests where the engine is real. First and by default on
+ * this machine: it opens the place Rojo built in Roblox Studio, runs the tests in a play session on
+ * both realms through Studio's MCP proxy, and closes it again. Second, when asked, in the cloud:
+ * it publishes the build to a testing place and runs the server's tests through the Open Cloud
+ * Luau Execution API. A copy of the original place can be patched with the build first either
+ * way, so the tests see the assets only the original has.
  *
  * Everything is injectable (`CliDeps`) so `bun test` can drive the whole CLI without a network,
  * a file system, a Studio or a real API key.
  */
 import { spawn, spawnSync } from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 
 import {
 	API_BASE,
@@ -29,6 +30,9 @@ import {
 import { loadCloudSettings, type CloudSettings } from "./config.ts";
 import { parseSections, renderFilter, renderOptions, renderShim, type Filter } from "./luau.ts";
 import { defaultPatchedPath, patchCommand, planPatch, type RojoProject } from "./patch.ts";
+import PATCH_TASK from "../tasks/patch-place.lune" with { type: "text" };
+import PROBE_TASK from "../tasks/probe.lune" with { type: "text" };
+import RUN_TESTS_TASK from "../tasks/run-tests.lune" with { type: "text" };
 import { formatList, formatSummary, parseRunResult, ResultParseError } from "./results.ts";
 import {
 	connectStudio,
@@ -46,13 +50,15 @@ import {
 	type StudioEntry,
 } from "./studio.ts";
 
-/** Where `publish` records the version it made, for `run` to pin. */
+/** Where `cloud publish` records the version it made, for `cloud run` to pin. */
 export const VERSION_FILE = "build/version.json";
 export const DEFAULT_PROJECT = "default.project.json";
 export const DEFAULT_TIMEOUT = "120s";
 export const PROBE_TIMEOUT = "60s";
-/** How long `studio open` waits for the window to show up on the proxy. */
+/** How long a Studio window is waited for after launching it. */
 export const STUDIO_OPEN_TIMEOUT = "180s";
+/** How long a play session is waited for once started. */
+export const PLAY_START_TIMEOUT_MS = 90_000;
 export const POLL_INTERVAL_MS = 2500;
 /** How long past the task's own timeout we keep polling before giving up. */
 export const QUEUE_SLACK_MS = 300_000;
@@ -75,6 +81,7 @@ const FLAGS: Record<string, FlagKind> = {
 	script: "string",
 	realm: "string",
 	keep: "boolean",
+	cloud: "boolean",
 	"dry-run": "boolean",
 	json: "boolean",
 	"testing-universe": "string",
@@ -88,16 +95,14 @@ const COMMON_FLAGS = ["testing-universe", "testing-place", "key", "help"];
 /** `studio` commands may name their window; every other way of finding it is automatic. */
 const STUDIO_FLAGS = ["studio"];
 /** Commands that take a file as a positional argument as well as `--file`. */
-const FILE_COMMANDS = ["publish", "test", "patch", "studio open"];
+const FILE_COMMANDS = ["test", "patch", "studio open", "cloud publish", "cloud test"];
 const PATCH_FLAGS = ["original", "project"];
 const PUBLISH_FLAGS = ["file", "published", ...PATCH_FLAGS];
 const RUN_FLAGS = ["version", "sections", "list", "timeout", "code", "script", "dry-run", "json"];
+const REPORT_FLAGS = ["sections", "list", "json", "timeout"];
 
 const COMMANDS: Record<string, string[]> = {
-	publish: PUBLISH_FLAGS,
-	run: RUN_FLAGS,
-	test: [...PUBLISH_FLAGS, ...RUN_FLAGS],
-	probe: ["version", "timeout", "json", "dry-run"],
+	test: ["file", "realm", "keep", "cloud", ...PATCH_FLAGS, ...REPORT_FLAGS, "published"],
 	patch: ["file", "out", ...PATCH_FLAGS],
 	"studio open": ["file", "timeout"],
 	"studio close": STUDIO_FLAGS,
@@ -105,8 +110,17 @@ const COMMANDS: Record<string, string[]> = {
 	"studio play": STUDIO_FLAGS,
 	"studio stop": STUDIO_FLAGS,
 	"studio exec": ["code", "script", "realm", "timeout", ...STUDIO_FLAGS],
-	"studio run": ["sections", "list", "realm", "keep", "json", "timeout", ...STUDIO_FLAGS],
+	"studio run": ["realm", "keep", ...REPORT_FLAGS, ...STUDIO_FLAGS],
+	"cloud publish": PUBLISH_FLAGS,
+	"cloud run": RUN_FLAGS,
+	"cloud test": [...PUBLISH_FLAGS, ...RUN_FLAGS],
+	"cloud probe": ["version", "timeout", "json", "dry-run"],
 	help: [],
+};
+
+const GROUPS: Record<string, string> = {
+	studio: "open, close, status, play, stop, exec, run",
+	cloud: "publish, run, test, probe",
 };
 
 export interface Flags {
@@ -123,6 +137,7 @@ export interface Flags {
 	script?: string;
 	realm?: string;
 	keep?: boolean;
+	cloud?: boolean;
 	"dry-run"?: boolean;
 	json?: boolean;
 	"testing-universe"?: string;
@@ -143,14 +158,15 @@ export class CliError extends Error {
 }
 
 export interface ParsedArgs {
-	/** `"publish"`, or a two-word one such as `"studio run"`. */
+	/** `"test"`, or a two-word one such as `"studio run"` or `"cloud publish"`. */
 	command?: string;
 	flags: Flags;
 }
 
 /**
- * Flags may appear before or after the command. `studio` commands are two words; `publish`,
- * `test`, `patch` and `studio open` accept a file as the next positional, the same as `--file`.
+ * Flags may appear before or after the command. `studio` and `cloud` commands are two words;
+ * `test`, `patch`, `studio open`, `cloud publish` and `cloud test` accept a file as the next
+ * positional, the same as `--file`.
  */
 export function parseArgs(argv: string[]): ParsedArgs {
 	const flags: Flags = {};
@@ -203,12 +219,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
 	}
 
 	let command = positionals.shift();
-	if (command === "studio") {
+	if (command !== undefined && GROUPS[command] !== undefined) {
 		const sub = positionals.shift();
 		if (sub === undefined) {
-			throw new UsageError("studio needs a subcommand: open, close, status, play, stop, exec, run");
+			throw new UsageError(`${command} needs a subcommand: ${GROUPS[command]}`);
 		}
-		command = `studio ${sub}`;
+		command = `${command} ${sub}`;
 	}
 
 	if (command !== undefined) {
@@ -240,17 +256,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
 	return { command, flags };
 }
 
-const USAGE = `flamework-cloud - run Flamework tests inside a real place: a testing place in the cloud, or
-Roblox Studio on this machine
+const USAGE = `flamework-test - run Flamework tests inside a real place: Roblox Studio on this machine by
+default, or a testing place in the cloud
 
 Usage:
-  flamework-cloud <command> [file] [flags]     (flags may come before the command)
+  flamework-test <command> [file] [flags]     (flags may come before the command)
 
-Cloud:
-  publish <file>  upload the place Rojo built to the testing place as a new version
-  run             run the tests in that version through Open Cloud and report the results
-  test <file>     publish the file, then run
-  probe           report what the execution sandbox looks like from the inside
+  test <file>     open the place Rojo built in Roblox Studio, run the tests in a play session on
+                  the server and the client, report, and close it again
   patch <file>    lay the build over a copy of the original place and write the result
 
 Studio (needs "MCP server" enabled in Studio's Assistant settings):
@@ -259,29 +272,39 @@ Studio (needs "MCP server" enabled in Studio's Assistant settings):
   studio status       what that window reports: edit or play, which data models exist
   studio play         start a play session in it;  studio stop  ends one
   studio exec         run Luau in it:  --code "<luau>" | --script <file>  [--realm edit|server|client]
-  studio run          run the tests in it, in a play session, and report like \`run\`
+  studio run          run the tests in it, in a play session, without opening or closing anything
+
+Cloud (a testing place and an Open Cloud key; the server's tests only):
+  cloud publish <file>  upload the place Rojo built to the testing place as a new version
+  cloud run             run the tests in that version through Open Cloud and report the results
+  cloud test <file>     publish the file, then run  (the same as: test <file> --cloud)
+  cloud probe           report what the execution sandbox looks like from the inside
 
 Flags:
-  publish    --file <path>           the same as the <file> argument
-             --published             publish live instead of uploading a Saved version
-             --original <place.rbxl> patch a copy of this place with the build first, and upload
-                                     that (needs lune; default: $ORIGINAL_PLACE, cloud.originalPlace)
+  test       --realm server|client|both  which realm's tests; default both
+             --keep                  leave Studio and the play session open afterwards
+             --cloud                 run in the cloud instead of Studio
+             --original <place.rbxl> patch a copy of this place with the build first, and run that
+                                     (needs lune; default: $ORIGINAL_PLACE, cloud.originalPlace)
              --project <path>        the Rojo project the patch follows; default ${DEFAULT_PROJECT}
-  patch      --out <path>            where the patched place goes; default <file>.patched.rbxl
-  run        --version <n>           default: ${VERSION_FILE}, else the current version
              --sections <a,b>        only these sections ("economy", "economy/buys")
              --list                  list the tests instead of running them
-             --timeout <120s>        task timeout, max 300s
-             --code "<luau>"         run this Luau instead of the test shim
-             --script <file>         run this Luau file instead of the test shim
-             --dry-run               print the request that would be sent, then stop
              --json                  print the raw result JSON instead of a summary
-  studio run --realm server|client   which realm's tests; default server
-             --sections, --list, --json   as for run
+             --timeout <120s>        per run
+  patch      --out <path>            where the patched place goes; default <file>.patched.rbxl
+  studio run --realm server|client|both   default server
              --keep                  leave the play session running afterwards
+             --sections, --list, --json, --timeout   as for test
   studio exec --realm edit|server|client  default edit
   studio *   --studio <name|id>      which window; default: the one with the testing place open,
                                      else the only one with a local place file open
+  cloud publish --published          publish live instead of uploading a Saved version
+             --original, --project   as for test
+  cloud run  --version <n>           default: ${VERSION_FILE}, else the current version
+             --code "<luau>"         run this Luau instead of the test shim
+             --script <file>         run this Luau file instead of the test shim
+             --dry-run               print the request that would be sent, then stop
+             --sections, --list, --json, --timeout   as for test (timeout: the task's, max 300s)
   common     --testing-universe <id> default: $TESTING_UNIVERSE_ID, else cloud.testingUniverseId
              --testing-place <id>    default: $TESTING_PLACE_ID, else cloud.testingPlaceId
              --key <apiKey>          default: $ROBLOX_API_KEY, else cloud.apiKey; prefer the
@@ -292,6 +315,8 @@ Settings come from flags, then the shell environment, then .env and .env.local n
 nearest flamework.config.json, then that file's "cloud" section, which may itself use \${NAME}:
   "cloud": { "testingUniverseId": "...", "testingPlaceId": "...", "apiKey": "\${ROBLOX_API_KEY:-}",
              "originalPlace": "places/original.rbxl" }
+A cloud run also needs "testing": { "entry": "src/server/main" }, the ModuleScript that ignites
+the game: a cloud task runs none of the place's Scripts, so the runner has to. Studio needs nothing.
 
 Environment (the shell, .env or .env.local):
   ROBLOX_API_KEY                          Open Cloud key: universe-places:write and
@@ -301,10 +326,11 @@ Environment (the shell, .env or .env.local):
   LUNE_EXE, ROBLOX_STUDIO_EXE, STUDIO_MCP_EXE   overrides for the tools this finds by itself
 
 Examples:
-  rojo build -o place.rbxl && flamework-cloud test place.rbxl
-  rojo build -o place.rbxl && flamework-cloud test place.rbxl --original original.rbxl
-  flamework-cloud run --sections economy       again, against the version last published
-  flamework-cloud studio open && flamework-cloud studio run --realm client
+  rojo build -o place.rbxl && flamework-test test place.rbxl
+  rojo build -o place.rbxl && flamework-test test place.rbxl --sections economy --keep
+  rojo build -o place.rbxl && flamework-test test place.rbxl --cloud
+  flamework-test cloud run --sections economy       again, against the version last published
+  flamework-test studio open && flamework-test studio run --realm client
 
 Exit codes: 0 success, 1 failure, 2 bad usage.`;
 
@@ -331,8 +357,6 @@ export interface CliDeps {
 	error?: (message: string) => void;
 	env?: Record<string, string | undefined>;
 	cwd?: string;
-	/** Where the `.luau` tasks live. */
-	tasksDir?: string;
 	now?: () => Date;
 	/** Reads the `cloud` section of the nearest flamework.config.json. */
 	loadSettings?: (cwd: string, env: Record<string, string | undefined>) => CloudSettings;
@@ -400,7 +424,7 @@ function resolveDeps(deps: CliDeps): Io {
 				if (exe === undefined) {
 					throw new CliError(
 						"StudioMCP.exe was not found under Roblox Studio's versions folder",
-						"is Roblox Studio installed on this machine? Set STUDIO_MCP_EXE to point at it otherwise",
+						"is Roblox Studio installed on this machine? Set STUDIO_MCP_EXE to point at it otherwise, or run in the cloud: flamework-test test <file> --cloud",
 					);
 				}
 				return await connectStudio(exe);
@@ -410,7 +434,6 @@ function resolveDeps(deps: CliDeps): Io {
 		error: deps.error ?? ((message) => console.error(message)),
 		env,
 		cwd: deps.cwd ?? process.cwd(),
-		tasksDir: deps.tasksDir ?? join(import.meta.dir, "..", "tasks"),
 		now: deps.now ?? (() => new Date()),
 		loadSettings: deps.loadSettings ?? loadCloudSettings,
 	};
@@ -477,7 +500,7 @@ function resolveIds(flags: Flags, io: Io): { universeId: string; placeId: string
 function placeFileOf(flags: Flags, command: string): string {
 	if (flags.file === undefined) {
 		throw new UsageError(
-			`${command} needs the place Rojo built: rojo build -o place.rbxl && flamework-cloud ${command} place.rbxl`,
+			`${command} needs the place Rojo built: rojo build -o place.rbxl && flamework-test ${command} place.rbxl`,
 		);
 	}
 	return flags.file;
@@ -490,7 +513,7 @@ function originalPlaceOf(flags: Flags, io: Io): string | undefined {
 	return settingsOf(io).originalPlace;
 }
 
-/** `lune`, or `LUNE_EXE`; checked before anything is uploaded, since the patch cannot run without it. */
+/** `lune`, or `LUNE_EXE`; checked before anything is opened or uploaded, since the patch cannot run without it. */
 async function requireLune(io: Io): Promise<string> {
 	const exe = envOf(io, "LUNE_EXE") ?? "lune";
 	let code: number;
@@ -502,7 +525,7 @@ async function requireLune(io: Io): Promise<string> {
 	if (code !== 0) {
 		throw new CliError(
 			"lune is needed to patch the original place, and it was not found",
-			"install it (rokit or aftman: `lune`), or set LUNE_EXE; nothing was uploaded",
+			"install it (rokit or aftman: `lune`), or set LUNE_EXE; nothing was run or uploaded",
 		);
 	}
 	return exe;
@@ -548,25 +571,40 @@ async function patchPlace(built: string, original: string, flags: Flags, io: Io)
 	const plan = planPatch(project);
 	await io.writeTextFile(planPath, JSON.stringify(plan));
 
+	// Lune runs a file, so the task ships as text and is written out beside the plan.
+	const taskPath = resolve(io.cwd, "build", "patch-place.luau");
+	await io.writeTextFile(taskPath, PATCH_TASK);
+
 	io.log(`patching a copy of ${original} with ${built}, following ${projectPath}`);
 	const code = await io.spawn(
-		patchCommand(lune, join(io.tasksDir, "patch-place.luau"), { original, built: builtPath, out, plan: planPath }),
+		patchCommand(lune, taskPath, { original, built: builtPath, out, plan: planPath }),
 		io.cwd,
 	);
 	if (code !== 0) {
-		throw new CliError(`the patch failed (lune exited ${code})`, "nothing was uploaded");
+		throw new CliError(`the patch failed (lune exited ${code})`, "nothing was run or uploaded");
 	}
 
 	io.log(`wrote ${out}`);
 	return out;
 }
 
-/** The file to upload: the build, or the build laid over the original when one is named. */
-async function fileToPublish(flags: Flags, io: Io, command: string): Promise<string> {
+/**
+ * The place to run or upload: the build, or the build laid over the original when one is named.
+ * `label` is how it is spoken of: the name the build was given, or the patched file's path.
+ */
+async function placeToRun(flags: Flags, io: Io, command: string): Promise<{ absolute: string; label: string }> {
 	const built = placeFileOf(flags, command);
 	const original = originalPlaceOf(flags, io);
-	if (original === undefined) return built;
-	return await patchPlace(built, original, flags, io);
+	if (original !== undefined) {
+		const patched = await patchPlace(built, original, flags, io);
+		return { absolute: patched, label: patched };
+	}
+
+	const absolute = resolve(io.cwd, built);
+	if (!(await io.exists(absolute))) {
+		throw new CliError(`${built} does not exist`, `build it first: rojo build -o ${built}`);
+	}
+	return { absolute, label: built };
 }
 
 async function cmdPatch(flags: Flags, io: Io): Promise<number> {
@@ -584,11 +622,7 @@ async function cmdPatch(flags: Flags, io: Io): Promise<number> {
 // ------------------------------------------------------------------- cloud
 
 async function cmdPublish(flags: Flags, io: Io): Promise<number> {
-	const file = await fileToPublish(flags, io, "publish");
-	const absolute = resolve(io.cwd, file);
-	if (!(await io.exists(absolute))) {
-		throw new CliError(`${file} does not exist`, `build it first: rojo build -o ${file}`);
-	}
+	const { absolute, label: file } = await placeToRun(flags, io, "cloud publish");
 
 	const versionType: VersionType = flags.published ? "Published" : "Saved";
 	const client = makeClient(flags, io);
@@ -649,19 +683,36 @@ async function buildScript(
 ): Promise<{ script: string; scriptKind: ScriptKind; label: string }> {
 	if (kind === "probe") {
 		return {
-			script: await io.readTextFile(join(io.tasksDir, "probe.luau")),
+			script: PROBE_TASK,
 			scriptKind: "probe",
-			label: "tasks/probe.luau",
+			label: "the probe",
 		};
 	}
 
 	const raw = await rawScript(flags, io);
 	if (raw !== undefined) return { ...raw, scriptKind: "raw" };
 
-	const template = await io.readTextFile(join(io.tasksDir, "run-tests.luau"));
+	requireCloudEntry(io);
+
 	const filter: Filter = parseSections(flags.sections);
-	const script = renderShim(template, filter, { list: flags.list === true });
-	return { script, scriptKind: "shim", label: "tasks/run-tests.luau" };
+	const script = renderShim(RUN_TESTS_TASK, filter, { list: flags.list === true });
+	return { script, scriptKind: "shim", label: "the test shim" };
+}
+
+/**
+ * A cloud task runs none of the place's Scripts, so the shim has to ignite the game itself, from
+ * the ModuleScript `testing.entry` names. Checked here, before anything is published: the task
+ * would only fail after the upload. Only a project whose config file was found can be checked;
+ * ids given by the environment alone say nothing about the place.
+ */
+function requireCloudEntry(io: Io): void {
+	const settings = settingsOf(io);
+	if (settings.configPath === undefined || settings.testingEntry !== undefined) return;
+
+	throw new CliError(
+		`a cloud run needs "testing": { "entry": "src/server/main" } in ${settings.configPath}`,
+		"a Luau execution task runs none of the place's Scripts, so the runner requires that ModuleScript and calls its ignite(); Studio needs no entry, the place runs itself: flamework-test test <file>",
+	);
 }
 
 /** `--code` or `--script`, when either was given. */
@@ -825,8 +876,9 @@ function printDryRun(
 	io.log("--- end script ---");
 }
 
-async function cmdTest(flags: Flags, io: Io): Promise<number> {
-	placeFileOf(flags, "test");
+async function cmdCloudTest(flags: Flags, io: Io): Promise<number> {
+	placeFileOf(flags, "cloud test");
+	requireCloudEntry(io);
 	const published = await cmdPublish(flags, io);
 	if (published !== 0) return published;
 	return await cmdRun(flags, io, "run");
@@ -851,7 +903,7 @@ async function withStudio<T>(
 				flags.studio !== undefined
 					? `no Studio window is named "${flags.studio}"; listed: ${listed || "none"}`
 					: `no Studio window has the testing place ${placeId} open${listed ? `; listed: ${listed}` : ""}`,
-				'open it with `flamework-cloud studio open`, and check that "MCP server" is enabled in Studio\'s Assistant settings; a window that has it disabled is not listed',
+				'open it with `flamework-test studio open`, and check that "MCP server" is enabled in Studio\'s Assistant settings; a window that has it disabled is not listed',
 			);
 		}
 		return await body(client, studio);
@@ -870,14 +922,52 @@ function dataModelOf(realm: string | undefined, fallback: DataModelType): DataMo
 	return mapped;
 }
 
-async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
+/** The realms a run covers: `server`, `client`, or `both`, in the order they run. */
+function realmsOf(realm: string | undefined, fallback: "server" | "both"): Array<"Server" | "Client"> {
+	const chosen = (realm ?? fallback).toLowerCase();
+	if (chosen === "both") return ["Server", "Client"];
+	if (chosen === "server") return ["Server"];
+	if (chosen === "client") return ["Client"];
+	throw new UsageError(`--realm must be server, client or both, got "${realm}"`);
+}
+
+/** Where Roblox Studio is, or a clear refusal with the cloud as the way out. */
+function requireStudioExe(io: Io): string {
 	const exe = io.studioExe();
 	if (exe === undefined) {
 		throw new CliError(
 			"RobloxStudioBeta.exe was not found under Roblox Studio's versions folder",
-			"is Roblox Studio installed on this machine? Set ROBLOX_STUDIO_EXE to point at it otherwise",
+			"is Roblox Studio installed on this machine? Set ROBLOX_STUDIO_EXE to point at it otherwise, or run in the cloud: flamework-test test <file> --cloud",
 		);
 	}
+	return exe;
+}
+
+/** Polls the proxy until a window matches, or the deadline passes. */
+async function waitForStudio(
+	client: StudioClient,
+	find: (studios: StudioEntry[]) => StudioEntry | undefined,
+	flags: Flags,
+	io: Io,
+): Promise<StudioEntry | undefined> {
+	const deadline = io.now().getTime() + parseDurationMs(flags.timeout ?? STUDIO_OPEN_TIMEOUT, 180_000);
+	while (io.now().getTime() < deadline) {
+		const studio = find(await client.studios());
+		if (studio !== undefined) return studio;
+		await io.sleep(5000);
+	}
+	return undefined;
+}
+
+function neverConnected(what: string): CliError {
+	return new CliError(
+		`Studio started but ${what} never showed up on the MCP proxy`,
+		'the window is open; if it stays unlisted, enable "MCP server" in Studio\'s Assistant settings and run `flamework-test studio status` again',
+	);
+}
+
+async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
+	const exe = requireStudioExe(io);
 
 	let find: (studios: StudioEntry[]) => StudioEntry | undefined;
 	let what: string;
@@ -899,35 +989,33 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 	}
 	io.log(`opening ${what} in Studio; waiting for it to connect...`);
 
-	const deadline = io.now().getTime() + parseDurationMs(flags.timeout ?? STUDIO_OPEN_TIMEOUT, 180_000);
 	const client = await io.connectStudio();
 	try {
-		while (io.now().getTime() < deadline) {
-			const studio = find(await client.studios());
-			if (studio !== undefined) {
-				io.log(`connected: ${studio.name} (${studio.id})`);
-				return 0;
-			}
-			await io.sleep(5000);
-		}
+		const studio = await waitForStudio(client, find, flags, io);
+		if (studio === undefined) throw neverConnected(what);
+		io.log(`connected: ${studio.name} (${studio.id})`);
+		return 0;
 	} finally {
 		client.close();
 	}
+}
 
-	throw new CliError(
-		`Studio started but ${what} never showed up on the MCP proxy`,
-		'the window is open; if it stays unlisted, enable "MCP server" in Studio\'s Assistant settings and run `flamework-cloud studio status` again',
+/** Closes a window by the name the proxy lists it under; what happened, for the log. */
+async function closeStudioWindow(name: string, io: Io): Promise<void> {
+	const outcome = await io.closeWindow(`${name} - Roblox Studio`);
+	if (outcome === "none") {
+		throw new CliError(`no window titled "${name} - Roblox Studio" was found to close`);
+	}
+	io.log(
+		outcome === "closed"
+			? `closed ${name}`
+			: `closed ${name}, which asked before going (a save prompt, usually; nothing a run makes is kept)`,
 	);
 }
 
 async function cmdStudioClose(flags: Flags, io: Io): Promise<number> {
 	return await withStudio(flags, io, async (_client, studio) => {
-		const name = placeNameOf(studio.name);
-		const outcome = await io.closeWindow(`${name} - Roblox Studio`);
-		if (outcome === "none") {
-			throw new CliError(`no window titled "${name} - Roblox Studio" was found to close`);
-		}
-		io.log(outcome === "closed" ? `closed ${name}` : `${name} did not close on its own and was stopped`);
+		await closeStudioWindow(placeNameOf(studio.name), io);
 		return 0;
 	});
 }
@@ -967,46 +1055,106 @@ async function cmdStudioExec(flags: Flags, io: Io): Promise<number> {
 	});
 }
 
-async function cmdStudioRun(flags: Flags, io: Io): Promise<number> {
-	const dataModel = dataModelOf(flags.realm, "Server");
-	if (dataModel === "Edit") {
-		throw new UsageError("studio run needs a play session; --realm is server or client");
-	}
+/**
+ * Runs the tests of each realm in a play session of the window, starting one when none is
+ * running and stopping it afterwards unless `--keep`. Every realm is run even after one fails;
+ * the exit code is the worst of them.
+ */
+async function runRealms(
+	client: StudioClient,
+	studio: StudioEntry,
+	realms: Array<"Server" | "Client">,
+	flags: Flags,
+	io: Io,
+): Promise<number> {
 	const filter: Filter = parseSections(flags.sections);
 	const script = renderStudioRun(renderFilter(filter), renderOptions({ list: flags.list === true }));
+	const state = () => client.call("get_studio_state", { studio_id: studio.id }, 30_000);
 
-	return await withStudio(flags, io, async (client, studio) => {
-		const state = () => client.call("get_studio_state", { studio_id: studio.id }, 30_000);
+	let startedHere = false;
+	if (!isPlaying(await state())) {
+		io.log("starting a play session...");
+		await client.call("start_stop_play", { studio_id: studio.id, is_start: true }, 180_000);
+		startedHere = true;
 
-		let startedHere = false;
-		if (!isPlaying(await state())) {
-			io.log("starting a play session...");
-			await client.call("start_stop_play", { studio_id: studio.id, is_start: true }, 180_000);
-			startedHere = true;
-
-			const deadline = io.now().getTime() + 90_000;
-			while (io.now().getTime() < deadline) {
-				const current = await state();
-				if (/Client/.test(current) && /Server/.test(current)) break;
-				await io.sleep(1000);
-			}
+		const deadline = io.now().getTime() + PLAY_START_TIMEOUT_MS;
+		while (io.now().getTime() < deadline) {
+			const current = await state();
+			if (/Client/.test(current) && /Server/.test(current)) break;
+			await io.sleep(1000);
 		}
+	}
 
-		try {
+	try {
+		let code = 0;
+		for (const dataModel of realms) {
 			io.log(`running the ${dataModel.toLowerCase()}'s tests in ${placeNameOf(studio.name)}...`);
 			const answer = await client.call(
 				"execute_luau",
 				{ studio_id: studio.id, datamodel_type: dataModel, code: script },
 				parseDurationMs(flags.timeout ?? DEFAULT_TIMEOUT, 120_000),
 			);
-			return printRunResult([unquoteLuauResult(answer)], flags, io);
-		} finally {
-			if (startedHere && flags.keep !== true) {
-				await client.call("start_stop_play", { studio_id: studio.id, is_start: false }, 120_000);
-				io.log("play session stopped (--keep leaves it running)");
-			}
+			code = Math.max(code, printRunResult([unquoteLuauResult(answer)], flags, io));
 		}
-	});
+		return code;
+	} finally {
+		if (startedHere && flags.keep !== true) {
+			await client.call("start_stop_play", { studio_id: studio.id, is_start: false }, 120_000);
+			io.log("play session stopped (--keep leaves it running)");
+		}
+	}
+}
+
+async function cmdStudioRun(flags: Flags, io: Io): Promise<number> {
+	const realms = realmsOf(flags.realm, "server");
+	return await withStudio(flags, io, (client, studio) => runRealms(client, studio, realms, flags, io));
+}
+
+// -------------------------------------------------------------------- test
+
+/**
+ * The default way to run the tests: the place Rojo built, opened in Studio on this machine, run
+ * on both realms in a play session, and closed again. A window that already has a file of that
+ * name open is from an earlier build and would test stale code, so it is closed first and the
+ * file opened afresh.
+ */
+async function cmdTest(flags: Flags, io: Io): Promise<number> {
+	if (flags.cloud) return await cmdCloudTest(flags, io);
+	if (flags.published) {
+		throw new UsageError("--published is for the cloud: flamework-test test <file> --cloud --published");
+	}
+
+	const realms = realmsOf(flags.realm, "both");
+	const { absolute: file, label } = await placeToRun(flags, io, "test");
+	const name = basename(file);
+	const exe = requireStudioExe(io);
+
+	const client = await io.connectStudio();
+	try {
+		const stale = findStudio(await client.studios(), undefined, name);
+		if (stale !== undefined) {
+			io.log(`${name} is already open in Studio, from an earlier build; closing it`);
+			await closeStudioWindow(name, io);
+			await io.sleep(2000);
+		}
+
+		await io.launch([exe, ...studioOpenArguments({ file })]);
+		io.log(`opening ${label} in Studio; waiting for it to connect...`);
+		const studio = await waitForStudio(client, (studios) => findStudio(studios, undefined, name), flags, io);
+		if (studio === undefined) throw neverConnected(label);
+		io.log(`connected: ${studio.name} (${studio.id})`);
+
+		const code = await runRealms(client, studio, realms, flags, io);
+
+		if (flags.keep === true) {
+			io.log("Studio left open (--keep)");
+		} else {
+			await closeStudioWindow(name, io);
+		}
+		return code;
+	} finally {
+		client.close();
+	}
 }
 
 // ------------------------------------------------------------------- main
@@ -1040,12 +1188,6 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
 
 	try {
 		switch (parsed.command) {
-			case "publish":
-				return await cmdPublish(parsed.flags, io);
-			case "run":
-				return await cmdRun(parsed.flags, io, "run");
-			case "probe":
-				return await cmdRun(parsed.flags, io, "probe");
 			case "test":
 				return await cmdTest(parsed.flags, io);
 			case "patch":
@@ -1064,6 +1206,14 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
 				return await cmdStudioExec(parsed.flags, io);
 			case "studio run":
 				return await cmdStudioRun(parsed.flags, io);
+			case "cloud publish":
+				return await cmdPublish(parsed.flags, io);
+			case "cloud run":
+				return await cmdRun(parsed.flags, io, "run");
+			case "cloud probe":
+				return await cmdRun(parsed.flags, io, "probe");
+			case "cloud test":
+				return await cmdCloudTest(parsed.flags, io);
 			default:
 				io.error(`error: unknown command: ${parsed.command}`);
 				io.error("");

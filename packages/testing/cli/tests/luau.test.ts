@@ -92,7 +92,7 @@ describe("renderShim", () => {
 });
 
 test("the shipped shim still has both placeholders and the guard", async () => {
-	const template = await Bun.file(new URL("../tasks/run-tests.luau", import.meta.url)).text();
+	const template = await Bun.file(new URL("../tasks/run-tests.lune", import.meta.url)).text();
 	expect(template).toContain("__FILTER__");
 	expect(template).toContain("__OPTIONS__");
 	expect(template).toContain("@flamework-experimental");

@@ -55,3 +55,11 @@ describe.each(PACKAGES)("@flamework-experimental/%s", (pkg) => {
 		expect(offenders).toEqual([]);
 	});
 });
+
+describe("@flamework-experimental/testing's CLI", () => {
+	// A game's Rojo project syncs node_modules/@flamework-experimental into the place, and Rojo makes a
+	// ModuleScript of every .luau it finds; the CLI's Luau is kept under another extension for that.
+	test("ships no .luau under cli/", () => {
+		expect(luauFiles(path.join(ROOT, "packages", "testing", "cli"))).toEqual([]);
+	});
+});

@@ -8,7 +8,6 @@ import type { StudioClient, StudioEntry } from "../src/studio.ts";
 export const SECRET = "secret-key-that-must-never-be-printed";
 export const UNIVERSE = "10765968722";
 export const PLACE = "108973151455286";
-export const TASKS_DIR = join(import.meta.dir, "..", "tasks");
 
 export const ENV = {
 	TESTING_PLACE_API_KEY: SECRET,
@@ -67,6 +66,8 @@ export async function runCli(
 		/** Where Roblox Studio is; undefined means not installed. */
 		studioExe?: string | undefined;
 		closeOutcome?: "closed" | "forced" | "none";
+		/** Runs when the CLI launches a program, so a fake Studio can start listing the window it opened. */
+		onLaunch?: () => void;
 	} = {},
 ): Promise<Harness> {
 	const out: string[] = [];
@@ -106,10 +107,7 @@ export async function runCli(
 		readFile: async () => new Uint8Array([0x89, 0x01]).buffer,
 		readTextFile: async (path) => {
 			const content = find(path);
-			if (content === undefined) {
-				// fall through to the real tasks/ files
-				return await Bun.file(path).text();
-			}
+			if (content === undefined) throw new Error(`unexpected read: ${path}`);
 			return content;
 		},
 		writeTextFile: async (path, text) => {
@@ -123,6 +121,7 @@ export async function runCli(
 		},
 		launch: async (command) => {
 			launched.push(command);
+			options.onLaunch?.();
 		},
 		closeWindow: async (titlePrefix) => {
 			closedWindows.push(titlePrefix);
@@ -146,7 +145,6 @@ export async function runCli(
 		error: (message) => err.push(message),
 		env: options.env ?? ENV,
 		cwd: join(import.meta.dir, "..", "fixture-cwd"),
-		tasksDir: TASKS_DIR,
 		now: () => new Date(clock),
 		loadSettings: () => ({ env: {}, ...options.settings }),
 	};

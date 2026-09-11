@@ -74,7 +74,7 @@ describe("patch", () => {
 		const task = run.spawned[1]!.map((part) => part.replaceAll("\\", "/"));
 		expect(task[0]).toBe("lune");
 		expect(task[1]).toBe("run");
-		expect(task[2]).toEndWith("tasks/patch-place.luau");
+		expect(task[2]).toEndWith("build/patch-place.luau");
 		expect(task[3]).toEndWith("original.rbxl");
 		expect(task[4]).toEndWith("place.rbxl");
 		expect(task[5]).toEndWith("place.patched.rbxl");
@@ -86,14 +86,14 @@ describe("patch", () => {
 	});
 
 	test("without lune the run stops before anything is uploaded, naming the cause", async () => {
-		const run = await runCli(["test", "place.rbxl", "--original", "original.rbxl"], {
+		const run = await runCli(["cloud", "test", "place.rbxl", "--original", "original.rbxl"], {
 			files: { "place.rbxl": "built", "original.rbxl": "orig", "default.project.json": PROJECT },
 			spawnCode: (command) => (command[1] === "--version" ? 127 : 0),
 		});
 
 		expect(run.code).toBe(1);
 		expect(run.err).toContain("lune is needed");
-		expect(run.err).toContain("nothing was uploaded");
+		expect(run.err).toContain("nothing was run or uploaded");
 		expect(run.calls).toHaveLength(0);
 	});
 
@@ -107,7 +107,7 @@ describe("patch", () => {
 	});
 
 	test("publish --original uploads the patched place and records that file", async () => {
-		const run = await runCli(["publish", "place.rbxl", "--original", "original.rbxl"], {
+		const run = await runCli(["cloud", "publish", "place.rbxl", "--original", "original.rbxl"], {
 			files: {
 				"place.rbxl": "built",
 				"original.rbxl": "orig",
@@ -144,7 +144,7 @@ describe("patch", () => {
 
 describe("turning the original off", () => {
 	test("an empty ORIGINAL_PLACE means no patch, even when the config names one", async () => {
-		const run = await runCli(["publish", "place.rbxl"], {
+		const run = await runCli(["cloud", "publish", "place.rbxl"], {
 			env: { TESTING_PLACE_API_KEY: "k", TESTING_UNIVERSE_ID: "1", TESTING_PLACE_ID: "2", ORIGINAL_PLACE: "" },
 			settings: { originalPlace: "/cfg/original.rbxl" },
 			files: { "place.rbxl": "built" },

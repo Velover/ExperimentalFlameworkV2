@@ -1,28 +1,40 @@
 {
   "name": "@flamework-experimental/testing",
   "version": "2.0.0-alpha.0",
-  "description": "In-place tests for Flamework games: define sections of tests, run them through a BindableFunction in Workspace, from the client through a RemoteFunction, or from an Open Cloud task.",
+  "description": "In-place tests for Flamework games: define sections of tests, run them through a BindableFunction in Workspace, from the client through a RemoteFunction, or from an Open Cloud task; and the flamework-test CLI that opens the place in Roblox Studio or publishes it to the cloud and runs them.",
   "main": "out/init.luau",
   "types": "out/index.d.ts",
+  "bin": {
+    "flamework-test": "./cli/src/cli.ts"
+  },
   "scripts": {
     "build": "rbxtsc",
-    "watch": "rbxtsc -w"
+    "watch": "rbxtsc -w",
+    "test": "bun test cli/tests",
+    "typecheck": "tsc -p cli --noEmit"
   },
   "files": [
     "out",
-    "flamework.build"
+    "flamework.build",
+    "cli/src",
+    "cli/tasks",
+    "cli/types.d.ts"
   ],
   "publishConfig": {
     "access": "public"
   },
   "peerDependencies": {
-    "@flamework-experimental/core": "*"
+    "@flamework-experimental/core": "*",
+    "@flamework-experimental/transformer": "*"
   },
   "devDependencies": {
     "@flamework-experimental/core": "workspace:*",
+    "@flamework-experimental/transformer": "workspace:*",
     "@rbxts/compiler-types": "^3.0.0-types.0",
     "@rbxts/types": "^1.0.948",
-    "roblox-ts": "^3.0.0"
+    "@types/bun": "^1.2.0",
+    "roblox-ts": "^3.0.0",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
     "@rbxts/services": "^1.1.5",

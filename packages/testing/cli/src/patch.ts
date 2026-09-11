@@ -8,7 +8,7 @@
  * it merely declares is kept when the original has it and taken from the build when it does not,
  * and the properties the project sets are applied. Everything else in the original stays.
  *
- * The plan is computed here from the project file and carried out by `tasks/patch-place.luau`
+ * The plan is computed here from the project file and carried out by `tasks/patch-place.lune`
  * under Lune, which can read and write place files.
  */
 

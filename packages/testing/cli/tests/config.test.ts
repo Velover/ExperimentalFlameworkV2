@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { loadCloudSettings } from "../src/config.ts";
 
 function scratch(files: Record<string, string>): string {
-	const dir = mkdtempSync(join(tmpdir(), "flamework-cloud-"));
+	const dir = mkdtempSync(join(tmpdir(), "flamework-test-"));
 	for (const [name, text] of Object.entries(files)) {
 		mkdirSync(join(dir, name, ".."), { recursive: true });
 		writeFileSync(join(dir, name), text);

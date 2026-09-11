@@ -1,11 +1,55 @@
-# Testing in the cloud
+# Running the tests: Studio first, the cloud second
 
-`@flamework-experimental/cloud-testing` publishes a place and runs its Flamework tests inside a
-real Roblox server through the Open Cloud Luau Execution API, from a terminal or CI, with no
-Studio involved. It is the cloud half of [Testing in the place](../guide/12-testing.md): the
-tests are the same `defineTests` sections, and what the CLI gets back is the same result table.
+The `flamework-test` CLI, which ships with `@flamework-experimental/testing`, runs the `defineTests`
+sections of [Testing in the place](../guide/12-testing.md) where the engine is real, from a terminal or CI.
+First, and by default, in Roblox Studio on this machine; second, when asked, in a real Roblox
+server through the Open Cloud Luau Execution API. Both take the place Rojo built, both give back
+the same result table, and both can lay the build over a copy of the original place first.
 
-## What a cloud task can and cannot do
+```console
+rojo build -o place.rbxl && bunx flamework-test test place.rbxl            # Studio, both realms
+rojo build -o place.rbxl && bunx flamework-test test place.rbxl --cloud    # a real server, server realm
+```
+
+## In Studio, on this machine
+
+`test <file>` launches Roblox Studio on the file, waits for the window to connect, starts a play
+session, invokes `Workspace.FlameworkTests` in the server's data model and then in the client's,
+prints each realm's summary, stops the session and closes the window. Every realm runs even when
+one fails; the exit code is the worst of them. Nothing is uploaded and no account is involved:
+the place runs itself, exactly as a Play in Studio would, and the client's sections run too, which
+the cloud cannot do.
+
+```console
+bunx flamework-test test place.rbxl --realm client         # one realm
+bunx flamework-test test place.rbxl --sections economy     # a section, or economy/buys
+bunx flamework-test test place.rbxl --list                 # what would run
+bunx flamework-test test place.rbxl --keep                 # leave Studio and the play session open
+```
+
+It needs Studio installed with "MCP server" enabled in its Assistant settings, which is what lets
+the CLI drive a window; a window with it disabled is invisible to it. The place has to be built
+with the `testing` scope active (`FLAMEWORK_SCOPES=testing` in `.env`), or the test providers are
+not registered and `Workspace.FlameworkTests` never appears.
+
+A window that already has a file of the same name open is from an earlier build and would test
+stale code, so `test` closes it before opening the fresh file. `--keep` leaves the window and the
+session for a look around; the next `test` closes it.
+
+The pieces `test` is made of are commands of their own, for driving a window by hand: `studio
+open [file]`, `studio close`, `studio status`, `studio play`, `studio stop`, `studio exec --code`
+and `studio run [--realm server|client|both]`, which runs the tests in whatever window has the
+testing place open without opening or closing anything. See the package's
+[README](../../packages/testing/README.md) for each.
+
+## In the cloud
+
+`test <file> --cloud` (or `cloud test <file>`) publishes the build to a testing place as a Saved
+version and runs the server's sections in a real server through the Luau Execution API. It is the
+path for a machine without Studio, and for a real server rather than Play Solo. Client sections
+cannot run there: there is no client.
+
+### What a cloud task can and cannot do
 
 A Luau execution task loads the place into a fresh server and runs the script you submit. That
 is all it runs: **the place's own Scripts do not execute** (verified with a sentinel Script on
@@ -23,8 +67,12 @@ per frame (the probe of 2026-09-11, counts over one second):
 `onTick` hangs off `Heartbeat`, so it runs in a task; `onPhysics` (`PreSimulation`) and
 `onRender` never do, and a test that waits for either times out.
 
-So something in the task has to start the game. The runner package ships a fixed cloud module
-for that; the script the CLI submits imports it through roblox-ts's runtime and nothing else:
+### Why the cloud needs `testing.entry`
+
+Since none of the place's Scripts run, nothing ignites the game in a task. Something in the task
+has to, and the runner cannot guess which module: that is `testing.entry`, the ModuleScript that
+exports `ignite()`. The runner package ships a fixed cloud module for it; the script the CLI
+submits imports it through roblox-ts's runtime and nothing else:
 
 ```lua
 local include = game:GetService("ReplicatedStorage").rbxts_include
@@ -35,9 +83,9 @@ return TS.import(script or {}, cloud).run(FILTER, OPTIONS)
 ```
 
 `run` looks for `Workspace.FlameworkTests`. When it is not there, it requires the ModuleScript
-that `testing.entry` names in `flamework.config.json`, calls its exported `ignite()`, waits for
-the bindable, invokes it and returns the result as JSON. The game therefore needs its server
-entry as a ModuleScript exporting `ignite()`, with the usual entry Script calling it:
+that `testing.entry` names, calls its exported `ignite()`, waits for the bindable, invokes it and
+returns the result as JSON. The game therefore needs its server entry as a ModuleScript exporting
+`ignite()`, with the usual entry Script calling it:
 
 ```ts
 // src/server/main.ts
@@ -59,17 +107,14 @@ ignite();
 
 ```jsonc
 // flamework.config.json
-"scopes":  { "active": "${FLAMEWORK_SCOPES:-}" },
 "testing": { "entry": "src/server/main" }
 ```
 
-The place has to be built with the `testing` scope active (`FLAMEWORK_SCOPES=testing` in `.env`),
-or the test providers are not registered and the plugin stays inert.
+In Studio the entry Script runs and the module is up before the tests are invoked, so a project
+that only runs its tests locally never sets `entry`. A cloud command checks for it before it
+publishes anything.
 
-Client tests cannot run in the cloud; there is no client. They run in Studio, through the same
-bindable: `flamework-cloud studio run --realm client` (see [Studio](#studio) below).
-
-## Setup
+### Setup
 
 1. A *testing* experience and place. Never the original: everything the CLI takes is named
    `testing...` so the two cannot be confused.
@@ -96,19 +141,15 @@ bindable: `flamework-cloud studio run --realm client` (see [Studio](#studio) bel
    }
    ```
 
-## Commands
-
-Building the place is Rojo's job; the CLI takes the file it produced:
+### Commands
 
 ```console
-rojo build -o place.rbxl                        # the place, from your project file (gitignore *.rbxl)
-bunx flamework-cloud publish place.rbxl         # upload it as a Saved version; keeps the number
-bunx flamework-cloud run [--sections a,b]       # run the tests against that version
-bunx flamework-cloud test place.rbxl            # publish, then run
-bunx flamework-cloud run --list                 # what would run
-bunx flamework-cloud run --code "return 1 + 1"  # any Luau, for a hypothesis about a real server
-bunx flamework-cloud probe                      # what the task environment reports
-bunx flamework-cloud patch place.rbxl --original original.rbxl   # the build laid over a copy of the original
+bunx flamework-test cloud publish place.rbxl         # upload as a Saved version; keeps the number
+bunx flamework-test cloud run [--sections a,b]       # run the tests against that version
+bunx flamework-test cloud test place.rbxl            # publish, then run
+bunx flamework-test cloud run --list                 # what would run
+bunx flamework-test cloud run --code "return 1 + 1"  # any Luau, for a hypothesis about a real server
+bunx flamework-test cloud probe                      # what the task environment reports
 ```
 
 The key and the ids come from flags (`--key`, `--testing-universe`, `--testing-place`), else
@@ -116,49 +157,15 @@ the shell, else `.env` and `.env.local` next to the config file, else the `cloud
 `.env.local` with `ROBLOX_API_KEY`, `TESTING_UNIVERSE_ID` and `TESTING_PLACE_ID` needs no
 config section at all.
 
-`run` prints every log line the task produced, then a summary per section with each failure's
-message, and exits non-zero when a test failed, a filter entry matched nothing, or the task
-itself failed. `--json` prints the raw result table instead.
+`cloud run` prints every log line the task produced, then a summary per section with each
+failure's message, and exits non-zero when a test failed, a filter entry matched nothing, or the
+task itself failed. `--json` prints the raw result table instead.
 
 A version is published as `Saved`, which uploads it and gives it a number without making it live,
-and the tests run against that number. Nothing here publishes to players.
+and the tests run against that number. Nothing here publishes to players. The place has to be
+closed in Studio while `cloud publish` runs: Roblox refuses to save a version of an open place.
 
-## The original place's assets
-
-A Rojo build holds the code and whatever the project file declares, and nothing a game keeps only
-in its place: models, terrain, sounds, the map. Tests that need those run against a copy of the
-original with the build laid over it. Save one from Studio (File > Save to File), name it with
-`--original`, `ORIGINAL_PLACE` or `cloud.originalPlace`, and `publish` and `test` patch it
-before uploading; `patch` writes the result without uploading.
-
-What the patch replaces is read from the project file, so it is exactly what a build changes: a
-node with `$path` is replaced by the build's (the fresh code, whatever the original had under that
-name), a node with only `$className` keeps the original's instance and everything in it, and
-`$properties` are applied. Everything else in the original stays. The patch prints each change.
-It runs under Lune; without `lune` on the path a command given an original stops before
-uploading anything.
-
-## Studio
-
-The same CLI opens the testing place in Roblox Studio on this machine and runs the tests there,
-which is how the client's sections run and how a run can be watched:
-
-```console
-bunx flamework-cloud studio open                # from the cloud; or: studio open place.patched.rbxl
-bunx flamework-cloud studio run                 # the server's sections, in a play session it starts and stops
-bunx flamework-cloud studio run --realm client  # the client's
-bunx flamework-cloud studio exec --code "return workspace.FlameworkTests:Invoke('economy').passed" --realm server
-bunx flamework-cloud studio status | play | stop | close
-```
-
-It drives Studio through Roblox's own MCP proxy, so "MCP server" has to be enabled in Studio's
-Assistant settings; a window without it is not listed. The commands drive the window with the
-testing place open, or the only one with a local place file open (what `studio open <file>`
-leaves), or whatever `--studio <name|id>` names, and say so when nothing matches. The place has to be closed in Studio while `publish`
-runs, since Roblox refuses to save a version of an open place.
-
-
-## Limits
+### Limits
 
 | Limit | Value |
 |---|---|
@@ -170,14 +177,31 @@ runs, since Roblox refuses to save a version of an open place.
 One task per run, so a test suite has to fit in five minutes of server time, and a loop that runs
 the suite more often than every 12 seconds is throttled.
 
+## The original place's assets
+
+A Rojo build holds the code and whatever the project file declares, and nothing a game keeps only
+in its place: models, terrain, sounds, the map. Tests that need those run against a copy of the
+original with the build laid over it. Save one from Studio (File > Save to File), name it with
+`--original`, `ORIGINAL_PLACE` or `cloud.originalPlace`, and `test` and `cloud publish` patch it
+before running or uploading; `patch` writes the result without doing either.
+
+What the patch replaces is read from the project file, so it is exactly what a build changes: a
+node with `$path` is replaced by the build's (the fresh code, whatever the original had under that
+name), a node with only `$className` keeps the original's instance and everything in it, and
+`$properties` are applied. Everything else in the original stays. The patch prints each change.
+It runs under Lune; without `lune` on the path a command given an original stops before running
+or uploading anything.
+
 ## Troubleshooting
 
 | Symptom | Cause |
 |---|---|
+| `RobloxStudioBeta.exe was not found` | Studio is not installed here; set `ROBLOX_STUDIO_EXE`, or run with `--cloud`. |
+| `... never showed up on the MCP proxy` | The window opened but "MCP server" is disabled in Studio's Assistant settings. |
+| `Workspace.FlameworkTests did not appear` | The build was made without the `testing` scope active (`FLAMEWORK_SCOPES` in `.env`), so the plugin stayed inert. |
+| `a cloud run needs "testing": { "entry": ... }` | The cloud has to ignite the game itself; give the config the ModuleScript that exports `ignite()`. |
 | `403 PERMISSION_DENIED ... luau-execution-session ... missing` | The key lacks the task scopes for this experience. |
 | `409 Conflict: Save failed. Server is busy` on publish | The place is open in Roblox Studio. Close it; the upload succeeds at once afterwards. |
 | `429` | The five-per-minute creation limit. |
 | Task `FAILED` with `@flamework-experimental/testing is not in this place` | The package is not installed, or nothing the entry module imports includes `TestingPlugin`. |
-| Task `FAILED` with `Workspace.FlameworkTests did not appear` | The build was made without the `testing` scope active (`FLAMEWORK_SCOPES` in `.env`), so the plugin stayed inert. |
-| Task `FAILED` with `... has no testing.entry` | The game's entry is a Script; give the config the ModuleScript that exports `ignite()`. |
 | Task `COMPLETE` but `ok` is false with `unknown` names | A `--sections` entry matched no section or test. |

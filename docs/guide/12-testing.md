@@ -48,7 +48,7 @@ their sections as they start, and the plugin creates `Workspace.FlameworkTests` 
 Nothing runs until something invokes it:
 
 ```lua
--- the Studio command bar, a debug UI, or `flamework-cloud studio run` from a terminal
+-- the Studio command bar, a debug UI, or `flamework-test` from a terminal
 local result = workspace.FlameworkTests:Invoke()          -- every section
 local result = workspace.FlameworkTests:Invoke("economy") -- one section
 ```
@@ -121,10 +121,11 @@ on the next resumption. Any other assertion library works too; a test fails when
 
 | From | How |
 |---|---|
+| A terminal, in Studio on this machine | `rojo build -o place.rbxl && flamework-test test place.rbxl`: opens the build in Studio, runs both realms, closes it; see [Running the tests](../testing/place.md) |
+| A terminal, in the cloud | `flamework-test test place.rbxl --cloud`: publishes to a testing place and runs the server's sections in a real server; needs `testing.entry`, see below |
 | The realm's own code | `Testing.run(filter?)` and `Testing.list(filter?)` |
 | Anything with the DataModel | `Workspace.FlameworkTests:Invoke(filter?, options?)` |
 | A client, for the server's tests | `Testing.runOnServer(filter?)`, over `Workspace.FlameworkTestsServer` |
-| An Open Cloud task | see [Testing in the cloud](../testing/place.md) |
 | Start-up | `"autoRun": true` in the config runs everything right after ignition |
 
 A filter is nothing, one section name, one `section/test` name, or a list of those. `{ list =
@@ -155,9 +156,15 @@ server's. A second invoke while a run is in progress raises.
   "enabled": true,             // when set, overrides the two above in either direction
   "autoRun": false,            // run everything right after ignition
   "timeout": 30,               // seconds per test
-  "entry": "src/server/main"   // ModuleScript exporting ignite(), for cloud tasks
+  "entry": "src/server/main"   // cloud runs only: the ModuleScript exporting ignite()
 }
 ```
+
+`entry` exists for one reason: an Open Cloud task loads the place but runs none of its Scripts,
+so nothing ignites the game there. The runner has to require a ModuleScript and call its
+`ignite()` itself, and `entry` names it. In Studio the place runs its own Scripts and the module is
+up before anything invokes the tests, so a project that only ever runs its tests locally never sets
+it. A cloud command refuses to publish without it.
 
 `activeIn` and `inactiveIn` follow the same rules as everywhere else: at least one active name,
 none of the names active, and an empty `activeIn` is no constraint. `TestingPlugin` is the plugin
@@ -169,4 +176,4 @@ Never ship a build with tests on: the remote lets any client run the server's te
 
 ---
 
-Previous: [Scopes](11-scopes.md) · See also: [Testing in Studio](../testing/studio.md), [Testing in the cloud](../testing/place.md)
+Previous: [Scopes](11-scopes.md) · See also: [Running the tests](../testing/place.md), [Testing in Studio](../testing/studio.md)

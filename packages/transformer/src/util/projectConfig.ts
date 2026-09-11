@@ -81,7 +81,7 @@ export interface RuntimeConfig {
 }
 
 /**
- * Where `@flamework-experimental/cloud-testing` publishes the place and runs its tests. Read by
+ * Where the `flamework-test` CLI (`@flamework-experimental/testing`) publishes the place and runs its tests. Read by
  * that CLI only: it is not a runtime section and never reaches the place.
  */
 export interface CloudConfig {

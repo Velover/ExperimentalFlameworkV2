@@ -38,8 +38,8 @@ Read in order the first time. Each page ends with the caveats for that topic.
 
 - [Testing in Roblox Studio](testing/studio.md) -- the battletest that runs a real place through the
   packages: setup, the automated matrix, the manual scenarios, and what the first run found.
-- [Testing in the cloud](testing/place.md) -- publishing a place and running its tests in a real
-  server through the Open Cloud Luau Execution API, from a terminal or CI.
+- [Running the tests](testing/place.md) -- `flamework-test`: the build opened in Roblox Studio and run
+  on both realms from a terminal, or published and run in a real server through Open Cloud.
 
 ## I just want to…
 

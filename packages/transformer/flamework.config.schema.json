@@ -166,14 +166,14 @@
 				},
 				"entry": {
 					"type": "string",
-					"description": "The source path of a ModuleScript exporting `ignite()`, for example \"src/server/main\", for runs where nothing starts the game by itself (an Open Cloud Luau execution task). The runner's cloud module requires it, ignites, then invokes the bindable. Compiled into the artifact as a tree path."
+					"description": "Cloud runs only. The source path of a ModuleScript exporting `ignite()`, for example \"src/server/main\": an Open Cloud Luau execution task runs none of the place's Scripts, so the runner requires this module and ignites the game itself before invoking the bindable. Studio runs need none, the place runs itself. Compiled into the artifact as a tree path."
 				}
 			}
 		},
 		"cloud": {
 			"type": "object",
 			"additionalProperties": false,
-			"description": "Where @flamework-experimental/cloud-testing publishes the build and runs its tests: a testing place, never the original. Read by that CLI only; never compiled into the place. Keep the key in the environment: \"apiKey\": \"${ROBLOX_API_KEY:-}\".",
+			"description": "Where the flamework-test CLI (@flamework-experimental/testing) publishes the build and runs its tests: a testing place, never the original. Read by that CLI only; never compiled into the place. Keep the key in the environment: \"apiKey\": \"${ROBLOX_API_KEY:-}\".",
 			"properties": {
 				"testingUniverseId": {
 					"type": "string",

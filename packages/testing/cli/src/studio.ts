@@ -201,7 +201,7 @@ export async function connectStudio(exe: string): Promise<StudioClient> {
 	await request("initialize", {
 		protocolVersion: "2024-11-05",
 		capabilities: {},
-		clientInfo: { name: "flamework-cloud", version: "1" },
+		clientInfo: { name: "flamework-test", version: "1" },
 	});
 	child.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
 
@@ -219,8 +219,11 @@ export async function connectStudio(exe: string): Promise<StudioClient> {
 		let lastError: unknown;
 		for (let attempt = 0; attempt < 20; attempt += 1) {
 			try {
-				const parsed = JSON.parse(await call("list_roblox_studios", {}, 15_000)) as { studios?: StudioEntry[] };
-				return parsed.studios ?? [];
+				const parsed = JSON.parse(await call("list_roblox_studios", {}, 15_000)) as {
+					studios?: Array<{ id: string; name: string | null }>;
+				};
+				// A window still loading its place is listed with no name yet.
+				return (parsed.studios ?? []).map((entry) => ({ id: entry.id, name: entry.name ?? "" }));
 			} catch (error) {
 				lastError = error;
 				await new Promise((r) => setTimeout(r, 500));

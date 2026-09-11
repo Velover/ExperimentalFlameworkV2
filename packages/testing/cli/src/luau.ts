@@ -1,6 +1,6 @@
 /**
  * Rendering of the test shim: turning CLI flags into the Luau literals that
- * `tasks/run-tests.luau` expects in place of `__FILTER__` and `__OPTIONS__`.
+ * `tasks/run-tests.lune` expects in place of `__FILTER__` and `__OPTIONS__`.
  */
 
 export type Filter = string[] | undefined;

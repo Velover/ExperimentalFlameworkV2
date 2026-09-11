@@ -2291,13 +2291,20 @@ export = suite("components", [
 			collectionService().AddTag(instance, "Pointer");
 			task.wait(0.1);
 
-			expectEqual(components.getComponent<Pointer>(instance), undefined, "component while the handle names nothing");
+			expectEqual(
+				components.getComponent<Pointer>(instance),
+				undefined,
+				"component while the handle names nothing",
+			);
 
 			// Pointed at something, the link follows.
 			const target = folder("NothingTarget");
 			instance.SetAttribute("Target", new InstanceHandle(target));
 
-			const component = expectDefined(components.getComponent<Pointer>(instance), "component once the handle names something");
+			const component = expectDefined(
+				components.getComponent<Pointer>(instance),
+				"component once the handle names something",
+			);
 			expectEqual(component.attributes.Target, target, "attribute holds the instance");
 
 			instance.Destroy();

@@ -305,7 +305,11 @@ function emptyListAnnotation(state: TransformState, original: ts.Expression | un
 	const type = state.typeChecker.getContextualType(original);
 	if (!type) return;
 
-	return state.typeChecker.typeToTypeNode(type, original, ts.NodeBuilderFlags.IgnoreErrors | ts.NodeBuilderFlags.NoTruncation);
+	return state.typeChecker.typeToTypeNode(
+		type,
+		original,
+		ts.NodeBuilderFlags.IgnoreErrors | ts.NodeBuilderFlags.NoTruncation,
+	);
 }
 
 function arrayType() {

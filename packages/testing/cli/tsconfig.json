@@ -15,5 +15,5 @@
 		"noUncheckedIndexedAccess": true,
 		"noImplicitOverride": true
 	},
-	"include": ["src", "tests"]
+	"include": ["src", "tests", "types.d.ts"]
 }

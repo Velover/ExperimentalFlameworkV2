@@ -25,8 +25,7 @@ writing a transformer plugin.
 | `packages/core` | Modules, dependency injection, plugins, lifecycle events, reflection. |
 | `packages/components` | CollectionService components, built on core's plugin system. |
 | `packages/networking` | Remote events and functions. |
-| `packages/testing` | In-place tests: sections, cleanup, the bindable and remote host, the cloud entry. |
-| `packages/cloud-testing` | The Bun CLI that publishes a place and runs its tests through Open Cloud; reads the `cloud` config section through the transformer's loader. |
+| `packages/testing` | In-place tests: sections, cleanup, the bindable and remote host, the cloud entry. `cli/` is `flamework-test`, the Bun CLI that runs them: opens the build in Roblox Studio and drives it through the MCP proxy, or publishes it and runs it through Open Cloud; reads the `cloud` and `testing.entry` config through the transformer's loader. |
 | `packages/specs` | Runtime specs, compiled by `rbxtsc` like any other consumer. |
 
 Build order matters and is fixed in [`scripts/build.mjs`](../../scripts/build.mjs): the transformer

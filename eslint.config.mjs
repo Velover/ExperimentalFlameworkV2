@@ -35,7 +35,7 @@ export default tseslint.config(
 		files: [
 			"packages/transformer/**/*",
 			"packages/transformer-plugin/**/*",
-			"packages/cloud-testing/**/*",
+			"packages/testing/cli/**/*",
 			"tests/**/*.ts",
 		],
 		rules: {
@@ -49,7 +49,7 @@ export default tseslint.config(
 		ignores: [
 			"packages/transformer/**/*",
 			"packages/transformer-plugin/**/*",
-			"packages/cloud-testing/**/*",
+			"packages/testing/cli/**/*",
 			"eslint.config.mjs",
 			"scripts/**/*",
 			"tests/**/*",
