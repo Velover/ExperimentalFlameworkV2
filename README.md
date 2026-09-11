@@ -36,9 +36,11 @@ bun run lint
 | `packages/core` | Modules, dependency injection, plugins and lifecycle events |
 | `packages/components` | CollectionService components, built on the core plugin system |
 | `packages/networking` | Remote events and functions |
+| `packages/testing` | In-place tests: sections, cleanup, a bindable and a remote to run them, a cloud entry |
+| `packages/cloud-testing` | CLI that publishes a place and runs its tests through Open Cloud |
 | `packages/transformer` | The roblox-ts transformer |
 | `packages/transformer-plugin` | Public API for writing transformer plugins |
-| `packages/testing` | Runtime specs, compiled by `rbxtsc` and executed under Lune |
+| `packages/specs` | Runtime specs, compiled by `rbxtsc` and executed under Lune |
 
 ### Tests
 
@@ -46,7 +48,7 @@ Two suites, both run by `bun run test`:
 
 - **Transformer tests** (`bun run test:unit`) compile a fixture project with the real `rbxtsc` and
   assert on the emitted Luau — guard generation, identifiers, nested macros and the plugin system.
-- **Runtime specs** (`bun run test:runtime`) execute compiled `@flamework/core`, `components` and
+- **Runtime specs** (`bun run test:runtime`) execute compiled `@flamework-experimental/core`, `components` and
   `networking` under Lune using the harness in [`tests/runtime`](tests/runtime), which models
   roblox-ts's `TS.import` tree over the filesystem and stubs the Roblox API surface Flamework
   touches (Instances, attributes, CollectionService, RemoteEvents, Players, signals, `task`,
@@ -61,5 +63,5 @@ Two suites, both run by `bun run test`:
   proves the two agree: a function receives on `$name` and sends on `@name` from the server and the
   mirror image from the client, so the pair of runs pins the wire format down from both ends.
 
-Specs live in [`packages/testing`](packages/testing) and are compiled by `rbxtsc` like any other
+Specs live in [`packages/specs`](packages/specs) and are compiled by `rbxtsc` like any other
 Flamework consumer, so they exercise the transformer and the runtime together.

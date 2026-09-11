@@ -3,7 +3,7 @@
  *
  * Plugins are loaded with `require`, so they must be CommonJS.
  */
-const { registerPlugin } = require("rbxts-transformer-flamework-plugin");
+const { registerPlugin } = require("@flamework-experimental/transformer-plugin");
 
 registerPlugin((api) => {
 	const expr = api.factory.expr;

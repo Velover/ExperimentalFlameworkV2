@@ -3,6 +3,7 @@ import { Diagnostics } from "../classes/diagnostics";
 import { TransformState } from "../classes/transformState";
 import { f } from "../util/factory";
 import { buildInlineEncoding, buildInlineResultEncoding } from "../util/functions/buildSerializerFromType";
+import { NETWORKING_PACKAGE } from "../util/packages";
 
 /**
  * With `networking.serialization` on, a call that sends over a networking handler packs its
@@ -244,7 +245,7 @@ function packResult(
 	value: ts.Identifier,
 	isParameter: boolean,
 ): ts.Statement[] {
-	const networking = state.addFileImport(state.getSourceFile(node), "@flamework/networking", "Networking");
+	const networking = state.addFileImport(state.getSourceFile(node), NETWORKING_PACKAGE, "Networking");
 	const skip = f.propertyAccessExpression(networking, f.identifier("Skip"));
 	const encoding = buildInlineResultEncoding(state, node, fnType, value, isParameter);
 	const packed = packedArguments(encoding);

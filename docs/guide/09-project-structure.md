@@ -28,8 +28,8 @@ The entry points are the only files that know how everything is wired:
 
 ```ts
 // src/server/runtime.server.ts
-import { ComponentPlugin } from "@flamework/components";
-import { Flamework } from "@flamework/core";
+import { ComponentPlugin } from "@flamework-experimental/components";
+import { Flamework } from "@flamework-experimental/core";
 
 Flamework.createModule()
     .includePlugin(ComponentPlugin.fromPath("src/shared/components"))
@@ -96,7 +96,7 @@ entry the tsconfig needs is `transform`; each package has its own section in the
 ```jsonc
 // flamework.config.json
 {
-  "$schema": "./node_modules/rbxts-transformer-flamework/flamework.config.schema.json",
+  "$schema": "./node_modules/@flamework-experimental/transformer/flamework.config.schema.json",
   "transformer": {
     "hashPrefix": "$g",
     "obfuscation": false,
@@ -122,6 +122,8 @@ entry the tsconfig needs is `transform`; each package has its own section in the
 | `networking` | `serialization` | Serializes every event and function payload into a buffer with code generated at compile time; see [Networking](06-networking.md#serialization). |
 | `components` | `warningTimeout`, `attributeWarningTimeout`, `streamingMode` | Defaults for components that do not set their own. |
 | `scopes` | `active` | The scopes this build is compiled with; see [Scopes](11-scopes.md). |
+| `testing` | `enabled`, `autoRun`, `timeout`, `entry` | In-place tests: whether the plugin loads them, whether they run at start, the per-test timeout, and the entry a cloud task ignites from; see [Testing in the place](12-testing.md). |
+| `cloud` | `universeId`, `placeId`, `apiKey`, `project` | Where `flamework-cloud` publishes and runs; read by that CLI only, never compiled in; see [Testing in the cloud](../testing/place.md). |
 
 The transformer looks for the file in the tsconfig's directory, then in each parent up to the
 package root, so a repository with several places can share one at the root and override it per
@@ -132,7 +134,7 @@ set `"configFile": "config/flamework.json"` on the tsconfig entry.
 The `transformer` section can also be written inline on the tsconfig entry, where it **overrides** the
 file; the other sections cannot. For a game project the transformer copies those runtime sections
 into `include/flamework/config.json`, which the packages read through `getRuntimeConfig()` from
-`@flamework/core`. A package (a scoped name) gets no such artifact: its defaults come from the game
+`@flamework-experimental/core`. A package (a scoped name) gets no such artifact: its defaults come from the game
 that uses it.
 
 **Do not set `idGenerationMode` or `obfuscation` in a published package.** Ids have to be stable and
@@ -202,7 +204,10 @@ full build does on its own.
 
 ## Testing
 
-A module is a container you can build fresh, which is what makes Flamework code testable without
+Tests that run inside the place -- in Studio, in a live server, or in an Open Cloud task -- are
+[`@flamework-experimental/testing`](12-testing.md): sections of tests loaded by a plugin, run
+through a bindable, with cleanup that always runs. What follows is the other kind: a module is a
+container you can build fresh, which is what makes Flamework code testable without
 mocks-by-injection frameworks:
 
 ```ts
@@ -247,7 +252,7 @@ events.setReady.predict(player, true);
 ```
 
 Flamework's own runtime specs use exactly this shape; see
-[`packages/testing`](../../packages/testing) if you want a worked example.
+[`packages/specs`](../../packages/specs) if you want a worked example.
 
 ## Studio plugins and models
 
@@ -260,7 +265,7 @@ Nothing changes in what you write. The transformer emits every path relative to 
 records in `include/flamework/paths.json` how far below that root the include folder sits, and the
 runtime climbs from the include folder to find the root the first time a path is resolved. A
 plugin therefore registers folders and globs exactly as a place does, and `@Provider` has no
-notion of a realm to get in the way. `getPathRoot()` from `@flamework/core` is that instance, and
+notion of a realm to get in the way. `getPathRoot()` from `@flamework-experimental/core` is that instance, and
 `resolveRbxPath(path)` walks a compile-time path from it, for a plugin of your own that resolves
 paths by hand.
 
@@ -288,8 +293,8 @@ referenced, which shrinks the output and the work `t` does per check. Guards wit
 members always use `t.unionList`, `t.intersectionList` and `t.literalList`, so there is no argument
 limit to hit.
 
-When your project resolves a different `@rbxts/t` than `@flamework/core` does, generated guards
-import `t` through `@flamework/core/out/prelude` so they run against the version core was built with.
+When your project resolves a different `@rbxts/t` than `@flamework-experimental/core` does, generated guards
+import `t` through `@flamework-experimental/core/out/prelude` so they run against the version core was built with.
 
 ---
 

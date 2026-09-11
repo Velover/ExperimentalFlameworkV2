@@ -4,6 +4,7 @@ import { TransformState } from "../../classes/transformState";
 import { f } from "../../util/factory";
 import { getIndexExpression } from "../../util/functions/getIndexExpression";
 import { isAttributesAccess } from "../../util/functions/isAttributesAccess";
+import { COMPONENTS_PACKAGE } from "../../util/packages";
 
 const MUTATING_OPERATORS = new Map<ts.BinaryOperator, ts.BinaryOperator>([
 	[ts.SyntaxKind.EqualsToken, ts.SyntaxKind.EqualsToken],
@@ -41,7 +42,7 @@ export function transformBinaryExpression(state: TransformState, node: ts.Binary
 
 			const attributeSetter = state.addFileImport(
 				node.getSourceFile(),
-				"@flamework/components/out/baseComponent",
+				`${COMPONENTS_PACKAGE}/out/baseComponent`,
 				"SYMBOL_ATTRIBUTE_SETTER",
 			);
 			const thisAccess = node.left.expression.expression;

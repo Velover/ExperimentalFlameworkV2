@@ -1,4 +1,4 @@
-import { Networking } from "@flamework/networking";
+import { Networking } from "@flamework-experimental/networking";
 
 /**
  * The cross-realm spec. Both graphs load this same compiled module -- which is also what makes the

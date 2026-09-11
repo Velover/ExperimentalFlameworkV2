@@ -80,7 +80,7 @@ export class BuildInfo {
 		const candidates: string[] = [];
 
 		for (const childPath of fs.readdirSync(searchPath)) {
-			// only search @* (@rbxts, @flamework, @custom, etc)
+			// only search @* (@rbxts, @flamework-experimental, @custom, etc)
 			if (!isNodeModules || childPath.startsWith("@")) {
 				const fullPath = path.join(searchPath, childPath);
 				const realPath = fs.realpathSync(fullPath);

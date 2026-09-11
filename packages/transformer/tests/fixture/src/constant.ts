@@ -1,4 +1,4 @@
-import { Modding } from "@flamework/core";
+import { Modding } from "@flamework-experimental/core";
 
 /** @metadata macro */
 export function withEmit(value?: Modding.Caller.Constant<Modding.Emit<{ marker: true }>>) {

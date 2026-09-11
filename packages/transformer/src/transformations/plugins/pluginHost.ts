@@ -1,11 +1,17 @@
 import path from "path";
 import ts from "typescript";
-import type { MacroContext, MacroTypeHandler, PluginApi, PluginCallback } from "rbxts-transformer-flamework-plugin";
+import type {
+	MacroContext,
+	MacroTypeHandler,
+	PluginApi,
+	PluginCallback,
+} from "@flamework-experimental/transformer-plugin";
 import { Diagnostics } from "../../classes/diagnostics";
 import type { TransformState } from "../../classes/transformState";
 import { f } from "../../util/factory";
 import { createNodeFactory, createNodeHandle, unwrapNode } from "./nodeFactory";
 import { createTypeFactory } from "./typeFacade";
+import { PLUGIN_PACKAGE } from "../../util/packages";
 
 export interface PluginHost {
 	/**
@@ -214,10 +220,10 @@ function resolvePluginPath(state: TransformState, pluginPath: string) {
 function requirePluginRegistry(state: TransformState) {
 	let resolved;
 	try {
-		resolved = require.resolve("rbxts-transformer-flamework-plugin", { paths: [state.rootDirectory] });
+		resolved = require.resolve(PLUGIN_PACKAGE, { paths: [state.rootDirectory] });
 	} catch {
 		throw new Error(
-			"Flamework plugins are configured, but 'rbxts-transformer-flamework-plugin' is not installed. " +
+			`Flamework plugins are configured, but '${PLUGIN_PACKAGE}' is not installed. ` +
 				"Add it as a dev dependency of your project.",
 		);
 	}

@@ -42,6 +42,23 @@ export interface ScopesRuntimeConfig {
 	active?: string[];
 }
 
+export interface TestingRuntimeConfig {
+	/** Whether the testing plugin loads test folders and answers the bindable and remote. */
+	enabled?: boolean;
+
+	/** Runs every test right after ignition, instead of only on request. */
+	autoRun?: boolean;
+
+	/** Seconds a single test may take before it is cancelled and counted as failed. */
+	timeout?: number;
+
+	/**
+	 * The source path of a ModuleScript exporting `ignite()`, for runs where nothing starts the
+	 * game by itself. A string here; the artifact carries it resolved to a tree path.
+	 */
+	entry?: string;
+}
+
 /**
  * The sections the runtime packages read. Game projects get them written to
  * `include/flamework/config.json`, which the packages find by walking up from their own script.
@@ -51,15 +68,30 @@ export interface RuntimeConfig {
 	networking?: NetworkingRuntimeConfig;
 	components?: ComponentsRuntimeConfig;
 	scopes?: ScopesRuntimeConfig;
+	testing?: TestingRuntimeConfig;
+}
+
+/**
+ * Where `@flamework-experimental/cloud-testing` publishes the place and runs its tests. Read by
+ * that CLI only: it is not a runtime section and never reaches the place.
+ */
+export interface CloudConfig {
+	universeId?: string;
+	placeId?: string;
+	/** Usually `"${ROBLOX_API_KEY:-}"`, so that the key stays in the environment. */
+	apiKey?: string;
+	/** The Rojo project file to build the place from, relative to the config file. */
+	project?: string;
 }
 
 /** The whole `flamework.config.json`. */
 export interface ProjectConfig extends RuntimeConfig {
 	$schema?: string;
 	transformer?: TransformerOptions;
+	cloud?: CloudConfig;
 }
 
-export const RUNTIME_SECTIONS = ["core", "networking", "components", "scopes"] as const;
+export const RUNTIME_SECTIONS = ["core", "networking", "components", "scopes", "testing"] as const;
 
 export interface LoadedProjectConfig {
 	/** The effective transformer options: the file's `transformer` section with inline tsconfig options on top. */

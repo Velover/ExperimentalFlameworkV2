@@ -1,5 +1,5 @@
-import { Flamework, Modding, Serialization } from "@flamework/core";
-import { Networking, NetworkingFunctionError } from "@flamework/networking";
+import { Flamework, Modding, Serialization } from "@flamework-experimental/core";
+import { Networking, NetworkingFunctionError } from "@flamework-experimental/networking";
 import { RunService } from "@rbxts/services";
 import { expectDefined, expectEqual, expectRejects, expectResolves, expectTrue, suite } from "../testkit";
 

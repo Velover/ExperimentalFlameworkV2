@@ -4,6 +4,7 @@ import { TransformState } from "../../classes/transformState";
 import { f } from "../../util/factory";
 import { getIndexExpression } from "../../util/functions/getIndexExpression";
 import { isAttributesAccess } from "../../util/functions/isAttributesAccess";
+import { COMPONENTS_PACKAGE } from "../../util/packages";
 
 const MUTATING_OPERATORS = new Map<ts.SyntaxKind, ts.BinaryOperator>([
 	[ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.PlusToken],
@@ -26,7 +27,7 @@ export function transformUnaryExpression(
 
 			const attributeSetter = state.addFileImport(
 				node.getSourceFile(),
-				"@flamework/components/out/baseComponent",
+				`${COMPONENTS_PACKAGE}/out/baseComponent`,
 				"SYMBOL_ATTRIBUTE_SETTER",
 			);
 			const thisAccess = node.operand.expression.expression;

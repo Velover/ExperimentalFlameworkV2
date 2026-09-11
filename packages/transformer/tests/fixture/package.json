@@ -9,14 +9,12 @@
   "devDependencies": {
     "@rbxts/compiler-types": "^3.0.0-types.0",
     "@rbxts/types": "^1.0.948",
-    "rbxts-transformer-flamework": "workspace:*",
-    "rbxts-transformer-flamework-plugin": "workspace:*",
     "roblox-ts": "^3.0.0"
   },
   "dependencies": {
-    "@flamework/components": "workspace:*",
-    "@flamework/core": "workspace:*",
+    "@flamework-experimental/components": "workspace:*",
+    "@flamework-experimental/core": "workspace:*",
     "@rbxts/t": "^3.1.0",
-    "@flamework/networking": "workspace:*"
+    "@flamework-experimental/networking": "workspace:*"
   }
 }

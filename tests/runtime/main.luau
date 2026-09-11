@@ -40,7 +40,7 @@ luneTask.spawn(function()
 	end
 end)
 
-local testing = context.require("@flamework/testing", "out")
+local testing = context.require("@flamework-experimental/specs", "out")
 local suites = testing.suites
 
 local passed = 0

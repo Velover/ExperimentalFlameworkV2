@@ -1,4 +1,4 @@
-import { Serialization } from "@flamework/core";
+import { Serialization } from "@flamework-experimental/core";
 import { Players, RunService } from "@rbxts/services";
 import { createEvent, decodeArguments } from "../event/createEvent";
 import { NetworkInfo } from "../types";

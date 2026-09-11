@@ -16,7 +16,7 @@ Install the plugin module as a dev dependency and list your plugin in the transf
 	"compilerOptions": {
 		"plugins": [
 			{
-				"transform": "rbxts-transformer-flamework",
+				"transform": "@flamework-experimental/transformer",
 				"plugins": [{ "path": "./myPlugin.cjs", "options": { "prefix": "fx" } }]
 			}
 		]
@@ -32,7 +32,7 @@ else is resolved as a package.
 
 ```js
 // myPlugin.cjs
-const { registerPlugin } = require("rbxts-transformer-flamework-plugin");
+const { registerPlugin } = require("@flamework-experimental/transformer-plugin");
 
 registerPlugin((api) => {
 	const expr = api.factory.expr;
@@ -62,7 +62,7 @@ Declare a user macro whose metadata parameter uses the `plugin` intrinsic. The t
 `[macroTypeId, TypeToReflect]`, and the third type argument is what the macro returns:
 
 ```ts
-import { Modding } from "@flamework/core";
+import { Modding } from "@flamework-experimental/core";
 
 interface FieldInfo {
 	name: string;

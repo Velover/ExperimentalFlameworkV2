@@ -1,4 +1,4 @@
-import { BaseComponent, Component, ComponentMetadata, Components } from "@flamework/components";
+import { BaseComponent, Component, ComponentMetadata, Components } from "@flamework-experimental/components";
 
 @Component({ tag: "FixtureHandler" })
 export class HandlerComponent extends BaseComponent<{ power: number }, BasePart> {}

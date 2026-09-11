@@ -1,4 +1,4 @@
-import { Flamework, Provider } from "@flamework/core";
+import { Flamework, Provider } from "@flamework-experimental/core";
 
 @Provider()
 export class Target {}

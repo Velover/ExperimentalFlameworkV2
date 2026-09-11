@@ -1,5 +1,5 @@
-import * as core from "@flamework/core";
-import { resolveRbxPath } from "@flamework/core";
+import * as core from "@flamework-experimental/core";
+import { resolveRbxPath } from "@flamework-experimental/core";
 import { expectThrows, expectTrue, suite } from "../testkit";
 
 /** Internal and stripped from the package's types, so reached through a cast, as `ignite` is. */

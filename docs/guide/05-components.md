@@ -5,15 +5,15 @@ constructs one per tagged instance, validates its attributes and its instance tr
 when the tag goes away.
 
 ```sh
-npm install @flamework/components
+npm install @flamework-experimental/components
 ```
 
 ## Your first component
 
 ```ts
 // src/shared/components/vehicle.ts
-import { BaseComponent, Component } from "@flamework/components";
-import { OnStart } from "@flamework/core";
+import { BaseComponent, Component } from "@flamework-experimental/components";
+import { OnStart } from "@flamework-experimental/core";
 
 interface Attributes {
     speed: number;
@@ -34,7 +34,7 @@ export class Vehicle extends BaseComponent<Attributes, Model> implements OnStart
 Register the components and include the plugin:
 
 ```ts
-import { ComponentPlugin } from "@flamework/components";
+import { ComponentPlugin } from "@flamework-experimental/components";
 
 Flamework.createModule()
     .includePlugin(ComponentPlugin.fromPath("src/shared/components"))
@@ -459,7 +459,7 @@ A component can depend on another component **on the same instance**. Declare it
 parameter; `ComponentMetadata` has to come first, because `BaseComponent` takes it:
 
 ```ts
-import { BaseComponent, Component, ComponentMetadata } from "@flamework/components";
+import { BaseComponent, Component, ComponentMetadata } from "@flamework-experimental/components";
 
 @Component({ tag: "Car" })
 export class Car extends BaseComponent<{}, Model> {

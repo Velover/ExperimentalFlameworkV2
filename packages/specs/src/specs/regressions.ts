@@ -1,4 +1,10 @@
-import { BaseComponent, Component, ComponentMetadata, ComponentPlugin, Components } from "@flamework/components";
+import {
+	BaseComponent,
+	Component,
+	ComponentMetadata,
+	ComponentPlugin,
+	Components,
+} from "@flamework-experimental/components";
 import {
 	Flamework,
 	LifecyclePlugin,
@@ -9,7 +15,7 @@ import {
 	OnTick,
 	Provider,
 	createLifecyclePlugin,
-} from "@flamework/core";
+} from "@flamework-experimental/core";
 import { expectDefined, expectEqual, expectNoThrow, expectThrows, expectTrue, suite } from "../testkit";
 
 /**

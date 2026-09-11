@@ -25,7 +25,9 @@ writing a transformer plugin.
 | `packages/core` | Modules, dependency injection, plugins, lifecycle events, reflection. |
 | `packages/components` | CollectionService components, built on core's plugin system. |
 | `packages/networking` | Remote events and functions. |
-| `packages/testing` | Runtime specs, compiled by `rbxtsc` like any other consumer. |
+| `packages/testing` | In-place tests: sections, cleanup, the bindable and remote host, the cloud entry. |
+| `packages/cloud-testing` | The Bun CLI that publishes a place and runs its tests through Open Cloud; reads the `cloud` config section through the transformer's loader. |
+| `packages/specs` | Runtime specs, compiled by `rbxtsc` like any other consumer. |
 
 Build order matters and is fixed in [`scripts/build.mjs`](../../scripts/build.mjs): the transformer
 plugin API, then the transformer, then the packages that compile with it. Everything after
@@ -141,7 +143,7 @@ how the call itself is emitted:
 | Intrinsic | Does |
 |---|---|
 | `inline` | Emits the macro's result in place of the call rather than as an argument. |
-| `flamework-rewrite` | Redirects the call to a named export of `@flamework/core`, which is what gives a `declare`d macro a runtime target. |
+| `flamework-rewrite` | Redirects the call to a named export of `@flamework-experimental/core`, which is what gives a `declare`d macro a runtime target. |
 | `const` | Rejects an argument that is not a literal, because the transformer reads it at compile time. |
 | `component-config` | Rewrites a `@Component` decorator's config with generated attribute and instance guards, and with the links read off the component's type parameters. |
 | `middleware` | Obfuscates event names inside a networking middleware object. |
@@ -169,7 +171,7 @@ An instance type intersected with an object type is read as required children:
 
 Transformer plugins register additional macro types. A plugin is a CommonJS module that calls
 `registerPlugin`; the transformer loads it with `require` and drains a registry keyed by a global
-symbol, so two copies of `rbxts-transformer-flamework-plugin` still share registrations.
+symbol, so two copies of `@flamework-experimental/transformer-plugin` still share registrations.
 
 The host ([`transformations/plugins/pluginHost.ts`](../../packages/transformer/src/transformations/plugins/pluginHost.ts))
 gives plugins two facades rather than raw compiler objects:

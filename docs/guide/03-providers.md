@@ -3,7 +3,7 @@
 A provider is a singleton within its module. It is the unit you write most of your game in.
 
 ```ts
-import { Provider } from "@flamework/core";
+import { Provider } from "@flamework-experimental/core";
 
 @Provider()
 export class Economy {
@@ -101,7 +101,7 @@ Code with no constructor -- a UI component, a script, a signal handler -- reache
 ignited with `{ default: true }` (see [Modules](02-modules.md#resolving-by-hand)).
 
 ```ts
-import { Dependency } from "@flamework/core";
+import { Dependency } from "@flamework-experimental/core";
 
 const economy = Dependency<Economy>();
 ```
@@ -221,7 +221,7 @@ Sometimes you want dependency injection for a class you create yourself -- a ses
 per-player object -- without it being a singleton or being picked up by `registerProviders`.
 
 ```ts
-import { Injectable } from "@flamework/core";
+import { Injectable } from "@flamework-experimental/core";
 
 @Injectable()
 class Session {
@@ -270,7 +270,7 @@ const session = module.createClassInstance(Session, {
 ```
 
 Returning `undefined` falls back to the module's normal resolution, so you only intercept what you
-mean to. This is exactly how `@flamework/components` gives every component its `instance` and
+mean to. This is exactly how `@flamework-experimental/components` gives every component its `instance` and
 `attributes`.
 
 ## Realms

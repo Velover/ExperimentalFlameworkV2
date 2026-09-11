@@ -17,7 +17,7 @@ export interface PluginApi {
 	 * The options this plugin was configured with in `tsconfig.json`.
 	 *
 	 * ```json
-	 * { "transform": "rbxts-transformer-flamework", "plugins": [{ "path": "./my-plugin.js", "options": { "verbose": true } }] }
+	 * { "transform": "@flamework-experimental/transformer", "plugins": [{ "path": "./my-plugin.js", "options": { "verbose": true } }] }
 	 * ```
 	 */
 	options: Readonly<Record<string, unknown>>;

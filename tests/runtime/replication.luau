@@ -47,8 +47,8 @@ end)
 
 local link = bridge.link(serverEnv, clientEnv)
 
-local server = serverContext.require("@flamework/testing", "out", "replication")
-local client = clientContext.require("@flamework/testing", "out", "replication")
+local server = serverContext.require("@flamework-experimental/specs", "out", "replication")
+local client = clientContext.require("@flamework-experimental/specs", "out", "replication")
 
 --- Lets deferred work -- remote wiring, replication, delivery -- run.
 local function flush(frames: number?)

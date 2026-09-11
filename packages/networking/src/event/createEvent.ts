@@ -1,4 +1,4 @@
-import { Serialization } from "@flamework/core";
+import { Serialization } from "@flamework-experimental/core";
 import { RunService } from "@rbxts/services";
 import { MiddlewareFactory, MiddlewareProcessor } from "../middleware/types";
 import { createRemoteInstance } from "./createRemoteInstance";

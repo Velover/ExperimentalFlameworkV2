@@ -4,6 +4,7 @@ import { TransformState } from "../../classes/transformState";
 import { f } from "../../util/factory";
 import { getIndexExpression } from "../../util/functions/getIndexExpression";
 import { isAttributesAccess } from "../../util/functions/isAttributesAccess";
+import { COMPONENTS_PACKAGE } from "../../util/packages";
 
 /** `delete this.attributes.label` clears the attribute on the instance. */
 export function transformDeleteExpression(state: TransformState, node: ts.DeleteExpression) {
@@ -16,7 +17,7 @@ export function transformDeleteExpression(state: TransformState, node: ts.Delete
 
 		const attributeSetter = state.addFileImport(
 			node.getSourceFile(),
-			"@flamework/components/out/baseComponent",
+			`${COMPONENTS_PACKAGE}/out/baseComponent`,
 			"SYMBOL_ATTRIBUTE_SETTER",
 		);
 		const thisAccess = node.expression.expression.expression;

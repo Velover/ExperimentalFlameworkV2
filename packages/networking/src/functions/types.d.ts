@@ -12,7 +12,7 @@ import {
 } from "../types";
 import { FunctionNetworkingEvents } from "../handlers";
 import { FunctionMiddleware } from "../middleware/types";
-import { Modding } from "@flamework/core";
+import { Modding } from "@flamework-experimental/core";
 
 /**
  * A sender declared `Networking.Raw`: its arguments and the result travel as they are. Without the

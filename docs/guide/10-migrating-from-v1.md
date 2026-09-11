@@ -44,8 +44,8 @@ Flamework.ignite();
 
 ```ts
 // v2
-import { ComponentPlugin } from "@flamework/components";
-import { Flamework } from "@flamework/core";
+import { ComponentPlugin } from "@flamework-experimental/components";
+import { Flamework } from "@flamework-experimental/core";
 
 Flamework.createModule()
     .includePlugin(ComponentPlugin.fromPath("src/server/components"))
@@ -168,7 +168,7 @@ Discovery is path-based, exactly like providers. Where v1 offered `Modding.getDe
 walk a folder and filter on your own metadata:
 
 ```ts
-import { getClassesInPath } from "@flamework/core";
+import { getClassesInPath } from "@flamework-experimental/core";
 
 for (const ctor of getClassesInPath(path)) {
     const name = Reflect.getOwnMetadata<string>(ctor, "myGame:command");

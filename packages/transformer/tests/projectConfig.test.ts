@@ -355,10 +355,13 @@ describe("the fixture", () => {
 		compileFixture();
 		const artifact = path.join(FIXTURE, "include", "flamework", "config.json");
 		expect(fs.existsSync(artifact)).toBe(true);
+		// `testing.entry` is a source path in the file and a tree path in the artifact, resolved the
+		// way a path macro is; `cloud` is read by the CLI only and never reaches the place.
 		expect(JSON.parse(fs.readFileSync(artifact, "utf8"))).toEqual({
 			networking: { serialization: true },
 			components: { warningTimeout: 2 },
 			scopes: { active: ["fixture", "demo"] },
+			testing: { enabled: false, entry: ["out", "env"] },
 		});
 	});
 });

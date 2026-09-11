@@ -1,4 +1,4 @@
-import { Modding, Serialization } from "@flamework/core";
+import { Modding, Serialization } from "@flamework-experimental/core";
 import { t } from "@rbxts/t";
 
 export interface NetworkInfo {

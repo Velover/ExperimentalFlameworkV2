@@ -10,7 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * The transformer must be built before any roblox-ts package, as `rbxtsc` loads it
  * from `out/` while compiling them.
  */
-const ORDER = ["transformer-plugin", "transformer", "core", "components", "networking", "testing"];
+const ORDER = ["transformer-plugin", "transformer", "core", "testing", "components", "networking", "specs"];
 
 const requested = process.argv.slice(2);
 const targets = requested.length > 0 ? requested : ORDER;

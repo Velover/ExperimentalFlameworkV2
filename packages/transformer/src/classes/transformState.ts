@@ -25,6 +25,7 @@ import { tryResolveTS } from "../util/functions/tryResolve";
 import { fingerprintProjectConfig, getRuntimeConfig, loadProjectConfig, ProjectConfig } from "../util/projectConfig";
 import type { Env } from "../util/env";
 import { Diagnostics } from "./diagnostics";
+import { FLAMEWORK_SCOPE, CORE_PACKAGE } from "../util/packages";
 
 export interface TransformerConfig {
 	/**
@@ -347,7 +348,7 @@ export class TransformState {
 		if (!this.isGame) this.config.hashPrefix ??= this.packageName;
 		this.buildInfo.setIdentifierPrefix(this.config.hashPrefix);
 
-		if (this.config.hashPrefix?.startsWith("$") && !this.packageName.startsWith("@flamework")) {
+		if (this.config.hashPrefix?.startsWith("$") && !this.packageName.startsWith(FLAMEWORK_SCOPE)) {
 			throw new Error(`The hashPrefix $ is used internally by Flamework`);
 		}
 
@@ -372,6 +373,20 @@ export class TransformState {
 			// The runtime sections of flamework.config.json, for the packages to read at runtime.
 			const runtimeConfig = getRuntimeConfig(this.projectConfig);
 			if (runtimeConfig) {
+				// `testing.entry` is a source path in the file; the runner's cloud module needs the
+				// ModuleScript, so it is written as a tree path, resolved the way a path macro is.
+				const entry = runtimeConfig.testing?.entry;
+				if (entry !== undefined) {
+					const sourcePath = entry.endsWith(".ts") ? entry : `${entry}.ts`;
+					const outputPath = this.pathTranslator.getOutputPath(sourcePath);
+					const rbxPath = this.rojoResolver?.getRbxPathFromFilePath(outputPath);
+					if (rbxPath === undefined) {
+						throw new Error(
+							`flamework.config.json: testing.entry '${entry}' is not in the Rojo tree; give the source path of the ModuleScript that exports ignite(), for example "src/server/main"`,
+						);
+					}
+					runtimeConfig.testing = { ...runtimeConfig.testing, entry: rbxPath as unknown as string };
+				}
 				writtenFiles.set("config.json", JSON.stringify(runtimeConfig));
 			}
 
@@ -466,7 +481,7 @@ export class TransformState {
 	public fileImports = new Map<string, ImportInfo[]>();
 	addFileImport(file: ts.SourceFile, importPath: string, name: string): ts.Identifier {
 		// Flamework itself uses features which require imports, this will rewrite those imports to be valid inside the Flamework package.
-		if (importPath === "@flamework/core" && this.packageName === "@flamework/core" && name === "Reflect") {
+		if (importPath === CORE_PACKAGE && this.packageName === CORE_PACKAGE && name === "Reflect") {
 			const modulePath = path.join(this.rootDirectory, "src", "reflect");
 			importPath = "./" + path.relative(path.dirname(file.fileName), modulePath) || ".";
 		}
@@ -597,7 +612,7 @@ export class TransformState {
 	 * Returns the identifier to reach `t` from, for generated guards.
 	 *
 	 * Generated guards use functions such as `t.unionList` that older `@rbxts/t` releases lack. When
-	 * the project resolves a different `@rbxts/t` than `@flamework/core` does, `t` is imported through
+	 * the project resolves a different `@rbxts/t` than `@flamework-experimental/core` does, `t` is imported through
 	 * core's prelude so that the guards run against the version core was built with.
 	 */
 	getGuardLibrary(file: ts.SourceFile) {
@@ -606,12 +621,12 @@ export class TransformState {
 		}
 
 		// Inside the Flamework packages themselves there is nothing to reconcile.
-		if (this.packageName.startsWith("@flamework/")) {
+		if (this.packageName.startsWith(`${FLAMEWORK_SCOPE}/`)) {
 			this.flameworkGuardLibraryPath = "@rbxts/t";
 			return this.addFileImport(file, "@rbxts/t", "t");
 		}
 
-		const corePath = tryResolveTS(this, "@flamework/core", file.fileName);
+		const corePath = tryResolveTS(this, CORE_PACKAGE, file.fileName);
 		if (corePath === undefined) {
 			Diagnostics.warning(file.endOfFileToken, "Flamework core was not found, guard generation may not work.");
 			return this.addFileImport(file, "@rbxts/t", "t");
@@ -620,7 +635,7 @@ export class TransformState {
 		const fileGuardPath = tryResolveTS(this, "@rbxts/t", file.fileName);
 		const coreGuardPath = tryResolveTS(this, "@rbxts/t", corePath);
 		if (fileGuardPath === coreGuardPath) {
-			// @flamework/core and the consuming project are using the same @rbxts/t version.
+			// @flamework-experimental/core and the consuming project are using the same @rbxts/t version.
 			this.flameworkGuardLibraryPath = "@rbxts/t";
 			return this.addFileImport(file, "@rbxts/t", "t");
 		}
@@ -633,7 +648,7 @@ export class TransformState {
 			return this.addFileImport(file, "@rbxts/t", "t");
 		}
 
-		this.flameworkGuardLibraryPath = "@flamework/core/out/prelude";
+		this.flameworkGuardLibraryPath = `${CORE_PACKAGE}/out/prelude`;
 		return this.addFileImport(file, this.flameworkGuardLibraryPath, "t");
 	}
 }

@@ -199,7 +199,7 @@ describe("generated locals", () => {
 		// already uses is renamed for us.
 		const result = compileProbe(
 			"shadowedLocal",
-			`import { Networking } from "@flamework/networking";
+			`import { Networking } from "@flamework-experimental/networking";
 import type { Placement } from "./serialization";
 
 interface ProbeServerEvents {

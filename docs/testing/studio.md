@@ -52,11 +52,12 @@ the place.
    cd packages/core       && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
    cd ../components       && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
    cd ../networking       && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
+   cd ../testing          && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
    cd ../transformer      && bun pm pack --destination ../../../CommisionTemplate/vendor/flamework-v2
    cd ../../../CommisionTemplate
-   bun remove @flamework/core @flamework/components @flamework/networking rbxts-transformer-flamework
-   bun add ./vendor/flamework-v2/flamework-core-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-components-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-networking-2.0.0-alpha.0.tgz
-   bun add -d ./vendor/flamework-v2/rbxts-transformer-flamework-2.0.0-alpha.0.tgz
+   bun remove @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking @flamework-experimental/testing @flamework-experimental/transformer
+   bun add ./vendor/flamework-v2/flamework-experimental-core-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-components-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-networking-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-testing-2.0.0-alpha.0.tgz
+   bun add -d ./vendor/flamework-v2/flamework-experimental-transformer-2.0.0-alpha.0.tgz
    bun run build
    ```
 
@@ -65,22 +66,22 @@ the place.
    repack** run
 
    ```console
-   bun update @flamework/core @flamework/components @flamework/networking rbxts-transformer-flamework
+   bun update @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking @flamework-experimental/testing @flamework-experimental/transformer
    ```
 
    which re-extracts the changed tarballs and refreshes their integrity in the lockfile. Skipping it
    leaves a plain `bun install` failing with `IntegrityCheckFailed`, and bun's cache (keyed by name
    and version) can otherwise hand back the previous contents. Then check one shipped file actually
    changed, for example
-   `grep -c "HasTag(instance, tag)" node_modules/@flamework/components/out/components.luau`.
+   `grep -c "HasTag(instance, tag)" node_modules/@flamework-experimental/components/out/components.luau`.
 
-   **Reinstalling replaces `node_modules/@flamework`, and Rojo stops watching a folder that was
+   **Reinstalling replaces `node_modules/@flamework-experimental`, and Rojo stops watching a folder that was
    deleted and recreated.** Restart `rojo serve` and reconnect the plugin after every reinstall, or
    copy the rebuilt `packages/*/out` over the installed `out` folders in place, which keeps the
    watch alive:
 
    ```console
-   cp -r packages/components/out/. ../CommisionTemplate/node_modules/@flamework/components/out/
+   cp -r packages/components/out/. ../CommisionTemplate/node_modules/@flamework-experimental/components/out/
    ```
 
 4. The template's `flamework.config.json` enables `networking.serialization`, so every `[FWTEST]`
@@ -249,9 +250,9 @@ registered by `ComponentPlugin.fromPath` in the two entry points). Keep names as
 
 All three were invisible to the Lune suites and are fixed, each with a test that fails without it.
 
-1. **Shipped Luau required `@rbxts/t` through `@flamework/core/node_modules`** (networking's
+1. **Shipped Luau required `@rbxts/t` through `@flamework-experimental/core/node_modules`** (networking's
    `errors.luau` and `createFunctionSender.luau`). With bun's isolated linker, roblox-ts first meets
-   `t.d.ts` through core's declaration files and maps it back through the `@flamework/core` symlink.
+   `t.d.ts` through core's declaration files and maps it back through the `@flamework-experimental/core` symlink.
    Fix: `components`, `networking` and `testing` pin `@rbxts/t` to their own copy with a `paths`
    entry in `tsconfig.json`; `tests/packaging/packaging.test.ts` greps every shipped file for
    `.node_modules` in an import. A hoisted layout is not an alternative: roblox-ts refuses imports

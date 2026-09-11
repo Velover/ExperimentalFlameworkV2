@@ -1,4 +1,4 @@
-import { Flamework, OnStart, Provider } from "@flamework/core";
+import { Flamework, OnStart, Provider } from "@flamework-experimental/core";
 import { expectArrayEqual, expectEqual, expectThrows, expectTrue, suite } from "../testkit";
 
 /** Undecorated on purpose: a plugin provides one, and nothing about that needs metadata. */

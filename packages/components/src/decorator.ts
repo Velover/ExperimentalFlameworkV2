@@ -1,4 +1,4 @@
-import { Reflect } from "@flamework/core";
+import { Reflect } from "@flamework-experimental/core";
 import type { t } from "@rbxts/t";
 
 /**

@@ -10,7 +10,7 @@ import {
 import { createNetworkingEvent } from "./events/createNetworkingEvent";
 import { createNetworkingFunction } from "./functions/createNetworkingFunction";
 import { NetworkRaw, NetworkUnreliable } from "./types";
-import type { Modding } from "@flamework/core";
+import type { Modding } from "@flamework-experimental/core";
 
 export namespace Networking {
 	/**

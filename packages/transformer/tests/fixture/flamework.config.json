@@ -8,5 +8,7 @@
 	},
 	"networking": { "serialization": true },
 	"components": { "warningTimeout": 2 },
-	"scopes": { "active": "${FLAMEWORK_FIXTURE_SCOPES:-unset}" }
+	"scopes": { "active": "${FLAMEWORK_FIXTURE_SCOPES:-unset}" },
+	"testing": { "enabled": "${FLAMEWORK_FIXTURE_TESTS:-false}", "entry": "src/env" },
+	"cloud": { "universeId": "1", "placeId": "2", "apiKey": "${FLAMEWORK_FIXTURE_KEY:-}", "project": "default.project.json" }
 }

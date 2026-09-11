@@ -6,7 +6,7 @@ import type {
 	NodeFactory,
 	ObjectLiteralField,
 	Statement,
-} from "rbxts-transformer-flamework-plugin";
+} from "@flamework-experimental/transformer-plugin";
 import { f } from "../../util/factory";
 
 /**

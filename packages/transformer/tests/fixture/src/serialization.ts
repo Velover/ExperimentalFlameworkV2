@@ -1,5 +1,5 @@
-import { Flamework, Serialization } from "@flamework/core";
-import { Networking } from "@flamework/networking";
+import { Flamework, Serialization } from "@flamework-experimental/core";
+import { Networking } from "@flamework-experimental/networking";
 
 interface Point {
 	x: number;

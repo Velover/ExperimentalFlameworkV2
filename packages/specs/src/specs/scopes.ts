@@ -1,6 +1,6 @@
-import { BaseComponent, Component, ComponentPlugin, Components } from "@flamework/components";
-import * as core from "@flamework/core";
-import { Flamework, Provider } from "@flamework/core";
+import { BaseComponent, Component, ComponentPlugin, Components } from "@flamework-experimental/components";
+import * as core from "@flamework-experimental/core";
+import { Flamework, Provider } from "@flamework-experimental/core";
 import { expectArrayEqual, expectDefined, expectEqual, expectFalse, expectThrows, expectTrue, suite } from "../testkit";
 
 /**

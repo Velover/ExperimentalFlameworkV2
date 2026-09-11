@@ -4,7 +4,7 @@ You declare two interfaces -- what the server receives, and what the client rece
 generates the remotes, the argument validation and the typed handlers from them.
 
 ```sh
-npm install @flamework/networking
+npm install @flamework-experimental/networking
 ```
 
 ## Declaring a network
@@ -13,7 +13,7 @@ Put this in shared code; both realms import the same object.
 
 ```ts
 // src/shared/network.ts
-import { Networking } from "@flamework/networking";
+import { Networking } from "@flamework-experimental/networking";
 
 interface ServerEvents {
     setReady(ready: boolean): void;
@@ -199,7 +199,7 @@ Sizes are what the types say: a `number` is eight bytes, a `boolean` one, an
 names, a `Vector3` is three floats. Counts and lengths (arrays, sets, maps, strings, buffers) are
 varints: one byte below 128, two below 16384, up to five. Widths come from brands:
 `Serialization.u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `f32`, `f64` and `varint` from
-`@flamework/core` are `number & { __brand: "u8" }`-style types, and any brand with one of those
+`@flamework-experimental/core` are `number & { __brand: "u8" }`-style types, and any brand with one of those
 literal names counts, so existing branded types keep working. `Serialization.string8` / `string16`
 / `string32` (and `buffer16` / `buffer32`) give a string or buffer a fixed-width length instead.
 

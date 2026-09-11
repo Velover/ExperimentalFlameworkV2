@@ -12,7 +12,7 @@ import path from "path";
  * docs/testing/studio.md).
  */
 const ROOT = path.resolve(import.meta.dir, "../..");
-const PACKAGES = ["core", "components", "networking"];
+const PACKAGES = ["core", "components", "networking", "testing"];
 
 function luauFiles(dir: string): string[] {
 	const files: string[] = [];
@@ -24,7 +24,7 @@ function luauFiles(dir: string): string[] {
 	return files;
 }
 
-describe.each(PACKAGES)("@flamework/%s", (pkg) => {
+describe.each(PACKAGES)("@flamework-experimental/%s", (pkg) => {
 	const out = path.join(ROOT, "packages", pkg, "out");
 
 	test("is built", () => {

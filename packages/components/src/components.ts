@@ -1,4 +1,4 @@
-import { Flamework, OnStart, Provider, Reflect, type Modding, getRuntimeConfig } from "@flamework/core";
+import { Flamework, OnStart, Provider, Reflect, type Modding, getRuntimeConfig } from "@flamework-experimental/core";
 import {
 	CollectionService,
 	ReplicatedStorage,
@@ -24,7 +24,7 @@ import Maid from "@rbxts/maid";
 import Signal from "@rbxts/signal";
 import type { ComponentModuleConfig } from "./componentModule";
 import { ComponentStreamingMode, type ComponentConfig, type ComponentLink } from "./decorator";
-import type { Module } from "@flamework/core";
+import type { Module } from "@flamework-experimental/core";
 
 interface ComponentInfo {
 	ctor: Constructor<BaseComponent>;

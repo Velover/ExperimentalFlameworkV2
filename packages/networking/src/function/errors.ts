@@ -1,4 +1,4 @@
-import { Flamework } from "@flamework/core";
+import { Flamework } from "@flamework-experimental/core";
 
 export const isNetworkingFunctionError = Flamework.createGuard<NetworkingFunctionError>();
 export enum NetworkingFunctionError {

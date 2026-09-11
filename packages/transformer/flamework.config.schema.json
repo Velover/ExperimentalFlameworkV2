@@ -8,12 +8,12 @@
 	"properties": {
 		"$schema": {
 			"type": "string",
-			"description": "Editor support: point this at node_modules/rbxts-transformer-flamework/flamework.config.schema.json."
+			"description": "Editor support: point this at node_modules/@flamework-experimental/transformer/flamework.config.schema.json."
 		},
 		"transformer": {
 			"type": "object",
 			"additionalProperties": false,
-			"description": "Options for rbxts-transformer-flamework.",
+			"description": "Options for @flamework-experimental/transformer.",
 			"properties": {
 				"plugins": {
 					"type": "array",
@@ -74,7 +74,7 @@
 		"core": {
 			"type": "object",
 			"additionalProperties": false,
-			"description": "Options for @flamework/core.",
+			"description": "Options for @flamework-experimental/core.",
 			"properties": {
 				"profiling": {
 					"type": "boolean",
@@ -85,7 +85,7 @@
 		"networking": {
 			"type": "object",
 			"additionalProperties": false,
-			"description": "Options for @flamework/networking.",
+			"description": "Options for @flamework-experimental/networking.",
 			"properties": {
 				"serialization": {
 					"type": "boolean",
@@ -97,7 +97,7 @@
 		"components": {
 			"type": "object",
 			"additionalProperties": false,
-			"description": "Options for @flamework/components.",
+			"description": "Options for @flamework-experimental/components.",
 			"properties": {
 				"warningTimeout": {
 					"type": "number",
@@ -129,6 +129,57 @@
 					"items": { "type": "string" },
 					"description": "The active scopes. A string from the environment is split on commas; \"*\" activates every scope and an empty list activates none.",
 					"default": []
+				}
+			}
+		},
+		"testing": {
+			"type": "object",
+			"additionalProperties": false,
+			"description": "Options for @flamework-experimental/testing. Usually driven by the environment, as \"enabled\": \"${FLAMEWORK_TESTS:-false}\", so that a release build carries no tests.",
+			"properties": {
+				"enabled": {
+					"type": "boolean",
+					"description": "Whether the testing plugin does anything: requires the registered test folders, creates Workspace.FlameworkTests (a BindableFunction) and Workspace.FlameworkTestsServer (a RemoteFunction) and answers them. Off, the plugin is inert and no test file is ever loaded.",
+					"default": false
+				},
+				"autoRun": {
+					"type": "boolean",
+					"description": "Runs every test right after the module ignites, printing the results. Otherwise tests only run when the bindable or remote is invoked.",
+					"default": false
+				},
+				"timeout": {
+					"type": "number",
+					"minimum": 0,
+					"description": "Seconds a single test may take before it is cancelled and counted as failed.",
+					"default": 30
+				},
+				"entry": {
+					"type": "string",
+					"description": "The source path of a ModuleScript exporting `ignite()`, for example \"src/server/main\", for runs where nothing starts the game by itself (an Open Cloud Luau execution task). The runner's cloud module requires it, ignites, then invokes the bindable. Compiled into the artifact as a tree path."
+				}
+			}
+		},
+		"cloud": {
+			"type": "object",
+			"additionalProperties": false,
+			"description": "Where @flamework-experimental/cloud-testing publishes the place and runs its tests. Read by that CLI only; never compiled into the place. Keep the key in the environment: \"apiKey\": \"${ROBLOX_API_KEY:-}\".",
+			"properties": {
+				"universeId": {
+					"type": "string",
+					"description": "The experience's universe id, from the Creator Dashboard URL (game.GameId in Studio)."
+				},
+				"placeId": {
+					"type": "string",
+					"description": "The place to publish to and run tests in. Never the live place."
+				},
+				"apiKey": {
+					"type": "string",
+					"description": "An Open Cloud API key with universe-places:write and universe.place.luau-execution-session:read and :write for the experience. Reference the environment, \"${ROBLOX_API_KEY:-}\", so the key is never in the file."
+				},
+				"project": {
+					"type": "string",
+					"description": "The Rojo project file to build the place from, relative to this file.",
+					"default": "default.project.json"
 				}
 			}
 		}

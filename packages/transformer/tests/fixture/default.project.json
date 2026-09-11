@@ -8,7 +8,7 @@
 		"node_modules": {
 			"$className": "Folder",
 			"@rbxts": { "$path": "node_modules/@rbxts" },
-			"@flamework": { "$path": "node_modules/@flamework" }
+			"@flamework-experimental": { "$path": "node_modules/@flamework-experimental" }
 		}
 	}
 }

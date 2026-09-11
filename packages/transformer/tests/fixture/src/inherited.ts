@@ -1,4 +1,4 @@
-import { Injectable, Provider } from "@flamework/core";
+import { Injectable, Provider } from "@flamework-experimental/core";
 
 @Provider()
 export class Dep {}

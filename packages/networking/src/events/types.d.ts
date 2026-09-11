@@ -10,7 +10,7 @@ import {
 } from "../types";
 import { EventNetworkingEvents } from "../handlers";
 import { EventMiddleware } from "../middleware/types";
-import { Modding } from "@flamework/core";
+import { Modding } from "@flamework-experimental/core";
 
 /**
  * A sender declared `Networking.RawReliable` / `RawUnreliable`: its arguments travel as they are.

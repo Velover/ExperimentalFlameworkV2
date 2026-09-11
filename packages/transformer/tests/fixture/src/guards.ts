@@ -1,4 +1,4 @@
-import { Flamework } from "@flamework/core";
+import { Flamework } from "@flamework-experimental/core";
 
 export const stringGuard = Flamework.createGuard<string>();
 export const objectGuard = Flamework.createGuard<{ a: number; b?: string }>();

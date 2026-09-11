@@ -1,5 +1,5 @@
 {
-  "name": "rbxts-transformer-flamework",
+  "name": "@flamework-experimental/transformer",
   "version": "2.0.0-alpha.0",
   "description": "An opinionated game framework for Roblox.",
   "main": "out/index.js",
@@ -34,7 +34,7 @@
     "@types/node": "^16.11.1",
     "@types/normalize-package-data": "^2.4.1",
     "@types/uuid": "^8.3.1",
-    "rbxts-transformer-flamework-plugin": "workspace:*",
+    "@flamework-experimental/transformer-plugin": "workspace:*",
     "typescript": "^5.9.3"
   },
   "peerDependencies": {

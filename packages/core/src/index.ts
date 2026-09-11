@@ -46,7 +46,7 @@ export type {
 export type { OnExtinguished, OnInit, OnPhysics, OnRender, OnStart, OnTick } from "./lifecycle/lifecycleInterfaces";
 
 // Utilities that plugins need in order to implement path-based registration.
-export { getClassesInPath } from "./utility/getClassesInPath";
+export { getClassesInPath, importModule, requireModulesInPath } from "./utility/getClassesInPath";
 export { getClassesInGlob, getGlobPaths } from "./utility/globs";
 export { getPathRoot, resolveRbxPath, __setPathRoot } from "./utility/pathRoot";
 export { getRuntimeConfig } from "./utility/runtimeConfig";
@@ -56,5 +56,6 @@ export type {
 	NetworkingRuntimeConfig,
 	RuntimeConfig,
 	ScopesRuntimeConfig,
+	TestingRuntimeConfig,
 } from "./utility/runtimeConfig";
 export type { AbstractConstructor, Constructor } from "./utility/constructors";

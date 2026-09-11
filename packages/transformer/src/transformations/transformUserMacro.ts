@@ -24,6 +24,7 @@ import { isTupleType } from "../util/functions/isTupleType";
 import { inlineMacroIntrinsic } from "./macros/intrinsics/inlining";
 import { addLeadingComment } from "../util/functions/addLeadingComment";
 import { transformComponentConfig } from "./macros/intrinsics/components";
+import { CORE_PACKAGE } from "../util/packages";
 
 export function transformUserMacro(
 	state: TransformState,
@@ -95,7 +96,7 @@ export function transformUserMacro(
 			Diagnostics.error(node, `The rewrite target '${rewrite.name}' is not declared inside a namespace.`);
 		}
 
-		const namespace = state.addFileImport(state.getSourceFile(node), "@flamework/core", rewrite.parent.name);
+		const namespace = state.addFileImport(state.getSourceFile(node), CORE_PACKAGE, rewrite.parent.name);
 		callee = f.elementAccessExpression(namespace, rewrite.name);
 	}
 

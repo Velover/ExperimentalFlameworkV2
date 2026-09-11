@@ -1,4 +1,4 @@
-import { Modding, Reflect } from "@flamework/core";
+import { Modding, Reflect } from "@flamework-experimental/core";
 
 export type Constructor<T = object> = new (...args: never[]) => T;
 export type AbstractConstructor<T = object> = abstract new (...args: never[]) => T;

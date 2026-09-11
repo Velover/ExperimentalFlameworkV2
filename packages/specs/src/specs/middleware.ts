@@ -1,4 +1,4 @@
-import { Networking } from "@flamework/networking";
+import { Networking } from "@flamework-experimental/networking";
 import { RunService } from "@rbxts/services";
 import { expectArrayEqual, expectDefined, expectEqual, expectTrue, suite } from "../testkit";
 

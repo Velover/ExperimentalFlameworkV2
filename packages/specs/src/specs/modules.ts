@@ -1,4 +1,4 @@
-import { Dependency, Flamework, OnStart, Provider } from "@flamework/core";
+import { Dependency, Flamework, OnStart, Provider } from "@flamework-experimental/core";
 import { expectArrayEqual, expectEqual, expectFalse, expectThrows, expectTrue, suite } from "../testkit";
 
 declare const __harness: {

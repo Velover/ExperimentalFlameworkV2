@@ -5,8 +5,8 @@ import {
 	ComponentPlugin,
 	ComponentStreamingMode,
 	Components,
-} from "@flamework/components";
-import { Flamework, OnStart } from "@flamework/core";
+} from "@flamework-experimental/components";
+import { Flamework, OnStart } from "@flamework-experimental/core";
 import { ReplicatedStorage, RunService } from "@rbxts/services";
 import {
 	expectArrayEqual,

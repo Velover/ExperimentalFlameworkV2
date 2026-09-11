@@ -1,4 +1,4 @@
-import { Flamework } from "@flamework/core";
+import { Flamework } from "@flamework-experimental/core";
 
 interface Point {
 	x: number;

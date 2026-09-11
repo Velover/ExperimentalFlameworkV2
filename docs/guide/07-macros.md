@@ -50,7 +50,7 @@ Add `@metadata macro` to the JSDoc and make the generated parameters **optional*
 them in at each callsite; the `!` is how you tell TypeScript they will be there.
 
 ```ts
-import { Modding } from "@flamework/core";
+import { Modding } from "@flamework-experimental/core";
 
 /** @metadata macro */
 export function logHere(message: string, line?: Modding.Caller.Line, text?: Modding.Caller.Text) {
@@ -165,7 +165,7 @@ value" somewhere unrelated. Nothing warns at compile time.
 
 Causes, in rough order of likelihood:
 
-1. **The transformer is not configured.** No `rbxts-transformer-flamework` in `tsconfig.json` means
+1. **The transformer is not configured.** No `@flamework-experimental/transformer` in `tsconfig.json` means
    *no* macro fires -- Flamework's own included.
 2. **`@metadata macro` is missing** from the function's JSDoc, or the JSDoc is not directly attached
    to the declaration.

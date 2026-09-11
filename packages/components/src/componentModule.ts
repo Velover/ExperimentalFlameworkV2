@@ -6,7 +6,7 @@ import {
 	getClassesInGlob,
 	getClassesInPath,
 	type ScopeCondition,
-} from "@flamework/core";
+} from "@flamework-experimental/core";
 import type { Constructor } from "./utility";
 import { Components } from "./components";
 import { BaseComponent } from "./baseComponent";

@@ -1,4 +1,4 @@
-import { Flamework, Provider, type Module } from "@flamework/core";
+import { Flamework, Provider, type Module } from "@flamework-experimental/core";
 import { expectEqual, expectNoThrow, expectThrows, expectTrue, suite } from "../testkit";
 
 @Provider()

@@ -29,9 +29,10 @@
     "prettier": "^3.3.3",
     "roblox-ts": "^3.0.0",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.2.0"
+    "typescript-eslint": "^8.2.0",
+    "@flamework-experimental/transformer-plugin": "workspace:*"
   },
   "dependencies": {
-    "rbxts-transformer-flamework": "workspace:*"
+    "@flamework-experimental/transformer": "workspace:*"
   }
 }

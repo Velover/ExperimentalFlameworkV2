@@ -26,10 +26,11 @@ local ROOT = process.cwd
 
 --- Maps a workspace package specifier onto its directory.
 local PACKAGES: { [string]: string } = {
-	["@flamework/core"] = "packages/core",
-	["@flamework/components"] = "packages/components",
-	["@flamework/networking"] = "packages/networking",
-	["@flamework/testing"] = "packages/testing",
+	["@flamework-experimental/core"] = "packages/core",
+	["@flamework-experimental/components"] = "packages/components",
+	["@flamework-experimental/networking"] = "packages/networking",
+	["@flamework-experimental/testing"] = "packages/testing",
+	["@flamework-experimental/specs"] = "packages/specs",
 }
 
 -- Instance tree ----------------------------------------------------------------------------------
@@ -64,7 +65,7 @@ local SKIPPED: { [string]: boolean } = { [".git"] = true, [".nx"] = true, [".vsc
 --- How to walk a directory's children.
 ---
 --- roblox-ts emits paths like `getModule(...).node_modules["@rbxts"].t.lib.ts`, so `node_modules`
---- has to be part of the tree. Walking it wholesale would be enormous (and `@flamework` entries are
+--- has to be part of the tree. Walking it wholesale would be enormous (and `@flamework-experimental` entries are
 --- symlinks back into the workspace, which would recurse), so only the `@rbxts` scope is followed.
 type WalkMode = "normal" | "nodeModules" | "scope"
 
@@ -228,7 +229,7 @@ local NODE_MODULES_ROOTS = {
 	"packages/components/node_modules",
 	"packages/core/node_modules",
 	"packages/networking/node_modules",
-	"packages/testing/node_modules",
+	"packages/specs/node_modules",
 	"node_modules",
 }
 

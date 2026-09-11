@@ -11,7 +11,7 @@ import type {
 	TupleElement,
 	Type,
 	UnionOrIntersectionType,
-} from "rbxts-transformer-flamework-plugin";
+} from "@flamework-experimental/transformer-plugin";
 import type { TransformState } from "../../classes/transformState";
 import { isArrayType, isTupleType } from "../../util/functions/isTupleType";
 import { TYPE_FLAG_INTRINSIC } from "../../util/tsInternals";

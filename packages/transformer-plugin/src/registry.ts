@@ -8,7 +8,7 @@ export type PluginCallback = (api: PluginApi) => void;
  * well-known global symbol rather than in module scope, so registration always reaches the
  * transformer that is about to drain it.
  */
-const REGISTRY_KEY = Symbol.for("rbxts-transformer-flamework.pluginRegistry");
+const REGISTRY_KEY = Symbol.for("@flamework-experimental/transformer.pluginRegistry");
 
 interface Registry {
 	pending: PluginCallback[];

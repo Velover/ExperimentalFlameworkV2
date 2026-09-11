@@ -83,7 +83,7 @@ When there is no module handle to hand -- a UI component, a script, a callback r
 something outside Flamework -- `Dependency<T>()` resolves against the **default module**:
 
 ```ts
-import { Dependency } from "@flamework/core";
+import { Dependency } from "@flamework-experimental/core";
 
 const shop = Dependency<Shop>();
 ```

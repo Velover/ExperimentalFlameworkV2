@@ -7,6 +7,7 @@ import { getNodeTypeUid, getTypeUid } from "../../util/uid";
 import { getDependencyInjectionMetadata } from "../transformUserMacro";
 import { validateConstraintMetadata } from "../../util/functions/validateConstraintMetadata";
 import { Diagnostics } from "../../classes/diagnostics";
+import { CORE_PACKAGE } from "../../util/packages";
 
 /**
  * A parameter together with the type it has at the class being transformed.
@@ -30,7 +31,7 @@ export function transformClassDeclaration(state: TransformState, node: ts.ClassD
 		return state.transform(node);
 	}
 
-	const importIdentifier = state.addFileImport(state.getSourceFile(node), "@flamework/core", "Reflect");
+	const importIdentifier = state.addFileImport(state.getSourceFile(node), CORE_PACKAGE, "Reflect");
 	const reflectStatements = new Array<ts.Statement>();
 
 	reflectStatements.push(...convertReflectionToStatements(generateClassMetadata(state, metadata, node)));

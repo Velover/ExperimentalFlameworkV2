@@ -6,14 +6,20 @@
 		// the isolated linker roblox-ts would otherwise emit that import through core's node_modules, a path
 		// that exists only inside this repository (see docs/testing/studio.md).
 		"baseUrl": ".",
-		"paths": { "@rbxts/t": ["./node_modules/@rbxts/t"] },
+		"paths": {
+			"@rbxts/t": ["./node_modules/@rbxts/t"],
+			"@flamework-experimental/core": ["./node_modules/@flamework-experimental/core"],
+			"@flamework-experimental/components": ["./node_modules/@flamework-experimental/components"],
+			"@flamework-experimental/networking": ["./node_modules/@flamework-experimental/networking"],
+			"@flamework-experimental/testing": ["./node_modules/@flamework-experimental/testing"]
+		},
 		"rootDir": "src",
 		"outDir": "out",
+		"declaration": false,
 		"plugins": [
 			{
 				"transform": "@flamework-experimental/transformer",
-				"$rbxpackmode$": true,
-				"hashPrefix": "$n"
+				"hashPrefix": "$t"
 			}
 		]
 	}

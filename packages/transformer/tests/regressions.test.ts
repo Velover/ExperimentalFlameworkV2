@@ -272,7 +272,7 @@ describe("component links", () => {
 		// there, so the optional type would promise a read Roblox does not allow.
 		const result = compileProbe(
 			"optionalChild",
-			`import { BaseComponent, Component } from "@flamework/components";
+			`import { BaseComponent, Component } from "@flamework-experimental/components";
 
 interface Character extends Model {
 	Head?: BasePart;
@@ -292,7 +292,7 @@ export class CharacterComponent extends BaseComponent<{}, Character> {}
 	test("rejects an optional child deeper in the instance tree", () => {
 		const result = compileProbe(
 			"optionalGrandchild",
-			`import { BaseComponent, Component } from "@flamework/components";
+			`import { BaseComponent, Component } from "@flamework-experimental/components";
 
 @Component({ tag: "FixtureOptionalGrandchild" })
 export class RiggedComponent extends BaseComponent<{}, Model & { Torso: BasePart & { Neck?: Motor6D } }> {}
@@ -306,7 +306,7 @@ export class RiggedComponent extends BaseComponent<{}, Model & { Torso: BasePart
 	test("rejects a component that is not a direct child of the instance tree", () => {
 		const result = compileProbe(
 			"nestedLink",
-			`import { BaseComponent, Component } from "@flamework/components";
+			`import { BaseComponent, Component } from "@flamework-experimental/components";
 import { HandlerComponent } from "./components";
 
 @Component({ tag: "FixtureNested" })

@@ -1,4 +1,4 @@
-import { Flamework } from "@flamework/core";
+import { Flamework } from "@flamework-experimental/core";
 
 // Set in the fixture's .env; the call is replaced by the value as a string literal.
 export const scopes: string | undefined = Flamework.env("FLAMEWORK_FIXTURE_SCOPES");

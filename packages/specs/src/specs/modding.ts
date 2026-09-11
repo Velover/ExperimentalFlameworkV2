@@ -1,4 +1,4 @@
-import { Flamework, Injectable, Modding, Reflect } from "@flamework/core";
+import { Flamework, Injectable, Modding, Reflect } from "@flamework-experimental/core";
 import { expectArrayEqual, expectEqual, expectFalse, expectTrue, suite } from "../testkit";
 
 /**

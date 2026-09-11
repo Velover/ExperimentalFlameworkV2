@@ -9,7 +9,7 @@ than to a specific class.
 ## A minimal plugin
 
 ```ts
-import { Flamework } from "@flamework/core";
+import { Flamework } from "@flamework-experimental/core";
 
 export const MetricsPlugin = Flamework.createPlugin("Metrics", (target) => {
     const metrics = new Metrics();

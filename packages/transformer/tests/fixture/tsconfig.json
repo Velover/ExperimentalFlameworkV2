@@ -1,8 +1,8 @@
 {
 	"extends": "../../../../tsconfig.roblox-ts.json",
 	"compilerOptions": {
-		"typeRoots": ["./node_modules/@rbxts", "./node_modules/@flamework"],
-		// The fixture lives inside this workspace, whose isolated linker gives @flamework/core its own copy of
+		"typeRoots": ["./node_modules/@rbxts", "./node_modules/@flamework-experimental"],
+		// The fixture lives inside this workspace, whose isolated linker gives @flamework-experimental/core its own copy of
 		// @rbxts/t; pin the fixture's copy so imports resolve like they do in a real game (see packages/*/tsconfig.json).
 		"baseUrl": ".",
 		"paths": { "@rbxts/t": ["./node_modules/@rbxts/t"] },
@@ -11,7 +11,7 @@
 		"declaration": false,
 		"plugins": [
 			{
-				"transform": "rbxts-transformer-flamework"
+				"transform": "@flamework-experimental/transformer"
 			}
 		]
 	}

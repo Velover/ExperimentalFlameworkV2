@@ -68,7 +68,7 @@ describe("Flamework.env", () => {
 	test("types the result as a plain string only when a fallback is given", () => {
 		const result = compileProbe(
 			"envType",
-			`import { Flamework } from "@flamework/core";
+			`import { Flamework } from "@flamework-experimental/core";
 
 export const value: string = Flamework.env("FLAMEWORK_FIXTURE_SCOPES");
 `,
@@ -81,7 +81,7 @@ export const value: string = Flamework.env("FLAMEWORK_FIXTURE_SCOPES");
 	test("rejects a fallback that is not a string literal", () => {
 		const result = compileProbe(
 			"envFallback",
-			`import { Flamework } from "@flamework/core";
+			`import { Flamework } from "@flamework-experimental/core";
 
 declare const computed: string;
 export const value = Flamework.env("FLAMEWORK_FIXTURE_SCOPES", computed);

@@ -1,4 +1,4 @@
-import { Modding } from "@flamework/core";
+import { Modding } from "@flamework-experimental/core";
 
 export interface FieldInfo {
 	name: string;

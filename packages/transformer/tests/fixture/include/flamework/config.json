@@ -1,1 +1,1 @@
-{"networking":{"serialization":true},"components":{"warningTimeout":2},"scopes":{"active":["fixture","demo"]}}
+{"networking":{"serialization":true},"components":{"warningTimeout":2},"scopes":{"active":["fixture","demo"]},"testing":{"enabled":false,"entry":["out","env"]}}

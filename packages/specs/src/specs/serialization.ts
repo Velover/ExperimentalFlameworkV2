@@ -1,4 +1,4 @@
-import { Flamework, Serialization } from "@flamework/core";
+import { Flamework, Serialization } from "@flamework-experimental/core";
 import { expectEqual, expectTrue, suite } from "../testkit";
 
 /*

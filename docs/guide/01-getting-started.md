@@ -6,8 +6,8 @@ automatically, with no manual wiring.
 ## Install
 
 ```sh
-npm install @flamework/core
-npm install -D rbxts-transformer-flamework
+npm install @flamework-experimental/core
+npm install -D @flamework-experimental/transformer
 ```
 
 Add the transformer to `tsconfig.json`. **Nothing in these docs works without it** -- most of
@@ -19,7 +19,7 @@ arguments are simply missing at runtime.
   "compilerOptions": {
     "plugins": [
       {
-        "transform": "rbxts-transformer-flamework"
+        "transform": "@flamework-experimental/transformer"
       }
     ]
   }
@@ -64,7 +64,7 @@ A **provider** is a singleton. Mark it with `@Provider()` and export it:
 
 ```ts
 // src/server/services/greeter.ts
-import { OnStart, Provider } from "@flamework/core";
+import { OnStart, Provider } from "@flamework-experimental/core";
 
 @Provider()
 export class Greeter implements OnStart {
@@ -80,7 +80,7 @@ The entry point builds a module and ignites it:
 
 ```ts
 // src/server/runtime.server.ts
-import { Flamework } from "@flamework/core";
+import { Flamework } from "@flamework-experimental/core";
 
 Flamework.createModule()
     .registerProviders("src/server/services")
@@ -103,7 +103,7 @@ The client is the same shape:
 
 ```ts
 // src/client/runtime.client.ts
-import { Flamework } from "@flamework/core";
+import { Flamework } from "@flamework-experimental/core";
 
 Flamework.createModule()
     .registerProviders("src/client/controllers")

@@ -17,7 +17,7 @@ it out, for a module that wants no per-frame work at all, and including one buil
 Implement the interface; the plugin finds you.
 
 ```ts
-import { OnStart, OnTick, Provider } from "@flamework/core";
+import { OnStart, OnTick, Provider } from "@flamework-experimental/core";
 
 @Provider()
 export class Spawner implements OnStart, OnTick {
@@ -130,7 +130,7 @@ with the provider's identifier, so providers show up by name in the MicroProfile
 view. To force it on or off, build the plugin with options instead of using the default:
 
 ```ts
-import { createLifecyclePlugin } from "@flamework/core";
+import { createLifecyclePlugin } from "@flamework-experimental/core";
 
 Flamework.createModule()
     .includePlugin(createLifecyclePlugin({ profiling: false }))
@@ -149,7 +149,7 @@ leaves its last lifecycle event, so components that come and go leave nothing be
 The plugin provides its `LifecycleProvider`, so a module can be asked what it is currently running:
 
 ```ts
-import { LifecycleProvider } from "@flamework/core";
+import { LifecycleProvider } from "@flamework-experimental/core";
 
 const lifecycle = module.resolveDependency<LifecycleProvider>();
 print(lifecycle.onTick.size(), "objects are ticking");

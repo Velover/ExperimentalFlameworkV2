@@ -11,7 +11,7 @@ import {
 	OnTick,
 	Provider,
 	createLifecyclePlugin,
-} from "@flamework/core";
+} from "@flamework-experimental/core";
 import { RunService } from "@rbxts/services";
 import { expectArrayEqual, expectEqual, expectThrows, expectTrue, suite } from "../testkit";
 

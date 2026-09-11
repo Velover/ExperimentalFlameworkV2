@@ -122,3 +122,7 @@ on in a published game.
 - **Plugins with a registry of their own must ask.** The components plugin filters its classes with
   `target.isActive(...)`; a plugin that keeps its own list of classes has to do the same, or its
   classes ignore the module's condition. See [plugins](08-plugins.md#what-a-plugin-can-do).
+
+---
+
+Previous: [Migrating from v1](10-migrating-from-v1.md) · Next: [Testing in the place](12-testing.md)

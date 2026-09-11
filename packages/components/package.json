@@ -1,5 +1,5 @@
 {
-  "name": "@flamework/components",
+  "name": "@flamework-experimental/components",
   "version": "2.0.0-alpha.0",
   "main": "out/init.luau",
   "types": "out/index.d.ts",
@@ -15,13 +15,12 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@flamework/core": "*"
+    "@flamework-experimental/core": "*"
   },
   "devDependencies": {
-    "@flamework/core": "workspace:*",
+    "@flamework-experimental/core": "workspace:*",
     "@rbxts/compiler-types": "^3.0.0-types.0",
     "@rbxts/types": "^1.0.948",
-    "rbxts-transformer-flamework": "workspace:*",
     "roblox-ts": "^3.0.0"
   },
   "dependencies": {

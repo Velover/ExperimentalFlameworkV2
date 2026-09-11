@@ -24,9 +24,26 @@ export interface ComponentsRuntimeConfig {
 export interface ScopesRuntimeConfig {
 	/**
 	 * The scopes this build was compiled with, usually taken from the environment at compile time.
-	 * `"*"` stands for every scope. Read by the scope checks in `@flamework/core`.
+	 * `"*"` stands for every scope. Read by the scope checks in `@flamework-experimental/core`.
 	 */
 	active?: string[];
+}
+
+export interface TestingRuntimeConfig {
+	/** Whether the testing plugin loads test folders and answers the bindable and remote. */
+	enabled?: boolean;
+
+	/** Runs every test right after ignition, instead of only on request. */
+	autoRun?: boolean;
+
+	/** Seconds a single test may take before it is cancelled and counted as failed. */
+	timeout?: number;
+
+	/**
+	 * The tree path of a ModuleScript exporting `ignite()`, resolved by the transformer from the
+	 * source path in `flamework.config.json`, for runs where nothing starts the game by itself.
+	 */
+	entry?: readonly string[];
 }
 
 /**
@@ -38,6 +55,7 @@ export interface RuntimeConfig {
 	networking?: NetworkingRuntimeConfig;
 	components?: ComponentsRuntimeConfig;
 	scopes?: ScopesRuntimeConfig;
+	testing?: TestingRuntimeConfig;
 }
 
 let cached: RuntimeConfig | undefined;
