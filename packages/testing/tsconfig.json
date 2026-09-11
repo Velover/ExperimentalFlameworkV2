@@ -1,19 +1,19 @@
 {
 	"extends": "../../tsconfig.roblox-ts.json",
 	"compilerOptions": {
-		"typeRoots": ["./node_modules/@rbxts", "./node_modules/@flamework"],
-		// Pin @rbxts/t to this package's own copy. @flamework/core's declaration files import it too, and with
+		"typeRoots": ["./node_modules/@rbxts", "./node_modules/@flamework-experimental"],
+		// Pin @rbxts/t to this package's own copy. @flamework-experimental/core's declaration files import it too, and with
 		// the isolated linker roblox-ts would otherwise emit that import through core's node_modules, a path
 		// that exists only inside this repository (see docs/testing/studio.md).
 		"baseUrl": ".",
 		"paths": { "@rbxts/t": ["./node_modules/@rbxts/t"] },
 		"rootDir": "src",
 		"outDir": "out",
-		"declaration": false,
 		"plugins": [
 			{
-				"transform": "rbxts-transformer-flamework",
-				"hashPrefix": "$t"
+				"transform": "@flamework-experimental/transformer",
+				"$rbxpackmode$": true,
+				"hashPrefix": "$T"
 			}
 		]
 	}

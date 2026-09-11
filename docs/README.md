@@ -25,6 +25,7 @@ Read in order the first time. Each page ends with the caveats for that topic.
 | 9 | [Project structure](guide/09-project-structure.md) | Folder layout, one module or several, testing. |
 | 10 | [Migrating from v1](guide/10-migrating-from-v1.md) | What changed, and what to do about it. |
 | 11 | [Scopes](guide/11-scopes.md) | Build scopes from `.env`: test scenarios, debug tooling and stand-ins that only exist in the builds that ask for them. |
+| 12 | [Testing in the place](guide/12-testing.md) | Sections of tests that run inside a real place through a bindable, a remote or a cloud task, with cleanup that always runs. |
 
 ## Reference
 
@@ -37,6 +38,8 @@ Read in order the first time. Each page ends with the caveats for that topic.
 
 - [Testing in Roblox Studio](testing/studio.md) -- the battletest that runs a real place through the
   packages: setup, the automated matrix, the manual scenarios, and what the first run found.
+- [Testing in the cloud](testing/place.md) -- publishing a place and running its tests in a real
+  server through the Open Cloud Luau Execution API, from a terminal or CI.
 
 ## I just want to…
 

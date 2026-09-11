@@ -1,24 +1,31 @@
 {
-  "name": "@flamework/testing",
+  "name": "@flamework-experimental/testing",
   "version": "2.0.0-alpha.0",
-  "private": true,
-  "description": "Runtime specs for Flamework, executed under Lune.",
+  "description": "In-place tests for Flamework games: define sections of tests, run them through a BindableFunction in Workspace, from the client through a RemoteFunction, or from an Open Cloud task.",
   "main": "out/init.luau",
+  "types": "out/index.d.ts",
   "scripts": {
     "build": "rbxtsc",
     "watch": "rbxtsc -w"
   },
+  "files": [
+    "out",
+    "flamework.build"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@flamework-experimental/core": "*"
+  },
   "devDependencies": {
+    "@flamework-experimental/core": "workspace:*",
     "@rbxts/compiler-types": "^3.0.0-types.0",
     "@rbxts/types": "^1.0.948",
-    "rbxts-transformer-flamework": "workspace:*",
     "roblox-ts": "^3.0.0"
   },
   "dependencies": {
-    "@flamework/core": "workspace:*",
-    "@flamework/components": "workspace:*",
-    "@flamework/networking": "workspace:*",
-    "@rbxts/t": "^3.1.0",
-    "@rbxts/services": "^1.1.5"
+    "@rbxts/services": "^1.1.5",
+    "@rbxts/t": "^3.1.0"
   }
 }

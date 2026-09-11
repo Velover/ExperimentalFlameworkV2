@@ -13,6 +13,7 @@ const STEPS = [
 	// than bun's default five second hook timeout on a cold cache.
 	["transformer tests", ["bun", ["test", "--timeout", "120000", "packages/transformer/tests"]]],
 	["packaging checks", ["bun", ["test", "tests/packaging"]]],
+	["cloud-testing tests", ["bun", ["test", "packages/cloud-testing/tests"]]],
 	["runtime specs", ["bun", ["run", "./scripts/test-runtime.mjs"]]],
 ];
 

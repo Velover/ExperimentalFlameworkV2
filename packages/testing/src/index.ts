@@ -1,34 +1,16 @@
-import type { TestSuite } from "./testkit";
+// Defining tests
+export { defineTests, test, beforeEach, afterEach, getSections, DEFAULT_SECTION, __resetTests } from "./registry";
+export type { Section, SectionContext, TestBody, TestDefinition } from "./registry";
 
-import components = require("./specs/components");
-import functions = require("./specs/functions");
-import lifecycle = require("./specs/lifecycle");
-import middleware = require("./specs/middleware");
-import modding = require("./specs/modding");
-import modules = require("./specs/modules");
-import networking = require("./specs/networking");
-import paths = require("./specs/paths");
-import plugins = require("./specs/plugins");
-import providers = require("./specs/providers");
-import regressions = require("./specs/regressions");
-import scopes = require("./specs/scopes");
-import serialization = require("./specs/serialization");
+// Inside a test
+export { defer, scratch } from "./runner";
+export * from "./expect";
 
-/**
- * Every suite the Lune harness should run, in order.
- */
-export const suites: TestSuite[] = [
-	modding,
-	paths,
-	providers,
-	modules,
-	plugins,
-	scopes,
-	lifecycle,
-	components,
-	networking,
-	functions,
-	middleware,
-	regressions,
-	serialization,
-];
+// Running
+export { Testing, BINDABLE_NAME, REMOTE_NAME, __isAttached } from "./host";
+export { runTests, getRealm, DEFAULT_TIMEOUT } from "./runner";
+export type { Realm, RunOptions, RunResult, RunnerConfig, SectionResult, TestFilter, TestResult } from "./runner";
+
+// The plugin
+export { TestingPlugin, createTestingPlugin, resolveTestingOptions } from "./plugin";
+export type { TestingOptions } from "./plugin";

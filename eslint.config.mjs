@@ -32,7 +32,12 @@ export default tseslint.config(
 
 	// transformer, plus the node-side test suites under tests/
 	{
-		files: ["packages/transformer/**/*", "packages/transformer-plugin/**/*", "tests/**/*.ts"],
+		files: [
+			"packages/transformer/**/*",
+			"packages/transformer-plugin/**/*",
+			"packages/cloud-testing/**/*",
+			"tests/**/*.ts",
+		],
 		rules: {
 			"@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "file", caughtErrors: "none" }],
 			"@typescript-eslint/no-namespace": ["off"],
@@ -44,6 +49,7 @@ export default tseslint.config(
 		ignores: [
 			"packages/transformer/**/*",
 			"packages/transformer-plugin/**/*",
+			"packages/cloud-testing/**/*",
 			"eslint.config.mjs",
 			"scripts/**/*",
 			"tests/**/*",

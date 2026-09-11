@@ -31,6 +31,8 @@ local CLASS_PARENTS: { [string]: string } = {
 	UnreliableRemoteEvent = "Instance",
 	Player = "Instance",
 	BindableEvent = "Instance",
+	BindableFunction = "Instance",
+	RemoteFunction = "Instance",
 }
 
 --- Classes that get the remote-event surface, which the networking specs drive directly.
@@ -680,6 +682,30 @@ function instances.new(className: string, parent: Instance?): Instance
 		rawget(instance, "_signals")["Event"] = event
 		rawset(instance, "Fire", function(_self, ...)
 			fireDeferrable(event, ...)
+		end)
+	end
+
+	-- The two function-shaped instances the testing package answers on. OnInvoke and OnServerInvoke
+	-- are plain properties (the generic __newindex stores them); Invoke and InvokeServer call them.
+	-- Only one realm exists per process, so InvokeServer reaches the callback set in this same graph
+	-- and passes nil for the player.
+	if className == "BindableFunction" then
+		rawset(instance, "Invoke", function(self, ...)
+			local callback = rawget(self, "OnInvoke")
+			if callback == nil then
+				error("harness: BindableFunction.Invoke with no OnInvoke set", 2)
+			end
+			return callback(...)
+		end)
+	end
+
+	if className == "RemoteFunction" then
+		rawset(instance, "InvokeServer", function(self, ...)
+			local callback = rawget(self, "OnServerInvoke")
+			if callback == nil then
+				error("harness: RemoteFunction.InvokeServer with no OnServerInvoke set", 2)
+			end
+			return callback(nil, ...)
 		end)
 	end
 

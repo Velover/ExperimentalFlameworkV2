@@ -1,0 +1,27 @@
+{
+  "name": "@flamework-experimental/cloud-testing",
+  "version": "2.0.0-alpha.0",
+  "description": "Publishes a place and runs its Flamework tests in a real server through the Open Cloud Luau Execution API.",
+  "type": "module",
+  "bin": {
+    "flamework-cloud": "./src/cli.ts"
+  },
+  "files": [
+    "src",
+    "tasks"
+  ],
+  "scripts": {
+    "test": "bun test tests",
+    "typecheck": "tsc --noEmit"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@flamework-experimental/transformer": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.9.3"
+  }
+}
