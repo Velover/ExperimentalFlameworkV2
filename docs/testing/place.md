@@ -77,29 +77,34 @@ bindable, with `scripts/studio/luau-tests.mjs --mode client`.
    ROBLOX_API_KEY=...
    ```
 
-4. The place and the project in `flamework.config.json`. This section is read by the CLI only
-   and is never compiled into the place:
+4. The place in `flamework.config.json`, or as `UNIVERSE_ID` and `PLACE_ID` in the same
+   `.env.local`. This section is read by the CLI only and is never compiled into the place:
 
    ```jsonc
    "cloud": {
      "universeId": "10765968722",
      "placeId": "108973151455286",
-     "apiKey": "${ROBLOX_API_KEY}",
-     "project": "default.project.json"
+     "apiKey": "${ROBLOX_API_KEY}"
    }
    ```
 
 ## Commands
 
+Building the place is Rojo's job; the CLI takes the file it produced:
+
 ```console
-bunx flamework-cloud build                      # rojo build <project> -> build/place.rbxl
-bunx flamework-cloud publish                    # upload as a Saved version; keeps the number
+rojo build -o place.rbxl                        # the place, from your project file (gitignore *.rbxl)
+bunx flamework-cloud publish place.rbxl         # upload it as a Saved version; keeps the number
 bunx flamework-cloud run [--sections a,b]       # run the tests against that version
-bunx flamework-cloud test                       # the three above
+bunx flamework-cloud test place.rbxl            # publish, then run
 bunx flamework-cloud run --list                 # what would run
 bunx flamework-cloud run --code "return 1 + 1"  # any Luau, for a hypothesis about a real server
 bunx flamework-cloud probe                      # what the task environment reports
 ```
+
+The key and the ids come from flags (`--key`, `--universe`, `--place`), else the shell, else
+`.env` and `.env.local` next to the config file, else the `cloud` section; a `.env.local` with
+`ROBLOX_API_KEY`, `UNIVERSE_ID` and `PLACE_ID` needs no config section at all.
 
 `run` prints every log line the task produced, then a summary per section with each failure's
 message, and exits non-zero when a test failed, a filter entry matched nothing, or the task

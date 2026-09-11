@@ -9,8 +9,9 @@ flamework.build
 .nx/cache
 .nx/workspace-data
 
-# Copied prior to publishing
+# Copied prior to publishing (scripts/copy-readme.mjs); cloud-testing keeps its own
 packages/*/README.md
+!packages/cloud-testing/README.md
 
 # Yarn
 .pnp.*

@@ -80,8 +80,6 @@ export interface CloudConfig {
 	placeId?: string;
 	/** Usually `"${ROBLOX_API_KEY:-}"`, so that the key stays in the environment. */
 	apiKey?: string;
-	/** The Rojo project file to build the place from, relative to the config file. */
-	project?: string;
 }
 
 /** The whole `flamework.config.json`. */

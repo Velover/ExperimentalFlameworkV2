@@ -9,10 +9,14 @@ export interface CloudSettings {
 	universeId?: string;
 	placeId?: string;
 	apiKey?: string;
-	/** The Rojo project file, resolved against the config file's directory. */
-	project?: string;
 	/** Where the settings were read from, when a file was found. */
 	configPath?: string;
+	/**
+	 * `.env`, then `.env.local`, then the process environment, later ones winning: the CLI reads
+	 * its own variables (ROBLOX_API_KEY, UNIVERSE_ID, PLACE_ID, PROJECT) from here, so a `.env`
+	 * works without the config file referencing it.
+	 */
+	env: Record<string, string>;
 }
 
 /**
@@ -23,15 +27,14 @@ export interface CloudSettings {
 export function loadCloudSettings(cwd: string, env: Record<string, string | undefined>): CloudSettings {
 	const loaded = loadProjectConfig(cwd, packageRoot(cwd), {}, env as Record<string, string>);
 	const cloud = loaded.project.cloud ?? {};
-	const base = loaded.configPath !== undefined ? dirname(loaded.configPath) : cwd;
 
 	return {
 		universeId: cloud.universeId,
 		placeId: cloud.placeId,
 		// An empty string is what `${ROBLOX_API_KEY:-}` gives when the variable is not set.
 		apiKey: cloud.apiKey !== undefined && cloud.apiKey !== "" ? cloud.apiKey : undefined,
-		project: cloud.project !== undefined ? resolve(base, cloud.project) : undefined,
 		configPath: loaded.configPath,
+		env: loaded.env,
 	};
 }
 

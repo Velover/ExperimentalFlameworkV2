@@ -175,11 +175,6 @@
 				"apiKey": {
 					"type": "string",
 					"description": "An Open Cloud API key with universe-places:write and universe.place.luau-execution-session:read and :write for the experience. Reference the environment, \"${ROBLOX_API_KEY:-}\", so the key is never in the file."
-				},
-				"project": {
-					"type": "string",
-					"description": "The Rojo project file to build the place from, relative to this file.",
-					"default": "default.project.json"
 				}
 			}
 		}

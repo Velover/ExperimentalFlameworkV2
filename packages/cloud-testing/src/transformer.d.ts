@@ -6,7 +6,6 @@ declare module "@flamework-experimental/transformer/out/util/projectConfig.js" {
 		universeId?: string;
 		placeId?: string;
 		apiKey?: string;
-		project?: string;
 	}
 
 	export interface LoadedProjectConfig {

@@ -1,8 +1,7 @@
 #!/usr/bin/env bun
 /**
- * place-test-runner - build a Roblox place with Rojo, publish it through Open
- * Cloud, and run the Flamework test suite inside it with the Luau Execution
- * API.
+ * flamework-cloud - publish a place built with Rojo through Open Cloud and run
+ * the Flamework test suite inside it with the Luau Execution API.
  *
  * Everything is injectable (`CliDeps`) so `bun test` can drive the whole CLI
  * without a network, a file system or a real API key.
@@ -27,11 +26,8 @@ import { loadCloudSettings, type CloudSettings } from "./config.ts";
 import { parseSections, renderShim, type Filter } from "./luau.ts";
 import { formatList, formatSummary, parseRunResult, ResultParseError } from "./results.ts";
 
-export const DEFAULT_PROJECT = "default.project.json";
-export const DEFAULT_PLACE_FILE = "build/place.rbxl";
+/** Where `publish` records the version it made, for `run` to pin. */
 export const VERSION_FILE = "build/version.json";
-export const DEFAULT_UNIVERSE_ID = "10765968722";
-export const DEFAULT_PLACE_ID = "108973151455286";
 export const DEFAULT_TIMEOUT = "120s";
 export const PROBE_TIMEOUT = "60s";
 export const POLL_INTERVAL_MS = 2500;
@@ -43,7 +39,6 @@ export const QUEUE_SLACK_MS = 300_000;
 type FlagKind = "string" | "boolean";
 
 const FLAGS: Record<string, FlagKind> = {
-	project: "string",
 	file: "string",
 	published: "boolean",
 	version: "string",
@@ -56,25 +51,25 @@ const FLAGS: Record<string, FlagKind> = {
 	json: "boolean",
 	universe: "string",
 	place: "string",
+	key: "string",
 	help: "boolean",
 };
 
-const COMMON_FLAGS = ["universe", "place", "help"];
-const BUILD_FLAGS = ["project"];
+const COMMON_FLAGS = ["universe", "place", "key", "help"];
+/** Commands that take the built place file as a positional argument as well as `--file`. */
+const FILE_COMMANDS = ["publish", "test"];
 const PUBLISH_FLAGS = ["file", "published"];
 const RUN_FLAGS = ["version", "sections", "list", "timeout", "code", "script", "dry-run", "json"];
 
 const COMMANDS: Record<string, string[]> = {
-	build: BUILD_FLAGS,
 	publish: PUBLISH_FLAGS,
 	run: RUN_FLAGS,
-	test: [...BUILD_FLAGS, ...PUBLISH_FLAGS, ...RUN_FLAGS],
+	test: [...PUBLISH_FLAGS, ...RUN_FLAGS],
 	probe: ["version", "timeout", "json", "dry-run"],
 	help: [],
 };
 
 export interface Flags {
-	project?: string;
 	file?: string;
 	published?: boolean;
 	version?: string;
@@ -87,6 +82,7 @@ export interface Flags {
 	json?: boolean;
 	universe?: string;
 	place?: string;
+	key?: string;
 	help?: boolean;
 }
 
@@ -105,10 +101,13 @@ export interface ParsedArgs {
 	flags: Flags;
 }
 
-/** Flags may appear before or after the subcommand. */
+/**
+ * Flags may appear before or after the subcommand. `publish` and `test` accept the place file as
+ * a second positional argument, which is the same as `--file`.
+ */
 export function parseArgs(argv: string[]): ParsedArgs {
 	const flags: Flags = {};
-	let command: string | undefined;
+	const positionals: string[] = [];
 
 	for (let i = 0; i < argv.length; i += 1) {
 		const arg = argv[i]!;
@@ -153,12 +152,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
 			throw new UsageError(`unknown flag: ${arg}`);
 		}
 
-		if (command !== undefined) {
-			throw new UsageError(`unexpected argument: ${arg}`);
-		}
-		command = arg;
+		positionals.push(arg);
 	}
 
+	const [command, file, ...extra] = positionals;
 	if (command !== undefined) {
 		const allowed = COMMANDS[command];
 		if (allowed === undefined) {
@@ -169,26 +166,36 @@ export function parseArgs(argv: string[]): ParsedArgs {
 				throw new UsageError(`--${name} is not a flag of "${command}"`);
 			}
 		}
+		if (file !== undefined) {
+			if (!FILE_COMMANDS.includes(command)) {
+				throw new UsageError(`unexpected argument: ${file}`);
+			}
+			if (extra.length > 0) {
+				throw new UsageError(`unexpected argument: ${extra[0]}`);
+			}
+			if (flags.file !== undefined) {
+				throw new UsageError(`the place file was given twice: "${file}" and --file ${flags.file}`);
+			}
+			flags.file = file;
+		}
 	}
 
 	return { command, flags };
 }
 
-const USAGE = `place-test-runner - run Flamework tests inside a published Roblox place
+const USAGE = `flamework-cloud - run Flamework tests inside a published Roblox place
 
 Usage:
-  bun run src/cli.ts <command> [flags]        (flags may come before the command)
+  flamework-cloud <command> [file] [flags]     (flags may come before the command)
 
 Commands:
-  build      rojo build the project into ${DEFAULT_PLACE_FILE}
-  publish    upload ${DEFAULT_PLACE_FILE} as a new place version
-  run        run the test shim in the place and report the results
-  test       build, then publish, then run
-  probe      report what the execution sandbox looks like from the inside
+  publish <file>  upload the place Rojo built as a new version
+  run             run the test shim in the place and report the results
+  test <file>     publish the file, then run
+  probe           report what the execution sandbox looks like from the inside
 
 Flags:
-  build      --project <path>        default: $PROJECT, else cloud.project, else ${DEFAULT_PROJECT}
-  publish    --file <path>           default: ${DEFAULT_PLACE_FILE}
+  publish    --file <path>           the same as the <file> argument
              --published             publish live instead of uploading a Saved version
   run        --version <n>           default: ${VERSION_FILE}, else the current version
              --sections <a,b>        only these sections ("economy", "economy/buys")
@@ -200,18 +207,23 @@ Flags:
              --json                  print the raw result JSON instead of a summary
   common     --universe <id>         default: $UNIVERSE_ID, else cloud.universeId
              --place <id>            default: $PLACE_ID, else cloud.placeId
+             --key <apiKey>          default: $ROBLOX_API_KEY, else cloud.apiKey; prefer the
+                                     environment, a flag lands in the shell history
              -h, --help
 
-Settings come from the "cloud" section of the nearest flamework.config.json, read the way the
-transformer reads it (\${NAME} references, .env and .env.local next to it), with flags and the
-environment on top:
-  "cloud": { "universeId": "...", "placeId": "...", "apiKey": "\${ROBLOX_API_KEY:-}", "project": "default.project.json" }
+Settings come from flags, then the shell environment, then .env and .env.local next to the
+nearest flamework.config.json, then that file's "cloud" section, which may itself use \${NAME}:
+  "cloud": { "universeId": "...", "placeId": "...", "apiKey": "\${ROBLOX_API_KEY:-}" }
 
-Environment:
+Environment (the shell, .env or .env.local):
   ROBLOX_API_KEY          Open Cloud key: universe-places:write and
   (or TESTING_PLACE_API_KEY) universe.place.luau-execution-session:read/:write
   UNIVERSE_ID, PLACE_ID   the experience and the place inside it
-  PROJECT                 Rojo project for "build"
+
+Examples:
+  rojo build -o place.rbxl && flamework-cloud test place.rbxl
+  flamework-cloud run --sections economy       again, against the version last published
+  flamework-cloud run --code "return 1 + 1" --place 123
 
 Exit codes: 0 success, 1 failure, 2 bad usage.`;
 
@@ -223,11 +235,7 @@ export interface CliDeps {
 	readFile?: (path: string) => Promise<ArrayBuffer>;
 	readTextFile?: (path: string) => Promise<string>;
 	writeTextFile?: (path: string, text: string) => Promise<void>;
-	/** `mkdir -p`. */
-	mkdirp?: (path: string) => Promise<void>;
 	exists?: (path: string) => Promise<boolean>;
-	/** Runs a child process; resolves with its exit code. */
-	spawn?: (command: string[], cwd: string) => Promise<number>;
 	log?: (message: string) => void;
 	error?: (message: string) => void;
 	env?: Record<string, string | undefined>;
@@ -255,23 +263,7 @@ function resolveDeps(deps: CliDeps): Io {
 				await mkdir(dirname(path), { recursive: true });
 				await Bun.write(path, text);
 			}),
-		mkdirp:
-			deps.mkdirp ??
-			(async (path) => {
-				await mkdir(path, { recursive: true });
-			}),
 		exists: deps.exists ?? ((path) => Bun.file(path).exists()),
-		spawn:
-			deps.spawn ??
-			(async (command, cwd) => {
-				const proc = Bun.spawn({
-					cmd: command,
-					cwd,
-					stdout: "inherit",
-					stderr: "inherit",
-				});
-				return await proc.exited;
-			}),
 		log: deps.log ?? ((message) => console.log(message)),
 		error: deps.error ?? ((message) => console.error(message)),
 		env: deps.env ?? (process.env as Record<string, string | undefined>),
@@ -293,12 +285,18 @@ function settingsOf(io: Io): CloudSettings {
 	return settings;
 }
 
+/** A variable from the shell, else from `.env` / `.env.local` next to the config file. */
+function envOf(io: Io, name: string): string | undefined {
+	return io.env[name] ?? settingsOf(io).env[name];
+}
+
 function makeClient(flags: Flags, io: Io, { requireKey = true }: { requireKey?: boolean } = {}): OpenCloudClient {
-	const apiKey = io.env.ROBLOX_API_KEY ?? io.env.TESTING_PLACE_API_KEY ?? settingsOf(io).apiKey ?? "";
+	const apiKey =
+		flags.key ?? envOf(io, "ROBLOX_API_KEY") ?? envOf(io, "TESTING_PLACE_API_KEY") ?? settingsOf(io).apiKey ?? "";
 	if (!apiKey && requireKey) {
 		throw new CliError(
 			"no Open Cloud API key",
-			'set ROBLOX_API_KEY in .env.local next to flamework.config.json and give the cloud section "apiKey": "\${ROBLOX_API_KEY:-}"',
+			"put ROBLOX_API_KEY in .env.local next to flamework.config.json (never in a committed file), or pass --key",
 		);
 	}
 	const { universeId, placeId } = resolveIds(flags, io);
@@ -314,12 +312,12 @@ function makeClient(flags: Flags, io: Io, { requireKey = true }: { requireKey?: 
 
 function resolveIds(flags: Flags, io: Io): { universeId: string; placeId: string } {
 	const settings = settingsOf(io);
-	const universeId = flags.universe ?? io.env.UNIVERSE_ID ?? settings.universeId;
-	const placeId = flags.place ?? io.env.PLACE_ID ?? settings.placeId;
+	const universeId = flags.universe ?? envOf(io, "UNIVERSE_ID") ?? settings.universeId;
+	const placeId = flags.place ?? envOf(io, "PLACE_ID") ?? settings.placeId;
 	if (universeId === undefined || placeId === undefined) {
 		throw new CliError(
 			"no universe and place to run in",
-			'give flamework.config.json a "cloud" section with "universeId" and "placeId", or pass --universe and --place',
+			'put UNIVERSE_ID and PLACE_ID in .env, give flamework.config.json a "cloud" section with "universeId" and "placeId", or pass --universe and --place',
 		);
 	}
 	if (universeId === placeId) {
@@ -332,34 +330,21 @@ function resolveIds(flags: Flags, io: Io): { universeId: string; placeId: string
 
 // --------------------------------------------------------------- commands
 
-async function cmdBuild(flags: Flags, io: Io): Promise<number> {
-	const project = flags.project ?? io.env.PROJECT ?? settingsOf(io).project ?? DEFAULT_PROJECT;
-	const outFile = resolve(io.cwd, DEFAULT_PLACE_FILE);
-	await io.mkdirp(dirname(outFile));
-
-	const command = ["rojo", "build", project, "-o", outFile];
-	io.log(`$ rojo build ${project} -o ${DEFAULT_PLACE_FILE}`);
-	const code = await io.spawn(command, io.cwd);
-	if (code !== 0) {
-		io.error(`rojo build failed (exit ${code})`);
-		return 1;
+/** The place file a command was given, which Rojo built; the CLI does not wrap `rojo build`. */
+function placeFileOf(flags: Flags, command: string): string {
+	if (flags.file === undefined) {
+		throw new UsageError(
+			`${command} needs the place Rojo built: rojo build -o place.rbxl && flamework-cloud ${command} place.rbxl`,
+		);
 	}
-
-	let size = "";
-	try {
-		size = ` (${(Bun.file(outFile).size / 1024).toFixed(0)} KiB)`;
-	} catch {
-		size = "";
-	}
-	io.log(`built ${DEFAULT_PLACE_FILE}${size}`);
-	return 0;
+	return flags.file;
 }
 
 async function cmdPublish(flags: Flags, io: Io): Promise<number> {
-	const file = flags.file ?? DEFAULT_PLACE_FILE;
+	const file = placeFileOf(flags, "publish");
 	const absolute = resolve(io.cwd, file);
 	if (!(await io.exists(absolute))) {
-		throw new CliError(`${file} does not exist`, "run `bun run build` first, or pass --file");
+		throw new CliError(`${file} does not exist`, `build it first: rojo build -o ${file}`);
 	}
 
 	const versionType: VersionType = flags.published ? "Published" : "Saved";
@@ -595,8 +580,7 @@ function printDryRun(
 }
 
 async function cmdTest(flags: Flags, io: Io): Promise<number> {
-	const built = await cmdBuild(flags, io);
-	if (built !== 0) return built;
+	placeFileOf(flags, "test");
 	const published = await cmdPublish(flags, io);
 	if (published !== 0) return published;
 	return await cmdRun(flags, io, "run");
@@ -633,8 +617,6 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
 
 	try {
 		switch (parsed.command) {
-			case "build":
-				return await cmdBuild(parsed.flags, io);
 			case "publish":
 				return await cmdPublish(parsed.flags, io);
 			case "run":

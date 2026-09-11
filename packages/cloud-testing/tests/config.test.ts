@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { loadCloudSettings } from "../src/config.ts";
 
 function scratch(files: Record<string, string>): string {
@@ -14,14 +14,13 @@ function scratch(files: Record<string, string>): string {
 }
 
 describe("loadCloudSettings", () => {
-	test("reads the cloud section with its environment substituted, and resolves the project against the file", () => {
+	test("reads the cloud section with its environment substituted", () => {
 		const dir = scratch({
 			"flamework.config.json": JSON.stringify({
 				cloud: {
 					universeId: "10765968722",
 					placeId: "108973151455286",
 					apiKey: "${FLAMEWORK_CLOUD_TEST_KEY:-}",
-					project: "places/test.project.json",
 				},
 			}),
 			".env": "FLAMEWORK_CLOUD_TEST_KEY=from-dotenv\n",
@@ -31,7 +30,6 @@ describe("loadCloudSettings", () => {
 			expect(settings.universeId).toBe("10765968722");
 			expect(settings.placeId).toBe("108973151455286");
 			expect(settings.apiKey).toBe("from-dotenv");
-			expect(settings.project).toBe(resolve(dir, "places/test.project.json"));
 			expect(settings.configPath).toBe(join(dir, "flamework.config.json"));
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
@@ -60,9 +58,19 @@ describe("loadCloudSettings", () => {
 				universeId: undefined,
 				placeId: undefined,
 				apiKey: undefined,
-				project: undefined,
 				configPath: undefined,
+				env: {},
 			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test(".env variables are exposed without the config referencing them, the process environment winning", () => {
+		const dir = scratch({ ".env": "ROBLOX_API_KEY=from-dotenv\nPLACE_ID=7\n" });
+		try {
+			expect(loadCloudSettings(dir, {}).env).toMatchObject({ ROBLOX_API_KEY: "from-dotenv", PLACE_ID: "7" });
+			expect(loadCloudSettings(dir, { PLACE_ID: "8" }).env.PLACE_ID).toBe("8");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
