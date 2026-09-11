@@ -106,6 +106,11 @@ export function firePong(player: Player, value: number) {
 	server.pong(player, value + 1);
 }
 
+// Regression: an empty player list bound to a temporary was an implicit `any[]`.
+export function fireNobody(value: number) {
+	server.pong.fire([], value);
+}
+
 export function ping(where: Vector3) {
 	client.ping.fire(1, where);
 }

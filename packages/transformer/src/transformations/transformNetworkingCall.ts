@@ -91,7 +91,9 @@ function transformSend(
 	}
 
 	const statements = new Array<ts.Statement>();
-	const leadingValues = leading.map((argument) => bindArgument(statements, argument, "target"));
+	const leadingValues = leading.map((argument, index) =>
+		bindArgument(statements, argument, "target", emptyListAnnotation(state, node.arguments[index])),
+	);
 
 	let encoding;
 	if (packed.some(ts.isSpreadElement)) {
@@ -273,7 +275,12 @@ function markerType(state: TransformState, type: ts.Type, marker: string, node: 
  * An argument that is read more than once is evaluated once, in call order, into a local. Identifiers
  * and literals are returned as they are; anything else comes back as the new local's identifier.
  */
-function bindArgument(statements: ts.Statement[], argument: ts.Expression, hint: string): ts.Expression {
+function bindArgument(
+	statements: ts.Statement[],
+	argument: ts.Expression,
+	hint: string,
+	annotation?: ts.TypeNode,
+): ts.Expression {
 	if (
 		ts.isIdentifier(argument) ||
 		ts.isLiteralExpression(argument) ||
@@ -284,8 +291,21 @@ function bindArgument(statements: ts.Statement[], argument: ts.Expression, hint:
 	}
 
 	const id = f.identifier(hint, true);
-	statements.push(f.variableStatement(id, argument));
+	statements.push(f.variableStatement(id, argument, annotation));
 	return id;
+}
+
+/**
+ * `const target = []` is an implicit `any[]`, which a project compiled with `noImplicitAny` rejects: an
+ * empty list (`fire([], value)`) is bound with the type its context gave it.
+ */
+function emptyListAnnotation(state: TransformState, original: ts.Expression | undefined): ts.TypeNode | undefined {
+	if (!original || !ts.isArrayLiteralExpression(original) || original.elements.length > 0) return;
+
+	const type = state.typeChecker.getContextualType(original);
+	if (!type) return;
+
+	return state.typeChecker.typeToTypeNode(type, original, ts.NodeBuilderFlags.IgnoreErrors | ts.NodeBuilderFlags.NoTruncation);
 }
 
 function arrayType() {

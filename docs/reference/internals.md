@@ -718,12 +718,15 @@ by a `Parent` check in the runtime -- so a tag applied to a *descendant* of a de
 component here that a place would not have built, and the specs that looked like they were testing
 the rule were testing that filter instead. `Instance:Clone` carries the source's tags across for the
 same reason: a tagged template cloned into Workspace is how most tagged instances come to exist, and
-dropping the tags made that case untestable. `Instance:Destroy` follows the engine's order too --
-`Destroying`, then the parent is nilled (announcing the subtree's tags as gone), then every
-connection on the instance is dropped, and only then do the children come apart -- so none of a
-destroyed instance's own tree signals reach a handler. Running them, as the harness used to, put a
-component's `ChildRemoved` and `DescendantRemoving` handlers against a half-dismantled tree that no
-place ever shows them.
+dropping the tags made that case untestable. `Instance:Destroy` follows the engine's order too,
+probed in a real server on 2026-09-11: `Destroying`, then the parent is nilled (announcing the
+subtree's tags as gone), then the children come apart with the instance's own connections still
+live -- its `DescendantRemoving` and `ChildRemoved` fire for each child against a tree that has
+already left the DataModel -- and only then is every connection dropped. An earlier version of the
+harness disconnected before the children moved, on the belief that the engine did; it does not,
+and the registry has to cope with a component's tree handlers running mid-destroy, which the
+`components` suite now asserts. `InstanceHandle.new(nil):Wait(timeout)` answers at once rather
+than after the timeout, as the engine's does.
 
 **Clean up a tag that can never qualify.** Specs leave their instances in the world on purpose, which
 is harmless for anything that qualifies. An instance tagged for a component it can never satisfy is
@@ -751,3 +754,9 @@ it before it ends.
   that reads instance state from inside a CollectionService handler as untested here.
 - `resolveRbxPath` walks with `WaitForChild` and no timeout, so a registered path naming a folder
   that does not exist stalls ignition with an "Infinite yield possible" warning instead of raising.
+- **Lune 0.10.5 does not reliably let go of a `task.wait` cancelled while it slept.** A thread
+  parked in `task.wait` and then `task.cancel`led can leave the scheduler waiting forever, so the
+  suite prints its summary and the process never exits; it depends on timing (a `print` beside it
+  made it go away) and did not reproduce outside the harness. The registry's link-attribute poll
+  no longer cancels its sleeping thread for that reason: it sets a flag and lets the thread wake
+  and see it. Anything else that cancels a sleeping `task.wait` under Lune may hit the same thing.

@@ -54,17 +54,15 @@ function describeLink(link: ComponentLink) {
 	return link.component !== undefined ? `${target} with component '${link.component}'` : target;
 }
 
+/**
+ * Tells a link's wait to stand down. The waiting thread is left to wake on its own -- `Wait` answers
+ * within its timeout, and the poll sleeps for no longer -- and returns once it sees the flag, so
+ * nothing here has to cancel a sleeping thread: the wait may be resuming into `resolve`, which is
+ * what releases the link it came from, and Lune's scheduler does not reliably let go of a
+ * `task.wait` that was cancelled while it slept (2026-09-11).
+ */
 function cancelPendingLink(pending: PendingLink) {
 	pending.cancelled = true;
-
-	const thread = pending.thread;
-	const current = coroutine.running();
-
-	// The wait resumes into `resolve`, which releases the link it came from: cancelling there would
-	// be cancelling the thread this is running on.
-	if (thread !== undefined && thread !== current && coroutine.status(thread) === "suspended") {
-		task.cancel(thread);
-	}
 }
 
 const DEFAULT_ANCESTOR_BLACKLIST = [ServerStorage, ReplicatedStorage, StarterPack, StarterGui, StarterPlayer];
@@ -819,12 +817,22 @@ export class Components {
 			let warned = false;
 
 			while (!pending.cancelled) {
-				if (handle.Wait(timeout > 0 ? timeout : LINK_POLL_INTERVAL) !== undefined) {
+				const interval = timeout > 0 ? timeout : LINK_POLL_INTERVAL;
+				const started = os.clock();
+
+				if (handle.Wait(interval) !== undefined) {
 					pending.thread = undefined;
 					if (!pending.cancelled) resolved();
 
 					return;
 				}
+
+				// A handle that names nothing at all (`InstanceHandle.new(nil)`) has nothing to wait
+				// for, and `Wait` answers at once rather than after the interval: the poll paces
+				// itself, or it spins the thread until the engine kills it.
+				const remaining = interval - (os.clock() - started);
+				if (remaining > 0) task.wait(remaining);
+				if (pending.cancelled) return;
 
 				if (timeout > 0 && !warned) {
 					warned = true;

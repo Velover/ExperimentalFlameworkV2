@@ -899,10 +899,16 @@ export = suite("components", [
 			childRemoved.Disconnect();
 			descendantRemoving.Disconnect();
 
-			// `Destroying` runs while the tree still stands, and every connection on the instance is
-			// dropped before its children come apart -- so a component's own `ChildRemoved` handler
-			// never runs against a half-dismantled tree, which is a state no place ever shows it.
-			expectArrayEqual(fired, ["destroying:1"], "signals the destroyed instance fired");
+			// `Destroying` runs while the tree still stands; then the instance leaves the DataModel,
+			// and its children come apart with its own connections still live, so its tree handlers
+			// run for each child against a tree that is already out of the DataModel. That is the
+			// engine's order (probed 2026-09-11), and a component's own `ChildRemoved` handler does
+			// see it.
+			expectArrayEqual(
+				fired,
+				["destroying:1", "descendantRemoving", "childRemoved"],
+				"signals the destroyed instance fired",
+			);
 
 			// Both components still go, because it is leaving the DataModel that announces their
 			// tags as gone: the owner's on the way out, and the child's with it.
@@ -2265,6 +2271,36 @@ export = suite("components", [
 
 			expectEqual(component.attributes.Spare, spare, "optional attribute once its handle resolved");
 
+			module.extinguish();
+		},
+	],
+	[
+		"paces its wait for a link attribute whose handle names nothing",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const linked = handlerFolder("NothingLinked");
+			const instance = folder("NothingPointer");
+			instance.SetAttribute("Target", new InstanceHandle(undefined));
+			instance.SetAttribute("Linked", new InstanceHandle(linked));
+
+			// A handle made from nothing has nothing to wait for, and the engine's `Wait` answers at
+			// once rather than after its timeout: the wait for it has to pace itself, or it asks
+			// again in the same breath until the engine kills the thread.
+			collectionService().AddTag(instance, "Pointer");
+			task.wait(0.1);
+
+			expectEqual(components.getComponent<Pointer>(instance), undefined, "component while the handle names nothing");
+
+			// Pointed at something, the link follows.
+			const target = folder("NothingTarget");
+			instance.SetAttribute("Target", new InstanceHandle(target));
+
+			const component = expectDefined(components.getComponent<Pointer>(instance), "component once the handle names something");
+			expectEqual(component.attributes.Target, target, "attribute holds the instance");
+
+			instance.Destroy();
 			module.extinguish();
 		},
 	],

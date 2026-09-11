@@ -130,6 +130,9 @@ describe("networking serialization", () => {
 			/local buf\w* = buffer\.create\(8\)\s*buffer\.writef64\(buf\w*, 0, value\)\s*server\.pong:_broadcast\(buf\w*\)/,
 		);
 		expect(source()).toMatch(/server\.pong:_fire\(player, buf\w*\)/);
+		// An empty list is bound with the type its context gave it, so a project's `noImplicitAny`
+		// accepts the temporary.
+		expect(source()).toMatch(/local target\w* = \{\}[\s\S]{0,200}?server\.pong:_fire\(target\w*, buf\w*\)/);
 		// The handler's call signature is a send too.
 		expect(source()).not.toMatch(/server\.pong\(player/);
 		expect(source()).toMatch(/buffer\.writef32\(buf\w*, 16, where\.Z\)\s*client\.ping:_fire\(buf\w*\)/);

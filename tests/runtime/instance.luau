@@ -223,11 +223,11 @@ end
 	Destroys the instance, in the engine's order.
 
 	`Destroying` first, while the tree still stands; then the instance leaves its parent -- and with
-	it the DataModel, which is what announces its tags as gone; then every connection on it is
-	dropped; and only then do the children come apart. So none of the instance's own tree signals
-	ever reach a handler: they were disconnected before its children moved. Tearing the children
-	down first, as this used to, ran a component's `ChildRemoved` and `DescendantRemoving` handlers
-	against a half-dismantled tree that no place ever shows them.
+	it the DataModel, which is what announces its tags as gone; then the children come apart, with
+	the instance's own connections still live, so its `DescendantRemoving` and `ChildRemoved`
+	handlers run for each child against a tree that has already left the DataModel; and only then
+	is every connection dropped. Probed in a real server on 2026-09-11: a component's own tree
+	handlers do see the half-dismantled tree, so the registry has to cope with that.
 ]]
 function methods:Destroy()
 	if rawget(self, "_destroyed") then
@@ -238,11 +238,12 @@ function methods:Destroy()
 
 	rawget(self, "Destroying"):Fire()
 	self.Parent = nil
-	disconnectAll(self)
 
 	for _, child in table.clone(rawget(self, "_children")) do
 		child:Destroy()
 	end
+
+	disconnectAll(self)
 end
 
 --- Observers told about a clone, so a realm's CollectionService can carry the tags across.
@@ -515,14 +516,15 @@ instanceMeta.__newindex = function(instance: Instance, key: string, value: any)
 			announceAncestry(instance, false)
 		end
 
+		-- The engine's order: `DescendantRemoving` up the old ancestry, then the old parent's `ChildRemoved`.
 		if previousParent then
-			fireTree(rawget(previousParent, "ChildRemoved"), instance)
-
 			local ancestor = previousParent
 			while ancestor do
 				fireTree(rawget(ancestor, "DescendantRemoving"), instance)
 				ancestor = rawget(ancestor, "_parent")
 			end
+
+			fireTree(rawget(previousParent, "ChildRemoved"), instance)
 		end
 
 		if isEntering and not wasInDataModel then
@@ -568,6 +570,12 @@ function handleMeta:Wait(timeout: number?): Instance?
 	local instance = rawget(self, "_instance")
 	if instance ~= nil then
 		return instance
+	end
+
+	-- A handle made from nothing (`InstanceHandle.new(nil)`) has nothing to wait for: the engine
+	-- answers at once rather than after the timeout (probed 2026-09-11).
+	if rawget(self, "_target") == nil then
+		return nil
 	end
 
 	local waiter = { thread = coroutine.running(), done = false }
