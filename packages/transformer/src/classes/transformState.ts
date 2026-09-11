@@ -22,7 +22,8 @@ import glob from "glob";
 import type { PathTranslator } from "@roblox-ts/path-translator";
 import { createPluginHost, type PluginHost } from "../transformations/plugins/pluginHost";
 import { tryResolveTS } from "../util/functions/tryResolve";
-import { getRuntimeConfig, hashCompiledInOptions, loadProjectConfig, ProjectConfig } from "../util/projectConfig";
+import { fingerprintProjectConfig, getRuntimeConfig, loadProjectConfig, ProjectConfig } from "../util/projectConfig";
+import type { Env } from "../util/env";
 import { Diagnostics } from "./diagnostics";
 
 export interface TransformerConfig {
@@ -265,6 +266,9 @@ export class TransformState {
 	/** The whole `flamework.config.json`, including the sections meant for the runtime packages. */
 	public projectConfig: ProjectConfig;
 
+	/** The environment the config was substituted from, as read when this process started. `Flamework.env` reads it. */
+	public env: Env;
+
 	constructor(
 		public program: ts.Program,
 		public context: ts.TransformationContext,
@@ -274,10 +278,26 @@ export class TransformState {
 		this.rootDirectory = directory;
 		assert(packageJson.name);
 
+		// Read once per process: a watcher keeps the config and environment it started with, since
+		// only the files that changed are recompiled and the rest would disagree with them. Every
+		// later compilation reads again only to notice a change and ask for a restart.
 		const loaded = loadProjectConfig(this.currentDirectory, this.rootDirectory, inlineConfig);
-		this.config = loaded.config;
-		this.configPath = loaded.configPath;
-		this.projectConfig = loaded.project;
+		const fingerprint = fingerprintProjectConfig(loaded);
+		if (Cache.projectConfig === undefined) {
+			Cache.projectConfig = loaded;
+			Cache.projectConfigFingerprint = fingerprint;
+		} else if (Cache.projectConfigFingerprint !== fingerprint) {
+			Logger.warn(
+				"flamework.config.json or .env changed since the watcher started",
+				"The values it started with are still in use; restart the watcher to apply the change.",
+			);
+		}
+
+		const effective = Cache.projectConfig;
+		this.config = { ...effective.config };
+		this.configPath = effective.configPath;
+		this.projectConfig = effective.project;
+		this.env = effective.env;
 
 		this.setupRojo();
 		this.setupBuildInfo();
@@ -288,20 +308,6 @@ export class TransformState {
 		if (previousMode !== undefined) {
 			Logger.info(
 				`idGenerationMode changed from '${previousMode}' to '${this.config.idGenerationMode}'; every identifier is regenerated`,
-			);
-		}
-
-		// The runtime sections are rewritten into config.json on every compilation, so a change to
-		// them reaches the game through the watcher. The options hashed here are compiled into each
-		// file, and a watcher only recompiles the files that changed.
-		const compiledOptionsHash = hashCompiledInOptions(this.config, this.projectConfig);
-		if (Cache.compiledOptionsHash === undefined) {
-			Cache.compiledOptionsHash = compiledOptionsHash;
-		} else if (Cache.compiledOptionsHash !== compiledOptionsHash) {
-			Logger.warn(
-				"flamework.config.json changed since the watcher started",
-				"The transformer section and networking.serialization are compiled into every file, and only the files that changed are recompiled.",
-				"Restart the watcher to apply them everywhere.",
 			);
 		}
 

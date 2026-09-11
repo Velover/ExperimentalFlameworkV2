@@ -23,7 +23,8 @@ FLAMEWORK_SCOPES=components,collections
 The variable is split on commas. An empty value activates nothing; `*` activates every scope. See
 [values from the environment](09-project-structure.md#values-from-the-environment) for how the
 file reads `.env`, and [watching](09-project-structure.md#watching) for what a running `rbxtsc -w`
-picks up: the active set reaches the game on the next rebuild, no restart needed.
+does with a change: it reports it and keeps the set it started with, so restart the watcher to
+switch scopes.
 
 At runtime, `Flamework.activeScopes()` is the list as configured, and `Flamework.isScopeActive(name)`
 answers for one scope, `*` included.
@@ -105,7 +106,8 @@ real game loop, or a component whose tag a test rig reuses.
 ## Where scopes are decided
 
 Every condition is judged once, at ignition, against the active set the build was compiled with. A
-change to `.env` needs a rebuild and, in Studio, a stop and play. There is no runtime override:
+change to `.env` needs a rebuild, a watcher restart if one is running, and, in Studio, a stop and
+play. There is no runtime override:
 which scopes a place runs with is a property of the build, so that a test scope cannot be switched
 on in a published game.
 

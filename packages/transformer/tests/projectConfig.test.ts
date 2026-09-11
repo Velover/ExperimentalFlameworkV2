@@ -4,7 +4,7 @@ import os from "os";
 import path from "path";
 import { compileFixture, emitted } from "./compile";
 
-const { findProjectConfig, getRuntimeConfig, hashCompiledInOptions, loadProjectConfig, readProjectConfig } =
+const { findProjectConfig, fingerprintProjectConfig, getRuntimeConfig, loadProjectConfig, readProjectConfig } =
 	await import("../out/util/projectConfig.js");
 const { loadEnv, parseEnvFile } = await import("../out/util/env.js");
 const { BuildInfo } = await import("../out/classes/buildInfo.js");
@@ -232,18 +232,33 @@ describe("environment substitution", () => {
 	});
 });
 
-describe("compiled-in options", () => {
-	test("hash the transformer options and networking.serialization, and nothing else", () => {
-		const base = hashCompiledInOptions({ hashPrefix: "$a" }, { networking: { serialization: false } });
+describe("the watcher's fingerprint", () => {
+	test("is stable across reads and changes with the file or with any variable", () => {
+		write("flamework.config.json", `{ "transformer": { "hashPrefix": "${"${FW_FP_PREFIX:-$a}"}" } }`);
+		write(".env", "FW_FP_PREFIX=$a\nFW_FP_UNUSED=1\n");
 
-		expect(hashCompiledInOptions({ hashPrefix: "$a" }, {})).toBe(base);
-		expect(
-			hashCompiledInOptions({ hashPrefix: "$a" }, { core: { profiling: true }, scopes: { active: ["x"] } }),
-		).toBe(base);
-		expect(hashCompiledInOptions({ hashPrefix: "$a", configFile: "other.json" }, {})).toBe(base);
+		const first = fingerprintProjectConfig(loadProjectConfig(root, root, {}, {}));
+		expect(fingerprintProjectConfig(loadProjectConfig(root, root, {}, {}))).toBe(first);
 
-		expect(hashCompiledInOptions({ hashPrefix: "$b" }, {})).not.toBe(base);
-		expect(hashCompiledInOptions({ hashPrefix: "$a" }, { networking: { serialization: true } })).not.toBe(base);
+		// A variable the file does not mention still counts: Flamework.env may read it.
+		write(".env", "FW_FP_PREFIX=$a\nFW_FP_UNUSED=2\n");
+		expect(fingerprintProjectConfig(loadProjectConfig(root, root, {}, {}))).not.toBe(first);
+
+		write(".env", "FW_FP_PREFIX=$a\nFW_FP_UNUSED=1\n");
+		write(
+			"flamework.config.json",
+			`{ "transformer": { "hashPrefix": "${"${FW_FP_PREFIX:-$a}"}" }, "core": { "profiling": true } }`,
+		);
+		expect(fingerprintProjectConfig(loadProjectConfig(root, root, {}, {}))).not.toBe(first);
+
+		remove("flamework.config.json");
+		remove(".env");
+	});
+
+	test("reads .env next to the tsconfig when there is no config file", () => {
+		write("places/a/.env", "FW_FP_LONE=yes\n");
+		expect(loadProjectConfig(place, root, {}, {}).env).toEqual({ FW_FP_LONE: "yes" });
+		remove("places/a/.env");
 	});
 
 	test("drop the identifier table when idGenerationMode changes", () => {

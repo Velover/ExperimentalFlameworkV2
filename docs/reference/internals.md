@@ -63,20 +63,21 @@ compiler.
 
 ### Configuration
 
-`flamework.config.json` is read in `util/projectConfig.ts` on every compilation, which in watch
-mode is every rebuild, since roblox-ts constructs a fresh transformer state per program. After the
-JSON is parsed, `util/env.ts` substitutes `${NAME}` and `${NAME:-fallback}` in every string from
-`.env`, `.env.local` and the process environment, then walks the schema alongside the value to
-convert strings sitting in boolean, number and string-list slots, and only then is the schema
-validated. The runtime sections -- `core`, `networking`, `components`, `scopes` -- are written to
-`include/flamework/config.json` from `saveArtifacts`, which is how a changed `.env` reaches a game
-through a rebuild without a restart.
+`flamework.config.json` is read in `util/projectConfig.ts`. After the JSON is parsed, `util/env.ts`
+substitutes `${NAME}` and `${NAME:-fallback}` in every string from `.env`, `.env.local` and the
+process environment, then walks the schema alongside the value to convert strings sitting in
+boolean, number and string-list slots, and only then is the schema validated. The runtime sections
+-- `core`, `networking`, `components`, `scopes` -- are written to `include/flamework/config.json`
+from `saveArtifacts`.
 
-Two things are compiled into every file rather than read at runtime: the `transformer` section and
-`networking.serialization`. `hashCompiledInOptions` hashes them, the process-level `Cache` keeps the
-first compilation's hash, and a later compilation that sees another prints the restart warning. The
-build info records `idGenerationMode` and drops its identifier table when the mode changes, since
-an identifier once generated is answered from the table without looking at the mode again.
+roblox-ts constructs a fresh transformer state per program, which in watch mode is every rebuild,
+but the config and environment are used from the first read only: the process-level `Cache` keeps
+that `LoadedProjectConfig` and its `fingerprintProjectConfig` (options, file, and the whole
+environment, since `Flamework.env` reads variables the file never names). A later state reads
+again, and a different fingerprint prints the restart warning while the first read stays in force,
+so that files which do not recompile never disagree with the ones that do. The build info records
+`idGenerationMode` and drops its identifier table when the mode changes, since an identifier once
+generated is answered from the table without looking at the mode again.
 
 ## Macros
 

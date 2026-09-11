@@ -70,6 +70,13 @@ export interface LoadedProjectConfig {
 
 	/** Where the file options came from, if a file was found. */
 	configPath?: string;
+
+	/**
+	 * The environment the file was substituted from, and that `Flamework.env` reads: `.env` and
+	 * `.env.local` next to the file (or next to the tsconfig when there is no file) with the process
+	 * environment on top.
+	 */
+	env: Env;
 }
 
 /**
@@ -197,17 +204,15 @@ export function getRuntimeConfig(project: ProjectConfig): RuntimeConfig | undefi
 }
 
 /**
- * A hash of the options that are compiled into every emitted file: the effective transformer
- * options and `networking.serialization`, whose codecs are generated at the call sites. The runtime
- * sections are not part of it, since they are rewritten into `config.json` on every compilation.
+ * A fingerprint of everything a compilation takes from the config file and the environment: the
+ * effective options, the whole file after substitution, and the environment itself, since
+ * `Flamework.env` reads variables the file never mentions.
  *
- * A watcher compares this across compilations: when it changes, files that did not recompile are
- * out of date and nothing but a restart brings them back.
+ * A watcher reads all of this once, when it starts, and compares later reads against the first:
+ * a change means files that do not recompile would disagree with files that do, so the first read
+ * stays in force and the watcher says to restart.
  */
-export function hashCompiledInOptions(config: TransformerConfig, project: ProjectConfig): string {
-	const { configFile, ...transformer } = config;
-	void configFile;
-
+export function fingerprintProjectConfig(loaded: LoadedProjectConfig): string {
 	const stable = (value: unknown): unknown => {
 		if (Array.isArray(value)) {
 			return value.map(stable);
@@ -224,28 +229,32 @@ export function hashCompiledInOptions(config: TransformerConfig, project: Projec
 		return value;
 	};
 
-	const compiledIn = { transformer, networking: { serialization: project.networking?.serialization ?? false } };
+	const snapshot = { config: loaded.config, project: loaded.project, configPath: loaded.configPath, env: loaded.env };
 	return crypto
 		.createHash("sha1")
-		.update(JSON.stringify(stable(compiledIn)))
+		.update(JSON.stringify(stable(snapshot)))
 		.digest("hex");
 }
 
 /**
- * Resolves the project config and the effective transformer options for a compilation.
+ * Resolves the project config, the effective transformer options and the environment for a
+ * compilation.
  */
 export function loadProjectConfig(
 	projectDirectory: string,
 	rootDirectory: string,
 	inlineConfig: TransformerConfig,
+	processEnv?: Env,
 ): LoadedProjectConfig {
 	const configPath = findProjectConfig(projectDirectory, rootDirectory, inlineConfig.configFile);
+	const env = loadEnv(configPath !== undefined ? path.dirname(configPath) : projectDirectory, processEnv);
+
 	if (configPath === undefined) {
-		return { config: mergeTransformerConfig(undefined, inlineConfig), project: {} };
+		return { config: mergeTransformerConfig(undefined, inlineConfig), project: {}, env };
 	}
 
-	const project = readProjectConfig(configPath);
+	const project = readProjectConfig(configPath, env);
 	Logger.infoIfVerbose(`Loaded project config from ${path.relative(projectDirectory, configPath) || configPath}`);
 
-	return { config: mergeTransformerConfig(project.transformer, inlineConfig), project, configPath };
+	return { config: mergeTransformerConfig(project.transformer, inlineConfig), project, configPath, env };
 }

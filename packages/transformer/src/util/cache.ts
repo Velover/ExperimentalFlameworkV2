@@ -1,5 +1,6 @@
 import { RojoResolver } from "@roblox-ts/rojo-resolver";
 import { PackageJsonResult } from "./functions/getPackageJson";
+import type { LoadedProjectConfig } from "./projectConfig";
 
 export interface Cache {
 	rojoSum?: string;
@@ -8,11 +9,13 @@ export interface Cache {
 	isInitialCompile: boolean;
 
 	/**
-	 * A hash of the config options that are compiled into every file, from the first compilation of
-	 * this process. A later compilation that sees a different one is a watcher whose output is now
-	 * partly stale, and says so.
+	 * The config file and environment as read by the first compilation of this process, which every
+	 * later compilation uses as well. A watcher only recompiles the files that changed, so a later
+	 * read that differs would leave the output disagreeing with itself; the first read stays in
+	 * force and the difference is reported, with the fingerprint here to compare against.
 	 */
-	compiledOptionsHash?: string;
+	projectConfig?: LoadedProjectConfig;
+	projectConfigFingerprint?: string;
 	pkgJsonCache: Map<string, PackageJsonResult>;
 }
 

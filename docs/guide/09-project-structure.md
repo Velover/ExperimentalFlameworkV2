@@ -163,16 +163,16 @@ FLAMEWORK_SCOPES=components,collections
 
 ### Watching
 
-The file and the environment are read on every compilation, and the runtime sections are rewritten
-into `include/flamework/config.json` each time. Under `rbxtsc -w` a change to them, or to `.env`,
-reaches the game on the next rebuild: the watcher does not watch either file, so save any source
-file to trigger one.
+The file and the environment are read once, when `rbxtsc` starts, and a watcher keeps what it
+read for as long as it runs. A watcher only recompiles the files that changed, and much of the
+config is compiled into every file -- ids, serialization codecs, `Flamework.env` values -- so a
+change taken up halfway would leave the output disagreeing with itself.
 
-The `transformer` section and `networking.serialization` are compiled into every emitted file, and
-a watcher only recompiles the files that changed. When one of those changes under a running
-watcher the transformer prints `flamework.config.json changed since the watcher started`; restart
-it to apply the change everywhere. Changing `idGenerationMode` or `obfuscation` also regenerates
-every identifier, which the next full build does on its own.
+Under `rbxtsc -w`, a change to `flamework.config.json`, `.env` or `.env.local` is noticed on the
+next rebuild and reported: `flamework.config.json or .env changed since the watcher started`. The
+values it started with stay in use until you restart it. A plain build reads everything fresh.
+Changing `idGenerationMode` or `obfuscation` also regenerates every identifier, which the next
+full build does on its own.
 
 ## Testing
 
