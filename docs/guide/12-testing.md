@@ -53,9 +53,11 @@ local result = workspace.FlameworkTests:Invoke()          -- every section
 local result = workspace.FlameworkTests:Invoke("economy") -- one section
 ```
 
-Without the scope, the test providers are not registered (with the condition on the folder
-registration, the files are never even required), the plugin is inert, and no instance is made.
-One switch, `FLAMEWORK_SCOPES`, turns on both the tests and the host that runs them.
+Without the scope, the test providers are skipped at ignition: their files are still required (a
+folder registration requires everything under it before it looks at any condition), but no test
+class is constructed, the plugin is inert, and no instance is made. One switch, `FLAMEWORK_SCOPES`,
+turns on both the tests and the host that runs them; keeping the files out of a release place
+altogether is Rojo's job, see [shipping](#shipping).
 
 ## Setting up
 
@@ -233,8 +235,23 @@ none of the names active, and an empty `activeIn` is no constraint. `TestingPlug
 with the file's settings; `createTestingPlugin({ ... })` overrides them per plugin, which is what
 a test harness of your own would use.
 
+## Shipping
+
 Never ship a build with tests on: the remote lets any client run the server's tests. Keep the
-`testing` scope out of the release `.env`.
+`testing` scope out of the release `.env`. The test files themselves still compile and load
+without the scope, since a folder registration requires everything under it; to leave them out of
+the place, give the release build a Rojo project that ignores the folders:
+
+```jsonc
+// release.project.json, otherwise identical to default.project.json
+"globIgnorePaths": ["**/package.json", "**/tsconfig.json", "**/Tests"]
+```
+
+`**/Tests` drops every folder of that name at any depth (`**/Tests/**` would leave empty folders
+behind). Never register such a folder by its own path, `registerProviders("src/server/Tests")`:
+the transformer resolves the path against the project file without regard to `globIgnorePaths`,
+and a registered folder that is not in the place stalls ignition in `WaitForChild`. Let the
+registration of the folder above it find the tests, with the scope condition on the classes.
 
 ---
 
