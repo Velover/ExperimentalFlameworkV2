@@ -18,7 +18,7 @@ import {
 } from "@rbxts/services";
 import { t } from "@rbxts/t";
 import { BaseComponent, ComponentMetadata, SYMBOL_ATTRIBUTE_HANDLERS } from "./baseComponent";
-import { ComponentTracker } from "./componentTracker";
+import { ComponentTracker, isAtomicModel, LinkWatcher } from "./componentTracker";
 import {
 	AbstractConstructor,
 	AbstractConstructorRef,
@@ -419,36 +419,41 @@ export class Components {
 
 		// Whether this component re-reads its instance tree at all. A child link is part of that
 		// tree, so it follows the same rule the instance guard does: under `Disabled` the tree is
-		// read once and the answer kept, however the children move afterwards.
+		// read once and the answer kept, however the children move afterwards -- and under
+		// `Contextual` an atomic model, which streams in whole, is read once on the client as well.
 		const pollsTree =
 			(streamingMode === ComponentStreamingMode.Contextual && RunService.IsClient()) ||
 			streamingMode === ComponentStreamingMode.Watching;
+		const followsTree = (instance: Instance) =>
+			pollsTree && (streamingMode !== ComponentStreamingMode.Contextual || !isAtomicModel(instance));
 
-		// The plain attributes -- a link attribute is its link's business -- whose guards are a
-		// criterion: one that fails, with no default to stand in for it, takes the component down,
-		// and a value the guard accepts builds it again. The same reading `getAttributes` makes on
-		// the way in, kept true for as long as the component stands.
-		const plainGuards = new Map<string, t.check<unknown>>();
-		for (const [name, guard] of this.getAttributeGuards(component)) {
-			if (!componentInfo.attributeLinks.has(name)) plainGuards.set(name, guard);
-		}
-
+		// The attributes whose guards are a criterion: one that fails, with no default to stand in
+		// for it, takes the component down, and a value the guard accepts builds it again. The same
+		// reading `getAttributes` makes on the way in, kept true for as long as the component stands.
+		//
+		// A link attribute's guard is among them for a value that is there. Whether the attribute
+		// names anything is its link's business, but a value that is not a handle at all is one the
+		// link cannot see: it resolves to nothing, which an optional link is content with, and
+		// `getAttributes` would then raise out of the very construction the link agreed to.
+		const guards = this.getAttributeGuards(component);
 		const defaults = this.getConfigValue(component, "defaults");
-		const checkAttributes = plainGuards.isEmpty()
+		const checkAttributes = guards.isEmpty()
 			? undefined
 			: (instance: Instance) => {
 					const invalid = new Array<string>();
-					for (const [name, guard] of plainGuards) {
-						if (!guard(instance.GetAttribute(name)) && defaults?.[name] === undefined) invalid.push(name);
+					for (const [name, guard] of guards) {
+						const value = instance.GetAttribute(name);
+						if (value === undefined && componentInfo.attributeLinks.has(name)) continue;
+						if (!guard(value) && defaults?.[name] === undefined) invalid.push(name);
 					}
 
 					return invalid;
 				};
-		const watchAttributes = plainGuards.isEmpty()
+		const watchAttributes = guards.isEmpty()
 			? undefined
 			: (instance: Instance, changed: () => void) => {
 					const connection = instance.AttributeChanged.Connect((name) => {
-						if (plainGuards.has(name)) changed();
+						if (guards.has(name)) changed();
 					});
 
 					return () => connection.Disconnect();
@@ -459,7 +464,7 @@ export class Components {
 			watchAttributes,
 			checkLinks: hasLinks ? (instance) => this.areLinksMet(componentInfo, instance) : undefined,
 			watchLinks: hasLinks
-				? (instance, update) => this.watchLinks(componentInfo, instance, update, pollsTree)
+				? (instance, update) => this.watchLinks(componentInfo, instance, update, followsTree(instance))
 				: undefined,
 			linksMet: hasLinks ? (instance) => this.areLinksMet(componentInfo, instance) : undefined,
 			tag: componentInfo.config.tag,
@@ -480,6 +485,7 @@ export class Components {
 			typeGuardPollAtomic: streamingMode !== ComponentStreamingMode.Contextual,
 			warningTimeout: componentInfo.config.warningTimeout ?? getRuntimeConfig().components?.warningTimeout,
 			dependencies,
+			isInvalid: (instance) => this.isInvalid(instance, component),
 		});
 
 		this.trackers.set(component, tracker);
@@ -618,6 +624,45 @@ export class Components {
 		return this.invalid.get(instance)?.has(component) === true;
 	}
 
+	/**
+	 * Whether a component is held up on an instance by an invalid one: itself, one that its own
+	 * links name, or one its constructor depends on, however many links or dependencies down. A
+	 * quiet build that reaches an invalid component through a link or a dependency returns nothing
+	 * without marking itself invalid -- it is waiting, not broken -- so one link further up, the
+	 * only trace of why there is no component is the invalid one at the end of the chain. A ring
+	 * of links ends where it began.
+	 */
+	private isHeldByInvalid(
+		instance: Instance,
+		component: Constructor,
+		seen = new Map<Instance, Set<Constructor>>(),
+	): boolean {
+		if (this.isInvalid(instance, component)) return true;
+
+		const componentInfo = this.components.get(component);
+		if (componentInfo === undefined) return false;
+
+		let seenHere = seen.get(instance);
+		if (seenHere?.has(component)) return false;
+		if (!seenHere) seen.set(instance, (seenHere = new Set()));
+		seenHere.add(component);
+
+		for (const dependency of componentInfo.componentDependencies) {
+			if (this.isHeldByInvalid(instance, dependency, seen)) return true;
+		}
+
+		for (const link of componentInfo.links) {
+			if (link.component === undefined) continue;
+
+			const target = this.resolveLinkTarget(instance, componentInfo, link);
+			if (target !== undefined && this.isHeldByInvalid(target, this.getLinkedComponent(link), seen)) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	private passesLinkGuard(link: ComponentLink, target: Instance) {
 		if (link.guard !== undefined) return link.guard(target);
 		if (link.shape !== undefined) return checkShape(link.shape, target);
@@ -729,16 +774,31 @@ export class Components {
 	 * side of it.
 	 */
 	private areLinksMet(componentInfo: ComponentInfo, instance: Instance) {
+		return (
+			this.readingLinks(componentInfo, instance, () => {
+				for (const link of componentInfo.links) {
+					if (!this.isLinkMet(componentInfo, instance, link)) return false;
+				}
+
+				return true;
+			}) === true
+		);
+	}
+
+	/**
+	 * Runs `read` over the links of a component on an instance, once: the same links reached again
+	 * further down -- the ring `areLinksMet` describes -- are not read, and the reading answers
+	 * `undefined`.
+	 */
+	private readingLinks<T>(componentInfo: ComponentInfo, instance: Instance, read: () => T): T | undefined {
 		let checking = this.checkingLinks.get(instance);
-		if (checking?.has(componentInfo.ctor)) return false;
+		if (checking?.has(componentInfo.ctor)) return undefined;
 
 		if (!checking) this.checkingLinks.set(instance, (checking = new Set()));
 		checking.add(componentInfo.ctor);
 
 		try {
-			for (const link of componentInfo.links) {
-				if (!this.isLinkMet(componentInfo, instance, link)) return false;
-			}
+			return read();
 		} finally {
 			checking.delete(componentInfo.ctor);
 
@@ -746,29 +806,37 @@ export class Components {
 				this.checkingLinks.delete(instance);
 			}
 		}
-
-		return true;
 	}
 
 	/**
 	 * Watches every link of a component on one instance, so that the component exists only while
-	 * the instances and components it names do.
+	 * the instances and components it names do. The watcher's `refresh` reads every link again --
+	 * once, as `readingLinks` keeps a ring of links to -- re-pointing each at the target it has now.
 	 */
 	private watchLinks(
 		componentInfo: ComponentInfo,
 		instance: Instance,
 		update: (criterion: string, isMet: boolean) => void,
 		pollsTree: boolean,
-	) {
+	): LinkWatcher {
 		const maid = new Maid();
+		const rereads = new Array<() => void>();
 
 		for (const link of componentInfo.links) {
-			this.watchLink(componentInfo, instance, link, update, maid, pollsTree);
+			rereads.push(this.watchLink(componentInfo, instance, link, update, maid, pollsTree));
 		}
 
-		return () => maid.Destroy();
+		return {
+			refresh: () => {
+				this.readingLinks(componentInfo, instance, () => {
+					for (const reread of rereads) reread();
+				});
+			},
+			release: () => maid.Destroy(),
+		};
 	}
 
+	/** Watches one link on one instance, and returns the re-read of it: the link resolved again, as it stands now. */
 	private watchLink(
 		componentInfo: ComponentInfo,
 		instance: Instance,
@@ -776,7 +844,7 @@ export class Components {
 		update: (criterion: string, isMet: boolean) => void,
 		maid: Maid,
 		pollsTree: boolean,
-	) {
+	): () => void {
 		const criterion = describeLink(link);
 
 		// `refreshAttributes: false` freezes a link attribute the way it freezes a plain one: the
@@ -789,6 +857,43 @@ export class Components {
 		let lastTarget: Instance | undefined;
 		let hasResolved = false;
 
+		/** The target the subscriptions below are on, and the re-read of it; neither once released. */
+		let watched: Instance | undefined;
+		let refreshWatched: (() => void) | undefined;
+
+		/**
+		 * The child whose `Name` is followed, for a child link that follows the tree: the one the
+		 * name resolved to, and still that one after it has been renamed away, so that renaming it
+		 * back is noticed. Dropped once it leaves the parent.
+		 */
+		let named: Instance | undefined;
+		let nameConnection: RBXScriptConnection | undefined;
+
+		const unwatchName = () => {
+			nameConnection?.Disconnect();
+			nameConnection = undefined;
+			named = undefined;
+		};
+
+		// A child is resolved by name, and a rename fires no child signal: the child the link holds
+		// can be renamed away, and a sibling can take its name, with the tree the component reads
+		// moved and nothing above announcing it. So the child's own name is followed as well, the
+		// way the instance guard's shape follows it: what the name resolves to now is the whole
+		// question, and a name that resolves to something other than the watched target is resolved
+		// again. Nothing named is left as it is, so a child renamed away stays followed.
+		const watchName = (target: Instance | undefined) => {
+			if (link.kind !== "child" || !pollsTree) return;
+			if (target === undefined || target === named) return;
+
+			unwatchName();
+			named = target;
+			nameConnection = target.GetPropertyChangedSignal("Name").Connect(() => {
+				if (instance.FindFirstChild(link.name) === watched) return;
+
+				resolve();
+			});
+		};
+
 		// A component outlives the watcher that follows its tree. The eager path builds one the
 		// moment somebody asks for it, while the tag that creates this entry -- and with it these
 		// watchers -- is announced a resumption later, and the tree can have moved in between: the
@@ -799,19 +904,27 @@ export class Components {
 		// records the swap as the state the component was built from, leaving it running against a
 		// tree it was never built out of and never rebuilding it. A link that does not follow the
 		// tree keeps the child it was built with whatever happens, so there is nothing to notice.
-		if (link.kind === "child" && pollsTree) {
-			const built = this.activeComponents.get(instance)?.get(componentInfo.ctor);
-			if (built !== undefined) {
-				const linked = (built.childComponents as unknown as Map<string, BaseComponent>).get(link.name);
+		const startFromBuilt = () => {
+			if (link.kind !== "child") return;
 
-				hasResolved = true;
-				lastTarget = linked?.instance;
-			}
+			const built = this.activeComponents.get(instance)?.get(componentInfo.ctor);
+			if (built === undefined) return;
+
+			const linked = (built.childComponents as unknown as Map<string, BaseComponent>).get(link.name);
+
+			hasResolved = true;
+			lastTarget = linked?.instance;
+		};
+
+		if (pollsTree) {
+			startFromBuilt();
 		}
 
 		const release = () => {
 			targetMaid?.Destroy();
 			targetMaid = undefined;
+			watched = undefined;
+			refreshWatched = undefined;
 
 			if (pending !== undefined) {
 				cancelPendingLink(pending);
@@ -843,6 +956,8 @@ export class Components {
 			release();
 
 			const target = this.resolveLinkTarget(instance, componentInfo, link);
+			watchName(target);
+
 			if (target === undefined) {
 				noteTarget(undefined);
 				update(criterion, link.optional);
@@ -857,6 +972,7 @@ export class Components {
 			}
 
 			noteTarget(target);
+			watched = target;
 
 			const linkedComponent = link.component !== undefined ? this.getLinkedComponent(link) : undefined;
 
@@ -897,6 +1013,7 @@ export class Components {
 				);
 			};
 
+			refreshWatched = refresh;
 			targetMaid = new Maid();
 
 			// The guard is a criterion rather than an answer given once. It carries the whole shape
@@ -986,6 +1103,38 @@ export class Components {
 			refresh();
 		};
 
+		/**
+		 * Reads the link again, as it stands now, for an entry nothing waits on: the tag's
+		 * announcement reaching an entry a link created, or the eager path asking ahead of it.
+		 *
+		 * A link that does not follow the tree is not told when its child arrives or is replaced,
+		 * so this is where it learns of it -- and the target it resolves to is the one it watches
+		 * from here on, the linked component's announcements and its entry included. A target it
+		 * already watches is reported as it stands and left as it is: re-pointing the same
+		 * subscriptions would release the linked component's entry, and with it what that entry
+		 * remembers, on every question asked. The child it compares against is the one the live
+		 * component holds, as above: a component built out of the tree as it is now was not built
+		 * from the child the link happened to see first.
+		 */
+		const reread = () => {
+			startFromBuilt();
+
+			const target = this.resolveLinkTarget(instance, componentInfo, link);
+			if (hasResolved && target === watched) {
+				noteTarget(target);
+
+				if (refreshWatched !== undefined) {
+					refreshWatched();
+				} else {
+					update(criterion, link.optional);
+				}
+
+				return;
+			}
+
+			resolve();
+		};
+
 		maid.GiveTask(release);
 
 		if (link.kind === "attribute") {
@@ -996,11 +1145,21 @@ export class Components {
 				if (child.Name === link.name) resolve();
 			};
 
+			maid.GiveTask(unwatchName);
 			maid.GiveTask(instance.ChildAdded.Connect(childChanged));
-			maid.GiveTask(instance.ChildRemoved.Connect(childChanged));
+			maid.GiveTask(
+				instance.ChildRemoved.Connect((child) => {
+					// A child that left under another name is no longer one a rename can bring back.
+					if (child === named) unwatchName();
+
+					childChanged(child);
+				}),
+			);
 		}
 
 		resolve();
+
+		return reread;
 	}
 
 	/**
@@ -1058,8 +1217,10 @@ export class Components {
 	 * its attributes name and the components it is linked to.
 	 *
 	 * Nothing when a component a link names turns out invalid -- built here, its `onInit` raised --
-	 * which is a state the owner waits out rather than a link reported met and then not built. A
-	 * construction by hand (`quiet` false) raises for it instead, naming the reason.
+	 * which is a state the owner waits out rather than a link reported met and then not built. The
+	 * same when the invalid component is further down: the one the link names was built here too,
+	 * quietly, and came to nothing for the same reason, which is what its own owner waits out in
+	 * turn. A construction by hand (`quiet` false) raises for it instead, naming the reason.
 	 */
 	private resolveLinks(
 		instance: Instance,
@@ -1093,10 +1254,10 @@ export class Components {
 				const linkedComponent = this.getLinkedComponent(link);
 				const linked = this.resolveLinkedComponent(target, linkedComponent);
 				if (linked === undefined) {
+					if (quiet && this.isHeldByInvalid(target, linkedComponent)) return undefined;
+
 					const invalidReason = this.invalid.get(target)?.get(linkedComponent);
 					if (invalidReason !== undefined) {
-						if (quiet) return undefined;
-
 						throw `${target.GetFullName()} carries an invalid '${link.component}' for ${describeLink(link)} of '${componentInfo.identifier}', whose onInit raised: ${invalidReason}`;
 					}
 
@@ -1121,10 +1282,14 @@ export class Components {
 	 * `notify` is what `refreshAttributes: false` switches off. The component's view still moves
 	 * for a write it made itself -- a plain attribute's own write lands the same way -- but a
 	 * component that tracks no attributes announces none either.
+	 *
+	 * An invalid component -- whose `onInit` raised -- keeps its place and nothing else: a plain
+	 * attribute reaches it through nothing, because `setupComponent` was skipped, and a link
+	 * attribute, which arrives through the tracker instead, is stopped here.
 	 */
 	private refreshLinkAttribute(instance: Instance, componentInfo: ComponentInfo, link: ComponentLink, notify = true) {
 		const component = this.activeComponents.get(instance)?.get(componentInfo.ctor);
-		if (component === undefined) return;
+		if (component === undefined || this.isInvalid(instance, componentInfo.ctor)) return;
 
 		const attributes = component.attributes as unknown as Map<string, unknown>;
 		const previous = attributes.get(link.name);
@@ -1160,6 +1325,9 @@ export class Components {
 	 * A removal and the rebuild that follows it are announced separately and delivered a resumption
 	 * late, so the link itself is never lost -- the target carries a component of the class it names
 	 * both before and after -- while the component the owner holds is the one that left.
+	 *
+	 * An invalid owner is left as it is, as above: it holds its place until the tracker takes it
+	 * down, and nothing of what it holds moves in the meantime.
 	 */
 	private refreshLinkedComponent(
 		instance: Instance,
@@ -1170,7 +1338,7 @@ export class Components {
 		if (link.component === undefined) return;
 
 		const component = this.activeComponents.get(instance)?.get(componentInfo.ctor);
-		if (component === undefined) return;
+		if (component === undefined || this.isInvalid(instance, componentInfo.ctor)) return;
 
 		const linkedComponent = this.getLinkedComponent(link);
 		const linked = this.activeComponents.get(target)?.get(linkedComponent);
@@ -1716,20 +1884,11 @@ export class Components {
 			error(this.missingComponentMessage(component));
 		}
 
-		const attributeGuards = this.getAttributeGuards(component);
-		const attributes = this.getAttributes(instance, componentInfo, attributeGuards);
-
-		if (skipInstanceCheck !== true) {
-			// A shape says which child is wrong; a guard written by hand only that it failed.
-			const { guard, shape } = this.getInstanceCheck(component);
-			const reason = shape !== undefined ? describeShapeMismatch(shape, instance) : undefined;
-			const passes = shape !== undefined ? reason === undefined : guard === undefined || guard(instance);
-
-			if (!passes) {
-				throw `${instance.GetFullName()} did not pass instance guard check for '${componentInfo.identifier}'${reason !== undefined ? `: ${reason}` : ""}`;
-			}
-		}
-
+		// Before the instance is read for a construction: a component that is already here is handed
+		// back as it stands, however the instance has moved since it was built. The tag can be
+		// announced again in the very resumption an attribute went bad -- the removal reads the tag
+		// as still there and looks again a resumption later -- and reading the attributes first is
+		// what raised out of that announcement for a component the criterion takes down on its own.
 		const existingComponent = this.activeComponents.get(instance)?.get(component);
 		if (existingComponent !== undefined) {
 			// An invalid one is not handed back, and not replaced either: it waits for the tracker,
@@ -1742,6 +1901,24 @@ export class Components {
 			}
 
 			return existingComponent;
+		}
+
+		// Built from the instance as it stands now, which the tracker is told: a criterion lost
+		// with nothing to hear it, before this, is not one this component has to be rebuilt for.
+		this.trackers.get(component)?.noteBuilt(instance);
+
+		const attributeGuards = this.getAttributeGuards(component);
+		const attributes = this.getAttributes(instance, componentInfo, attributeGuards);
+
+		if (skipInstanceCheck !== true) {
+			// A shape says which child is wrong; a guard written by hand only that it failed.
+			const { guard, shape } = this.getInstanceCheck(component);
+			const reason = shape !== undefined ? describeShapeMismatch(shape, instance) : undefined;
+			const passes = shape !== undefined ? reason === undefined : guard === undefined || guard(instance);
+
+			if (!passes) {
+				throw `${instance.GetFullName()} did not pass instance guard check for '${componentInfo.identifier}'${reason !== undefined ? `: ${reason}` : ""}`;
+			}
 		}
 
 		let constructingSet = this.constructing.get(instance);
@@ -1767,6 +1944,18 @@ export class Components {
 			}
 
 			const { childComponents, attributeComponents } = resolved;
+
+			// The constructor's component dependencies, resolved ahead of it for the reason the
+			// links are: one that turns out invalid -- built here, its `onInit` raised -- is a state
+			// a quiet build waits out rather than raises on, and inside the constructor, where the
+			// dependency is asked for, it is too late to answer nothing.
+			if (skipInstanceCheck === true) {
+				for (const dependency of componentInfo.componentDependencies) {
+					if (this.getComponent(instance, dependency) !== undefined) continue;
+					if (this.isHeldByInvalid(instance, dependency)) return undefined as never;
+				}
+			}
+
 			const metadata = identity<ComponentMetadata>({
 				instance,
 				attributes,
@@ -1825,8 +2014,10 @@ export class Components {
 			const message = `component '${componentInfo.identifier}' failed to initialise for ${instance.GetFullName()}: ${initError}`;
 
 			// A link watching this instance for this component loses its criterion here: the
-			// component it counted on Flamework building is one Flamework could not.
+			// component it counted on Flamework building is one Flamework could not. So does a
+			// dependent waiting at this component's entry, which is told through the tracker.
 			this.componentInvalidatedListeners.get(componentInfo.identifier)?.Fire(instance);
+			this.trackers.get(component)?.noteInvalidated(instance);
 
 			// Flamework building for itself -- the tag, a link, `getComponent` -- reports it and
 			// answers that there is no component, which is what every lookup will say; a call by
@@ -1962,6 +2153,15 @@ export class Components {
 			if (maid !== undefined) {
 				maid.Destroy();
 			}
+		}
+
+		// The place the invalid component held is free again, which is what the observers at its
+		// entry -- a dependent waiting on it, a link watching it -- were told the opposite of when
+		// it turned invalid, and what nothing else tells them: no removal was announced, and the
+		// entry never stopped qualifying. Told once the removal is over, so that the construction
+		// this lets try again finds nothing of it left. Not at extinguish, where nothing may be built.
+		if (wasInvalid && !this.isStopped) {
+			this.trackers.get(component)?.noteCleared(instance);
 		}
 	}
 

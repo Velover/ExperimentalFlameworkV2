@@ -7,6 +7,11 @@ const ATOMIC_MODES = new Set<Enum.ModelStreamingMode>([
 	Enum.ModelStreamingMode.PersistentPerPlayer,
 ]);
 
+/** Whether the instance is a model that streams in whole, whose tree contextual streaming reads once rather than follows. */
+export function isAtomicModel(instance: Instance) {
+	return instance.IsA("Model") && ATOMIC_MODES.has(instance.ModelStreamingMode);
+}
+
 type Listener = (isQualified: boolean, instance: Instance) => void;
 
 /** How far a warning follows links and dependencies for their reasons before it stops naming them. */
@@ -23,6 +28,16 @@ interface InstanceTracker {
 	 * many observers are left holding the entry open.
 	 */
 	waiting: Set<Listener>;
+
+	/**
+	 * The subset of `waiting` this entry is read for: the tag path's listener, which builds the
+	 * component out of the answer. Its arrival is what reads the criteria for keeps -- once, for a
+	 * component that reads its tree once, and from then on through the entry's own deferred tasks
+	 * -- so until it is here the entry answers the way no entry at all would, read afresh each
+	 * time it is asked. A dependent's listener waits here too, for the warning's sake, but like a
+	 * link's it reads nothing and keeps nothing current: the entry is held open, not owned.
+	 */
+	owners: Set<Listener>;
 
 	/**
 	 * The listener this entry registered on each of its component's dependencies, so that a wait
@@ -47,6 +62,13 @@ interface InstanceTracker {
 	 */
 	typeGuardWatcher?: TypeGuardWatcher;
 
+	/**
+	 * The watcher following the component's links, present while the entry has any. `refreshInstance`
+	 * re-reads the links through it rather than beside it, so that what it watches -- the linked
+	 * component's own entry, its announcements -- is re-pointed along with the answer it gave.
+	 */
+	linkWatcher?: LinkWatcher;
+
 	/** The attribute criteria currently unmet, `invalid attribute '<name>'` each, so a re-read can clear the stale ones. */
 	invalidAttributes?: Set<string>;
 
@@ -62,13 +84,15 @@ interface InstanceTracker {
 	isProvisional?: boolean;
 
 	/**
-	 * Whether a criterion was lost with nothing registered to hear it.
+	 * Whether a criterion was lost with no owner registered to act on it.
 	 *
 	 * An entry is set up before its first listener is added, and the component it is for can
 	 * already be there: the eager path builds one the moment somebody asks for it, a resumption
 	 * before the tag that creates this entry is announced. A criterion that goes unmet and met
 	 * again in between describes a component that has to be built afresh, and the current answer
 	 * on its own says none of that -- it is "qualified", and the stale component is handed back.
+	 *
+	 * Cleared by a build (`noteBuilt`): a component built after the loss is that fresh one.
 	 */
 	unheardLoss?: boolean;
 }
@@ -77,6 +101,16 @@ interface InstanceTracker {
 export interface TypeGuardWatcher {
 	isMet: () => boolean;
 	refresh: () => boolean;
+	release: () => void;
+}
+
+/**
+ * The watched links of one entry. `refresh` resolves every link again, re-pointing what each
+ * watches at the target it has now and reporting each as it stands, the way the watcher reports a
+ * change it was told about.
+ */
+export interface LinkWatcher {
+	refresh: () => void;
 	release: () => void;
 }
 
@@ -119,6 +153,15 @@ export interface Criteria {
 	warningTimeout?: number;
 
 	/**
+	 * Whether the component this tracker is for holds an invalid place on the instance: it was
+	 * built there and its `onInit` raised. Such a component is not a criterion of its own entry --
+	 * the tag path that built it is what takes it down, for a reason of its own -- but it is one
+	 * for whoever asks the entry for the component, a dependent above all, which cannot be built
+	 * on top of it.
+	 */
+	isInvalid?: (instance: Instance) => boolean;
+
+	/**
 	 * Whether the component's links are all met on this instance, right now. Used for instances
 	 * that are not tracked, where there is nothing watching and nothing to wait on.
 	 *
@@ -129,12 +172,14 @@ export interface Criteria {
 
 	/**
 	 * Watches the component's links on this instance, reporting each one as it is met or lost, and
-	 * returns the cleanup for those subscriptions.
+	 * returns the watcher, which releases those subscriptions and re-reads the links on demand.
 	 *
 	 * Links live outside the instance -- another instance's component, or one an attribute points
-	 * at -- so unlike the other criteria they cannot be recomputed from the instance alone.
+	 * at -- so unlike the other criteria they cannot be recomputed from the instance alone. For an
+	 * entry whose links are read once -- a child link under a streaming mode that does not follow
+	 * the tree -- the watcher's `refresh` is the only thing that ever reads them again.
 	 */
-	watchLinks?: (instance: Instance, update: (criterion: string, isMet: boolean) => void) => () => void;
+	watchLinks?: (instance: Instance, update: (criterion: string, isMet: boolean) => void) => LinkWatcher;
 
 	/**
 	 * Whether every link is met on this instance right now, read from the instance rather than from
@@ -160,6 +205,7 @@ export class ComponentTracker {
 				unmetCriteria: new Set(),
 				listeners: new Set(),
 				waiting: new Set(),
+				owners: new Set(),
 				dependencyListeners: new Map(),
 				cleanup: new Set(),
 				isQualified: true,
@@ -169,31 +215,58 @@ export class ComponentTracker {
 		return tracker;
 	}
 
+	/**
+	 * Whether the instance passes every criterion that is read from it, read now rather than from the
+	 * entry: the instance guard, the attributes and the links.
+	 *
+	 * Every criterion is a cache of something read elsewhere, and each of these can go stale with
+	 * nothing on the way to correct it in time. The engine defers the child signals, so a link is
+	 * asked to rebuild while the signal that would have unmet another one is still queued behind it,
+	 * and a child renamed rather than moved fires no signal at all; the guard and the attributes are
+	 * read on deferred tasks of their own, a resumption after the tree or the attribute moved, and
+	 * the link's signal that asks for the rebuild lands in between. So the flip to qualified -- the
+	 * moment a component is built out of these caches, from an instance it then reads for itself --
+	 * is gated on reading them again. Without it a link reports itself met and construction raises
+	 * out of whatever handler happened to ask, or builds on a tree that is short of a child.
+	 *
+	 * A gate rather than a criterion of its own: the reading is worth nothing if it can only happen
+	 * while the set is already empty, and the answer stops mattering the moment the component exists.
+	 * A component whose tree is read once keeps the child it was built with, however that tree moves
+	 * afterwards; what the deferred tasks find is recorded by them, a resumption later.
+	 *
+	 * A dependency is among them. It is read from its own entry rather than from the instance, but
+	 * that entry is a cache of the same kind: it answers for a component that was removed by hand
+	 * and cannot be built again, because the tree its guard read once has since moved, or for one
+	 * that was built and is invalid -- and construction raises on either, asking for a dependency
+	 * it cannot resolve.
+	 */
+	private readsQualified(instance: Instance) {
+		const { typeGuard, checkAttributes, dependencies, linksMet } = this.criteria;
+
+		if (typeGuard !== undefined && !typeGuard(instance)) return false;
+		if (checkAttributes !== undefined && !checkAttributes(instance).isEmpty()) return false;
+
+		if (dependencies !== undefined && dependencies.some((dependency) => !dependency.checkInstance(instance))) {
+			return false;
+		}
+
+		return linksMet === undefined || linksMet(instance);
+	}
+
 	private updateListeners(instance: Instance, tracker: InstanceTracker) {
-		// Every criterion is a cache of something read elsewhere, and a link's is the one that can
-		// go stale with nothing on the way to correct it: the engine defers the child signals, so a
-		// link is asked to rebuild while the signal that would have unmet another one is still
-		// queued behind it, and a child renamed rather than moved fires no signal at all. So the
-		// flip to qualified -- the moment a component is built out of these caches, from a tree it
-		// then reads for itself -- is gated on reading the links again. Without it a link reports
-		// itself met and construction raises out of whatever handler happened to ask.
-		//
-		// A gate rather than a criterion of its own: the reading is worth nothing if it can only
-		// happen while the set is already empty, and the answer stops mattering the moment the
-		// component exists. A component whose tree is read once keeps the child it was built with,
-		// however that tree moves afterwards.
-		const isQualified =
-			tracker.unmetCriteria.isEmpty() &&
-			(tracker.isQualified || this.criteria.linksMet === undefined || this.criteria.linksMet(instance));
+		const isQualified = tracker.unmetCriteria.isEmpty() && (tracker.isQualified || this.readsQualified(instance));
 
 		if (isQualified !== tracker.isQualified) {
 			tracker.isQualified = isQualified;
 
-			// A criterion lost with nothing registered to hear it is kept for the listener that
+			// A criterion lost with nothing registered to act on it is kept for the listener that
 			// arrives next, because the component this entry is for may already exist and would
-			// otherwise simply be handed back. A gain nobody heard needs nothing: the answer a
-			// listener is given as it registers already says it.
-			if (tracker.listeners.isEmpty()) {
+			// otherwise simply be handed back. Only the tag path's listener acts on it: a link
+			// hearing the loss re-checks its own criterion, and a dependent takes its own component
+			// down -- neither can take this one down, however much the dependent is waiting. A gain
+			// nobody heard needs nothing: the answer a listener is given as it registers already
+			// says it.
+			if (tracker.owners.isEmpty()) {
 				if (!isQualified) tracker.unheardLoss = true;
 			} else {
 				tracker.unheardLoss = undefined;
@@ -244,8 +317,8 @@ export class ComponentTracker {
 	private setupTracker(instance: Instance, tracker: InstanceTracker, observeOnly = false) {
 		const { typeGuard, typeGuardPoll, typeGuardPollAtomic, watchTypeGuard, dependencies } = this.criteria;
 
-		const isAtomicModel = instance.IsA("Model") && ATOMIC_MODES.has(instance.ModelStreamingMode);
-		const pollsTree = typeGuard !== undefined && typeGuardPoll === true && (typeGuardPollAtomic || !isAtomicModel);
+		const pollsTree =
+			typeGuard !== undefined && typeGuardPoll === true && (typeGuardPollAtomic || !isAtomicModel(instance));
 
 		if (pollsTree && watchTypeGuard !== undefined) {
 			// A shape is followed one required child at a time: the watcher keeps the slot that
@@ -257,11 +330,11 @@ export class ComponentTracker {
 				const watcher = tracker.typeGuardWatcher;
 				if (watcher === undefined) return;
 
-				const wasMet = !tracker.unmetCriteria.has("type guard");
-				const isMet = watcher.isMet();
-				if (isMet === wasMet) return;
-
-				this.setTypeGuardMet(tracker, isMet);
+				// Reported even when it is what the entry already records. A flip the gate in
+				// `updateListeners` refused records nothing, and this poll is what runs after the
+				// tree moved again: a tree that broke and was repaired before it ran reads as the
+				// record says, and the entry would otherwise stay down with nothing left to lift it.
+				this.setTypeGuardMet(tracker, watcher.isMet());
 				this.updateListeners(instance, tracker);
 			});
 
@@ -282,14 +355,12 @@ export class ComponentTracker {
 
 			// Re-reads the guard against the tree as it now stands, whichever signal reported that
 			// it moved. Both connections run the same body because the poll is not told what
-			// changed: it is here to notice that the answer moved, and a poll that was re-pointed
-			// while this was already queued still has to report the tree it finds when it runs.
+			// changed: it is here to report the tree it finds when it runs, and a poll that was
+			// re-pointed while this was already queued still has to. As above, a reading that
+			// matches the record is reported too: the gate can have refused a flip on a tree that
+			// is whole again by now, and the record says nothing of it.
 			const poll = () => {
-				const wasMet = !tracker.unmetCriteria.has("type guard");
-				const isMet = typeGuard(instance);
-				if (isMet === wasMet) return;
-
-				this.setTypeGuardMet(tracker, isMet);
+				this.setTypeGuardMet(tracker, typeGuard(instance));
 				this.updateListeners(instance, tracker);
 			};
 
@@ -367,11 +438,16 @@ export class ComponentTracker {
 					this.updateListeners(instance, tracker);
 				};
 
-				// Passed on rather than dropped: a tracker that is only observing is not waiting for
-				// its dependencies either, and a dependency's warning here would be the same "wrong
-				// way round" report `observeOnly` exists to suppress -- said about a component
-				// nobody has asked for on an instance nothing is tagged with.
-				dependency.trackInstance(instance, listener, observeOnly);
+				// Observing, the way a link does: this entry is not the dependency's tag path, and
+				// registering as if it were is what would freeze the dependency's entry on whatever
+				// this reading found -- a guard read before the tree was finished, a tag criterion
+				// only the announcement writes -- and answer the dependency's own tag from it.
+				// The wait is passed on below, through the chain, when this entry itself waits: a
+				// tracker that is only observing is not waiting for its dependencies either, and
+				// a dependency's warning would be the same "wrong way round" report `observeOnly`
+				// exists to suppress -- said about a component nobody has asked for on an
+				// instance nothing is tagged with.
+				dependency.trackInstance(instance, listener, true);
 				tracker.dependencyListeners.set(dependency, listener);
 
 				tracker.cleanup.add(() => {
@@ -383,21 +459,27 @@ export class ComponentTracker {
 
 		const { watchLinks } = this.criteria;
 		if (watchLinks) {
-			tracker.cleanup.add(
-				watchLinks(instance, (criterion, isMet) => {
-					if (isMet) {
-						tracker.unmetCriteria.delete(criterion);
-					} else {
-						tracker.unmetCriteria.add(criterion);
-					}
+			const watcher = watchLinks(instance, (criterion, isMet) => {
+				if (isMet) {
+					tracker.unmetCriteria.delete(criterion);
+				} else {
+					tracker.unmetCriteria.add(criterion);
+				}
 
-					this.updateListeners(instance, tracker);
-				}),
-			);
+				this.updateListeners(instance, tracker);
+			});
+			tracker.linkWatcher = watcher;
+
+			tracker.cleanup.add(() => {
+				tracker.linkWatcher = undefined;
+				watcher.release();
+			});
 		}
 
+		// The whole chain, because the dependencies above were subscribed as observers: the wait
+		// reaches each of them from here, as it does for a listener arriving at an entry later.
 		if (!observeOnly) {
-			this.armWarning(instance, tracker);
+			this.armWarningChain(instance, tracker);
 		}
 	}
 
@@ -405,15 +487,30 @@ export class ComponentTracker {
 	 * The criteria an instance is short of: read off its entry when it has one, and from the
 	 * instance otherwise -- the tag, the instance guard, each dependency and each link, as
 	 * `testInstance` would find them.
+	 *
+	 * An entry whose every recorded criterion is met and that is still not qualified is held down
+	 * by the reading `readsQualified` gates the flip on, which records nothing: what it read is
+	 * read again here, so the warning can name it the way it names a criterion a poll recorded.
 	 */
 	public unmetCriteriaOf(instance: Instance): defined[] {
 		const tracker = this.getInstanceTracker(instance, false);
-		if (tracker !== undefined) return [...tracker.unmetCriteria] as defined[];
+		if (tracker !== undefined) {
+			const recorded = [...tracker.unmetCriteria] as defined[];
+			return recorded.isEmpty() && !tracker.isQualified ? this.readUnmet(instance, false) : recorded;
+		}
 
+		return this.readUnmet(instance, true);
+	}
+
+	/**
+	 * The criteria read from the instance itself, now. `whole` adds the tag, which an entry records
+	 * for itself; without it, only what `readsQualified` reads.
+	 */
+	private readUnmet(instance: Instance, whole: boolean): defined[] {
 		const unmet = new Array<defined>();
 		const { tag, typeGuard, checkAttributes, dependencies, unmetLinks } = this.criteria;
 
-		if (tag !== undefined && !CollectionService.HasTag(instance, tag)) unmet.push("CollectionService tag");
+		if (whole && tag !== undefined && !CollectionService.HasTag(instance, tag)) unmet.push("CollectionService tag");
 		if (typeGuard !== undefined && !typeGuard(instance)) unmet.push("type guard");
 
 		if (checkAttributes !== undefined) {
@@ -485,13 +582,13 @@ export class ComponentTracker {
 	}
 
 	/**
-	 * Arms the warning for an instance already being tracked, and for everything this component
-	 * depends on, because a listener that waits has arrived after the entry was created.
+	 * Arms the warning for an instance being tracked, and for everything this component depends
+	 * on, because a listener that waits has arrived -- with the entry, or after it was created.
 	 *
-	 * The dependencies are part of it because their entries were created alongside this one: an
-	 * entry a link created observes its dependencies too, so nothing down the chain is armed until
-	 * somebody actually waits at the top of it. The subscription this entry holds on each of them
-	 * starts waiting along with it, which is what makes the wait end down there as well.
+	 * The dependencies are part of it because their entries were created alongside this one, and
+	 * every entry observes its dependencies: nothing down the chain is armed until somebody
+	 * actually waits at the top of it. The subscription this entry holds on each of them starts
+	 * waiting along with it, which is what makes the wait end down there as well.
 	 */
 	private armWarningChain(instance: Instance, tracker: InstanceTracker) {
 		this.armWarning(instance, tracker);
@@ -560,7 +657,8 @@ export class ComponentTracker {
 	 * unmet set in both directions and notifying the listeners once, at the end.
 	 *
 	 * `checkLinks` is left out for an instance that has an entry, because a link is not something
-	 * the instance can be read for: it is watched, and reported through `watchLinks`.
+	 * the instance can be read for: it is watched, and reported through `watchLinks` -- or read
+	 * again by `refreshInstance`, ahead of this, for an entry nothing waits on.
 	 */
 	private testInstance(instance: Instance, tracker?: InstanceTracker) {
 		let result = true;
@@ -644,34 +742,126 @@ export class ComponentTracker {
 			}
 
 			this.updateListeners(instance, tracker);
+
+			// The tag going is a loss the tag path reports here itself, having already let its
+			// listener go, and it takes the component down along with it: there is nothing left
+			// for the listener that arrives with the tag coming back to replay.
+			if (!hasTag) tracker.unheardLoss = undefined;
 		}
 	}
 
 	/**
-	 * Re-reads the criteria of an entry nothing is waiting for, which is an entry only a link is
-	 * holding open.
+	 * Re-reads the criteria of an entry the tag path has not registered on, which is an entry only
+	 * a link or a dependent is holding open.
 	 *
-	 * A link is not allowed to change the answer this tracker gives, so an entry a link created has
-	 * to answer the way no entry at all would: every criterion read now rather than frozen at
-	 * whatever it was when the link first looked. Called from every path that learns something new
-	 * about an instance but has no listener to register -- one the predicate or the ancestor lists
-	 * filtered out, where nothing else will ever read the tree again.
+	 * Neither is allowed to change the answer this tracker gives, so an entry one of them created
+	 * has to answer the way no entry at all would: every criterion read now rather than frozen at
+	 * whatever it was when the link or the dependent first looked. A dependent's listener waits
+	 * here, but it keeps nothing current, and the component it belongs to may not poll the tree at
+	 * all. Called from every path that learns something new about an instance but has no listener
+	 * to register -- one the predicate or the ancestor lists filtered out, where nothing else will
+	 * ever read the tree again.
+	 *
+	 * The links are among those criteria. A child link is part of the tree, and read once under a
+	 * streaming mode that does not follow it -- as it was when the link looked, before the child
+	 * was there -- so it is re-read here with the instance guard, through the watcher rather than
+	 * beside it: a link met by this reading is watched from here on, on the target it resolved to,
+	 * so that the linked component going is heard whatever the streaming mode.
 	 */
 	public refreshInstance(instance: Instance) {
 		const tracker = this.getInstanceTracker(instance, false);
-		if (tracker === undefined || !tracker.waiting.isEmpty()) return;
+		if (tracker === undefined || !tracker.owners.isEmpty()) return;
 
+		tracker.linkWatcher?.refresh();
 		this.testInstance(instance, tracker);
 	}
 
+	/**
+	 * Whether the instance can have this component right now: it qualifies, and no invalid one --
+	 * built, its `onInit` raised -- holds the place. An invalid component is the tag path's to take
+	 * down, and its entry goes on qualifying; what is asked here is asked by a dependent, or by the
+	 * eager path, and neither can be handed a component that is not there.
+	 */
 	public checkInstance(instance: Instance) {
+		if (this.criteria.isInvalid?.(instance) === true) return false;
+
 		const tracker = this.getInstanceTracker(instance, false);
 
 		if (tracker) {
-			return tracker.isProvisional !== true && tracker.isQualified;
+			if (tracker.isProvisional === true) return false;
+
+			// An entry the tag path has not registered on is one a link or a dependent holds open,
+			// and it answers the way no entry would: read now rather than frozen. Its tag
+			// criterion in particular is only ever written by the announcement, which arrives a
+			// resumption after the tag itself -- the very window the eager path builds in.
+			if (tracker.owners.isEmpty()) {
+				this.refreshInstance(instance);
+
+				return tracker.isQualified;
+			}
+
+			// An entry the tag path registered on was read at its arrival, and is read by its own
+			// deferred tasks from then on; its answer is what the listener acts on, a resumption
+			// after the change, and the question here is asked now, ahead of that, by a path that
+			// builds on the answer. So a "yes" is confirmed by the reading the flip to qualified
+			// is gated on, rather than trusted: an attribute that went bad this resumption is one
+			// construction would raise on.
+			return tracker.isQualified && this.readsQualified(instance);
 		}
 
 		return this.testInstance(instance, tracker);
+	}
+
+	/**
+	 * Notes that a component was built on this instance from the criteria as they stand now.
+	 *
+	 * A loss nothing heard is kept for the listener that arrives next, to take down a component
+	 * built before it. A component built after it -- the eager path, in the window between an entry
+	 * a link created and the tag's announcement -- was built out of everything that loss described,
+	 * and replaying it would destroy and rebuild that component for nothing.
+	 */
+	public noteBuilt(instance: Instance) {
+		const tracker = this.getInstanceTracker(instance, false);
+		if (tracker !== undefined) {
+			tracker.unheardLoss = undefined;
+		}
+	}
+
+	/**
+	 * Notes that the component built on this instance turned out invalid: its `onInit` raised.
+	 *
+	 * A loss for the observers and not for the entry, which goes on qualifying: a dependent was
+	 * counting on a component Flamework would build here, and now waits, saying so; a link re-reads
+	 * its own criterion. The tag path is not told, because it is what built the component and what
+	 * takes it down, for a reason of its own -- told the entry no longer qualifies, it would take
+	 * the invalid component down and build it again at once, and again.
+	 */
+	public noteInvalidated(instance: Instance) {
+		const tracker = this.getInstanceTracker(instance, false);
+		if (tracker === undefined) return;
+
+		for (const listener of tracker.listeners) {
+			if (!tracker.owners.has(listener)) listener(false, instance);
+		}
+	}
+
+	/**
+	 * Notes that the invalid component on this instance was taken down: the place is free again.
+	 *
+	 * The counterpart of `noteInvalidated`, for the same observers, which are answered from the
+	 * entry again -- it went on qualifying throughout, and nothing else ever tells them so: the
+	 * removal of an invalid component is announced to nobody, and the entry never flips. A
+	 * dependent that was waiting on nothing but the invalid component qualifies on this, and its
+	 * own tag path builds it, asking for the dependency on the way: being taken down is what lets
+	 * the next construction here try again, and that construction is the next one.
+	 */
+	public noteCleared(instance: Instance) {
+		const tracker = this.getInstanceTracker(instance, false);
+		if (tracker === undefined) return;
+
+		for (const listener of tracker.listeners) {
+			if (!tracker.owners.has(listener)) listener(tracker.isQualified, instance);
+		}
 	}
 
 	public isTracked(instance: Instance) {
@@ -682,14 +872,21 @@ export class ComponentTracker {
 	 * Starts tracking an instance, calling `listener` whenever it starts or stops qualifying.
 	 *
 	 * `observeOnly` is for a listener that is watching rather than waiting -- a link, whose own
-	 * component already reports the wait. Without it the instance would be reported as one this
-	 * component is being kept from, which is the wrong way round and says it twice.
+	 * component already reports the wait, or a dependent, whose wait reaches this entry through
+	 * `armWarningChain` instead. Without it the instance would be reported as one this component
+	 * is being kept from, which is the wrong way round and says it twice; and the entry would be
+	 * read as if for the tag path, and frozen on that reading before the tag has arrived.
 	 */
 	public trackInstance(instance: Instance, listener: Listener, observeOnly = false) {
 		const isNewInstance = !this.instances.has(instance);
 		const tracker = this.getInstanceTracker(instance);
 		if (isNewInstance) {
 			this.testInstance(instance, tracker);
+
+			// The first reading is where the entry starts from, not a loss: the answer it gives the
+			// listener below says everything it found. What is kept is a loss after that -- one the
+			// subscriptions below notice as they are set up, or that only a link hears later.
+			tracker.unheardLoss = undefined;
 
 			// The criteria this entry is judged by are subscribed below, and a link is one of them:
 			// until they have all reported, the entry has no answer of its own to give back to one
@@ -701,9 +898,9 @@ export class ComponentTracker {
 				tracker.isProvisional = undefined;
 			}
 		} else if (!observeOnly) {
-			// Nobody was waiting for this instance, so the entry is only here because a link is
-			// watching it: an instance guard that failed before the tree was finished is asked
-			// again rather than left frozen by whoever happened to look first.
+			// The tag path was not here yet, so the entry is only here because a link or a
+			// dependent is watching it: an instance guard that failed before the tree was finished
+			// is asked again rather than left frozen by whoever happened to look first.
 			this.refreshInstance(instance);
 
 			// The tracker is already here because a link is watching this instance, which arms no
@@ -714,20 +911,26 @@ export class ComponentTracker {
 		tracker.listeners.add(listener);
 		if (!observeOnly) {
 			tracker.waiting.add(listener);
+			tracker.owners.add(listener);
 		}
 
 		// The entry was set up before this listener existed, so a criterion lost and met again
 		// while that happened is news it has not been given. Handing it the current answer alone is
 		// what leaves a component built from a tree that has since moved exactly where it was: the
 		// answer is "qualified", and the listener has nothing to do about a component it already
-		// has. The loss is replayed first, in the order it happened.
-		if (tracker.unheardLoss === true && tracker.isQualified) {
+		// has. The loss is replayed first, in the order it happened -- to a listener that waits,
+		// which is the one that can act on it; an observer arriving would only use it up.
+		if (!observeOnly && tracker.unheardLoss === true && tracker.isQualified) {
 			tracker.unheardLoss = undefined;
 
 			listener(false, instance);
 		}
 
-		listener(tracker.isQualified, instance);
+		// An observer is answered the way `checkInstance` answers, since that is what it asks: a
+		// component that is invalid here is not one a dependent can be handed. The tag path is
+		// answered whether the entry qualifies, which is its question.
+		const isInvalid = observeOnly && this.criteria.isInvalid?.(instance) === true;
+		listener(tracker.isQualified && !isInvalid, instance);
 	}
 
 	/**
@@ -753,6 +956,7 @@ export class ComponentTracker {
 		if (tracker) {
 			tracker.listeners.delete(listener);
 			tracker.waiting.delete(listener);
+			tracker.owners.delete(listener);
 
 			// The warning outlives the listener that armed it otherwise. A link can create a
 			// tracker that the tag path later arms, so an observer left holding the entry open is

@@ -205,6 +205,56 @@ class BrokenInitTagged extends BaseComponent<{}, Folder> implements OnInit, OnSt
 @Component({ tag: "BrokenOwner", warningTimeout: 0.1 })
 class BrokenOwner extends BaseComponent<{}, Folder & { Core: BrokenInitTagged }> {}
 
+/** Depends on `BrokenInitTagged` instead, so the component that is never valid is reached through the constructor rather than a link. */
+@Component({ tag: "BrokenCar", warningTimeout: 0 })
+class BrokenCar extends BaseComponent<{}, Folder> {
+	constructor(
+		metadata: ComponentMetadata,
+		public readonly broken: BrokenInitTagged,
+	) {
+		super(metadata);
+	}
+}
+
+/** Raises out of `onInit` while `broken`, so one build can be invalid and the next valid. */
+@Component({ tag: "Flaky", warningTimeout: 0 })
+class Flaky extends BaseComponent<{}, Folder> implements OnInit {
+	public static broken = false;
+
+	public onInit() {
+		initAttempts += 1;
+		if (Flaky.broken) throw "not today";
+	}
+}
+
+/** Depends on `Flaky`, so an invalid dependency taken down by hand is what it waits through. */
+@Component({ tag: "FlakyCar", warningTimeout: 0 })
+class FlakyCar extends BaseComponent<{}, Folder> {
+	constructor(
+		metadata: ComponentMetadata,
+		public readonly flaky: Flaky,
+	) {
+		super(metadata);
+	}
+}
+
+/** A link attribute beside an `onInit` that raises, listened for from the constructor, which does run. */
+@Component({ tag: "BrokenPointer", warningTimeout: 0, attributeWarningTimeout: 0 })
+class BrokenPointer extends BaseComponent<{ Target: Folder }, Folder> implements OnInit {
+	public static seen = 0;
+
+	constructor(metadata: ComponentMetadata) {
+		super(metadata);
+		this.onAttributeChanged("Target", () => {
+			BrokenPointer.seen += 1;
+		});
+	}
+
+	public onInit() {
+		throw "not today";
+	}
+}
+
 /** The instance `EarlyAdder` gives a component to during ignition. */
 let earlyInstance: Instance | undefined;
 
@@ -294,6 +344,17 @@ class Strict extends BaseComponent<{}, Folder> {}
 @Component({ tag: "StrictOwner", warningTimeout: 0, attributeWarningTimeout: 0 })
 class StrictOwner extends BaseComponent<{ Linked: Strict }, Folder> {}
 
+/** Depends on `Strict`, which is the other way that entry arrives before the tag -- with something waiting at it. */
+@Component({ tag: "StrictCar", warningTimeout: 0 })
+class StrictCar extends BaseComponent<{}, Folder> {
+	constructor(
+		metadata: ComponentMetadata,
+		public readonly strict: Strict,
+	) {
+		super(metadata);
+	}
+}
+
 /** A plain instance link whose guard asks for a tree, with no component to report it filling in. */
 @Component({ tag: "Rooted", warningTimeout: 0, attributeWarningTimeout: 0 })
 class Rooted extends BaseComponent<{ Target: Folder & { Root: Folder } }, Folder> {}
@@ -331,6 +392,10 @@ class BaseOwner extends BaseComponent<{}, Folder & { Core: BaseHandler }> {}
 /** Links through a tree it never re-checks, so the two kinds of change can be told apart. */
 @Component({ tag: "FrozenOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Disabled })
 class FrozenOwner extends BaseComponent<{}, Folder & { Core: Handler }> {}
+
+/** A child link on a model, under the default streaming mode, so an atomic model is read once on the client too. */
+@Component({ tag: "AtomicOwner", warningTimeout: 0 })
+class AtomicOwner extends BaseComponent<{}, Model & { Core: Handler }> {}
 
 /** Only ever built under an instance named `Chosen`, which a link has to weigh as well. */
 @Component({ tag: "Choosy", predicate: (instance) => instance.Parent?.Name === "Chosen" })
@@ -403,6 +468,70 @@ class Owner extends BaseComponent<{}, Folder & { Core: Handler }> {
 	public destroy() {
 		this.destroyCount += 1;
 		super.destroy();
+	}
+}
+
+/** Points at an `Owner` through an attribute, which gives that component's tracker an entry before its tag is announced. */
+@Component({ tag: "OwnerPointer", warningTimeout: 0, attributeWarningTimeout: 0 })
+class OwnerPointer extends BaseComponent<{ Inner: Owner }, Folder> {}
+
+/** Depends on an `Owner` instead, so the entry that exists before the tag is one a dependent waits at rather than one a link watches. */
+@Component({ tag: "OwnerCar", warningTimeout: 0 })
+class OwnerCar extends BaseComponent<{}, Folder> {
+	constructor(
+		metadata: ComponentMetadata,
+		public readonly owner: Owner,
+	) {
+		super(metadata);
+	}
+}
+
+/** Points at a `FrozenOwner`, whose child link is read once: the entry the link creates reads it before the tree is there. */
+@Component({ tag: "FrozenOwnerPointer", warningTimeout: 0, attributeWarningTimeout: 0 })
+class FrozenOwnerPointer extends BaseComponent<{ Inner: FrozenOwner }, Folder> {}
+
+/** Depends on a `FrozenOwner` instead, so the entry that reads the link too early is one a dependent waits at. */
+@Component({ tag: "FrozenOwnerCar", warningTimeout: 0 })
+class FrozenOwnerCar extends BaseComponent<{}, Folder> {
+	constructor(
+		metadata: ComponentMetadata,
+		public readonly owner: FrozenOwner,
+	) {
+		super(metadata);
+	}
+}
+
+/** Points at a `BrokenOwner`, whose own link names a component that is never valid: a chain two links long. */
+@Component({ tag: "BrokenOwnerPointer", warningTimeout: 0, attributeWarningTimeout: 0 })
+class BrokenOwnerPointer extends BaseComponent<{ Inner: BrokenOwner }, Folder> {}
+
+/** A plain attribute beside a linked child, so a link can ask for a rebuild while the attribute has just gone bad. */
+@Component({ tag: "SpeedOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
+class SpeedOwner extends BaseComponent<{ speed: number }, Folder & { Core: Handler }> {}
+
+/** A plain required child beside a linked one, so a link can ask for a rebuild while the tree has just lost the other. */
+@Component({ tag: "TwoChildOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
+class TwoChildOwner extends BaseComponent<{}, Folder & { Core: Handler; Extra: Folder }> implements OnStart {
+	public static created = 0;
+
+	constructor(metadata: ComponentMetadata) {
+		super(metadata);
+		TwoChildOwner.created += 1;
+	}
+
+	public onStart() {
+		events.push(`twostart:${this.instance.FindFirstChild("Extra") !== undefined}`);
+	}
+}
+
+/** Runs a callback from its constructor, which is synchronous inside the tag's handler on every engine: a tree it moves moves mid-batch. */
+@Component({ tag: "Repairer" })
+class Repairer extends BaseComponent<{}, Folder> {
+	public static repair?: () => void;
+
+	constructor(metadata: ComponentMetadata) {
+		super(metadata);
+		Repairer.repair?.();
 	}
 }
 
@@ -537,6 +666,10 @@ function createComponentPlugin() {
 		.registerComponent(BrokenInit)
 		.registerComponent(BrokenInitTagged)
 		.registerComponent(BrokenOwner)
+		.registerComponent(BrokenCar)
+		.registerComponent(BrokenPointer)
+		.registerComponent(Flaky)
+		.registerComponent(FlakyCar)
 		.registerComponent(Blocked)
 		.registerComponent(Allowed)
 		.registerComponent(Enemy)
@@ -554,6 +687,7 @@ function createComponentPlugin() {
 		.registerComponent(LateRigOwner)
 		.registerComponent(Strict)
 		.registerComponent(StrictOwner)
+		.registerComponent(StrictCar)
 		.registerComponent(Rooted)
 		.registerComponent(FrozenPointer)
 		.registerComponent(Twin)
@@ -562,6 +696,15 @@ function createComponentPlugin() {
 		.registerComponent(DerivedHandler)
 		.registerComponent(BaseOwner)
 		.registerComponent(FrozenOwner)
+		.registerComponent(AtomicOwner)
+		.registerComponent(OwnerPointer)
+		.registerComponent(OwnerCar)
+		.registerComponent(FrozenOwnerPointer)
+		.registerComponent(FrozenOwnerCar)
+		.registerComponent(BrokenOwnerPointer)
+		.registerComponent(SpeedOwner)
+		.registerComponent(TwoChildOwner)
+		.registerComponent(Repairer)
 		.registerComponent(Choosy)
 		.registerComponent(ChoosyOwner)
 		.registerComponent(LooseOwner)
@@ -698,6 +841,158 @@ export = suite("components", [
 		},
 	],
 	[
+		"leaves a component down when a linked child is swapped in the resumption an attribute went bad",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("SpeedOwner1", { speed: 1 });
+			const oldCore = addCore(instance);
+			collectionService().AddTag(oldCore, "Handler");
+			collectionService().AddTag(instance, "SpeedOwner");
+			expectDefined(components.getComponent<SpeedOwner>(instance), "component");
+
+			const newCore = new Instance("Folder");
+			newCore.Name = "Core";
+			collectionService().AddTag(newCore, "Handler");
+			const elsewhere = folder("SpeedOwnerElsewhere");
+
+			// The attribute criterion is read on a deferred task, so the swap's child signals arrive
+			// first: the link takes the component down and asks for it straight back, against an
+			// attribute the guard refuses. The rebuild reads it rather than raising out of the
+			// handler, and nothing is built until the attribute is valid again.
+			expectNoThrow(() => {
+				__harness.deferTree(() => {
+					instance.SetAttribute("speed", "bad");
+					oldCore.Parent = elsewhere;
+					newCore.Parent = instance;
+				});
+			}, "delivering the queued child signals");
+			expectEqual(components.getComponent<SpeedOwner>(instance), undefined, "component in the same resumption");
+			__harness.flush();
+			expectEqual(
+				components.getComponent<SpeedOwner>(instance),
+				undefined,
+				"component while the attribute is bad",
+			);
+
+			instance.SetAttribute("speed", 2);
+			__harness.flush();
+			const rebuilt = expectDefined(
+				components.getComponent<SpeedOwner>(instance),
+				"component once the attribute is valid again",
+			);
+			expectEqual(rebuilt.attributes.speed, 2, "the attribute the rebuilt component read");
+			expectEqual(rebuilt.childComponents.Core, components.getComponent<Handler>(newCore), "the swapped child");
+
+			instance.Destroy();
+			oldCore.Destroy();
+			elsewhere.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"leaves a component down when a linked child is swapped in the resumption another child left",
+		() => {
+			events.clear();
+			TwoChildOwner.created = 0;
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("TwoChildOwner1");
+			const extra = folderIn(instance, "Extra");
+			const oldCore = addCore(instance);
+			collectionService().AddTag(oldCore, "Handler");
+			collectionService().AddTag(instance, "TwoChildOwner");
+			expectDefined(components.getComponent<TwoChildOwner>(instance), "component");
+			expectEqual(TwoChildOwner.created, 1, "constructions");
+
+			const newCore = new Instance("Folder");
+			newCore.Name = "Core";
+			collectionService().AddTag(newCore, "Handler");
+			const elsewhere = folder("TwoChildOwnerElsewhere");
+
+			// The instance guard is read on a deferred task as well, so the link's rebuild arrives
+			// while the guard still says the tree is whole: the rebuild reads the tree for itself,
+			// rather than constructing a component on one that is missing a required child.
+			__harness.deferTree(() => {
+				extra.Parent = elsewhere;
+				oldCore.Parent = elsewhere;
+				newCore.Parent = instance;
+			});
+			expectEqual(TwoChildOwner.created, 1, "constructions in the same resumption");
+			expectEqual(
+				components.getComponents<TwoChildOwner>(instance).size(),
+				0,
+				"components in the same resumption",
+			);
+			__harness.flush();
+			expectEqual(TwoChildOwner.created, 1, "constructions after the guard was read");
+			expectFalse(events.includes("twostart:false"), "a component started on a tree missing its child");
+
+			extra.Parent = instance;
+			__harness.flush();
+			expectDefined(components.getComponent<TwoChildOwner>(instance), "component once the tree is whole again");
+			expectEqual(TwoChildOwner.created, 2, "constructions once the tree is whole again");
+
+			instance.Destroy();
+			oldCore.Destroy();
+			elsewhere.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"builds a component whose tree was repaired between a refused rebuild and the guard's poll",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("RepairedOwner");
+			const oldCore = addCore(instance);
+			collectionService().AddTag(oldCore, "Handler");
+			const extra = folderIn(instance, "Extra");
+			collectionService().AddTag(instance, "TwoChildOwner");
+			expectDefined(components.getComponent<TwoChildOwner>(instance), "component");
+
+			const newCore = new Instance("Folder");
+			newCore.Name = "Core";
+			collectionService().AddTag(newCore, "Handler");
+			const elsewhere = folder("RepairedOwnerElsewhere");
+			const other = folder("RepairedOwnerOther");
+			Repairer.repair = () => {
+				extra.Parent = instance;
+			};
+
+			// In raise order: the linked child's swap, then a tag whose component's constructor
+			// puts `Extra` back, then `Extra` leaving. The swap asks for a rebuild while `Extra` is
+			// gone, which the reading at the flip refuses without recording anything; the
+			// constructor puts it back; and the guard's own signal for `Extra` then finds the slot
+			// filled again, so its poll reads the tree exactly as the entry already records it.
+			// The poll still has to say so, or nothing ever lifts the refusal.
+			__harness.deferTree(() => {
+				__harness.deferTags(() => {
+					oldCore.Parent = elsewhere;
+					newCore.Parent = instance;
+					collectionService().AddTag(other, "Repairer");
+					extra.Parent = elsewhere;
+				});
+			});
+			Repairer.repair = undefined;
+			__harness.flush();
+			__harness.flush();
+
+			expectEqual(extra.Parent, instance, "Extra is back");
+			expectDefined(components.getComponent<Handler>(newCore), "the linked child's component");
+			expectDefined(components.getComponent<TwoChildOwner>(instance), "component once the tree holds again");
+
+			instance.Destroy();
+			oldCore.Destroy();
+			elsewhere.Destroy();
+			other.Destroy();
+			module.extinguish();
+		},
+	],
+	[
 		"leaves a component down when a link attribute rebuilds it after its frozen tree broke",
 		() => {
 			const module = createComponentModule();
@@ -816,6 +1111,88 @@ export = suite("components", [
 			expectEqual(rebuilt.attributes.speed, 4, "the attribute the rebuilt component read");
 
 			// Destroyed rather than left behind: every later module would otherwise wait on it.
+			instance.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"hands a built component back when its tag is announced again beside an attribute that has just gone bad",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("RetaggedBad", { speed: 1 });
+			collectionService().AddTag(instance, "Tagged");
+			const component = expectDefined(components.getComponent<Tagged>(instance), "component");
+
+			// The removal reads the tag as still there and looks again a resumption later, so the
+			// added announcement reaches a component that is still attached -- and is handed it, as
+			// it would be without the attribute write. The attribute criterion takes it down on its
+			// own, a resumption later, as it does without the re-tag.
+			expectNoThrow(() => {
+				__harness.deferTags(() => {
+					instance.SetAttribute("speed", "bad");
+					collectionService().RemoveTag(instance, "Tagged");
+					collectionService().AddTag(instance, "Tagged");
+				});
+			}, "announcing the tag again");
+			expectEqual(components.getComponent<Tagged>(instance), component, "component in the same resumption");
+
+			__harness.flush();
+			expectEqual(components.getComponent<Tagged>(instance), undefined, "component once the attribute was read");
+
+			instance.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"answers getComponent with nothing, not a raise, for an attribute that went bad in the same resumption",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("BadNowTagged", { speed: 1 });
+			collectionService().AddTag(instance, "Tagged");
+			expectDefined(components.getComponent<Tagged>(instance), "component");
+
+			// A hand removal leaves the tag and the tracker alone, and the attribute criterion is
+			// read on a deferred task: for the rest of this resumption the entry still says the
+			// instance qualifies. The eager path reads the attribute for itself rather than
+			// building on that answer and raising out of `getComponent`.
+			components.removeComponent<Tagged>(instance);
+			instance.SetAttribute("speed", "bad");
+
+			let answer: Tagged | undefined;
+			expectNoThrow(() => {
+				answer = components.getComponent<Tagged>(instance);
+			}, "asking beside an attribute that has just gone bad");
+			expectEqual(answer, undefined, "component for an instance whose attribute is invalid");
+
+			instance.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"treats a link attribute that is not a handle as invalid, and builds the component once it is cleared",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			// An optional link resolves a value that is not a handle to nothing, which holds nothing
+			// up, so the guard is what refuses it -- as a criterion, the way a plain attribute's is,
+			// rather than raising out of the tag handler on the way into the constructor.
+			const instance = folder("BadOptionalLink", { Partner: "nope" });
+			expectNoThrow(() => collectionService().AddTag(instance, "Twin"), "tagging with a bad link attribute");
+			expectEqual(components.getComponent<Twin>(instance), undefined, "component while the attribute is invalid");
+
+			instance.SetAttribute("Partner", undefined);
+			__harness.flush();
+			expectEqual(
+				components.getComponents<Twin>(instance).size(),
+				1,
+				"components once the attribute was cleared",
+			);
+
 			instance.Destroy();
 			module.extinguish();
 		},
@@ -1106,6 +1483,29 @@ export = suite("components", [
 		},
 	],
 	[
+		"builds a freshly tagged component eagerly when a link already tracks its instance",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			// The pointer's link gives `Handler`'s tracker an entry for the untagged instance, whose
+			// tag criterion only the announcement writes. The eager path reads the tag now, as it
+			// does with no entry at all.
+			const linked = folder("EagerTrackedLinked");
+			pointer("EagerTrackedPointer", folder("EagerTrackedTarget"), linked);
+
+			let built: Handler | undefined;
+			__harness.deferTags(() => {
+				collectionService().AddTag(linked, "Handler");
+				built = expectDefined(components.getComponent<Handler>(linked), "component inside the resumption");
+			});
+
+			expectEqual(components.getComponent<Handler>(linked), built, "component once the tag was announced");
+
+			module.extinguish();
+		},
+	],
+	[
 		"writes an optional link attribute's default to the instance, and clears it back to nothing",
 		() => {
 			const module = createComponentModule();
@@ -1216,6 +1616,79 @@ export = suite("components", [
 		},
 	],
 	[
+		"re-points a child link when the child it holds is renamed away and a sibling takes its name",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("RenamedLink");
+			const core = folderIn(instance, "Core");
+			collectionService().AddTag(core, "Handler");
+			const spare = folderIn(instance, "Spare");
+			collectionService().AddTag(instance, "Owner");
+
+			const owner = expectDefined(components.getComponent<Owner>(instance), "component");
+			try {
+				// A rename fires no child signal, so the link learns of the swap from the child's
+				// own name: `Core` now names a child that carries no `Handler`, and the component
+				// built around the old one comes down.
+				__harness.deferTree(() => {
+					core.Name = "Old";
+					spare.Name = "Core";
+				});
+				__harness.flush();
+				expectEqual(owner.destroyCount, 1, "takedowns after the swap");
+				expectEqual(
+					components.getComponent<Owner>(instance),
+					undefined,
+					"component while the child named Core has no Handler",
+				);
+
+				// The child the name resolves to now is the one the link watches: its component
+				// arriving builds the owner around it, and leaving takes the owner down again.
+				collectionService().AddTag(spare, "Handler");
+				__harness.flush();
+				const rebuilt = expectDefined(
+					components.getComponent<Owner>(instance),
+					"component once the new Core carries Handler",
+				);
+				expectEqual(
+					rebuilt.childComponents.Core,
+					components.getComponent<Handler>(spare),
+					"the child it holds",
+				);
+
+				collectionService().RemoveTag(spare, "Handler");
+				__harness.flush();
+				expectEqual(
+					components.getComponent<Owner>(instance),
+					undefined,
+					"component after the new Core lost its Handler",
+				);
+				expectEqual(rebuilt.destroyCount, 1, "takedowns of the rebuilt component");
+
+				// Renamed back, the old child is `Core` again, and the link follows it there too.
+				__harness.deferTree(() => {
+					spare.Name = "Spare";
+					core.Name = "Core";
+				});
+				__harness.flush();
+				const restored = expectDefined(
+					components.getComponent<Owner>(instance),
+					"component once the old child is Core again",
+				);
+				expectEqual(
+					restored.childComponents.Core,
+					components.getComponent<Handler>(core),
+					"the child it holds again",
+				);
+			} finally {
+				instance.Destroy();
+				module.extinguish();
+			}
+		},
+	],
+	[
 		"rebuilds a component around the child that replaced the one it was built with",
 		() => {
 			const module = createComponentModule();
@@ -1273,6 +1746,141 @@ export = suite("components", [
 
 			root.Destroy();
 			core.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"rebuilds a component whose linked child was swapped while only a link was watching it",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const outer = folder("ObservedSwapOuter");
+			const inner = folder("ObservedSwapInner");
+			const oldCore = folderIn(inner, "Core");
+			outer.SetAttribute("Inner", new InstanceHandle(inner));
+
+			// The pointer is announced first, and its link builds `Owner` on the inner instance
+			// against a tracker entry the link created -- one nothing waits on until the inner
+			// instance's own tag is announced. The swap happens in between, so the only thing that
+			// hears the loss is a link, which cannot take the component down.
+			let built: Owner | undefined;
+			let newCore!: Folder;
+			const connection = components.onComponentAdded<OwnerPointer>(() => {
+				if (built !== undefined) return;
+				built = expectDefined(components.getComponent<Owner>(inner), "component built through the link");
+
+				newCore = folderIn(inner, "Core");
+				collectionService().AddTag(newCore, "Handler");
+				oldCore.Parent = folder("ObservedSwapElsewhere");
+			});
+
+			__harness.deferTags(() => {
+				collectionService().AddTag(oldCore, "Handler");
+				collectionService().AddTag(outer, "OwnerPointer");
+				collectionService().AddTag(inner, "Owner");
+			});
+			__harness.flush();
+			connection.Disconnect();
+
+			const first = expectDefined(built, "component built through the link");
+			const rebuilt = expectDefined(components.getComponent<Owner>(inner), "component after the announcements");
+			expectEqual(first.destroyCount, 1, "takedowns of the component that held the old child");
+			expectTrue(rebuilt !== first, "the component was rebuilt rather than left holding the old child");
+			expectEqual(rebuilt.childComponents.Core, components.getComponent<Handler>(newCore), "the new child");
+
+			outer.Destroy();
+			inner.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"rebuilds a component whose linked child was swapped while only a dependent was waiting at it",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("DependentSwap");
+			const elsewhere = folder("DependentSwapElsewhere");
+			const oldCore = addCore(instance);
+			const newCore = addCore(elsewhere);
+			collectionService().AddTag(oldCore, "Handler");
+			collectionService().AddTag(newCore, "Handler");
+
+			// The dependent's tag creates `Owner`'s entry on the instance, with the dependent waiting
+			// at it and nothing owning it: the tag path has not read it yet.
+			collectionService().AddTag(instance, "OwnerCar");
+			expectEqual(components.getComponent<OwnerCar>(instance), undefined, "dependent before the owner exists");
+
+			let built: Owner | undefined;
+			try {
+				__harness.deferTags(() => {
+					collectionService().AddTag(instance, "Owner");
+					built = components.getComponent<Owner>(instance);
+					expectDefined(components.getComponent<OwnerCar>(instance), "dependent once the owner was built");
+
+					// The swap reaches the entry with only the dependent listening, which takes its
+					// own component down and cannot take the owner's: the loss is one the tag's
+					// announcement still has to replay, as it does with a link watching instead.
+					oldCore.Parent = elsewhere;
+					newCore.Parent = instance;
+				});
+				__harness.flush();
+
+				const first = expectDefined(built, "component built before its tag was announced");
+				const rebuilt = expectDefined(
+					components.getComponent<Owner>(instance),
+					"component after the announcement",
+				);
+				expectEqual(first.destroyCount, 1, "takedowns of the component that held the old child");
+				expectTrue(rebuilt !== first, "the component was rebuilt rather than left holding the old child");
+				expectEqual(rebuilt.childComponents.Core, components.getComponent<Handler>(newCore), "the new child");
+			} finally {
+				instance.Destroy();
+				elsewhere.Destroy();
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"keeps a component built before its tag was announced when nothing about it changed",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const pointer = folder("UnchangedPointer");
+			const inner = folder("UnchangedInner");
+			const core = addCore(inner);
+			collectionService().AddTag(pointer, "OwnerPointer");
+			__harness.flush();
+
+			let built: Owner | undefined;
+			__harness.deferTags(() => {
+				collectionService().AddTag(inner, "Owner");
+
+				// The pointer's link creates `Owner`'s entry on the inner instance with the tag
+				// present and the guard met, and its own child link unmet: `Core` carries no
+				// `Handler` yet. That first reading is a loss nobody hears, and the component is
+				// built after it, from everything the loss described.
+				pointer.SetAttribute("Inner", new InstanceHandle(inner));
+
+				collectionService().AddTag(core, "Handler");
+				built = components.getComponent<Owner>(inner);
+			});
+
+			// The announcement finds nothing changed since the construction, so it hands the same
+			// component back rather than replaying the loss the component was built after.
+			const owner = expectDefined(built, "component asked for before its tag was announced");
+			expectEqual(owner.destroyCount, 0, "takedowns by the tag's announcement");
+			expectEqual(components.getComponent<Owner>(inner), owner, "the component after the announcement");
+			expectEqual(
+				owner.childComponents.Core,
+				components.getComponent<Handler>(core),
+				"the linked component it holds",
+			);
+
+			pointer.Destroy();
+			inner.Destroy();
 			module.extinguish();
 		},
 	],
@@ -1773,6 +2381,271 @@ export = suite("components", [
 			owner.Destroy();
 			target.Destroy();
 			control.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"asks a component's child link again when its tag arrives at an entry a link created",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			// `FrozenOwner` reads its tree once, and its child link with it. The pointer's link
+			// creates the entry while there is no `Core` at all, so the link is read as unmet -- an
+			// answer nothing would ever correct if the entry kept it, where an instance nothing
+			// links to would be read afresh when its tag arrives.
+			const inner = folder("FrozenPointedInner");
+			const outer = folder("FrozenPointedOuter");
+			outer.SetAttribute("Inner", new InstanceHandle(inner));
+			collectionService().AddTag(outer, "FrozenOwnerPointer");
+			__harness.flush();
+			expectEqual(
+				components.getComponent<FrozenOwnerPointer>(outer),
+				undefined,
+				"owner before the target is tagged",
+			);
+
+			// The control: the same instance and the same order, with nothing linked to it.
+			const control = folder("FrozenPointedControl");
+
+			for (const instance of [inner, control]) {
+				collectionService().AddTag(addCore(instance), "Handler");
+				collectionService().AddTag(instance, "FrozenOwner");
+			}
+
+			__harness.flush();
+
+			expectDefined(components.getComponent<FrozenOwner>(control), "the component nothing links to");
+			expectDefined(components.getComponent<FrozenOwner>(inner), "the component a link watches");
+			expectDefined(components.getComponent<FrozenOwnerPointer>(outer), "owner once the link is met");
+
+			// The eager path asks the same entry a resumption earlier, before the tag is announced.
+			const eagerInner = folder("FrozenPointedEagerInner");
+			const eagerOuter = folder("FrozenPointedEagerOuter");
+			eagerOuter.SetAttribute("Inner", new InstanceHandle(eagerInner));
+			collectionService().AddTag(eagerOuter, "FrozenOwnerPointer");
+			__harness.flush();
+
+			collectionService().AddTag(addCore(eagerInner), "Handler");
+			__harness.deferTags(() => {
+				collectionService().AddTag(eagerInner, "FrozenOwner");
+				expectDefined(components.getComponent<FrozenOwner>(eagerInner), "the component asked for eagerly");
+			});
+			expectDefined(components.getComponent<FrozenOwnerPointer>(eagerOuter), "owner once the eager link is met");
+
+			outer.Destroy();
+			inner.Destroy();
+			control.Destroy();
+			eagerOuter.Destroy();
+			eagerInner.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"asks a component's instance guard again when its tag arrives at an entry a dependency created",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			// The dependent's tag creates `Strict`'s entry while there is no `Root`, so its guard is
+			// read as failing -- and `Strict` reads its tree once. The dependent waits at that
+			// entry, which is not the same as the tag path having read it: nothing keeps it
+			// current, and the tag arriving has to read the tree the way it would with no entry.
+			const instance = folder("StrictDependent");
+			collectionService().AddTag(instance, "StrictCar");
+			expectEqual(components.getComponent<StrictCar>(instance), undefined, "dependent before Strict exists");
+
+			// The control: the same instance and the same order, with nothing depending on it.
+			const control = folder("StrictDependentControl");
+
+			for (const target of [instance, control]) {
+				folderIn(target, "Root");
+				collectionService().AddTag(target, "Strict");
+			}
+
+			__harness.flush();
+
+			expectDefined(components.getComponent<Strict>(control), "the component nothing depends on");
+			expectDefined(components.getComponent<Strict>(instance), "the component a dependent waits for");
+			expectDefined(components.getComponent<StrictCar>(instance), "the dependent once its dependency is built");
+
+			instance.Destroy();
+			control.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"asks a component's child link again when its tag arrives at an entry a dependency created",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			// As above, for a link read once: the dependent's tag creates `FrozenOwner`'s entry
+			// while there is no `Core` at all.
+			const instance = folder("FrozenDependent");
+			collectionService().AddTag(instance, "FrozenOwnerCar");
+			expectEqual(
+				components.getComponent<FrozenOwnerCar>(instance),
+				undefined,
+				"dependent before the owner exists",
+			);
+
+			const control = folder("FrozenDependentControl");
+
+			for (const target of [instance, control]) {
+				collectionService().AddTag(addCore(target), "Handler");
+				collectionService().AddTag(target, "FrozenOwner");
+			}
+
+			__harness.flush();
+
+			expectDefined(components.getComponent<FrozenOwner>(control), "the component nothing depends on");
+			expectDefined(components.getComponent<FrozenOwner>(instance), "the component a dependent waits for");
+			expectDefined(
+				components.getComponent<FrozenOwnerCar>(instance),
+				"the dependent once its dependency is built",
+			);
+
+			instance.Destroy();
+			control.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"builds a freshly tagged component eagerly when a dependency already tracks its instance",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			// The control: nothing tracks the instance, so the eager path reads the tag itself.
+			const control = folder("EagerEngineControl");
+			__harness.deferTags(() => {
+				collectionService().AddTag(control, "Engine");
+				expectDefined(components.getComponent<Engine>(control), "engine nothing depends on, asked for eagerly");
+			});
+
+			// `Car` depends on `Engine`, so Engine's entry exists before Engine's own tag is
+			// announced, with its tag criterion written only by that announcement. The eager path
+			// asks in between, and has to read the tag now, as it does with no entry at all.
+			const instance = folder("EagerEngine");
+			collectionService().AddTag(instance, "Car");
+			expectEqual(components.getComponent<Car>(instance), undefined, "car before its engine");
+
+			__harness.deferTags(() => {
+				collectionService().AddTag(instance, "Engine");
+				expectDefined(
+					components.getComponent<Engine>(instance),
+					"engine a dependent waits for, asked for eagerly",
+				);
+			});
+			expectDefined(components.getComponent<Car>(instance), "car once its engine exists");
+
+			instance.Destroy();
+			control.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"takes a component down when the component a re-read child link names goes, whatever the streaming mode",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const inner = folder("RereadInner");
+			const outer = folder("RereadOuter");
+
+			// The link creates the entry before `Core` exists: the child link is read once as unmet,
+			// and only the re-read at the tag's arrival sees the child. What that re-read resolves
+			// to is what the link watches from then on.
+			outer.SetAttribute("Inner", new InstanceHandle(inner));
+			collectionService().AddTag(outer, "FrozenOwnerPointer");
+			__harness.flush();
+
+			const core = addCore(inner);
+			collectionService().AddTag(core, "Handler");
+			collectionService().AddTag(inner, "FrozenOwner");
+			__harness.flush();
+			const owner = expectDefined(components.getComponent<FrozenOwner>(inner), "owner");
+			expectDefined(components.getComponent<FrozenOwnerPointer>(outer), "pointer");
+			expectEqual(owner.childComponents.Core, components.getComponent<Handler>(core), "the linked component");
+
+			// The component the link names goes, which is a lifecycle event rather than the tree
+			// moving, and is noticed under a streaming mode that reads the tree once.
+			collectionService().RemoveTag(core, "Handler");
+			__harness.flush();
+			expectEqual(components.getComponent<Handler>(core), undefined, "handler after its tag went");
+			expectEqual(
+				components.getComponent<FrozenOwner>(inner),
+				undefined,
+				"owner after its linked component went",
+			);
+			expectEqual(components.getComponent<FrozenOwnerPointer>(outer), undefined, "pointer after the owner went");
+
+			inner.Destroy();
+			outer.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"re-points a re-read child link at the child the component was built from",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const inner = folder("RepointedInner");
+			const outer = folder("RepointedOuter");
+			const elsewhere = folder("RepointedElsewhere");
+			const core1 = addCore(inner);
+			collectionService().AddTag(core1, "Handler");
+
+			// The link creates the entry with the first child in place, so the child link watches it.
+			outer.SetAttribute("Inner", new InstanceHandle(inner));
+			collectionService().AddTag(outer, "FrozenOwnerPointer");
+			__harness.flush();
+
+			// The child is swapped while nothing follows the tree, and then the tag arrives: the
+			// component is built out of the tree as it is now, and the link is re-pointed at that
+			// child rather than left on the one it happened to see first.
+			core1.Parent = elsewhere;
+			const core2 = addCore(inner);
+			collectionService().AddTag(core2, "Handler");
+			__harness.flush();
+			collectionService().AddTag(inner, "FrozenOwner");
+			__harness.flush();
+
+			const owner = expectDefined(components.getComponent<FrozenOwner>(inner), "owner");
+			expectEqual(
+				owner.childComponents.Core,
+				components.getComponent<Handler>(core2),
+				"built from the child the tree holds",
+			);
+
+			// The first child loses its component, which the owner was never built from.
+			collectionService().RemoveTag(core1, "Handler");
+			__harness.flush();
+			expectEqual(
+				components.getComponent<FrozenOwner>(inner),
+				owner,
+				"owner after a component it does not hold went",
+			);
+			expectEqual(
+				owner.childComponents.Core,
+				components.getComponent<Handler>(core2),
+				"the linked component it holds",
+			);
+
+			// The child it was built from loses its component: now the owner goes.
+			collectionService().RemoveTag(core2, "Handler");
+			__harness.flush();
+			expectEqual(
+				components.getComponent<FrozenOwner>(inner),
+				undefined,
+				"owner after its linked component went",
+			);
+
+			inner.Destroy();
+			outer.Destroy();
+			elsewhere.Destroy();
 			module.extinguish();
 		},
 	],
@@ -3036,6 +3909,32 @@ export = suite("components", [
 		},
 	],
 	[
+		"leaves an atomic model's child link unwatched",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const model = new Instance("Model");
+			model.Name = "AtomicLinkModel";
+			model.ModelStreamingMode = Enum.ModelStreamingMode.Atomic;
+			model.Parent = game.Workspace;
+
+			const core = addCore(model);
+			collectionService().AddTag(core, "Handler");
+			collectionService().AddTag(model, "AtomicOwner");
+			const owner = expectDefined(components.getComponent<AtomicOwner>(model), "component");
+
+			// A child link is part of the tree, and the tree is read once on both realms: the server
+			// never follows it, and on the client an atomic model streams in whole.
+			core.Parent = folder("AtomicLinkElsewhere");
+			__harness.flush();
+			expectEqual(components.getComponent<AtomicOwner>(model), owner, "component after the child moved away");
+
+			model.Destroy();
+			module.extinguish();
+		},
+	],
+	[
 		// `getComponent` constructs eagerly and deliberately ignores the ancestor lists, which only
 		// gate CollectionService-driven construction, so these count what actually exists instead.
 		"skips tagged instances under a blocked ancestor",
@@ -3653,6 +4552,229 @@ export = suite("components", [
 		},
 	],
 	[
+		"waits out a component whose onInit raised two links away",
+		() => {
+			events.clear();
+			initAttempts = 0;
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const outer = folder("BrokenChainOuter");
+			const inner = folder("BrokenChainInner");
+			const core = folderIn(inner, "Core");
+			outer.SetAttribute("Inner", new InstanceHandle(inner));
+
+			// Every tag is there when the first is announced, so every link reads met, and the
+			// build reaches the invalid component through two links rather than one. The one in
+			// between is built quietly for nothing, and the owner above it waits the same way.
+			__harness.clearWarnings();
+			expectNoThrow(() => {
+				__harness.deferTags(() => {
+					collectionService().AddTag(outer, "BrokenOwnerPointer");
+					collectionService().AddTag(inner, "BrokenOwner");
+					collectionService().AddTag(core, "BrokenInitTagged");
+				});
+			}, "announcing a chain of tags that ends in an invalid component");
+
+			expectEqual(initAttempts, 1, "onInit attempts");
+			expectFalse(events.includes("brokenstart:Core"), "onStart for the invalid component");
+			expectEqual(components.getComponent<BrokenInitTagged>(core), undefined, "the child's component");
+			expectEqual(components.getComponent<BrokenOwner>(inner), undefined, "the owner in between");
+			expectEqual(components.getComponent<BrokenOwnerPointer>(outer), undefined, "the owner at the top");
+			expectFalse(
+				__harness.warnings().some((line) => line.find("has no component", 1, true)[0] !== undefined),
+				`warnings: ${__harness.warnings().join(" | ")}`,
+			);
+
+			outer.Destroy();
+			inner.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"waits out a component whose onInit raised when it is a constructor dependency",
+		() => {
+			initAttempts = 0;
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("BrokenDependent");
+			const late = folder("BrokenDependentLate");
+			try {
+				// The dependency is invalid before the dependent's tag arrives: a dependency that
+				// cannot be had, which the dependent waits for rather than builds on.
+				collectionService().AddTag(instance, "BrokenInitTagged");
+				expectEqual(initAttempts, 1, "onInit attempts");
+				expectNoThrow(
+					() => collectionService().AddTag(instance, "BrokenCar"),
+					"announcing the dependent's tag",
+				);
+				expectEqual(
+					components.getComponent<BrokenCar>(instance),
+					undefined,
+					"the dependent while its dependency is invalid",
+				);
+				expectEqual(components.getComponent<BrokenInitTagged>(instance), undefined, "the invalid dependency");
+				expectEqual(initAttempts, 1, "onInit attempts after the dependent asked");
+
+				// The other order: the dependency turns invalid inside the dependent's own build,
+				// which comes to nothing quietly, the way a build that reaches an invalid component
+				// through a link does.
+				collectionService().AddTag(late, "BrokenCar");
+				expectEqual(
+					components.getComponent<BrokenCar>(late),
+					undefined,
+					"dependent before its dependency exists",
+				);
+				expectNoThrow(
+					() => collectionService().AddTag(late, "BrokenInitTagged"),
+					"announcing the dependency's tag under a waiting dependent",
+				);
+				expectEqual(initAttempts, 2, "onInit attempts for the second instance");
+				expectEqual(
+					components.getComponent<BrokenCar>(late),
+					undefined,
+					"the dependent whose dependency turned invalid as it was built",
+				);
+				expectEqual(initAttempts, 2, "onInit attempts after the second dependent asked");
+			} finally {
+				instance.Destroy();
+				late.Destroy();
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"builds a dependent once the invalid dependency it waits at is taken down by hand",
+		() => {
+			initAttempts = 0;
+			Flaky.broken = true;
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("FlakyDependent");
+			const stuck = folder("FlakyDependentStuck");
+			try {
+				collectionService().AddTag(instance, "Flaky");
+				collectionService().AddTag(instance, "FlakyCar");
+				expectEqual(initAttempts, 1, "onInit attempts");
+				expectEqual(
+					components.getComponent<FlakyCar>(instance),
+					undefined,
+					"the dependent while its dependency is invalid",
+				);
+
+				// The invalid component is taken down by hand, with what made it raise put right:
+				// nothing is left in the dependent's way, so it is built -- and, asked for, a valid
+				// dependency with it.
+				Flaky.broken = false;
+				components.removeComponent<Flaky>(instance);
+				const flaky = expectDefined(components.getComponent<Flaky>(instance), "the dependency built again");
+				expectEqual(initAttempts, 2, "onInit attempts after the rebuild");
+				__harness.flush();
+				const car = expectDefined(
+					components.getComponent<FlakyCar>(instance),
+					"the dependent once its dependency is valid",
+				);
+				expectEqual(car.flaky, flaky, "the dependency the dependent holds");
+
+				// Taken down while whatever made it raise is still there, it is tried again -- that
+				// is what being taken down is for -- and the dependent waits on.
+				Flaky.broken = true;
+				collectionService().AddTag(stuck, "Flaky");
+				collectionService().AddTag(stuck, "FlakyCar");
+				expectEqual(initAttempts, 3, "onInit attempts for the second instance");
+				components.removeComponent<Flaky>(stuck);
+				expectEqual(initAttempts, 4, "onInit attempts after the second was taken down");
+				expectEqual(
+					components.getComponent<FlakyCar>(stuck),
+					undefined,
+					"the dependent while its dependency raises still",
+				);
+
+				// Left as they are when the module goes -- the dependency invalid, the dependent
+				// waiting -- the invalid one is taken down like every other, and nothing is built
+				// on the way out.
+				__harness.clearWarnings();
+				module.extinguish();
+				expectFalse(
+					__harness.warnings().some((line) => line.find("Failed to remove", 1, true)[0] !== undefined),
+					`warnings: ${__harness.warnings().join(" | ")}`,
+				);
+				expectEqual(initAttempts, 4, "onInit attempts after the module went");
+			} finally {
+				Flaky.broken = false;
+				instance.Destroy();
+				stuck.Destroy();
+				if (!module.isExtinguished()) module.extinguish();
+			}
+		},
+	],
+	[
+		"answers getComponent with nothing for a dependent whose dependency can no longer be built",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("StrictDependentGone");
+			const elsewhere = folder("StrictDependentGoneElsewhere");
+			const root = folderIn(instance, "Root");
+			try {
+				collectionService().AddTag(instance, "Strict");
+				collectionService().AddTag(instance, "StrictCar");
+				expectDefined(components.getComponent<Strict>(instance), "the dependency");
+				expectDefined(components.getComponent<StrictCar>(instance), "the dependent");
+
+				// Both removed by hand, which leaves every criterion as it was; then the tree the
+				// dependency's guard asks for goes, which its entry -- read once -- never hears.
+				// The dependency answers nothing for it, and so must the dependent, rather than
+				// raising out of a construction its dependency cannot be resolved for.
+				components.removeComponent<StrictCar>(instance);
+				components.removeComponent<Strict>(instance);
+				root.Parent = elsewhere;
+				expectEqual(components.getComponent<Strict>(instance), undefined, "the dependency once its tree went");
+				expectEqual(
+					components.getComponent<StrictCar>(instance),
+					undefined,
+					"the dependent once its dependency's tree went",
+				);
+			} finally {
+				instance.Destroy();
+				elsewhere.Destroy();
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"keeps a component whose onInit raised from hearing its link attributes change",
+		() => {
+			BrokenPointer.seen = 0;
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const first = folder("BrokenPointerFirst");
+			const second = folder("BrokenPointerSecond");
+			const instance = folder("BrokenPointer1");
+			instance.SetAttribute("Target", new InstanceHandle(first));
+			__harness.clearWarnings();
+			collectionService().AddTag(instance, "BrokenPointer");
+			expectEqual(components.getComponent<BrokenPointer>(instance), undefined, "the invalid component");
+
+			// A plain attribute reaches an invalid component through nothing, because the
+			// subscriptions that would carry it were never set up. A link attribute arrives through
+			// the tracker's link instead, and it too stops short of a component that keeps its
+			// place and nothing else.
+			instance.SetAttribute("Target", new InstanceHandle(second));
+			__harness.flush();
+			expectEqual(BrokenPointer.seen, 0, "attribute changes the invalid component heard");
+
+			instance.Destroy();
+			first.Destroy();
+			second.Destroy();
+			module.extinguish();
+		},
+	],
+	[
 		"starts a component built during ignition only once ignition has finished",
 		() => {
 			events.clear();
@@ -3747,6 +4869,54 @@ export = suite("components", [
 			);
 
 			instance.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"names the instance guard in the warning when the reading at the flip is what holds a component down",
+		() => {
+			// Contextual streaming on a server reads the tree once: the child moving away is not
+			// polled, so only the reading the flip to qualified is gated on sees that it is gone.
+			if (!RunService.IsServer()) return;
+
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("GatedExplained");
+			const elsewhere = folder("GatedElsewhere");
+			const core = addCore(instance);
+			folderIn(core, "Root");
+			collectionService().AddTag(core, "Rig");
+			collectionService().AddTag(instance, "ExplainedOwner");
+			expectDefined(components.getComponent<ExplainedOwner>(instance), "component");
+
+			__harness.clearWarnings();
+			components.removeComponent<Rig>(core);
+			expectEqual(
+				components.getComponent<ExplainedOwner>(instance),
+				undefined,
+				"component after its linked component was removed",
+			);
+
+			core.Parent = elsewhere;
+			expectDefined(components.getComponent<Rig>(core), "the linked component rebuilt elsewhere");
+			expectEqual(
+				components.getComponent<ExplainedOwner>(instance),
+				undefined,
+				"component while its tree is short of Core",
+			);
+
+			// Nothing recorded the guard failing, so the warning reads it the way the gate did.
+			task.wait(0.3);
+			expectTrue(
+				__harness
+					.warnings()
+					.some((line) => line.find("instance guard (child 'Core' is missing", 1, true)[0] !== undefined),
+				`warnings: ${__harness.warnings().join(" | ")}`,
+			);
+
+			instance.Destroy();
+			elsewhere.Destroy();
 			module.extinguish();
 		},
 	],
