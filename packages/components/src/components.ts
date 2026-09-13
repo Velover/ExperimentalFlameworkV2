@@ -1,4 +1,12 @@
-import { Flamework, OnStart, Provider, Reflect, type Modding, getRuntimeConfig } from "@flamework-experimental/core";
+import {
+	Flamework,
+	OnInit,
+	OnStart,
+	Provider,
+	Reflect,
+	type Modding,
+	getRuntimeConfig,
+} from "@flamework-experimental/core";
 import {
 	CollectionService,
 	ReplicatedStorage,
@@ -1611,6 +1619,21 @@ export class Components {
 				component,
 				this.getDependencyResolutionOptions(componentInfo, instance, metadata),
 			);
+
+			// `onInit` runs here, inside the constructing window and before the component is in
+			// any lookup: nothing can see it yet -- not `getComponent`, not a link's
+			// `childComponents`, not an added listener -- and asking for it raises as cyclic rather
+			// than building a second one. It is synchronous, so a Promise it returns is not waited
+			// for; a raise fails the construction, and the instance is detached from the lifecycle
+			// events it was attached to as it was built.
+			if (Flamework.implements<OnInit>(componentInstance)) {
+				const initialising = componentInstance;
+				const [ok, err] = pcall(() => initialising.onInit());
+				if (!ok) {
+					this.module.removeClassInstance(initialising);
+					throw `component '${componentInfo.identifier}' failed to initialise for ${instance.GetFullName()}: ${tostring(err)}`;
+				}
+			}
 		} finally {
 			constructingSet.delete(component);
 			if (constructingSet.isEmpty()) {

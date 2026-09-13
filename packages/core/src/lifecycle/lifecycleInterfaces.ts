@@ -6,10 +6,16 @@
  * it until the Promise settles; a rejection fails ignition.
  *
  * This is where setup that must be complete before other providers start belongs.
+ *
+ * A component implements it too. `Components` runs a component's `onInit` itself, synchronously,
+ * right after construction and before the component can be seen anywhere -- before `getComponent`
+ * hands it back, before another component receives it through a link, before an added listener
+ * hears of it. A Promise it returns is not waited for there, and a raise fails the construction.
  */
 export interface OnInit {
 	/**
-	 * Called once during ignition, in dependency order, before any `onStart`.
+	 * Called once during ignition, in dependency order, before any `onStart`. On a component, once
+	 * right after construction, before anything can see the component.
 	 *
 	 * Yielding or returning a Promise delays the providers after this one, so keep it short.
 	 *

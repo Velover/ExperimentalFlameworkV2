@@ -6,7 +6,7 @@ import {
 	ComponentStreamingMode,
 	Components,
 } from "@flamework-experimental/components";
-import { Flamework, OnStart } from "@flamework-experimental/core";
+import { Flamework, OnInit, OnStart } from "@flamework-experimental/core";
 import { ReplicatedStorage, RunService } from "@rbxts/services";
 import {
 	expectArrayEqual,
@@ -146,6 +146,39 @@ class ExplainedOwner extends BaseComponent<{}, Folder & { Core: Rig }> {}
 /** Warns almost at once about a plain link whose target is the wrong shape. */
 @Component({ tag: "RootedImpatient", warningTimeout: 0.1, attributeWarningTimeout: 0 })
 class RootedImpatient extends BaseComponent<{ Target: Folder & { Root: Folder } }, Folder> {}
+
+/** Records `onInit` and `onStart`, and marks itself ready in `onInit`, which anything that sees it can check. */
+@Component({ tag: "Initialised", warningTimeout: 0 })
+class Initialised extends BaseComponent<{}, Folder> implements OnInit, OnStart {
+	public ready = false;
+
+	public onInit() {
+		this.ready = true;
+		events.push(`init:${this.instance.Name}`);
+	}
+
+	public onStart() {
+		events.push(`start:${this.instance.Name}`);
+	}
+}
+
+/** Links to `Initialised` and records, as it is initialised, whether the linked component already was. */
+@Component({ tag: "InitialisedOwner", warningTimeout: 0 })
+class InitialisedOwner extends BaseComponent<{}, Folder & { Core: Initialised }> implements OnInit {
+	public sawReady = false;
+
+	public onInit() {
+		this.sawReady = this.childComponents.Core.ready;
+	}
+}
+
+/** Raises out of `onInit`, so it is never attached. */
+@Component({ warningTimeout: 0 })
+class BrokenInit extends BaseComponent<{}, Folder> implements OnInit {
+	public onInit() {
+		throw "not today";
+	}
+}
 
 @Component({ tag: "Blocked" })
 class Blocked extends BaseComponent<{}, Folder> {}
@@ -455,6 +488,9 @@ function createComponentModule() {
 		.registerComponent(LateRigChildOwner)
 		.registerComponent(ExplainedOwner)
 		.registerComponent(RootedImpatient)
+		.registerComponent(Initialised)
+		.registerComponent(InitialisedOwner)
+		.registerComponent(BrokenInit)
 		.registerComponent(Blocked)
 		.registerComponent(Allowed)
 		.registerComponent(Enemy)
@@ -3436,6 +3472,73 @@ export = suite("components", [
 
 			instance.Destroy();
 			rooted.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"runs onInit before anything can see the component, and onStart after",
+		() => {
+			events.clear();
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const seen = new Array<boolean>();
+			components.onComponentAdded<Initialised>((component) => seen.push(component.ready));
+
+			const instance = folder("InitOrder");
+			collectionService().AddTag(instance, "Initialised");
+
+			const component = expectDefined(components.getComponent<Initialised>(instance), "component");
+			expectTrue(component.ready, "the component had run onInit by the time getComponent handed it back");
+			expectArrayEqual(
+				events.filter((event) => event.find(":InitOrder", 1, true)[0] !== undefined),
+				["init:InitOrder", "start:InitOrder"],
+				"lifecycle order",
+			);
+			expectArrayEqual(seen, [true], "what the added listener saw");
+
+			module.extinguish();
+		},
+	],
+	[
+		"initialises a linked component before the component that links to it is built",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			// The owner is tagged first, so its link is what builds the child's component.
+			const instance = folder("InitOwner");
+			const core = folderIn(instance, "Core");
+			collectionService().AddTag(instance, "InitialisedOwner");
+			collectionService().AddTag(core, "Initialised");
+
+			const owner = expectDefined(components.getComponent<InitialisedOwner>(instance), "owner");
+			expectTrue(owner.sawReady, "the owner's onInit saw an initialised child");
+			expectTrue(owner.childComponents.Core.ready, "the child in childComponents");
+
+			module.extinguish();
+		},
+	],
+	[
+		"does not attach a component whose onInit raises",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("BrokenInit1");
+			const message = expectThrows(
+				() => components.addComponent<BrokenInit>(instance),
+				"adding a component whose onInit raises",
+			);
+			expectTrue(message.find("failed to initialise", 1, true)[0] !== undefined, `message: ${message}`);
+			expectTrue(message.find("not today", 1, true)[0] !== undefined, `message: ${message}`);
+			expectEqual(
+				components.getComponent<BrokenInit>(instance),
+				undefined,
+				"component after the failed construction",
+			);
+			expectEqual(components.getAllComponents<BrokenInit>().size(), 0, "components of that kind");
+
 			module.extinguish();
 		},
 	],

@@ -176,9 +176,15 @@ export class LifecycleProvider {
 	public addInit(object: OnInit, context: InterfaceContext) {
 		this.initMembers.add(object);
 
+		// Only a provider is initialised by the plugin. An instance attached through `listen` or
+		// `createClassInstance` is owned by whoever created it -- `Components` runs a component's
+		// `onInit` itself, before the component can be seen -- so one built during ignition must not
+		// be initialised a second time here.
+		if (context.kind !== "provider") return;
+
 		if (!this.hasStarted) {
 			this.onInit.push(object);
-		} else if (context.kind === "provider") {
+		} else {
 			this.scheduleLateProvider(object);
 		}
 	}

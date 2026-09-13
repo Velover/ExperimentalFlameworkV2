@@ -420,6 +420,16 @@ to tell an instance that can never carry the component it names (its guard fails
 merely has no component yet: the first raises with the reason, the second warns and leaves the
 attribute alone.
 
+A component's `onInit` runs inside the constructing window -- after `createClassInstance`, before
+the component enters any lookup -- so nothing can see it until it has run: `getComponent` is still
+on its way in, a link that would resolve to it has not been handed it, and an added listener has not
+been told. Asking for the component from inside its own `onInit` raises as cyclic rather than
+building a second one. It is synchronous (a Promise is not waited for), and a raise fails the
+construction: the instance is detached from the lifecycle events `createClassInstance` attached it
+to, and the error names the component and the instance. The lifecycle plugin, for its part, runs
+`onInit` only for providers, before and after ignition alike, so a component built during ignition
+is not initialised a second time at `postIgnite`.
+
 Removal is announced once the component is out of both lookups, which mirrors an addition being
 announced only after it is in them. A link that names the departing component reacts to the
 announcement by taking its own component down, and a cycle of links would otherwise come back round

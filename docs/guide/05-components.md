@@ -57,10 +57,24 @@ ComponentPlugin.createPlugin()
     .build();
 ```
 
+### Lifecycle
+
 Components are constructed through the module that includes `ComponentPlugin`, so they get
 `onTick`, `onPhysics` and `onRender` from **that module's** lifecycle plugin, which every module
-starts with. `onStart` is the exception: `Components` calls it itself, so it works even with
-`disableDefaultLifecycle()`.
+starts with. `onInit` and `onStart` are the exceptions: `Components` calls both itself, so they work
+even with `disableDefaultLifecycle()`. In order:
+
+| Step | When |
+|---|---|
+| constructor | Dependencies injected; `this.instance`, `this.attributes` and every link already resolved. |
+| `onInit()` | Synchronously, right after construction, **before the component can be seen**: `getComponent` has not handed it back yet, no other component holds it in `childComponents` or `attributeComponents`, no `onComponentAdded` listener has heard of it. A Promise it returns is not awaited. A raise fails the construction: the component is not attached, and `addComponent` raises `component '...' failed to initialise for ...`. |
+| attached | `getComponent` answers, links resolve to it, added listeners fire. |
+| `onStart()` | On its own thread, after the component is attached. |
+| per-frame events | From the module's lifecycle plugin. |
+| `destroy()` | When the component is removed. |
+
+Do the setup that anything else may rely on in `onInit`: another component linking to this one
+receives it initialised, whichever of the two was tagged first.
 
 Register by glob when the components are spread across feature folders:
 

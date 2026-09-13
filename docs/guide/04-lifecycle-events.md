@@ -115,6 +115,8 @@ registered with it. Per-frame events start immediately.
 
 The same applies to anything built with `createClassInstance`: it is attached to the lifecycle
 events it implements, and detached by `removeClassInstance` or when the module extinguishes.
+`onInit` is a provider's: the plugin never runs it for an instance, before or after ignition; whoever
+created the instance owns its initialisation.
 
 A **lazy provider** is different: it is a provider, so when it is first resolved after ignition the
 plugin runs its `onInit` and `onStart` for it, on the next resume point, in that order.
@@ -123,8 +125,12 @@ plugin runs its `onInit` and `onStart` for it, on the next resume point, in that
 
 Components are constructed through the module that includes `ComponentPlugin`, so they take their
 per-frame events from **that module's** lifecycle plugin -- the default one, unless the module
-disabled it, in which case components do not tick. `onStart` is the one exception: `Components`
-calls it itself, so it works either way.
+disabled it, in which case components do not tick. `onInit` and `onStart` are the exceptions:
+`Components` calls both itself, so they work either way. `onInit` runs synchronously, right after
+construction and before the component can be seen anywhere -- before `getComponent` hands it back,
+before another component receives it through a link, before an added listener hears of it -- and a
+Promise it returns is not awaited; a raise fails the construction. `onStart` runs on its own thread
+once the component is attached. See [Components](05-components.md#lifecycle).
 
 ## Profiling
 
