@@ -101,3 +101,10 @@ export class EitherComponent extends BaseComponent<{}, (Model & { Root: BasePart
 /** A guard written by hand is kept as it is, with no shape beside it. */
 @Component({ tag: "FixtureCustom", instanceGuard: t.instanceIsA("Part") })
 export class CustomGuardComponent extends BaseComponent<{}, Part> {}
+
+/**
+ * A child naming a component with a tree of its own: the owner's shape stops at the child's class,
+ * and that component's tracker answers for the tree below it.
+ */
+@Component({ tag: "FixtureRigOwner" })
+export class RigOwnerComponent extends BaseComponent<{}, Model & { Rig: RigComponent }> {}

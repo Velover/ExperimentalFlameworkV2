@@ -259,7 +259,11 @@ export class Turret extends BaseComponent<{ Owner: PlayerComponent }, Tree> {
 ```
 
 `this.instance` keeps holding instances -- `this.instance.EffectHandler` is the part the component is
-attached to, which is what the generated instance guard checks. The components themselves live in
+attached to, which is what the generated instance guard checks. The tree *under* a child that names
+a component is that component's business, not the owner's: the owner's shape stops at the child's
+class, and whether the rest is there is what the linked component's own tracker says, under its own
+streaming mode. (A component type cannot be intersected with a tree of its own -- `Handler & { Root:
+Part }` is not a type -- so there is nothing the owner could add.) The components themselves live in
 `childComponents` and `attributeComponents`, whose fields are readonly: Flamework owns them, and
 reassigning one would only put it out of step with the instance.
 
@@ -361,7 +365,9 @@ that instance is tagged.
 | The component a link names is destroyed | Removed, whatever the streaming mode: that is a lifecycle event, not the tree moving. |
 | Some **other** component on a linked instance is destroyed | **Kept**, including a subclass of the one the link names. |
 | A link attribute is re-pointed at something that fails its guard | Removed, and built again if it is pointed back at something valid. |
-| The instance a link attribute names stops passing its guard | Removed, and built again once it passes. The guard carries the whole shape, so a linked model losing the child the link asked for counts, whatever the streaming mode: the target's tree is not this component's tree. |
+| The instance a **plain** link attribute names stops passing its guard | Removed, and built again once it passes. The guard carries the whole shape, so a linked model losing the child the link asked for counts, whatever the streaming mode: the target's tree is not this component's tree. |
+| The tree under a linked **component** breaks | Whatever that component's own streaming mode does. Its tree is its business: under `Watching` it goes and takes this component with it; under `Disabled` it stays, and so does this one. |
+
 | A required link attribute is cleared from outside | Removed. |
 | A plain attribute is changed to a value its guard rejects | **Kept.** The change is filtered out, `this.attributes` holds its last good value and `onAttributeChanged` does not fire. An attribute guard is a construction check, not a criterion. |
 | A child a link names is replaced by another instance of the same name | Removed and built again around the new one, so it never holds a child that has left. |
@@ -410,6 +416,22 @@ component down until it does.
 
 Both default to 5 and `0` disables them. Keep instances an attribute names somewhere that is always
 loaded -- ReplicatedStorage, or inside the same model -- and the wait never happens.
+
+The warning says why, criterion by criterion, and follows a link into the linked component's own
+reasons:
+
+```
+Waiting for component 'Turret'
+Waiting for the following criteria: instance guard (child 'Barrel' is missing (expected BasePart)),
+  child 'EffectHandler' with component 'EffectHandlerComponent' (Workspace.Turret.EffectHandler is
+  waiting for: CollectionService tag), attribute 'Owner' with component 'PlayerComponent' (the
+  attribute names nothing that has streamed in)
+```
+
+Writing a link attribute reads the same way: an instance that could never carry the component it
+names raises with that component's reason (`did not pass the guard for attribute 'Rig' of 'Turret':
+instance guard (child 'Root' is missing (expected BasePart))`), while one of the right shape that
+merely has no component yet is refused with a warning and the attribute left alone.
 
 A warning is only ever about something that is **waiting**. A link watches the instance it names
 without waiting for it, so it neither starts a warning nor keeps one alive: untag an instance again

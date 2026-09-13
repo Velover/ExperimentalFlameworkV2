@@ -146,8 +146,9 @@ function updateInstanceGuard(
 
 	if (!type.checker.isTypeAssignableTo(superInstanceType, instanceType)) {
 		// As data wherever the type is only classes and children, which the runtime watches one
-		// child at a time and can explain; as a guard otherwise.
-		const shape = buildInstanceShape(state, node, instanceType);
+		// child at a time and can explain; as a guard otherwise. A child naming a component has a
+		// tree of its own that is that component's business, so the shape stops at its class.
+		const shape = buildInstanceShape(state, node, instanceType, getComponentChildNames(state, node));
 		if (shape !== undefined) {
 			properties.push(f.propertyAssignmentDeclaration("instanceShape", shape));
 		} else {
@@ -235,6 +236,23 @@ function createLink(
 }
 
 /**
+ * The direct children of the declared tree that name a component. Their trees belong to that
+ * component -- its tracker checks and watches them -- so the owner's shape stops at their class.
+ */
+function getComponentChildNames(state: TransformState, node: ts.ClassDeclaration) {
+	const names = new Set<string>();
+	const instanceType = getMarkedType(state, node, COMPONENT_BRAND, "intrinsic-component-instance-links");
+	if (!instanceType) return names;
+
+	for (const [property, declaredType] of getDeclaredChildren(state, node, instanceType)) {
+		const targetType = state.typeChecker.getNonNullableType(declaredType);
+		if (getComponentInstanceType(state, targetType, node)) names.add(property.name);
+	}
+
+	return names;
+}
+
+/**
  * Discovers the components and instances a component links to, from the attributes it declares and
  * from its instance tree. `Components` waits for each one and keeps it resolved.
  */
@@ -256,11 +274,10 @@ function updateLinks(state: TransformState, node: ts.ClassDeclaration, propertie
 			const targetType = state.typeChecker.getNonNullableType(declaredType);
 			const optional = isOptionalMember(state, property, declaredType);
 
-			const componentInstance = getComponentInstanceType(state, targetType, node);
-			if (componentInstance) {
-				links.push(
-					createLink(state, node, "attribute", property.name, optional, targetType, componentInstance),
-				);
+			if (getComponentInstanceType(state, targetType, node)) {
+				// No guard or shape of its own: the instance a component link names has to carry
+				// that component, and that component's tracker is what checks its tree.
+				links.push(createLink(state, node, "attribute", property.name, optional, targetType));
 			} else if (isInstanceType(targetType)) {
 				links.push(createLink(state, node, "attribute", property.name, optional, undefined, targetType));
 			}

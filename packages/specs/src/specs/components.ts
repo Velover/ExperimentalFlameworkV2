@@ -127,6 +127,26 @@ class DeepImpatient extends BaseComponent<{}, Folder & { Root: Folder & { Textur
 @Component({ tag: "Parted", streamingMode: ComponentStreamingMode.Watching, warningTimeout: 0 })
 class Parted extends BaseComponent<{}, Folder & { Core: Part }> {}
 
+/** Reads its tree once, so the owner below learns that a linked child's tree is that child's business. */
+@Component({ tag: "FrozenRig", warningTimeout: 0, streamingMode: ComponentStreamingMode.Disabled })
+class FrozenRig extends BaseComponent<{}, Folder & { Root: Folder }> {}
+
+/** Watches its own tree; the tree under `Core` belongs to `FrozenRig`. */
+@Component({ tag: "FrozenRigOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
+class FrozenRigOwner extends BaseComponent<{}, Folder & { Core: FrozenRig }> {}
+
+/** The same owner over a child whose component does watch its tree. */
+@Component({ tag: "LateRigChildOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
+class LateRigChildOwner extends BaseComponent<{}, Folder & { Core: LateRig }> {}
+
+/** Warns almost at once about a child whose component is missing, in that component's words. */
+@Component({ tag: "ExplainedOwner", warningTimeout: 0.1 })
+class ExplainedOwner extends BaseComponent<{}, Folder & { Core: Rig }> {}
+
+/** Warns almost at once about a plain link whose target is the wrong shape. */
+@Component({ tag: "RootedImpatient", warningTimeout: 0.1, attributeWarningTimeout: 0 })
+class RootedImpatient extends BaseComponent<{ Target: Folder & { Root: Folder } }, Folder> {}
+
 @Component({ tag: "Blocked" })
 class Blocked extends BaseComponent<{}, Folder> {}
 
@@ -430,6 +450,11 @@ function createComponentModule() {
 		.registerComponent(Deep)
 		.registerComponent(DeepImpatient)
 		.registerComponent(Parted)
+		.registerComponent(FrozenRig)
+		.registerComponent(FrozenRigOwner)
+		.registerComponent(LateRigChildOwner)
+		.registerComponent(ExplainedOwner)
+		.registerComponent(RootedImpatient)
 		.registerComponent(Blocked)
 		.registerComponent(Allowed)
 		.registerComponent(Enemy)
@@ -2560,6 +2585,10 @@ export = suite("components", [
 			// the class. A folder without one can never be right, so this raises.
 			const message = expectThrows(() => component.setRigged(folder("NoRoot")), "writing a rootless folder");
 			expectTrue(message.find("did not pass the guard")[0] !== undefined, "message names the guard");
+			expectTrue(
+				message.find("child 'Root' is missing (expected Folder)", 1, true)[0] !== undefined,
+				"message says what is wrong",
+			);
 			expectEqual(instance.GetAttribute("Rigged"), undefined, "attribute after the refused write");
 
 			module.extinguish();
@@ -3301,6 +3330,101 @@ export = suite("components", [
 			expectDefined(components.getComponent<Parted>(instance), "component once the name resolves to the Part");
 			expectEqual(instance.FindFirstChild("Core"), part, "the Core it reads");
 
+			module.extinguish();
+		},
+	],
+	[
+		"leaves the tree under a linked child to that child's component",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			// `FrozenRig` reads its tree once. The owner watches its own tree, but the tree under
+			// `Core` is not the owner's: what the child's component keeps, the owner keeps.
+			const instance = folder("FrozenRigOwner1");
+			const core = folderIn(instance, "Core");
+			const root = folderIn(core, "Root");
+			collectionService().AddTag(core, "FrozenRig");
+			collectionService().AddTag(instance, "FrozenRigOwner");
+			const owner = expectDefined(components.getComponent<FrozenRigOwner>(instance), "owner");
+
+			root.Destroy();
+			__harness.flush();
+			expectDefined(components.getComponent<FrozenRig>(core), "the child's component after its tree broke");
+			expectEqual(components.getComponent<FrozenRigOwner>(instance), owner, "the owner after the child's tree broke");
+
+			// The child itself is the owner's tree.
+			core.Parent = undefined;
+			__harness.flush();
+			expectEqual(components.getComponent<FrozenRigOwner>(instance), undefined, "the owner after the child left");
+
+			module.extinguish();
+		},
+	],
+	[
+		"follows the tree under a linked child through that child's component when it watches it",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("LateRigChildOwner1");
+			const core = folderIn(instance, "Core");
+			const root = folderIn(core, "Root");
+			collectionService().AddTag(core, "LateRig");
+			collectionService().AddTag(instance, "LateRigChildOwner");
+			expectDefined(components.getComponent<LateRigChildOwner>(instance), "owner");
+
+			root.Parent = undefined;
+			__harness.flush();
+			expectEqual(components.getComponent<LateRig>(core), undefined, "the child's component after its tree broke");
+			expectEqual(
+				components.getComponent<LateRigChildOwner>(instance),
+				undefined,
+				"the owner after the child's component went",
+			);
+
+			root.Parent = core;
+			__harness.flush();
+			expectDefined(components.getComponent<LateRig>(core), "the child's component once its tree is back");
+			expectDefined(components.getComponent<LateRigChildOwner>(instance), "the owner once the child's component is back");
+
+			module.extinguish();
+		},
+	],
+	[
+		"says what a linked component is waiting for, and why a plain link's target is the wrong shape",
+		() => {
+			const module = createComponentModule();
+			module.resolveDependency<Components>();
+
+			const instance = folder("ExplainedOwner1");
+			const core = folderIn(instance, "Core");
+			collectionService().AddTag(core, "Rig");
+
+			const rooted = folder("RootedImpatient1");
+			const target = folder("RootlessTarget");
+			rooted.SetAttribute("Target", new InstanceHandle(target));
+
+			__harness.clearWarnings();
+			collectionService().AddTag(instance, "ExplainedOwner");
+			collectionService().AddTag(rooted, "RootedImpatient");
+			task.wait(0.3);
+
+			const warnings = __harness.warnings();
+			const linked = `child 'Core' with component '${Flamework.id<Rig>()}' (${core.GetFullName()} is waiting for: instance guard (child 'Root' is missing (expected Folder)))`;
+			expectTrue(
+				warnings.some((line) => line.find(linked, 1, true)[0] !== undefined),
+				`warnings: ${warnings.join(" | ")}`,
+			);
+
+			const plain = `attribute 'Target' (${target.GetFullName()}: child 'Root' is missing (expected Folder))`;
+			expectTrue(
+				warnings.some((line) => line.find(plain, 1, true)[0] !== undefined),
+				`warnings: ${warnings.join(" | ")}`,
+			);
+
+			instance.Destroy();
+			rooted.Destroy();
 			module.extinguish();
 		},
 	],

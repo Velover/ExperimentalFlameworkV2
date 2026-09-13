@@ -49,6 +49,9 @@ interface PendingLink {
 /** How long an unresolved attribute is waited on at a time when its warning is disabled. */
 const LINK_POLL_INTERVAL = 5;
 
+/** How far a warning follows links for their reasons before it stops naming them. */
+const MAX_REASON_DEPTH = 2;
+
 /** How a link reads in the warning that lists what a component is still waiting for. */
 function describeLink(link: ComponentLink) {
 	const target = link.kind === "attribute" ? `attribute '${link.name}'` : `child '${link.name}'`;
@@ -352,7 +355,7 @@ export class Components {
 		this.componentWaiters.clear();
 	}
 
-	private getComponentTracker(component: Constructor) {
+	private getComponentTracker(component: Constructor): ComponentTracker {
 		const existingTracker = this.trackers.get(component);
 		if (existingTracker) return existingTracker;
 
@@ -386,8 +389,14 @@ export class Components {
 			linksMet: hasLinks ? (instance) => this.areLinksMet(componentInfo, instance) : undefined,
 			tag: componentInfo.config.tag,
 			typeGuard: instanceGuard,
-			describeTypeGuard:
-				instanceShape !== undefined ? (instance) => describeShapeMismatch(instanceShape, instance) : undefined,
+			describeCriterion: (instance, criterion, depth) =>
+				this.describeCriterion(componentInfo, instanceShape, instance, criterion, depth),
+			unmetLinks: hasLinks
+				? (instance) =>
+						componentInfo.links
+							.filter((link) => !this.isLinkMet(componentInfo, instance, link))
+							.map(describeLink)
+				: undefined,
 			watchTypeGuard:
 				instanceShape !== undefined
 					? (instance, changed) => watchShape(instance, instanceShape, changed)
@@ -400,6 +409,81 @@ export class Components {
 
 		this.trackers.set(component, tracker);
 		return tracker;
+	}
+
+	/**
+	 * One of a component's unmet criteria, as the warning says it. The instance guard names the
+	 * child that is wrong when it was written as a shape; a link names what its target is short of,
+	 * in the linked component's own words, as far down as `MAX_REASON_DEPTH` lets a ring of links go.
+	 */
+	private describeCriterion(
+		componentInfo: ComponentInfo,
+		shape: InstanceShape | undefined,
+		instance: Instance,
+		criterion: string,
+		depth: number,
+	): string | undefined {
+		if (criterion === "type guard") {
+			const reason = shape !== undefined ? describeShapeMismatch(shape, instance) : undefined;
+			return reason !== undefined ? `instance guard (${reason})` : "instance guard";
+		}
+
+		const link = componentInfo.links.find((candidate) => describeLink(candidate) === criterion);
+		if (link === undefined) return undefined;
+
+		const reason = this.describeUnmetLink(instance, componentInfo, link, depth);
+		return reason !== undefined ? `${criterion} (${reason})` : criterion;
+	}
+
+	/**
+	 * Why a link is not met on an instance: the target is not there, does not have the tree a plain
+	 * link asks for, or -- for a link naming a component -- cannot carry that component here, or is
+	 * short of what it needs, which that component's own tracker says.
+	 */
+	private describeUnmetLink(
+		instance: Instance,
+		componentInfo: ComponentInfo,
+		link: ComponentLink,
+		depth: number,
+	): string | undefined {
+		const target = this.resolveLinkTarget(instance, componentInfo, link);
+		if (target === undefined) {
+			return link.kind === "attribute" ? "the attribute names nothing that has streamed in" : "no such child";
+		}
+
+		if (!this.passesLinkGuard(link, target)) {
+			const reason = this.describeLinkGuard(link, target);
+			return reason !== undefined
+				? `${target.GetFullName()}: ${reason}`
+				: `${target.GetFullName()} did not pass the guard`;
+		}
+
+		if (link.component === undefined) return undefined;
+
+		const linkedComponent = this.getLinkedComponent(link);
+		if (this.hasComponent(target, linkedComponent)) return undefined;
+
+		const name = target.GetFullName();
+		const predicate = this.getConfigValue(linkedComponent, "predicate");
+		if (predicate !== undefined && !predicate(target)) {
+			return `${name} is refused by the predicate of '${link.component}'`;
+		}
+
+		const linkedInfo = this.components.get(linkedComponent);
+		if (linkedInfo !== undefined && !this.passesAncestorLists(linkedInfo, target)) {
+			return `${name} is under an ancestor that '${link.component}' is not built under`;
+		}
+
+		if (!target.IsDescendantOf(game)) {
+			return `${name} is not in the DataModel`;
+		}
+
+		if (depth >= MAX_REASON_DEPTH) return `${name} has no component '${link.component}'`;
+
+		const reasons = this.getComponentTracker(linkedComponent).describeUnmet(target, depth + 1);
+		return reasons.isEmpty()
+			? `${name} has no component '${link.component}' yet`
+			: `${name} is waiting for: ${reasons.join(", ")}`;
 	}
 
 	/**
@@ -510,7 +594,7 @@ export class Components {
 	 * with: an instance that is there, passes the guard, and either already carries the component
 	 * the link names or is somewhere Flamework would build one.
 	 */
-	private isLinkMet(componentInfo: ComponentInfo, instance: Instance, link: ComponentLink) {
+	private isLinkMet(componentInfo: ComponentInfo, instance: Instance, link: ComponentLink): boolean {
 		const target = this.resolveLinkTarget(instance, componentInfo, link);
 		if (target === undefined) return link.optional;
 
@@ -1026,10 +1110,18 @@ export class Components {
 				// of timing rather than a mistake in the value. Writing it anyway would unqualify
 				// this component and destroy it mid-write, so the write is refused and said out
 				// loud instead -- wait for the component first, then assign.
-				if (
-					link.component !== undefined &&
-					this.resolveLinkedComponent(value, this.getLinkedComponent(link)) === undefined
-				) {
+				const linkedComponent = link.component !== undefined ? this.getLinkedComponent(link) : undefined;
+				if (linkedComponent !== undefined && this.resolveLinkedComponent(value, linkedComponent) === undefined) {
+					// An instance that can never carry the component -- the wrong tree for it -- is a
+					// mistake in the value, said in that component's own words; one that merely has
+					// no component yet is left to the warning below.
+					const tracker = this.getComponentTracker(linkedComponent);
+					if (tracker.unmetCriteriaOf(value).includes("type guard")) {
+						error(
+							`'${tostring(value)}' did not pass the guard for attribute '${key}' of '${componentInfo.identifier}': ${tracker.describe(value, "type guard")}`,
+						);
+					}
+
 					warn(
 						`[Flamework] ${value.GetFullName()} has no component '${link.component}', which attribute`,
 						`'${key}' of '${componentInfo.identifier}' links to; the attribute was left alone`,
@@ -1269,7 +1361,11 @@ export class Components {
 	 * a link goes through them the way the tag that would build the component does, while
 	 * `getComponent` does not -- asking by hand is how you get past them.
 	 */
-	private canCreateComponentEager(instance: Instance, component: Constructor, checkAncestors = false) {
+	private canCreateComponentEager(
+		instance: Instance,
+		component: Constructor,
+		checkAncestors = false,
+	): boolean | undefined {
 		const componentInfo = this.components.get(component);
 		if (!componentInfo) return false;
 

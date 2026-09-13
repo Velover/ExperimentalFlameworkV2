@@ -200,9 +200,10 @@ describe("component links", () => {
 		expect(source).toContain(`kind = "attribute", name = "Spare", optional = true, shape = { isA = { "Part" }, },`);
 	});
 
-	test("links the component an attribute names, by its identifier", () => {
+	test("links the component an attribute names, by its identifier, with no shape of its own", () => {
+		// The instance has to carry the component, and that component's tracker checks its tree.
 		expect(normalize(emitted("components"))).toContain(
-			`kind = "attribute", name = "Handler", optional = false, shape = { isA = { "BasePart" }, }, component = "fw:components@HandlerComponent",`,
+			`kind = "attribute", name = "Handler", optional = false, component = "fw:components@HandlerComponent",`,
 		);
 	});
 
@@ -217,12 +218,13 @@ describe("component links", () => {
 		);
 	});
 
-	test("carries the structure a linked component needs into the link's shape", () => {
-		// Not just the class: a component that declares a tree only accepts an instance that has it,
-		// wherever it is named from.
-		expect(normalize(emitted("components"))).toContain(
-			`name = "Rig", optional = false, shape = { isA = { "Model" }, children = { Root = { isA = { "BasePart" }, }, }, }, component =`,
-		);
+	test("leaves the tree a linked component needs to that component", () => {
+		// The link names the component; what its instance has to look like is that component's
+		// own shape, checked and watched by its own tracker rather than written here again.
+		const source = normalize(emitted("components"));
+
+		expect(source).toContain(`name = "Rig", optional = false, component = "fw:components@RigComponent",`);
+		expect(source).not.toContain(`name = "Rig", optional = false, shape`);
 	});
 
 	test("leaves an attribute that asks for the handle itself unlinked", () => {
@@ -290,6 +292,14 @@ describe("instance shapes", () => {
 
 		expect(source).toContain(
 			`tag = "FixtureEither", attributes = {}, instanceGuard = t.union(t.intersection(t.instanceIsA("Model"), t.children({ Root = t.instanceIsA("BasePart"), })), t.intersection(t.instanceIsA("Folder"), t.children({ Core = t.instanceIsA("Folder"), }))), }`,
+		);
+	});
+
+	test("stops at the class of a child that names a component", () => {
+		// `RigComponent` asks for a `Root`; the owner's shape does not repeat that, because the
+		// child's component is what checks and watches the tree below the child.
+		expect(normalize(emitted("components"))).toContain(
+			`instanceShape = { isA = { "Model" }, children = { Rig = { isA = { "Model" }, }, }, }`,
 		);
 	});
 

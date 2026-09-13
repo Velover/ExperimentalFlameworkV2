@@ -57,15 +57,17 @@ export interface ComponentLink {
 	optional: boolean;
 
 	/**
-	 * Guard for the linked instance. Attribute links only: a child is already covered by the
-	 * component's own instance guard. Written when the declared type says more than `shape` can.
+	 * Guard for the linked instance. Attribute links naming a plain instance only: a child is
+	 * already covered by the component's own instance guard, and a link naming a component leaves
+	 * the target's tree to that component's tracker. Written when the declared type says more than
+	 * `shape` can.
 	 */
 	guard?: t.check<unknown>;
 
 	/**
 	 * The tree the linked instance must have, as data: what the transformer writes wherever the
 	 * declared type is only classes and children, so the target can be watched one child at a
-	 * time and a mismatch named. Attribute links only, like `guard`.
+	 * time and a mismatch named. Attribute links naming a plain instance only, like `guard`.
 	 */
 	shape?: InstanceShape;
 

@@ -15,17 +15,33 @@ interface Shape {
  * watches: `{ isA = { "Model" }, children = { Root = { isA = { "BasePart" } } } }` for
  * `Model & { Root: BasePart }`.
  *
+ * `componentChildren` names the direct children that are typed as a component. Their own trees
+ * belong to that component -- its tracker checks and watches them -- so the shape stops at their
+ * class.
+ *
  * Nothing when the type says more than classes and children -- a union whose members declare
  * children of their own, a member that is not an instance -- and the caller falls back to a `t`
  * guard, which can say anything but has to read the whole tree to say it.
  */
-export function buildInstanceShape(state: TransformState, node: ts.Node, type: ts.Type): ts.Expression | undefined {
-	const shape = readShape(state, node, type, false);
+export function buildInstanceShape(
+	state: TransformState,
+	node: ts.Node,
+	type: ts.Type,
+	componentChildren?: ReadonlySet<string>,
+): ts.Expression | undefined {
+	const shape = readShape(state, node, type, false, true, componentChildren);
 
 	return shape === undefined ? undefined : emitShape(shape);
 }
 
-function readShape(state: TransformState, node: ts.Node, type: ts.Type, allowOptional: boolean): Shape | undefined {
+function readShape(
+	state: TransformState,
+	node: ts.Node,
+	type: ts.Type,
+	allowOptional: boolean,
+	descend: boolean,
+	componentChildren?: ReadonlySet<string>,
+): Shape | undefined {
 	const checker = state.typeChecker;
 	let members: readonly ts.Type[] = [type];
 	let optional = false;
@@ -52,6 +68,8 @@ function readShape(state: TransformState, node: ts.Node, type: ts.Type, allowOpt
 		if (className === undefined) return undefined;
 		if (!isA.includes(className)) isA.push(className);
 
+		if (!descend) continue;
+
 		const declared = new Map<string, Shape>();
 		for (const property of member.getProperties()) {
 			if (instanceType.getProperty(property.name)) continue;
@@ -59,7 +77,7 @@ function readShape(state: TransformState, node: ts.Node, type: ts.Type, allowOpt
 			const propertyType = checker.getTypeOfPropertyOfType(member, property.name);
 			if (!propertyType) return undefined;
 
-			const child = readShape(state, node, propertyType, true);
+			const child = readShape(state, node, propertyType, true, !componentChildren?.has(property.name));
 			if (child === undefined) return undefined;
 
 			declared.set(property.name, child);

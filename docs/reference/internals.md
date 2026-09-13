@@ -398,14 +398,27 @@ attached component if there is one and otherwise builds one only where `canCreat
 with `checkAncestors` says a link may. Reaching for `getComponent` there instead would build the
 component the criterion had just refused, under the very ancestor the lists exist to keep it out of.
 
-The guard is part of the criterion rather than a question asked once on the way in: it carries the
-whole shape the target has to have, and a target can gain that shape -- or lose it -- long after the
-attribute naming it was written. So a link with a shape follows the target one required child at a
-time, as the instance guard's own watcher does, and a link with a guard subscribes to the target's
-`DescendantAdded` and `DescendantRemoving`; either re-reads the criterion on a deferred task. This is how a link to a component whose tree fills in late is ever met: without
-it the target would have nothing watching it at all, because a failing guard is what kept the
-subscription to the linked component's tracker from being made in the first place. Only attribute
-links carry a guard; a child's shape is already part of its owner's instance guard.
+A plain instance link's guard is part of the criterion rather than a question asked once on the way
+in: it carries the whole shape the target has to have, and a target can gain that shape -- or lose
+it -- long after the attribute naming it was written. So a link with a shape follows the target one
+required child at a time, as the instance guard's own watcher does, and a link with a guard
+subscribes to the target's `DescendantAdded` and `DescendantRemoving`; either re-reads the criterion
+on a deferred task. A link naming a *component* carries neither: the tree its target has to have is
+that component's own shape, checked and watched by that component's tracker under its own streaming
+mode, and the link only asks whether the component is there or could be built there. A component
+type cannot be intersected with a tree of its own (`Handler & { Root: Part }` is not a type), so
+there is nothing a link could add to what the component already says. The owner's shape stops at a
+component-typed child's class for the same reason: the tree below it is not the owner's tree, and
+what the child's component keeps under `Disabled`, the owner keeps too.
+
+The warning says why. `ComponentTracker.describeUnmet` reads an instance's unmet criteria -- off its
+entry, or from the instance when it has none -- and `Components` explains each: the instance guard
+with the child that is wrong, a dependency with what it waits for, a link with what its target is
+short of, which for a component link is that component's own `describeUnmet` on the target,
+followed to a depth of two so that a ring of links ends. The attribute writer uses the same reading
+to tell an instance that can never carry the component it names (its guard fails) from one that
+merely has no component yet: the first raises with the reason, the second warns and leaves the
+attribute alone.
 
 Removal is announced once the component is out of both lookups, which mirrors an addition being
 announced only after it is in them. A link that names the departing component reacts to the

@@ -9,6 +9,9 @@ const ATOMIC_MODES = new Set<Enum.ModelStreamingMode>([
 
 type Listener = (isQualified: boolean, instance: Instance) => void;
 
+/** How far a warning follows links and dependencies for their reasons before it stops naming them. */
+const MAX_REASON_DEPTH = 2;
+
 interface InstanceTracker {
 	isQualified: boolean;
 	unmetCriteria: Set<unknown>;
@@ -79,10 +82,18 @@ export interface Criteria {
 	typeGuard?: (instance: Instance) => boolean;
 
 	/**
-	 * Why the instance guard fails on an instance, for the warning. Only a guard the transformer
-	 * wrote as a shape can say; one written by hand only says that it failed.
+	 * Explains one unmet criterion on an instance, for the warning: which child the instance guard
+	 * is missing when it was written as a shape, or what a link's target is still short of. `depth`
+	 * is how far the explanation has already followed links and dependencies, so that a ring of
+	 * them ends.
 	 */
-	describeTypeGuard?: (instance: Instance) => string | undefined;
+	describeCriterion?: (instance: Instance, criterion: string, depth: number) => string | undefined;
+
+	/**
+	 * The links that are not met on an instance right now, by the name each is recorded under. For
+	 * an instance that has no entry to read them from.
+	 */
+	unmetLinks?: (instance: Instance) => string[];
 
 	/**
 	 * Watches the instance for the guard one required child at a time, calling `changed` whenever
@@ -333,6 +344,59 @@ export class ComponentTracker {
 	}
 
 	/**
+	 * The criteria an instance is short of: read off its entry when it has one, and from the
+	 * instance otherwise -- the tag, the instance guard, each dependency and each link, as
+	 * `testInstance` would find them.
+	 */
+	public unmetCriteriaOf(instance: Instance): defined[] {
+		const tracker = this.getInstanceTracker(instance, false);
+		if (tracker !== undefined) return [...tracker.unmetCriteria] as defined[];
+
+		const unmet = new Array<defined>();
+		const { tag, typeGuard, dependencies, unmetLinks } = this.criteria;
+
+		if (tag !== undefined && !CollectionService.HasTag(instance, tag)) unmet.push("CollectionService tag");
+		if (typeGuard !== undefined && !typeGuard(instance)) unmet.push("type guard");
+
+		if (dependencies !== undefined) {
+			for (const dependency of dependencies) {
+				if (!dependency.checkInstance(instance)) unmet.push(dependency);
+			}
+		}
+
+		if (unmetLinks !== undefined) {
+			for (const link of unmetLinks(instance)) unmet.push(link);
+		}
+
+		return unmet;
+	}
+
+	/**
+	 * One criterion as the warning says it: the instance guard with the child that is wrong, a link
+	 * with what its target is short of, a dependency with what it is waiting for in turn.
+	 */
+	public describe(instance: Instance, criterion: defined, depth = 0): string {
+		if (typeIs(criterion, "string")) {
+			return this.criteria.describeCriterion?.(instance, criterion, depth) ?? criterion;
+		}
+
+		if (criterion instanceof ComponentTracker) {
+			const reasons = depth < MAX_REASON_DEPTH ? criterion.describeUnmet(instance, depth + 1) : [];
+
+			return reasons.isEmpty()
+				? `dependency '${criterion.identifier}'`
+				: `dependency '${criterion.identifier}' (waiting for: ${reasons.join(", ")})`;
+		}
+
+		return tostring(criterion);
+	}
+
+	/** Everything an instance is still waiting for, as the warning lists it. */
+	public describeUnmet(instance: Instance, depth = 0): string[] {
+		return this.unmetCriteriaOf(instance).map((criterion) => this.describe(instance, criterion, depth));
+	}
+
+	/**
 	 * Starts the warning that reports what a component is still waiting for, unless it is already
 	 * running or there is nothing left to wait for.
 	 *
@@ -348,30 +412,9 @@ export class ComponentTracker {
 			// warning is pending, and a spent one would refuse every later wait on this instance.
 			tracker.timeoutWarningThread = undefined;
 
-			const reasons = new Array<string>();
-			const { describeTypeGuard } = this.criteria;
-
-			for (const criteria of tracker.unmetCriteria) {
-				if (!typeIs(criteria, "string")) continue;
-
-				// The instance guard can say which child it is waiting for when it was written as
-				// a shape; a guard written by hand only says that it failed.
-				const reason =
-					criteria === "type guard" && describeTypeGuard !== undefined
-						? describeTypeGuard(instance)
-						: undefined;
-
-				reasons.push(reason !== undefined ? `instance guard (${reason})` : criteria);
-			}
-
-			const { dependencies } = this.criteria;
-			if (dependencies) {
-				for (const dependency of dependencies) {
-					if (tracker.unmetCriteria.has(dependency)) {
-						reasons.push(`dependency '${dependency.identifier}'`);
-					}
-				}
-			}
+			// Each criterion with its reason: the child the instance guard is missing, what a link's
+			// target is short of in the linked component's own words, what a dependency waits for.
+			const reasons = this.describeUnmet(instance);
 
 			warn(`[Flamework] Infinite yield possible on instance '${instance.GetFullName()}'`);
 			warn(`Waiting for component '${this.identifier}'`);
