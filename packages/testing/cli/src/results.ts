@@ -20,6 +20,8 @@ export interface SectionResult {
 export interface RunResult {
 	ok: boolean;
 	realm: "server" | "client";
+	/** The project the place was made under, read off Workspace's attribute; absent when the place was not patched. */
+	project?: string;
 	passed: number;
 	failed: number;
 	durationMs: number;
@@ -75,6 +77,7 @@ export function parseRunResult(results: string[] | undefined): RunResult {
 	return {
 		ok: value.ok,
 		realm: value.realm === "client" ? "client" : "server",
+		...(typeof value.project === "string" ? { project: value.project } : {}),
 		passed: numberOr(value.passed, 0),
 		failed: numberOr(value.failed, 0),
 		durationMs: numberOr(value.durationMs, 0),
@@ -137,9 +140,8 @@ export function formatSummary(result: RunResult): string[] {
 	}
 
 	lines.push("");
-	lines.push(
-		`${result.passed} passed, ${result.failed} failed in ${Math.round(result.durationMs)}ms (${result.realm})`,
-	);
+	const where = result.project === undefined ? result.realm : `${result.realm}, project ${result.project}`;
+	lines.push(`${result.passed} passed, ${result.failed} failed in ${Math.round(result.durationMs)}ms (${where})`);
 	lines.push(result.ok ? "PASS" : "FAIL");
 	return lines;
 }

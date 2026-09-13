@@ -8,7 +8,7 @@ export * from "./expect";
 
 // Running
 export { Testing, BINDABLE_NAME, REMOTE_NAME, __isAttached } from "./host";
-export { runTests, getRealm, DEFAULT_TIMEOUT } from "./runner";
+export { runTests, getRealm, getProject, DEFAULT_TIMEOUT, PROJECT_ATTRIBUTE } from "./runner";
 export type { Realm, RunOptions, RunResult, RunnerConfig, SectionResult, TestFilter, TestResult } from "./runner";
 
 // The plugin

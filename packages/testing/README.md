@@ -43,8 +43,10 @@ first.
 | Command | Does |
 |---|---|
 | `test <file> [--realm server\|client\|both] [--sections a,b] [--list] [--json] [--keep] [--original <rbxl>]` | The above. |
+| `test <file> --project <a.project.json> [--project <b.project.json>]` | The above once per project, each in a place made under that project's `$properties`; see [Running under several Rojo projects](#running-under-several-rojo-projects). |
 | `test <file> --cloud` | The cloud run instead, see below. |
 | `patch <file> --original <rbxl> [--out <path>]` | Lays the build over a copy of the original and writes the result, without running anything. |
+| `patch <file> --project <file> [--out <path>]` | Sets the project's `$properties` on the build and writes that, `place.<project>.rbxl`; with an original, patches a copy of it under that project. |
 
 ## Studio commands
 
@@ -120,7 +122,9 @@ The key needs `universe-places:write` and `universe.place.luau-execution-session
 `:write` for the testing experience. The `cloud` section is read by this CLI only and is never
 compiled into the place. `--testing-universe`, `--testing-place`, `--key`, `--original` and the
 variables `TESTING_UNIVERSE_ID`, `TESTING_PLACE_ID`, `ROBLOX_API_KEY` and `ORIGINAL_PLACE`
-override it; prefer the environment for the key, a flag lands in the shell history.
+override it; prefer the environment for the key, a flag lands in the shell history. The projects
+a run follows are `--project` or `ROJO_PROJECT`, see [Running under several Rojo
+projects](#running-under-several-rojo-projects).
 
 ## Patching a copy of the original place
 
@@ -139,9 +143,69 @@ What the patch does is read from the Rojo project file (`--project`, default
 | `$properties` | Applied, typed from the reflection database: booleans, numbers, strings, enums, `Vector3`, `Vector2`, `Color3`. |
 | Everything else in the original | Untouched. |
 
-The patch prints one line per change it made and anything it skipped. It runs under
-[Lune](https://lune-org.github.io/docs), which reads and writes place files; without `lune` on the
-path (or `LUNE_EXE`) a command given an original stops before running or uploading anything.
+The patch prints one line per change it made and anything it skipped, and stamps the place with
+the name of the project it followed (`Workspace`'s `FlameworkTestProject` attribute, `default` for
+`default.project.json`). It runs under [Lune](https://lune-org.github.io/docs), which reads and
+writes place files; without `lune` on the path (or `LUNE_EXE`) a command given an original stops
+before running or uploading anything.
+
+## Running under several Rojo projects
+
+A place file takes any property, including the ones no script may set once the game runs. So a
+project's `$properties` on `Workspace` are how a test run gets a `SignalBehavior` or a streaming
+setup: the patch writes them into the place before Studio opens it, and the play session honours
+them. Verified on 2026-09-13 with Lune 0.10.5 and Rojo 7.7.0:
+
+| `Workspace` property | Values | Set by the patch | In the play session |
+|---|---|---|---|
+| `SignalBehavior` | `Default`, `Immediate`, `Deferred`, `AncestryDeferred` | yes | `Deferred` measured: no signal fires inside the write, all after `task.wait()`; `Default` in a fresh place behaves as `Immediate` |
+| `StreamingEnabled` | boolean | yes | readable, and far content stays off the client |
+| `StreamingTargetRadius` | studs | yes | 256 measured: a part 600 studs out never reaches the client, which the default 1024 would send |
+| `ModelStreamingBehavior` | `Legacy`, `Default`, `Improved` | yes | `Improved` measured: a far Model is absent on the client entirely, where `Default` sends the empty container |
+| `StreamingMinRadius` | studs | yes | written to the file; not readable and not told apart from the target radius in a small place |
+| `StreamingIntegrityMode` | `Default`, `MinimumRadiusPause`, `PauseOutsideLoadedArea`, `Disabled` | yes | written to the file; `PauseOutsideLoadedArea` did not pause a teleported character in the time it took the far area to stream in |
+
+Only `StreamingEnabled` can be read back from a script; the other five are `NotScriptable` and
+show only in what the engine does. Any other property the reflection database knows takes the
+same route: `Workspace.Gravity`, `PhysicsSteppingMethod`, `Lighting`'s, `SoundService`'s.
+
+To test under one of these, write a project file that differs from `default.project.json` in its
+`$properties` and name it on the run. `tests/deferred.project.json`:
+
+```jsonc
+{
+  "name": "flamework-game",
+  "tree": {
+    // the same tree as default.project.json, with:
+    "Workspace": { "$className": "Workspace", "$properties": { "SignalBehavior": "Deferred" } }
+  }
+}
+```
+
+```console
+bunx flamework-test test place.rbxl --project tests/deferred.project.json
+bunx flamework-test test place.rbxl --project tests/deferred.project.json --project tests/streaming.project.json
+```
+
+Each project is one run of every realm in a place of its own name, `place.deferred.rbxl`, under a
+heading, every one of them even after one fails, with `projects: deferred passed, streaming FAILED`
+at the end and the worst exit code. `--project` may be repeated or comma-separated;
+`ROJO_PROJECT=tests/deferred.project.json,tests/streaming.project.json` in `.env` is the same
+without the flags, and `ROJO_PROJECT=` turns it off again. With no project named, the run is the
+plain one: the build as it is, or laid over the original when one is named, following
+`default.project.json`. A chosen project needs `lune` even without an original, since the build
+was made by `rojo build` from `default.project.json` and its properties have to be set on a copy.
+`--timeout`, the hang report and every other flag apply to each project's run.
+
+The tree still comes from the build: a project chosen for a run changes what the place's services
+and containers are *set to*, not what Rojo synced into it. To test a different tree, build with
+that project (`rojo build tests/big.project.json -o big.rbxl`) and run that file.
+
+Inside the place, `getProject()` from `@flamework-experimental/testing` is the name of the project
+the place was made under (`deferred`), `undefined` in a place the CLI did not make, so a test can
+assert what that project changes or return early under the others; the run result carries it as
+`project` and the summary line prints it. The `patch` command makes the same place without running
+it, for a look in Studio: `flamework-test patch place.rbxl --project tests/deferred.project.json`.
 
 ## What runs in the cloud
 
@@ -170,7 +234,10 @@ tasks per place, 300 seconds per task. One task per run.
 | `409 Conflict: Save failed. Server is busy` on publish | The place is open in Roblox Studio; `studio close` it and publish again. |
 | `429` | The creation limit. |
 | Task `FAILED`: `@flamework-experimental/testing is not in this place` | The package is not installed, or nothing the entry module imports includes `TestingPlugin`. |
-| `lune is needed to patch the original place` | Install Lune (rokit or aftman) or set `LUNE_EXE`. Nothing was run or uploaded. |
+| `lune is needed to patch the original place` / `to set the properties of the project ...` | Install Lune (rokit or aftman) or set `LUNE_EXE`. Nothing was run or uploaded. |
+| `the Rojo project ... does not exist` | A `--project` or `ROJO_PROJECT` entry names no file; every project is checked before the first run. |
+| `two projects are both named ...` | Runs, files and the place's attribute are named after the project file, so `tests/a.project.json` and `other/a.project.json` cannot both be in one run. |
+| `skipped Workspace.X (not a property the reflection database knows)` | The name is not a property of that class in Lune's reflection database; check the spelling against the Studio Properties window. |
 
 ## Development
 

@@ -195,9 +195,108 @@ before running or uploading; `patch` writes the result without doing either.
 What the patch replaces is read from the project file, so it is exactly what a build changes: a
 node with `$path` is replaced by the build's (the fresh code, whatever the original had under that
 name), a node with only `$className` keeps the original's instance and everything in it, and
-`$properties` are applied. Everything else in the original stays. The patch prints each change.
-It runs under Lune; without `lune` on the path a command given an original stops before running
-or uploading anything.
+`$properties` are applied. Everything else in the original stays. The patch prints each change
+and stamps the place with the name of the project it followed. It runs under Lune; without
+`lune` on the path a command given an original stops before running or uploading anything.
+
+## Workspace settings no script can change
+
+Some of what a test needs to run under is not a script's to set: `Workspace.SignalBehavior`
+decides whether a `ChildAdded` handler runs inside the write that parented the child or on the
+next resumption, and the streaming radii decide what a client has at all. Once the game runs those
+properties are `NotScriptable`: a script cannot read them, let alone write them. A place file
+takes them, though, and the patch writes place files. So they come from the Rojo project's
+`$properties`, and a project chosen for a run puts them in effect before Studio opens the place.
+Verified on 2026-09-13 with Lune 0.10.5, in a play session the CLI started:
+
+| `Workspace` property | Values | In the session |
+|---|---|---|
+| `SignalBehavior` | `Default`, `Immediate`, `Deferred`, `AncestryDeferred` | `Deferred` measured: `ChildAdded`, `Name`, attribute and BindableEvent signals all fire after `task.wait()`, none inside the write. `Default` in a fresh place is `Immediate`: all inside the write. |
+| `StreamingEnabled` | boolean | The one that can be read back; a client under it holds only what is near. |
+| `StreamingTargetRadius` | studs | 256 measured: a part 600 studs out never reaches the client, where the default 1024 would send it. |
+| `ModelStreamingBehavior` | `Legacy`, `Default`, `Improved` | `Improved` measured: a far Model is absent on the client entirely; `Default` sends its empty container. |
+| `StreamingMinRadius` | studs | Written; cannot be read back, and a small place does not tell it from the target radius. |
+| `StreamingIntegrityMode` | `Default`, `MinimumRadiusPause`, `PauseOutsideLoadedArea`, `Disabled` | Written; `PauseOutsideLoadedArea` did not pause a character teleported onto a platform that streamed in within the frame. |
+
+Every other property the reflection database knows takes the same route, `Gravity` and
+`PhysicsSteppingMethod` included, on any service or container the project declares. Rojo itself
+accepts the same `$properties`, so such a project is also a valid `rojo build` / `rojo serve`
+project for a look in Studio by hand.
+
+### Several projects, one suite
+
+Write one project file per setup, differing from `default.project.json` in its `$properties`:
+
+```jsonc
+// tests/deferred.project.json: default.project.json with
+"Workspace": { "$className": "Workspace", "$properties": { "SignalBehavior": "Deferred" } }
+```
+
+```jsonc
+// tests/streaming.project.json: default.project.json with
+"Workspace": {
+  "$className": "Workspace",
+  "$properties": { "StreamingEnabled": true, "StreamingMinRadius": 64, "StreamingTargetRadius": 256 }
+}
+```
+
+and name them on the run, repeated or comma-separated, or as `ROJO_PROJECT` in `.env`:
+
+```console
+bunx flamework-test test place.rbxl --project tests/deferred.project.json
+bunx flamework-test test place.rbxl --project tests/deferred.project.json,tests/streaming.project.json
+```
+
+```ini
+# .env
+ROJO_PROJECT=default.project.json,tests/deferred.project.json,tests/streaming.project.json
+```
+
+Each project is a run of both realms in a place of its own name (`place.deferred.rbxl`, laid
+over the original when one is named, else the build with the project's properties set on it),
+under a heading with the project's name, every one of them even after one fails, and a line at the
+end:
+
+```
+=== deferred: tests/deferred.project.json ===
+...
+2 passed, 0 failed in 340ms (server, project deferred)
+...
+projects: default passed, deferred passed, streaming FAILED
+```
+
+The exit code is the worst of them; `--timeout` and the hang report apply to each project's run.
+Without a project named, the run is the plain one, and `ROJO_PROJECT=` turns a listed set off
+again. A chosen project needs `lune` even without an original: the build came from `rojo build`
+with `default.project.json`, so its properties are set on a copy first. The tree still comes from
+the build, since the CLI does not wrap `rojo build`: a project chosen for a run changes what the
+place's services are set to, not what Rojo synced; a project with a different tree is built with
+`rojo build tests/big.project.json -o big.rbxl` and that file is run.
+
+A test learns which project it runs under from `getProject()`, the name of the project file
+(`deferred`; `default` for the default project when an original was patched; `undefined` in a
+place the CLI did not make, such as one opened from Rojo by hand). The run result carries it as
+`project`. Assert per project, or return early under the others:
+
+```ts
+import { defineTests, expectEqual, expectTrue, getProject, test } from "@flamework-experimental/testing";
+
+defineTests("signals", () => {
+    test("ChildAdded is deferred past the write", () => {
+        if (getProject() !== "deferred") return;
+        const folder = new Instance("Folder");
+        let fired = false;
+        folder.ChildAdded.Connect(() => (fired = true));
+        new Instance("Part").Parent = folder;
+        expectEqual(fired, false);
+        task.wait();
+        expectTrue(fired);
+    });
+});
+```
+
+`flamework-test patch place.rbxl --project tests/deferred.project.json` makes the same place
+without running it, `place.deferred.rbxl`, to open in Studio and look at.
 
 ## Troubleshooting
 
@@ -207,6 +306,9 @@ or uploading anything.
 | `... never showed up on the MCP proxy` | The window opened but "MCP server" is disabled in Studio's Assistant settings. |
 | `Workspace.FlameworkTests did not appear` | The build was made without the `testing` scope active (`FLAMEWORK_SCOPES` in `.env`), so the plugin stayed inert. |
 | `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started. The next line names the last test that reported in Studio's output; the one after it in that section is the hanging one. |
+| `lune is needed to set the properties of the project ...` | A chosen `--project` sets its `$properties` on a copy of the build under Lune; install it or set `LUNE_EXE`. |
+| `the Rojo project ... does not exist` / `two projects are both named ...` | A `--project` or `ROJO_PROJECT` entry names no file, or two files share a name; both are checked before the first run. |
+| `skipped Workspace.X (not a property the reflection database knows)` | Not a property of that class in Lune's reflection database; check the spelling against the Properties window. |
 | `a cloud run needs "testing": { "entry": ... }` | The cloud has to ignite the game itself; give the config the ModuleScript that exports `ignite()`. |
 | `403 PERMISSION_DENIED ... luau-execution-session ... missing` | The key lacks the task scopes for this experience. |
 | `409 Conflict: Save failed. Server is busy` on publish | The place is open in Roblox Studio. Close it; the upload succeeds at once afterwards. |

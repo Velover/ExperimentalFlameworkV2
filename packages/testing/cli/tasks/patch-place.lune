@@ -4,10 +4,18 @@
 
 	  lune run patch-place.luau <original.rbxl> <built.rbxl> <out.rbxl> <plan.json>
 
-	Each operation names an instance by its path from the DataModel:
+	The plan is { project = "<name>", ops = { ... } }. Each operation names an instance by its path
+	from the DataModel:
 	  replace  the build's instance takes the place of the original's, whatever was under it
 	  ensure   the original's instance is kept; when the original has none, the build's is taken
-	Then the properties the project file sets are applied, typed from the reflection database.
+	Then the properties the project file sets are applied, typed from the reflection database. A
+	place file takes any property, including the ones no script may set once the game runs
+	(Workspace.SignalBehavior, StreamingMinRadius, StreamingTargetRadius, ...), which is how a
+	project chosen for a run puts them in effect. Given the build as both the original and the
+	build, nothing is replaced and only the properties are set.
+
+	Last, Workspace gets the attribute FlameworkTestProject = the project's name, so a test can
+	tell which project it runs under.
 ]]
 local fs = require("@lune/fs")
 local process = require("@lune/process")
@@ -19,9 +27,17 @@ if not planPath then
 	error("usage: patch-place.luau <original.rbxl> <built.rbxl> <out.rbxl> <plan.json>", 0)
 end
 
-local original = roblox.deserializePlace(fs.readFile(originalPath))
+--- The build standing in for the original: the properties are what the run is after.
+local propertiesOnly = originalPath == builtPath
+
 local built = roblox.deserializePlace(fs.readFile(builtPath))
+local original = if propertiesOnly then built else roblox.deserializePlace(fs.readFile(originalPath))
 local plan = serde.decode("json", fs.readFile(planPath))
+local ops = plan.ops
+local projectName = plan.project
+if type(ops) ~= "table" or type(projectName) ~= "string" then
+	error("the plan is not { project = <name>, ops = { ... } }: " .. planPath, 0)
+end
 local database = roblox.getReflectionDatabase()
 
 local replaced, added, kept, propertiesSet = 0, 0, 0, 0
@@ -135,12 +151,14 @@ local function applyProperties(instance, path, properties)
 	end
 end
 
-for _, op in plan do
+for _, op in ops do
 	local path = op.path
 	local fromBuild = find(built, path)
 	local existing, parent = find(original, path)
+	-- With the build standing in for the original, what a replace would put there is already there.
+	local kind = if propertiesOnly then "ensure" else op.kind
 
-	if op.kind == "replace" then
+	if kind == "replace" then
 		if fromBuild == nil then
 			table.insert(skipped, table.concat(path, ".") .. " (not in the build)")
 			continue
@@ -165,7 +183,7 @@ for _, op in plan do
 		local copy = fromBuild:Clone()
 		copy.Parent = parent
 		existing = copy
-	elseif op.kind == "ensure" then
+	elseif kind == "ensure" then
 		if existing ~= nil then
 			kept += 1
 		elseif fromBuild ~= nil and parent ~= nil then
@@ -185,6 +203,10 @@ for _, op in plan do
 	end
 end
 
+-- The place carries the name of the project it was made under, for `getProject()` in a test.
+original:GetService("Workspace"):SetAttribute("FlameworkTestProject", projectName)
+note("set", { "Workspace" }, "FlameworkTestProject = " .. projectName .. " (attribute)")
+
 fs.writeFile(outPath, roblox.serializePlace(original))
 
 for _, line in changes do
@@ -193,4 +215,8 @@ end
 for _, entry in skipped do
 	print("  skipped  " .. entry)
 end
-print(string.format("patched: %d replaced, %d added, %d kept as the original had them, %d properties set, %d skipped", replaced, added, kept, propertiesSet, #skipped))
+if propertiesOnly then
+	print(string.format("applied the project %s to the build: %d properties set, %d skipped", projectName, propertiesSet, #skipped))
+else
+	print(string.format("patched under the project %s: %d replaced, %d added, %d kept as the original had them, %d properties set, %d skipped", projectName, replaced, added, kept, propertiesSet, #skipped))
+end

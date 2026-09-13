@@ -160,6 +160,7 @@ on the next resumption. Any other assertion library works too; a test fails when
 | From | How |
 |---|---|
 | A terminal, in Studio on this machine | `rojo build -o place.rbxl && flamework-test test place.rbxl`: opens the build in Studio, runs both realms, closes it; see [Running the tests](../testing/place.md) |
+| A terminal, under another Rojo project | `flamework-test test place.rbxl --project tests/deferred.project.json`: the same, in a place with that project's `$properties` set, `Workspace.SignalBehavior` and the streaming radii included; one run per `--project`, see [Workspace settings no script can change](../testing/place.md#workspace-settings-no-script-can-change) |
 | A terminal, in the cloud | `flamework-test test place.rbxl --cloud`: publishes to a testing place and runs the server's sections in a real server; needs `testing.entry`, see below |
 | The realm's own code | `Testing.run(filter?)` and `Testing.list(filter?)` |
 | Anything with the DataModel | `Workspace.FlameworkTests:Invoke(filter?, options?)` |
@@ -180,6 +181,12 @@ the same whether it came back from an invoke, a remote or `Testing.run`:
 Every test also prints one line, `[FWTEST] server economy/buying deducts the price: PASS (3ms)`,
 and the run ends with a summary line, so the Output window and a task's log read the same as
 the table.
+
+A place made by `flamework-test` knows which Rojo project it was made under: `getProject()` is
+that project's name (`deferred` for `tests/deferred.project.json`, `undefined` in a place opened
+by hand), and the result carries it as `project`. A test that only holds under one project's
+`Workspace` settings, `SignalBehavior` say, checks it and returns early under the others; see
+[several projects, one suite](../testing/place.md#several-projects-one-suite).
 
 Each realm has its own instance callback: a client with the plugin answers on the same
 `Workspace.FlameworkTests` for its own tests, and `FlameworkTestsServer` is how it reaches the

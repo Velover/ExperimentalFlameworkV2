@@ -2,12 +2,14 @@ import * as core from "@flamework-experimental/core";
 import { Flamework, Provider, type Module, type OnStart } from "@flamework-experimental/core";
 import * as testing from "@flamework-experimental/testing";
 import {
+	PROJECT_ATTRIBUTE,
 	Testing,
 	afterEach,
 	beforeEach,
 	createTestingPlugin,
 	defer,
 	defineTests,
+	getProject,
 	runTests,
 	scratch,
 	test,
@@ -154,6 +156,36 @@ export = suite("testing", [
 			expectEqual(result.realm, RunService.IsServer() ? "server" : "client", "realm");
 			expectTrue(contains(outcome(result, "counts", "fails").error, "the shop was empty"), "the message");
 			expectTrue(outcome(result, "counts", "passes").ok, "a pass");
+		},
+	],
+
+	[
+		"getProject() is the project flamework-test stamped on Workspace, carried by the result, and nothing in a place it did not make",
+		() => {
+			fresh(() => {
+				defineTests("stamped", () => {
+					test("reads it", () => {});
+				});
+			});
+
+			expectEqual(getProject(), undefined, "no attribute, no project");
+			expectEqual(Testing.run().project, undefined, "the result says so too");
+
+			Workspace.SetAttribute(PROJECT_ATTRIBUTE, "deferred");
+			try {
+				expectEqual(getProject(), "deferred", "the attribute's value");
+				expectEqual(Testing.run().project, "deferred", "on the run");
+				expectEqual(Testing.list().project, "deferred", "and on a listing");
+			} finally {
+				Workspace.SetAttribute(PROJECT_ATTRIBUTE, undefined);
+			}
+
+			Workspace.SetAttribute(PROJECT_ATTRIBUTE, 7);
+			try {
+				expectEqual(getProject(), undefined, "only a string names a project");
+			} finally {
+				Workspace.SetAttribute(PROJECT_ATTRIBUTE, undefined);
+			}
 		},
 	],
 

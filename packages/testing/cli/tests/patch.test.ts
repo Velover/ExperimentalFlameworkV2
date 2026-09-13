@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { defaultPatchedPath, planPatch } from "../src/patch.ts";
+import { defaultPatchedPath, patchedPathFor, planPatch, projectNameOf } from "../src/patch.ts";
 import { json, runCli } from "./harness.ts";
 
 const PROJECT = JSON.stringify({
@@ -61,6 +61,18 @@ describe("planPatch", () => {
 		expect(defaultPatchedPath("place.rbxl")).toBe("place.patched.rbxl");
 		expect(defaultPatchedPath("build/game.rbxlx")).toBe("build/game.patched.rbxl");
 	});
+
+	test("a project is named after its file, and a chosen one names the place made under it", () => {
+		expect(projectNameOf("default.project.json")).toBe("default");
+		expect(projectNameOf("tests/deferred.project.json")).toBe("deferred");
+		expect(projectNameOf("C:\\game\\tests\\Streaming.Project.JSON")).toBe("Streaming");
+		expect(projectNameOf("odd.json")).toBe("odd");
+
+		const chosen = { path: "/game/tests/deferred.project.json", name: "deferred", chosen: true };
+		expect(patchedPathFor("place.rbxl", chosen)).toBe("place.deferred.rbxl");
+		expect(patchedPathFor("build/game.rbxlx", chosen)).toBe("build/game.deferred.rbxl");
+		expect(patchedPathFor("place.rbxl", { ...chosen, name: "default", chosen: false })).toBe("place.patched.rbxl");
+	});
 });
 
 describe("patch", () => {
@@ -80,9 +92,67 @@ describe("patch", () => {
 		expect(task[5]).toEndWith("place.patched.rbxl");
 
 		const plan = JSON.parse(Object.entries(run.written).find(([path]) => path.endsWith("patch-plan.json"))![1]);
-		expect(plan).toHaveLength(3);
+		expect(plan.project).toBe("default");
+		expect(plan.ops).toHaveLength(3);
 		expect(run.out).toContain("place.patched.rbxl");
 		expect(run.calls).toHaveLength(0);
+	});
+
+	test("a chosen project without an original sets its properties on the build itself, into a file of its name", async () => {
+		const run = await runCli(["patch", "place.rbxl", "--project", "tests/deferred.project.json"], {
+			files: { "place.rbxl": "built", "tests/deferred.project.json": PROJECT },
+		});
+
+		expect(run.code).toBe(0);
+		expect(run.out).toContain("setting the properties of");
+		expect(run.out).toContain("deferred.project.json");
+		const task = run.spawned[1]!.map((part) => part.replaceAll("\\", "/"));
+		// The build stands in for the original: the task then sets properties and replaces nothing.
+		expect(task[3]).toEndWith("/place.rbxl");
+		expect(task[4]).toBe(task[3]);
+		expect(task[5]).toEndWith("/place.deferred.rbxl");
+		const plan = JSON.parse(Object.entries(run.written).find(([path]) => path.endsWith("patch-plan.json"))![1]);
+		expect(plan.project).toBe("deferred");
+
+		// The default project is only followed when there is an original to lay the build over.
+		const nothing = await runCli(["patch", "place.rbxl"], { files: { "place.rbxl": "built" } });
+		expect(nothing.code).toBe(2);
+		expect(nothing.err).toContain("patch needs the original place");
+		expect(nothing.err).toContain("or a project whose properties to set");
+
+		// A missing project file is named, before lune would have run.
+		const missing = await runCli(["patch", "place.rbxl", "--project", "tests/nowhere.project.json"], {
+			files: { "place.rbxl": "built" },
+		});
+		expect(missing.code).toBe(1);
+		expect(missing.err).toContain("nowhere.project.json does not exist");
+		expect(missing.err).toContain("check --project or ROJO_PROJECT");
+		expect(missing.spawned.map((command) => command[1])).toEqual(["--version"]);
+	});
+
+	test("patch and cloud publish follow one project at a time", async () => {
+		const two = await runCli(
+			["patch", "place.rbxl", "--project", "a.project.json", "--project", "b.project.json"],
+			{
+				files: { "place.rbxl": "built", "a.project.json": PROJECT, "b.project.json": PROJECT },
+			},
+		);
+		expect(two.code).toBe(2);
+		expect(two.err).toContain("patch follows one project at a time, and --project names 2");
+		expect(two.spawned).toHaveLength(0);
+
+		const fromEnv = await runCli(["cloud", "publish", "place.rbxl"], {
+			env: {
+				TESTING_PLACE_API_KEY: "k",
+				TESTING_UNIVERSE_ID: "1",
+				TESTING_PLACE_ID: "2",
+				ROJO_PROJECT: "a.project.json,b.project.json",
+			},
+			files: { "place.rbxl": "built", "a.project.json": PROJECT, "b.project.json": PROJECT },
+		});
+		expect(fromEnv.code).toBe(2);
+		expect(fromEnv.err).toContain("cloud publish follows one project at a time, and ROJO_PROJECT names 2");
+		expect(fromEnv.calls).toHaveLength(0);
 	});
 
 	test("without lune the run stops before anything is uploaded, naming the cause", async () => {

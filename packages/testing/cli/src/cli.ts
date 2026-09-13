@@ -12,7 +12,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 
 import {
 	API_BASE,
@@ -29,7 +29,15 @@ import {
 } from "./openCloud.ts";
 import { loadCloudSettings, type CloudSettings } from "./config.ts";
 import { parseSections, renderFilter, renderOptions, renderShim, type Filter } from "./luau.ts";
-import { defaultPatchedPath, patchCommand, planPatch, type RojoProject } from "./patch.ts";
+import {
+	patchCommand,
+	patchedPathFor,
+	planPatch,
+	projectNameOf,
+	type PatchPlan,
+	type ProjectChoice,
+	type RojoProject,
+} from "./patch.ts";
 import PATCH_TASK from "../tasks/patch-place.lune" with { type: "text" };
 import PROBE_TASK from "../tasks/probe.lune" with { type: "text" };
 import RUN_TESTS_TASK from "../tasks/run-tests.lune" with { type: "text" };
@@ -65,13 +73,14 @@ export const QUEUE_SLACK_MS = 300_000;
 
 // ---------------------------------------------------------------- arguments
 
-type FlagKind = "string" | "boolean";
+/** `list`: a string flag that may be repeated, or given comma-separated, and collects every value. */
+type FlagKind = "string" | "boolean" | "list";
 
 const FLAGS: Record<string, FlagKind> = {
 	file: "string",
 	published: "boolean",
 	original: "string",
-	project: "string",
+	project: "list",
 	out: "string",
 	version: "string",
 	sections: "string",
@@ -127,7 +136,8 @@ export interface Flags {
 	file?: string;
 	published?: boolean;
 	original?: string;
-	project?: string;
+	/** Every `--project` given, in order. */
+	project?: string[];
 	out?: string;
 	version?: string;
 	sections?: string;
@@ -145,6 +155,14 @@ export interface Flags {
 	key?: string;
 	studio?: string;
 	help?: boolean;
+}
+
+/** A comma-separated list, the way `--sections` and the environment give one; blanks dropped. */
+export function splitList(value: string | undefined): string[] {
+	return (value ?? "")
+		.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0);
 }
 
 export class UsageError extends Error {}
@@ -206,7 +224,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
 					value = next;
 					i += 1;
 				}
-				(flags as Record<string, unknown>)[name] = value;
+				if (kind === "list") {
+					const values = splitList(value);
+					if (values.length === 0) throw new UsageError(`--${name} needs a value`);
+					const record = flags as Record<string, unknown>;
+					record[name] = [...((record[name] as string[] | undefined) ?? []), ...values];
+				} else {
+					(flags as Record<string, unknown>)[name] = value;
+				}
 			}
 			continue;
 		}
@@ -286,12 +311,18 @@ Flags:
              --cloud                 run in the cloud instead of Studio
              --original <place.rbxl> patch a copy of this place with the build first, and run that
                                      (needs lune; default: $ORIGINAL_PLACE, cloud.originalPlace)
-             --project <path>        the Rojo project the patch follows; default ${DEFAULT_PROJECT}
+             --project <path>        the Rojo project the run follows: its $properties are set on the
+                                     place (Workspace.SignalBehavior, the streaming radii: what no
+                                     script can set) and the patch follows its tree; repeatable or
+                                     comma-separated, one run per project, named after the file
+                                     (getProject() in a test); needs lune. Default: $ROJO_PROJECT,
+                                     else ${DEFAULT_PROJECT}, followed only when an original is patched
              --sections <a,b>        only these sections ("economy", "economy/buys")
              --list                  list the tests instead of running them
              --json                  print the raw result JSON instead of a summary
              --timeout <120s>        per run
-  patch      --out <path>            where the patched place goes; default <file>.patched.rbxl
+  patch      --out <path>            where the patched place goes; default <file>.patched.rbxl, or
+                                     <file>.<project>.rbxl under a chosen --project (one project)
   studio run --realm server|client|both   default server
              --keep                  leave the play session running afterwards
              --sections, --list, --json, --timeout   as for test
@@ -299,7 +330,7 @@ Flags:
   studio *   --studio <name|id>      which window; default: the one with the testing place open,
                                      else the only one with a local place file open
   cloud publish --published          publish live instead of uploading a Saved version
-             --original, --project   as for test
+             --original, --project   as for test (one project: one version is published)
   cloud run  --version <n>           default: ${VERSION_FILE}, else the current version
              --code "<luau>"         run this Luau instead of the test shim
              --script <file>         run this Luau file instead of the test shim
@@ -323,11 +354,13 @@ Environment (the shell, .env or .env.local):
   (or TESTING_PLACE_API_KEY)              universe.place.luau-execution-session:read/:write
   TESTING_UNIVERSE_ID, TESTING_PLACE_ID   the testing experience and the place inside it
   ORIGINAL_PLACE                          a copy of the original place, for --original
+  ROJO_PROJECT                            the project(s) a run follows, comma-separated, for --project
   LUNE_EXE, ROBLOX_STUDIO_EXE, STUDIO_MCP_EXE   overrides for the tools this finds by itself
 
 Examples:
   rojo build -o place.rbxl && flamework-test test place.rbxl
   rojo build -o place.rbxl && flamework-test test place.rbxl --sections economy --keep
+  rojo build -o place.rbxl && flamework-test test place.rbxl --project tests/deferred.project.json
   rojo build -o place.rbxl && flamework-test test place.rbxl --cloud
   flamework-test cloud run --sections economy       again, against the version last published
   flamework-test studio open && flamework-test studio run --realm client
@@ -513,8 +546,44 @@ function originalPlaceOf(flags: Flags, io: Io): string | undefined {
 	return settingsOf(io).originalPlace;
 }
 
+/**
+ * The projects a run follows, in order: `--project`, else `ROJO_PROJECT` (comma-separated; empty
+ * turns it off), else the default project, unchosen: followed only when an original is patched.
+ * Runs, files and the place's attribute are named after the project file, so two files of the
+ * same name are refused.
+ */
+function projectsOf(flags: Flags, io: Io): ProjectChoice[] {
+	const named = flags.project ?? splitList(envOf(io, "ROJO_PROJECT"));
+	if (named.length === 0) {
+		return [{ path: resolve(io.cwd, DEFAULT_PROJECT), name: projectNameOf(DEFAULT_PROJECT), chosen: false }];
+	}
+
+	const projects = named.map((path) => ({ path: resolve(io.cwd, path), name: projectNameOf(path), chosen: true }));
+	for (const [index, project] of projects.entries()) {
+		const twin = projects.slice(0, index).find((other) => other.name === project.name);
+		if (twin !== undefined) {
+			throw new UsageError(
+				`two projects are both named ${project.name}: ${twin.path} and ${project.path}; a run, its place file and the place's FlameworkTestProject attribute are named after the project file, so give them different names`,
+			);
+		}
+	}
+	return projects;
+}
+
+/** Commands that make one place follow one project: `patch` writes one file, `cloud publish` one version. */
+function singleProjectOf(flags: Flags, io: Io, command: string): ProjectChoice {
+	const projects = projectsOf(flags, io);
+	if (projects.length > 1) {
+		const source = flags.project !== undefined ? "--project" : "ROJO_PROJECT";
+		throw new UsageError(
+			`${command} follows one project at a time, and ${source} names ${projects.length}; ${source === "--project" ? "give one" : "pass --project <file>"}`,
+		);
+	}
+	return projects[0]!;
+}
+
 /** `lune`, or `LUNE_EXE`; checked before anything is opened or uploaded, since the patch cannot run without it. */
-async function requireLune(io: Io): Promise<string> {
+async function requireLune(io: Io, what: string): Promise<string> {
 	const exe = envOf(io, "LUNE_EXE") ?? "lune";
 	let code: number;
 	try {
@@ -524,60 +593,84 @@ async function requireLune(io: Io): Promise<string> {
 	}
 	if (code !== 0) {
 		throw new CliError(
-			"lune is needed to patch the original place, and it was not found",
+			`lune is needed to ${what}, and it was not found`,
 			"install it (rokit or aftman: `lune`), or set LUNE_EXE; nothing was run or uploaded",
 		);
 	}
 	return exe;
 }
 
-/** Lays the build over a copy of the original and returns the patched file's path. */
-async function patchPlace(built: string, original: string, flags: Flags, io: Io): Promise<string> {
-	const lune = await requireLune(io);
+/** The project file, parsed; refused before anything opens or uploads when it is missing or unreadable. */
+async function readProject(project: ProjectChoice, io: Io): Promise<RojoProject> {
+	if (!(await io.exists(project.path))) {
+		throw new CliError(
+			`the Rojo project ${project.path} does not exist`,
+			project.chosen
+				? "a run follows the project file for the properties to set and what the build replaces; check --project or ROJO_PROJECT"
+				: "the patch follows the project file to know what the build replaces; pass --project",
+		);
+	}
+
+	let rojo: RojoProject;
+	try {
+		rojo = JSON.parse(await io.readTextFile(project.path)) as RojoProject;
+	} catch (error) {
+		throw new CliError(
+			`${project.path} is not readable JSON: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	if (typeof rojo.tree !== "object" || rojo.tree === null) {
+		throw new CliError(`${project.path} has no "tree"`);
+	}
+	return rojo;
+}
+
+/**
+ * Makes the place a project's run uses and returns its path: the build laid over a copy of the
+ * original when there is one, else the build with the project's properties set on it. Either
+ * way the place carries the project's name.
+ */
+async function patchPlace(
+	built: string,
+	original: string | undefined,
+	project: ProjectChoice,
+	flags: Flags,
+	io: Io,
+): Promise<string> {
+	const lune = await requireLune(
+		io,
+		original !== undefined ? "patch the original place" : `set the properties of the project ${project.name}`,
+	);
 
 	const builtPath = resolve(io.cwd, built);
 	if (!(await io.exists(builtPath))) {
 		throw new CliError(`${built} does not exist`, `build it first: rojo build -o ${built}`);
 	}
-	if (!(await io.exists(original))) {
+	if (original !== undefined && !(await io.exists(original))) {
 		throw new CliError(
 			`the original place ${original} does not exist`,
 			"save a copy of the original place from Studio (File > Save to File) and point --original or cloud.originalPlace at it",
 		);
 	}
 
-	const projectPath = resolve(io.cwd, flags.project ?? envOf(io, "PROJECT") ?? DEFAULT_PROJECT);
-	if (!(await io.exists(projectPath))) {
-		throw new CliError(
-			`the Rojo project ${projectPath} does not exist`,
-			"the patch follows the project file to know what the build replaces; pass --project",
-		);
-	}
+	const rojo = await readProject(project, io);
 
-	let project: RojoProject;
-	try {
-		project = JSON.parse(await io.readTextFile(projectPath)) as RojoProject;
-	} catch (error) {
-		throw new CliError(
-			`${projectPath} is not readable JSON: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-	if (typeof project.tree !== "object" || project.tree === null) {
-		throw new CliError(`${projectPath} has no "tree"`);
-	}
-
-	const out = resolve(io.cwd, flags.out ?? defaultPatchedPath(built));
+	const out = resolve(io.cwd, flags.out ?? patchedPathFor(built, project));
 	const planPath = resolve(io.cwd, "build", "patch-plan.json");
-	const plan = planPatch(project);
+	const plan: PatchPlan = { project: project.name, ops: planPatch(rojo) };
 	await io.writeTextFile(planPath, JSON.stringify(plan));
 
 	// Lune runs a file, so the task ships as text and is written out beside the plan.
 	const taskPath = resolve(io.cwd, "build", "patch-place.luau");
 	await io.writeTextFile(taskPath, PATCH_TASK);
 
-	io.log(`patching a copy of ${original} with ${built}, following ${projectPath}`);
+	if (original !== undefined) {
+		io.log(`patching a copy of ${original} with ${built}, following ${project.path}`);
+	} else {
+		io.log(`setting the properties of ${project.path} on ${built}`);
+	}
 	const code = await io.spawn(
-		patchCommand(lune, taskPath, { original, built: builtPath, out, plan: planPath }),
+		patchCommand(lune, taskPath, { original: original ?? builtPath, built: builtPath, out, plan: planPath }),
 		io.cwd,
 	);
 	if (code !== 0) {
@@ -589,14 +682,20 @@ async function patchPlace(built: string, original: string, flags: Flags, io: Io)
 }
 
 /**
- * The place to run or upload: the build, or the build laid over the original when one is named.
- * `label` is how it is spoken of: the name the build was given, or the patched file's path.
+ * The place to run or upload: the build as it is, or the place made under the project when an
+ * original is named or the project was chosen. `label` is how it is spoken of: the name the build
+ * was given, or the patched file's path.
  */
-async function placeToRun(flags: Flags, io: Io, command: string): Promise<{ absolute: string; label: string }> {
+async function placeToRun(
+	flags: Flags,
+	io: Io,
+	command: string,
+	project: ProjectChoice,
+): Promise<{ absolute: string; label: string }> {
 	const built = placeFileOf(flags, command);
 	const original = originalPlaceOf(flags, io);
-	if (original !== undefined) {
-		const patched = await patchPlace(built, original, flags, io);
+	if (original !== undefined || project.chosen) {
+		const patched = await patchPlace(built, original, project, flags, io);
 		return { absolute: patched, label: patched };
 	}
 
@@ -609,20 +708,26 @@ async function placeToRun(flags: Flags, io: Io, command: string): Promise<{ abso
 
 async function cmdPatch(flags: Flags, io: Io): Promise<number> {
 	const built = placeFileOf(flags, "patch");
+	const project = singleProjectOf(flags, io, "patch");
 	const original = originalPlaceOf(flags, io);
-	if (original === undefined) {
+	if (original === undefined && !project.chosen) {
 		throw new UsageError(
-			"patch needs the original place: --original <place.rbxl>, ORIGINAL_PLACE, or cloud.originalPlace",
+			"patch needs the original place (--original <place.rbxl>, ORIGINAL_PLACE, or cloud.originalPlace), or a project whose properties to set on the build (--project <file>)",
 		);
 	}
-	await patchPlace(built, original, flags, io);
+	await patchPlace(built, original, project, flags, io);
 	return 0;
 }
 
 // ------------------------------------------------------------------- cloud
 
 async function cmdPublish(flags: Flags, io: Io): Promise<number> {
-	const { absolute, label: file } = await placeToRun(flags, io, "cloud publish");
+	return await publishProject(flags, io, singleProjectOf(flags, io, "cloud publish"));
+}
+
+/** Uploads the place made under the project as a new version of the testing place, and records the number. */
+async function publishProject(flags: Flags, io: Io, project: ProjectChoice): Promise<number> {
+	const { absolute, label: file } = await placeToRun(flags, io, "cloud publish", project);
 
 	const versionType: VersionType = flags.published ? "Published" : "Saved";
 	const client = makeClient(flags, io);
@@ -876,10 +981,14 @@ function printDryRun(
 	io.log("--- end script ---");
 }
 
+/** `cloud test <file>` is `test <file> --cloud`: the same runs, one per project. */
 async function cmdCloudTest(flags: Flags, io: Io): Promise<number> {
-	placeFileOf(flags, "cloud test");
-	requireCloudEntry(io);
-	const published = await cmdPublish(flags, io);
+	return await cmdTest({ ...flags, cloud: true }, io);
+}
+
+/** One project's cloud run: publish the place made under it, then run the server's tests in it. */
+async function cloudTestProject(flags: Flags, io: Io, project: ProjectChoice): Promise<number> {
+	const published = await publishProject(flags, io, project);
 	if (published !== 0) return published;
 	return await cmdRun(flags, io, "run");
 }
@@ -1156,19 +1265,57 @@ async function cmdStudioRun(flags: Flags, io: Io): Promise<number> {
 // -------------------------------------------------------------------- test
 
 /**
+ * The tests, run once per project the run follows: in Studio on this machine by default, in the
+ * cloud with `--cloud`. One project is the plain run; several are run one after another, each
+ * under its own heading and with its own place file, every one of them even after one fails,
+ * with a line at the end saying how each fared. The exit code is the worst of them. What refuses
+ * up front (a missing project file, no lune, no Studio) is checked before the first run starts.
+ */
+async function cmdTest(flags: Flags, io: Io): Promise<number> {
+	if (flags.published && !flags.cloud) {
+		throw new UsageError("--published is for the cloud: flamework-test test <file> --cloud --published");
+	}
+	if (flags.cloud) {
+		placeFileOf(flags, "cloud test");
+		requireCloudEntry(io);
+	}
+
+	const projects = projectsOf(flags, io);
+	if (projects.length === 1) {
+		return await testProject(flags, io, projects[0]!);
+	}
+
+	// Every project file is read before the first run, so a typo in the last does not cost the runs before it.
+	for (const project of projects) await readProject(project, io);
+
+	const outcomes: Array<{ project: ProjectChoice; code: number }> = [];
+	for (const project of projects) {
+		io.log("");
+		io.log(`=== ${project.name}: ${relative(io.cwd, project.path)} ===`);
+		outcomes.push({ project, code: await testProject(flags, io, project) });
+	}
+
+	io.log("");
+	io.log(
+		`projects: ${outcomes.map(({ project, code }) => `${project.name} ${code === 0 ? "passed" : "FAILED"}`).join(", ")}`,
+	);
+	return Math.max(...outcomes.map(({ code }) => code));
+}
+
+async function testProject(flags: Flags, io: Io, project: ProjectChoice): Promise<number> {
+	if (flags.cloud) return await cloudTestProject(flags, io, project);
+	return await studioTestProject(flags, io, project);
+}
+
+/**
  * The default way to run the tests: the place Rojo built, opened in Studio on this machine, run
  * on both realms in a play session, and closed again. A window that already has a file of that
  * name open is from an earlier build and would test stale code, so it is closed first and the
  * file opened afresh.
  */
-async function cmdTest(flags: Flags, io: Io): Promise<number> {
-	if (flags.cloud) return await cmdCloudTest(flags, io);
-	if (flags.published) {
-		throw new UsageError("--published is for the cloud: flamework-test test <file> --cloud --published");
-	}
-
+async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice): Promise<number> {
 	const realms = realmsOf(flags.realm, "both");
-	const { absolute: file, label } = await placeToRun(flags, io, "test");
+	const { absolute: file, label } = await placeToRun(flags, io, "test", project);
 	const name = basename(file);
 	const exe = requireStudioExe(io);
 

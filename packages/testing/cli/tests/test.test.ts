@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { basename } from "node:path";
 
 import { OTHER_STUDIO, PLACE, TESTING_STUDIO, happyPath, json, resultJson, runCli } from "./harness.ts";
 import type { StudioEntry } from "../src/studio.ts";
@@ -40,6 +41,349 @@ function studioThatOpens(window: StudioEntry, results: Record<string, string>) {
 		},
 	};
 }
+
+type Answer = string | (() => string);
+
+/**
+ * A Studio that lists every file the CLI launches, by name, and answers each realm's run from
+ * `results[fileName]`: what a run under several projects sees, one window after another.
+ */
+function studioThatOpensEach(results: Record<string, Record<string, Answer>>) {
+	let mode = "Edit";
+	let current = "";
+	const listed: StudioEntry[] = [OTHER_STUDIO];
+	return {
+		fake: {
+			studios: listed,
+			answers: {
+				get_studio_state: () => (mode === "Play" ? PLAYING : EDITING),
+				start_stop_play: (args: Record<string, unknown>) => {
+					mode = args.is_start ? "Play" : "Edit";
+					return args.is_start ? "Game Started" : "Game Stopped";
+				},
+				execute_luau: (args: Record<string, unknown>) => {
+					const answer = results[current]?.[args.datamodel_type as string];
+					if (answer === undefined) throw new Error(`no result for ${current} ${args.datamodel_type}`);
+					return typeof answer === "function" ? answer() : answer;
+				},
+			},
+		},
+		onLaunch: (command: string[]) => {
+			current = basename(command[1]!);
+			listed.push({ id: `studio-${listed.length}`, name: current });
+		},
+	};
+}
+
+const DEFERRED = JSON.stringify({
+	tree: {
+		$className: "DataModel",
+		ServerScriptService: { TS: { $path: "out/server" } },
+		Workspace: { $className: "Workspace", $properties: { SignalBehavior: "Deferred" } },
+	},
+});
+const STREAMING = JSON.stringify({
+	tree: {
+		$className: "DataModel",
+		ServerScriptService: { TS: { $path: "out/server" } },
+		Workspace: { $className: "Workspace", $properties: { StreamingEnabled: true, StreamingTargetRadius: 256 } },
+	},
+});
+
+describe("test under several projects", () => {
+	test("runs both realms once per --project, each in a place of the project's name, and reports every project", async () => {
+		const studio = studioThatOpensEach({
+			"place.deferred.rbxl": {
+				Server: JSON.stringify(resultJson({ project: "deferred" })),
+				Client: JSON.stringify(resultJson({ realm: "client", project: "deferred" })),
+			},
+			"place.streaming.rbxl": {
+				Server: JSON.stringify(
+					resultJson({
+						project: "streaming",
+						ok: false,
+						passed: 1,
+						failed: 1,
+						sections: [
+							{
+								name: "economy",
+								passed: 1,
+								failed: 1,
+								tests: [
+									{ name: "buys", ok: true, durationMs: 1 },
+									{ name: "sells", ok: false, error: "nothing streamed in", durationMs: 2 },
+								],
+							},
+						],
+					}),
+				),
+				Client: JSON.stringify(resultJson({ realm: "client", project: "streaming" })),
+			},
+		});
+		const run = await runCli(
+			[
+				"test",
+				"place.rbxl",
+				"--project",
+				"tests/deferred.project.json",
+				"--project",
+				"tests/streaming.project.json",
+			],
+			{
+				files: {
+					"place.rbxl": "built",
+					"tests/deferred.project.json": DEFERRED,
+					"tests/streaming.project.json": STREAMING,
+					"place.deferred.rbxl": "made",
+					"place.streaming.rbxl": "made",
+				},
+				studio: studio.fake,
+				onLaunch: studio.onLaunch,
+			},
+		);
+
+		// Every project ran, the second's failure is the exit code, and the last line says which.
+		expect(run.code).toBe(1);
+		expect(run.out.replaceAll("\\", "/")).toContain("=== deferred: tests/deferred.project.json ===");
+		expect(run.out.replaceAll("\\", "/")).toContain("=== streaming: tests/streaming.project.json ===");
+		expect(run.out).toContain("projects: deferred passed, streaming FAILED");
+		expect(run.out).toContain("nothing streamed in");
+
+		// No original: the build stands in for it and each project's properties are set on a copy of its own name.
+		const tasks = run.spawned.filter((command) => command[1] === "run");
+		expect(tasks).toHaveLength(2);
+		expect(tasks[0]![3]).toBe(tasks[0]![4]);
+		expect(tasks[0]![5]!.replaceAll("\\", "/")).toEndWith("/place.deferred.rbxl");
+		expect(tasks[1]![5]!.replaceAll("\\", "/")).toEndWith("/place.streaming.rbxl");
+		expect(run.out).toContain("setting the properties of");
+		const plans = Object.entries(run.written).filter(([path]) => path.endsWith("patch-plan.json"));
+		expect(JSON.parse(plans[plans.length - 1]![1]).project).toBe("streaming");
+
+		// One Studio window per project, each run on both realms and closed again.
+		expect(run.launched.map((command) => basename(command[1]!))).toEqual([
+			"place.deferred.rbxl",
+			"place.streaming.rbxl",
+		]);
+		expect(run.studioCalls.filter((call) => call.name === "execute_luau")).toHaveLength(4);
+		expect(run.closedWindows).toEqual([
+			"place.deferred.rbxl - Roblox Studio",
+			"place.streaming.rbxl - Roblox Studio",
+		]);
+
+		// The place reports the project it carries, and the summary says so.
+		expect(run.out).toContain("2 passed, 0 failed in 12ms (server, project deferred)");
+		expect(run.out).toContain("1 passed, 1 failed in 12ms (server, project streaming)");
+	});
+
+	test("ROJO_PROJECT lists the projects when no flag does, and an empty one is the plain run", async () => {
+		const studio = studioThatOpensEach({
+			"place.deferred.rbxl": {
+				Server: JSON.stringify(resultJson({ project: "deferred" })),
+				Client: JSON.stringify(resultJson({ realm: "client", project: "deferred" })),
+			},
+			"place.streaming.rbxl": {
+				Server: JSON.stringify(resultJson({ project: "streaming" })),
+				Client: JSON.stringify(resultJson({ realm: "client", project: "streaming" })),
+			},
+			"place.rbxl": {
+				Server: JSON.stringify(resultJson()),
+				Client: JSON.stringify(resultJson({ realm: "client" })),
+			},
+		});
+		const files = {
+			"place.rbxl": "built",
+			"tests/deferred.project.json": DEFERRED,
+			"tests/streaming.project.json": STREAMING,
+			"place.deferred.rbxl": "made",
+			"place.streaming.rbxl": "made",
+		};
+		const listed = await runCli(["test", "place.rbxl"], {
+			files,
+			env: { ROJO_PROJECT: "tests/deferred.project.json, tests/streaming.project.json" },
+			studio: studio.fake,
+			onLaunch: studio.onLaunch,
+		});
+		expect(listed.code).toBe(0);
+		expect(listed.out).toContain("projects: deferred passed, streaming passed");
+		expect(listed.launched.map((command) => basename(command[1]!))).toEqual([
+			"place.deferred.rbxl",
+			"place.streaming.rbxl",
+		]);
+
+		const plain = await runCli(["test", "place.rbxl"], {
+			files,
+			env: { ROJO_PROJECT: "" },
+			studio: studio.fake,
+			onLaunch: studio.onLaunch,
+		});
+		expect(plain.code).toBe(0);
+		expect(plain.spawned).toHaveLength(0);
+		expect(plain.launched.map((command) => basename(command[1]!))).toEqual(["place.rbxl"]);
+		expect(plain.out).not.toContain("projects:");
+		expect(plain.out).toContain("2 passed, 0 failed in 12ms (server)");
+	});
+
+	test("a realm that hangs under one project is placed, and the other projects still run", async () => {
+		const studio = studioThatOpensEach({
+			"place.deferred.rbxl": {
+				Server: JSON.stringify(resultJson({ project: "deferred" })),
+				Client: () => {
+					throw new Error("execute_luau timed out after 1000ms");
+				},
+			},
+			"place.streaming.rbxl": {
+				Server: JSON.stringify(resultJson({ project: "streaming" })),
+				Client: JSON.stringify(resultJson({ realm: "client", project: "streaming" })),
+			},
+		});
+		(studio.fake.answers as Record<string, unknown>).get_console_output = () =>
+			["[FWTEST] client components/added: PASS (2ms)", "[FWTEST] client components/removed: PASS (1ms)"].join(
+				"\n",
+			);
+
+		const run = await runCli(
+			[
+				"test",
+				"place.rbxl",
+				"--project",
+				"tests/deferred.project.json,tests/streaming.project.json",
+				"--timeout",
+				"1s",
+			],
+			{
+				files: {
+					"place.rbxl": "built",
+					"tests/deferred.project.json": DEFERRED,
+					"tests/streaming.project.json": STREAMING,
+					"place.deferred.rbxl": "made",
+					"place.streaming.rbxl": "made",
+				},
+				studio: studio.fake,
+				onLaunch: studio.onLaunch,
+			},
+		);
+
+		expect(run.code).toBe(1);
+		expect(run.err).toContain("the client's run did not finish within 1s");
+		expect(run.err).toContain("last test that reported: components/removed (PASS)");
+		expect(run.out).toContain("projects: deferred FAILED, streaming passed");
+		// The hung project's session was still stopped and its window closed before the next opened.
+		expect(run.studioCalls.filter((call) => call.name === "start_stop_play")).toHaveLength(4);
+		expect(run.closedWindows).toEqual([
+			"place.deferred.rbxl - Roblox Studio",
+			"place.streaming.rbxl - Roblox Studio",
+		]);
+	});
+
+	test("every project file is checked before the first run, and two of one name are refused", async () => {
+		const missing = await runCli(
+			[
+				"test",
+				"place.rbxl",
+				"--project",
+				"tests/deferred.project.json",
+				"--project",
+				"tests/nowhere.project.json",
+			],
+			{ files: { "place.rbxl": "built", "tests/deferred.project.json": DEFERRED } },
+		);
+		expect(missing.code).toBe(1);
+		expect(missing.err).toContain("nowhere.project.json does not exist");
+		expect(missing.launched).toHaveLength(0);
+		expect(missing.spawned).toHaveLength(0);
+
+		const twins = await runCli(
+			[
+				"test",
+				"place.rbxl",
+				"--project",
+				"tests/deferred.project.json",
+				"--project",
+				"other/deferred.project.json",
+			],
+			{
+				files: {
+					"place.rbxl": "built",
+					"tests/deferred.project.json": DEFERRED,
+					"other/deferred.project.json": DEFERRED,
+				},
+			},
+		);
+		expect(twins.code).toBe(2);
+		expect(twins.err).toContain("two projects are both named deferred");
+		expect(twins.launched).toHaveLength(0);
+	});
+
+	test("with an original every project patches a copy of it, and one --project is the plain run under that project", async () => {
+		const studio = studioThatOpensEach({
+			"place.deferred.rbxl": {
+				Server: JSON.stringify(resultJson({ project: "deferred" })),
+				Client: JSON.stringify(resultJson({ realm: "client", project: "deferred" })),
+			},
+		});
+		const run = await runCli(
+			["test", "place.rbxl", "--original", "original.rbxl", "--project", "tests/deferred.project.json"],
+			{
+				files: {
+					"place.rbxl": "built",
+					"original.rbxl": "orig",
+					"tests/deferred.project.json": DEFERRED,
+					"place.deferred.rbxl": "made",
+				},
+				studio: studio.fake,
+				onLaunch: studio.onLaunch,
+			},
+		);
+
+		expect(run.code).toBe(0);
+		expect(run.out).toContain("patching a copy of");
+		expect(run.out).not.toContain("===");
+		expect(run.out).not.toContain("projects:");
+		const task = run.spawned[1]!.map((part) => part.replaceAll("\\", "/"));
+		expect(task[3]).toEndWith("/original.rbxl");
+		expect(task[4]).toEndWith("/place.rbxl");
+		expect(task[5]).toEndWith("/place.deferred.rbxl");
+		expect(run.out).toContain("connected: place.deferred.rbxl");
+		expect(run.out).toContain("(server, project deferred)");
+	});
+
+	test("--cloud publishes and runs once per project", async () => {
+		const run = await runCli(
+			[
+				"test",
+				"place.rbxl",
+				"--cloud",
+				"--project",
+				"tests/deferred.project.json",
+				"--project",
+				"tests/streaming.project.json",
+			],
+			{
+				files: {
+					"place.rbxl": "built",
+					"tests/deferred.project.json": DEFERRED,
+					"tests/streaming.project.json": STREAMING,
+					"place.deferred.rbxl": "made",
+					"place.streaming.rbxl": "made",
+				},
+				responses: [
+					json({ versionNumber: 4 }),
+					...happyPath([resultJson({ project: "deferred" })]),
+					json({ versionNumber: 5 }),
+					...happyPath([resultJson({ project: "streaming" })]),
+				],
+			},
+		);
+
+		expect(run.code).toBe(0);
+		expect(run.out.replaceAll("\\", "/")).toContain("=== deferred: tests/deferred.project.json ===");
+		expect(run.out).toContain("published version 4");
+		expect(run.out).toContain("published version 5");
+		expect(run.calls[5]!.url).toContain("/versions/5/luau-execution-session-tasks");
+		expect(run.out).toContain("projects: deferred passed, streaming passed");
+		expect(run.launched).toHaveLength(0);
+	});
+});
 
 describe("test", () => {
 	test("opens the build in Studio, runs both realms in one play session, reports each, and closes it", async () => {

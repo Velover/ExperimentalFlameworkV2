@@ -29,6 +29,21 @@ describe("argument parsing", () => {
 		expect(parseArgs(["--version=4", "cloud", "run"]).flags.version).toBe("4");
 	});
 
+	test("--project collects every value, repeated or comma-separated", () => {
+		expect(parseArgs(["test", "place.rbxl", "--project", "a.project.json"]).flags.project).toEqual([
+			"a.project.json",
+		]);
+		expect(
+			parseArgs(["test", "--project", "a.project.json", "place.rbxl", "--project=b.project.json"]).flags.project,
+		).toEqual(["a.project.json", "b.project.json"]);
+		expect(parseArgs(["test", "place.rbxl", "--project", "a.project.json, b.project.json"]).flags.project).toEqual([
+			"a.project.json",
+			"b.project.json",
+		]);
+		expect(() => parseArgs(["test", "place.rbxl", "--project", ","])).toThrow(/--project needs a value/);
+		expect(() => parseArgs(["test", "place.rbxl", "--project"])).toThrow(/--project needs a value/);
+	});
+
 	test("unknown flags and commands are usage errors", () => {
 		expect(() => parseArgs(["cloud", "run", "--nope"])).toThrow(UsageError);
 		expect(() => parseArgs(["fly"])).toThrow(/unknown command/);

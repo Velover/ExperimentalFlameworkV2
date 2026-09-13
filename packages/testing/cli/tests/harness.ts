@@ -66,8 +66,8 @@ export async function runCli(
 		/** Where Roblox Studio is; undefined means not installed. */
 		studioExe?: string | undefined;
 		closeOutcome?: "closed" | "forced" | "none";
-		/** Runs when the CLI launches a program, so a fake Studio can start listing the window it opened. */
-		onLaunch?: () => void;
+		/** Runs when the CLI launches a program, with the command, so a fake Studio can start listing the window it opened. */
+		onLaunch?: (command: string[]) => void;
 	} = {},
 ): Promise<Harness> {
 	const out: string[] = [];
@@ -121,7 +121,7 @@ export async function runCli(
 		},
 		launch: async (command) => {
 			launched.push(command);
-			options.onLaunch?.();
+			options.onLaunch?.(command);
 		},
 		closeWindow: async (titlePrefix) => {
 			closedWindows.push(titlePrefix);

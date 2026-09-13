@@ -34,6 +34,8 @@ export interface RunResult {
 	/** No test failed and every filter entry matched something. */
 	ok: boolean;
 	realm: Realm;
+	/** The project the place was made under, `getProject()`; absent when it was not made by `flamework-test`. */
+	project?: string;
 	/** Set when `list` was asked for: nothing ran. */
 	listed?: boolean;
 	passed: number;
@@ -64,6 +66,25 @@ let running = false;
 
 export function getRealm(): Realm {
 	return RunService.IsServer() ? "server" : "client";
+}
+
+/**
+ * The attribute `flamework-test` sets on Workspace when it makes the place: the name of the Rojo
+ * project the place follows, `deferred` for `tests/deferred.project.json`.
+ */
+export const PROJECT_ATTRIBUTE = "FlameworkTestProject";
+
+/**
+ * Which Rojo project this place was made under, when `flamework-test` made it: the name of the
+ * project file, `default` for `default.project.json`. A run under several projects (`--project`
+ * repeated) runs every test under each, and this is how a test tells them apart, to assert what
+ * that project's Workspace properties change (`SignalBehavior`, streaming) or to return early
+ * under the others. `undefined` in a place that was not patched: a build opened by hand, or run
+ * as it is.
+ */
+export function getProject(): string | undefined {
+	const value = Workspace.GetAttribute(PROJECT_ATTRIBUTE);
+	return typeIs(value, "string") ? value : undefined;
 }
 
 /**
@@ -271,12 +292,14 @@ export function runTests(filter: TestFilter, options: RunOptions | undefined, co
 	}
 
 	const realm = getRealm();
+	const project = getProject();
 	const selection = selectTests(filter);
 
 	if (options?.list === true) {
 		return {
 			ok: selection.unknown.isEmpty(),
 			realm,
+			project,
 			listed: true,
 			passed: 0,
 			failed: 0,
@@ -329,5 +352,5 @@ export function runTests(filter: TestFilter, options: RunOptions | undefined, co
 		warn(summary);
 	}
 
-	return { ok, realm, passed, failed, durationMs, sections, unknown: selection.unknown };
+	return { ok, realm, project, passed, failed, durationMs, sections, unknown: selection.unknown };
 }
