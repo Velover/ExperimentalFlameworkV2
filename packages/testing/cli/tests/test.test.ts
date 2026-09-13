@@ -279,4 +279,32 @@ describe("test", () => {
 		expect(run.studioCalls.filter((call) => call.name === "execute_luau")).toHaveLength(2);
 		expect(run.out).not.toContain(PLACE);
 	});
+	test("names the last test that reported when a realm's run does not answer in time", async () => {
+		const studio = studioThatOpens(BUILT_STUDIO, { Server: JSON.stringify(resultJson()), Client: "" });
+		const answers = studio.fake.answers as Record<string, unknown>;
+		answers.execute_luau = (args: Record<string, unknown>) => {
+			if (args.datamodel_type === "Client") throw new Error("execute_luau timed out after 1000ms");
+			return JSON.stringify(resultJson());
+		};
+		answers.get_console_output = () =>
+			[
+				"[FWTEST] client economy/buys: PASS (2ms)",
+				"[FWTEST] client economy/sells: PASS (1ms)",
+				"[FWTEST] server economy/later: PASS (1ms)",
+			].join("\n");
+
+		const run = await runCli(["test", "place.rbxl", "--timeout", "1s"], {
+			files: { "place.rbxl": "built" },
+			studio: studio.fake,
+			onLaunch: studio.onLaunch,
+		});
+
+		// Every test times itself out, so a realm that never answers is placed by the last test
+		// that reported in Studio's output; the server's result still prints, and the session is
+		// still stopped and the window closed.
+		expect(run.code).toBe(1);
+		expect(run.err).toContain("the client's run did not finish within 1s");
+		expect(run.err).toContain("last test that reported: economy/sells (PASS)");
+		expect(run.out).toContain("play session stopped");
+	});
 });

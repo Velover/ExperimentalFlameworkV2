@@ -1089,11 +1089,26 @@ async function runRealms(
 		let code = 0;
 		for (const dataModel of realms) {
 			io.log(`running the ${dataModel.toLowerCase()}'s tests in ${placeNameOf(studio.name)}...`);
-			const answer = await client.call(
-				"execute_luau",
-				{ studio_id: studio.id, datamodel_type: dataModel, code: script },
-				parseDurationMs(flags.timeout ?? DEFAULT_TIMEOUT, 120_000),
-			);
+			const timeout = flags.timeout ?? DEFAULT_TIMEOUT;
+
+			let answer: string;
+			try {
+				answer = await client.call(
+					"execute_luau",
+					{ studio_id: studio.id, datamodel_type: dataModel, code: script },
+					parseDurationMs(timeout, 120_000),
+				);
+			} catch (error) {
+				if (!/timed out/.test(String(error))) throw error;
+
+				// Every test has `testing.timeout` of its own, so a realm that does not answer is
+				// stuck somewhere the runner cannot see: the last test that reported places it.
+				code = 1;
+				io.error(`the ${dataModel.toLowerCase()}'s run did not finish within ${timeout} (--timeout)`);
+				io.error(await describeHangingTest(client, studio, dataModel));
+				continue;
+			}
+
 			code = Math.max(code, printRunResult([unquoteLuauResult(answer)], flags, io));
 		}
 		return code;
@@ -1103,6 +1118,34 @@ async function runRealms(
 			io.log("play session stopped (--keep leaves it running)");
 		}
 	}
+}
+
+/**
+ * Where a realm's run that never answered got to, read off Studio's output: the last `[FWTEST]`
+ * line names the last test that reported, so the one after it in that section is the one that has
+ * not returned. No line at all means the host never started the run.
+ */
+async function describeHangingTest(client: StudioClient, studio: StudioEntry, dataModel: string): Promise<string> {
+	const realm = dataModel.toLowerCase();
+
+	let output: string;
+	try {
+		output = await client.call("get_console_output", { studio_id: studio.id }, 30_000);
+	} catch (error) {
+		return `could not read Studio's output to place it: ${String(error)}`;
+	}
+
+	const reported = output
+		.split(/\r?\n/)
+		.map((line) => line.match(new RegExp(`\\[FWTEST\\] ${realm} (\\S+): (PASS|FAIL)`)))
+		.filter((match): match is RegExpMatchArray => match !== null);
+
+	if (reported.length === 0) {
+		return `no test of the ${realm} reported in Studio's output: the host never started the run, or the place is not built with the testing scope`;
+	}
+
+	const last = reported[reported.length - 1]!;
+	return `last test that reported: ${last[1]} (${last[2]}); the test after it in that section is hanging, past its own timeout`;
 }
 
 async function cmdStudioRun(flags: Flags, io: Io): Promise<number> {

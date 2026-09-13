@@ -124,8 +124,11 @@ this.onAttributeChanged("speed", (newValue, oldValue) => {
 });
 ```
 
-Only values that pass the guard are applied, so a handler never sees a bad one. Turn tracking off
-with `refreshAttributes: false`, which also disables `onAttributeChanged`.
+A value that fails the guard is never applied. With no `defaults` entry to stand in for it, the
+component is removed, and built again -- reading the attributes afresh -- once the attribute is
+valid; with one, the component keeps its last good value. Turn tracking off with
+`refreshAttributes: false`, which also disables `onAttributeChanged`; the validity of the attributes
+is a criterion, like the instance tree, and is watched either way.
 
 ### Writing an attribute
 
@@ -394,7 +397,7 @@ that instance is tagged.
 | The tree under a linked **component** breaks | Whatever that component's own streaming mode does. Its tree is its business: under `Watching` it goes and takes this component with it; under `Disabled` it stays, and so does this one. |
 
 | A required link attribute is cleared from outside | Removed. |
-| A plain attribute is changed to a value its guard rejects | **Kept.** The change is filtered out, `this.attributes` holds its last good value and `onAttributeChanged` does not fire. An attribute guard is a construction check, not a criterion. |
+| A plain attribute is changed to a value its guard rejects | Removed, and built again once it is valid -- the warning names it, `invalid attribute 'speed' ("fast")`. With a `defaults` entry for it, **kept** with its last good value, and `onAttributeChanged` does not fire. |
 | A child a link names is replaced by another instance of the same name | Removed and built again around the new one, so it never holds a child that has left. |
 | The child of an **optional** link arrives, or leaves | Removed and built again, so `childComponents` never names an instance the tree no longer holds. An optional link never holds construction up, but it is still part of the tree. |
 | The instance tree stops matching -- a child goes, including one a link names | Follows `streamingMode` (below). |
@@ -463,7 +466,9 @@ without waiting for it, so it neither starts a warning nor keeps one alive: unta
 and the warning goes with the tag, however many links are still watching, and tagging it once more
 starts the wait over. The same goes down the chain, in both directions -- the components a watched
 component depends on are watched too and report nothing until something asks for the component
-itself, and when the tag that was asking goes, their warnings go with it.
+itself, and when the tag that was asking goes, their warnings go with it. And it is said again after
+every loss: a component that goes down -- its tree broke, a link was lost, an attribute went bad --
+and stays down for `warningTimeout` seconds warns as one that never came up would, with the reason.
 
 ## Where components may attach
 
@@ -630,7 +635,8 @@ for.
   updates `childComponents` and `attributeComponents` to the component that is there now. Otherwise
   a cycle would remove and rebuild itself for as long as the place is running.
 - **Attribute tracking is on by default.** `refreshAttributes: false` disables `onAttributeChanged`
-  as well as the tracking.
+  as well as the tracking -- but not the watch on their validity: an attribute changed to a value
+  its guard rejects still takes the component down.
 - **A component with no `tag` can only be added by hand.**
 - **`@Component` classes are not providers.** They are not picked up by `registerProviders`, and
   `registerComponents` will not pick up providers.

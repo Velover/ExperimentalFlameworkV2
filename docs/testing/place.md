@@ -206,6 +206,7 @@ or uploading anything.
 | `RobloxStudioBeta.exe was not found` | Studio is not installed here; set `ROBLOX_STUDIO_EXE`, or run with `--cloud`. |
 | `... never showed up on the MCP proxy` | The window opened but "MCP server" is disabled in Studio's Assistant settings. |
 | `Workspace.FlameworkTests did not appear` | The build was made without the `testing` scope active (`FLAMEWORK_SCOPES` in `.env`), so the plugin stayed inert. |
+| `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started. The next line names the last test that reported in Studio's output; the one after it in that section is the hanging one. |
 | `a cloud run needs "testing": { "entry": ... }` | The cloud has to ignite the game itself; give the config the ModuleScript that exports `ignite()`. |
 | `403 PERMISSION_DENIED ... luau-execution-session ... missing` | The key lacks the task scopes for this experience. |
 | `409 Conflict: Save failed. Server is busy` on publish | The place is open in Roblox Studio. Close it; the upload succeeds at once afterwards. |

@@ -47,6 +47,9 @@ interface InstanceTracker {
 	 */
 	typeGuardWatcher?: TypeGuardWatcher;
 
+	/** The attribute criteria currently unmet, `invalid attribute '<name>'` each, so a re-read can clear the stale ones. */
+	invalidAttributes?: Set<string>;
+
 	/**
 	 * Whether this entry is still being set up, and its answer therefore provisional.
 	 *
@@ -100,6 +103,16 @@ export interface Criteria {
 	 * one was resolved again. Without it, a polled guard is re-run whole on every descendant change.
 	 */
 	watchTypeGuard?: (instance: Instance, changed: () => void) => TypeGuardWatcher;
+
+	/**
+	 * The plain attributes whose guards fail on the instance, with nothing to stand in for them: one
+	 * criterion each, so a component comes down when an attribute goes bad and up again when it is
+	 * valid, and the warning can name it.
+	 */
+	checkAttributes?: (instance: Instance) => string[];
+
+	/** Watches those attributes, calling `changed` whenever one of them was written. Returns the cleanup. */
+	watchAttributes?: (instance: Instance, changed: () => void) => () => void;
 	typeGuardPoll?: boolean;
 	typeGuardPollAtomic?: boolean;
 	dependencies?: ComponentTracker[];
@@ -195,7 +208,37 @@ export class ComponentTracker {
 				tracker.timeoutWarningThread = undefined;
 				task.cancel(warningThread);
 			}
+
+			// Said again after every loss while something waits: a component that goes down -- its
+			// tree broke, a link was lost, an attribute went bad -- and stays down is as stuck as one
+			// that never came up, and says why the same way.
+			if (!isQualified && !tracker.waiting.isEmpty()) {
+				this.armWarning(instance, tracker);
+			}
 		}
+	}
+
+	/**
+	 * Records which plain attributes fail their guards, one criterion each, clearing the ones that
+	 * have since been put right.
+	 */
+	private setInvalidAttributes(tracker: InstanceTracker, invalid: string[]) {
+		const criteria = new Set<string>();
+		for (const name of invalid) {
+			criteria.add(`invalid attribute '${name}'`);
+		}
+
+		if (tracker.invalidAttributes !== undefined) {
+			for (const previous of tracker.invalidAttributes) {
+				if (!criteria.has(previous)) tracker.unmetCriteria.delete(previous);
+			}
+		}
+
+		for (const criterion of criteria) {
+			tracker.unmetCriteria.add(criterion);
+		}
+
+		tracker.invalidAttributes = criteria;
 	}
 
 	private setupTracker(instance: Instance, tracker: InstanceTracker, observeOnly = false) {
@@ -297,6 +340,21 @@ export class ComponentTracker {
 			tracker.syncTypeGuardPoll(!tracker.unmetCriteria.has("type guard"));
 		}
 
+		const { checkAttributes, watchAttributes } = this.criteria;
+		if (checkAttributes !== undefined && watchAttributes !== undefined) {
+			// A burst of attribute writes is read once, after the engine has delivered them all.
+			const deferred = deferOnce(() => {
+				this.setInvalidAttributes(tracker, checkAttributes(instance));
+				this.updateListeners(instance, tracker);
+			});
+
+			const release = watchAttributes(instance, deferred.schedule);
+			tracker.cleanup.add(() => {
+				deferred.release();
+				release();
+			});
+		}
+
 		if (dependencies) {
 			for (const dependency of dependencies) {
 				const listener = (isQualified: boolean) => {
@@ -353,10 +411,14 @@ export class ComponentTracker {
 		if (tracker !== undefined) return [...tracker.unmetCriteria] as defined[];
 
 		const unmet = new Array<defined>();
-		const { tag, typeGuard, dependencies, unmetLinks } = this.criteria;
+		const { tag, typeGuard, checkAttributes, dependencies, unmetLinks } = this.criteria;
 
 		if (tag !== undefined && !CollectionService.HasTag(instance, tag)) unmet.push("CollectionService tag");
 		if (typeGuard !== undefined && !typeGuard(instance)) unmet.push("type guard");
+
+		if (checkAttributes !== undefined) {
+			for (const name of checkAttributes(instance)) unmet.push(`invalid attribute '${name}'`);
+		}
 
 		if (dependencies !== undefined) {
 			for (const dependency of dependencies) {
@@ -535,6 +597,18 @@ export class ComponentTracker {
 				if (!tracker) return result;
 
 				this.setTypeGuardMet(tracker, false);
+			}
+		}
+
+		if (this.criteria.checkAttributes) {
+			const invalid = this.criteria.checkAttributes(instance);
+			if (tracker) {
+				this.setInvalidAttributes(tracker, invalid);
+			}
+
+			if (!invalid.isEmpty()) {
+				result = false;
+				if (!tracker) return result;
 			}
 		}
 

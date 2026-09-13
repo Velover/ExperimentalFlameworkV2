@@ -147,6 +147,10 @@ class ExplainedOwner extends BaseComponent<{}, Folder & { Core: Rig }> {}
 @Component({ tag: "RootedImpatient", warningTimeout: 0.1, attributeWarningTimeout: 0 })
 class RootedImpatient extends BaseComponent<{ Target: Folder & { Root: Folder } }, Folder> {}
 
+/** Warns almost at once, so a spec can read what it says about a bad attribute. */
+@Component({ tag: "Speedy", warningTimeout: 0.1 })
+class Speedy extends BaseComponent<{ speed: number }, Folder> {}
+
 /** Records `onInit` and `onStart`, and marks itself ready in `onInit`, which anything that sees it can check. */
 @Component({ tag: "Initialised", warningTimeout: 0 })
 class Initialised extends BaseComponent<{}, Folder> implements OnInit, OnStart {
@@ -527,6 +531,7 @@ function createComponentPlugin() {
 		.registerComponent(LateRigChildOwner)
 		.registerComponent(ExplainedOwner)
 		.registerComponent(RootedImpatient)
+		.registerComponent(Speedy)
 		.registerComponent(Initialised)
 		.registerComponent(InitialisedOwner)
 		.registerComponent(BrokenInit)
@@ -787,22 +792,31 @@ export = suite("components", [
 		},
 	],
 	[
-		"keeps a component when a plain attribute is changed to a value its guard rejects",
+		"removes a component when a plain attribute becomes invalid, and builds it again once it is valid",
 		() => {
 			const module = createComponentModule();
 			const components = module.resolveDependency<Components>();
 
 			const instance = folder("BadExternal", { speed: 3 });
 			collectionService().AddTag(instance, "Tagged");
-			const component = expectDefined(components.getComponent<Tagged>(instance), "component");
+			expectDefined(components.getComponent<Tagged>(instance), "component");
 
-			// A plain attribute guard is a construction check, not a criterion: a bad change is
-			// filtered out so a handler never sees it, and the component carries on.
+			// An attribute guard is a criterion: a value it rejects takes the component down, and a
+			// value it accepts builds it again, reading the attributes afresh.
 			instance.SetAttribute("speed", "nope");
+			__harness.flush();
+			expectEqual(components.getComponent<Tagged>(instance), undefined, "component after a bad attribute change");
 
-			expectDefined(components.getComponent<Tagged>(instance), "component after a bad attribute change");
-			expectEqual(component.attributes.speed, 3, "attribute after a bad change");
+			instance.SetAttribute("speed", 4);
+			__harness.flush();
+			const rebuilt = expectDefined(
+				components.getComponent<Tagged>(instance),
+				"component once the attribute is valid again",
+			);
+			expectEqual(rebuilt.attributes.speed, 4, "the attribute the rebuilt component read");
 
+			// Destroyed rather than left behind: every later module would otherwise wait on it.
+			instance.Destroy();
 			module.extinguish();
 		},
 	],
@@ -3660,6 +3674,79 @@ export = suite("components", [
 				"lifecycle order across ignition",
 			);
 
+			module.extinguish();
+		},
+	],
+	[
+		"keeps a component whose invalid attribute has a default to stand in",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("DefaultedBad", { speed: 3 });
+			collectionService().AddTag(instance, "Defaulted");
+			const component = expectDefined(components.getComponent<Defaulted>(instance), "component");
+
+			instance.SetAttribute("speed", "nope");
+			__harness.flush();
+			expectEqual(
+				components.getComponent<Defaulted>(instance),
+				component,
+				"component after a bad change with a default",
+			);
+			expectEqual(component.attributes.speed, 3, "the last good value");
+
+			module.extinguish();
+		},
+	],
+	[
+		"names an invalid attribute in the warning",
+		() => {
+			const module = createComponentModule();
+			module.resolveDependency<Components>();
+
+			const instance = folder("SpeedyBad", { speed: "fast" });
+			__harness.clearWarnings();
+			collectionService().AddTag(instance, "Speedy");
+			task.wait(0.3);
+
+			expectTrue(
+				__harness
+					.warnings()
+					.some((line) => line.find(`invalid attribute 'speed' ("fast")`, 1, true)[0] !== undefined),
+				`warnings: ${__harness.warnings().join(" | ")}`,
+			);
+
+			instance.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"warns again when a component loses a criterion and stays down",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("LostAgain");
+			const root = folderIn(instance, "Root");
+			const texture = folderIn(root, "Texture");
+			collectionService().AddTag(instance, "DeepImpatient");
+			expectDefined(components.getComponent<DeepImpatient>(instance), "component");
+
+			__harness.clearWarnings();
+			texture.Destroy();
+			__harness.flush();
+			expectEqual(components.getComponent<DeepImpatient>(instance), undefined, "component after its tree broke");
+
+			task.wait(0.3);
+			expectTrue(
+				__harness
+					.warnings()
+					.some((line) => line.find("child 'Root.Texture' is missing", 1, true)[0] !== undefined),
+				`warnings: ${__harness.warnings().join(" | ")}`,
+			);
+
+			instance.Destroy();
 			module.extinguish();
 		},
 	],

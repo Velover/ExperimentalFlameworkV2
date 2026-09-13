@@ -307,9 +307,13 @@ one for it.
 The interesting part is `ComponentTracker`
 ([`componentTracker.ts`](../../packages/components/src/componentTracker.ts)). Rather than checking
 whether an instance qualifies at a point in time, a tracker holds a set of *unmet criteria* per
-instance -- the tag, the instance guard, and each component dependency -- and notifies its listeners
-whenever that set becomes empty or stops being empty. `Components` registers one listener that adds
-the component when the instance qualifies and removes it when it stops.
+instance -- the tag, the instance guard, each plain attribute whose guard fails with no default to
+stand in (`invalid attribute 'speed'`, watched through `AttributeChanged` and read once per burst),
+and each component dependency -- and notifies its listeners whenever that set becomes empty or
+stops being empty. `Components` registers one listener that adds the component when the instance
+qualifies and removes it when it stops. The wait-warning is armed when a listener starts waiting
+and again on every loss while one still waits, so a component that goes down and stays down says
+why, as one that never came up does.
 
 This is what makes dependencies and streaming work with one mechanism:
 
@@ -810,9 +814,14 @@ it before it ends.
   that reads instance state from inside a CollectionService handler as untested here.
 - `resolveRbxPath` walks with `WaitForChild` and no timeout, so a registered path naming a folder
   that does not exist stalls ignition with an "Infinite yield possible" warning instead of raising.
-- **Lune 0.10.5 does not reliably let go of a `task.wait` cancelled while it slept.** A thread
-  parked in `task.wait` and then `task.cancel`led can leave the scheduler waiting forever, so the
-  suite prints its summary and the process never exits; it depends on timing (a `print` beside it
-  made it go away) and did not reproduce outside the harness. The registry's link-attribute poll
-  no longer cancels its sleeping thread for that reason: it sets a flag and lets the thread wake
-  and see it. Anything else that cancels a sleeping `task.wait` under Lune may hit the same thing.
+- **Lune 0.10.5 does not reliably let go of a `task.wait` cancelled while it slept**, and holds a
+  cancelled `task.delay` until its deadline. A thread parked in `task.wait` and then
+  `task.cancel`led can leave the scheduler waiting forever, so the suite prints its summary and the
+  process never exits; it depends on timing (a `print` beside it made it go away) and did not
+  reproduce outside the harness. The registry's link-attribute poll no longer cancels its sleeping
+  thread for that reason: it sets a flag and lets the thread wake and see it. The runner
+  (`tests/runtime/main.luau`) defends against both: every case runs under a timeout
+  (`FLAMEWORK_SPEC_TIMEOUT`, 30s) and is reported as `HANG` by name when it is up, and the process
+  exits explicitly after the summary rather than waiting for the scheduler to drain.
+  `scripts/test-runtime.mjs` kills a run that still does not finish (`FLAMEWORK_RUNTIME_TIMEOUT_MS`,
+  10 minutes) and prints the last case it reported.

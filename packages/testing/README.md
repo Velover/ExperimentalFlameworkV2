@@ -163,6 +163,7 @@ tasks per place, 300 seconds per task. One task per run.
 | `RobloxStudioBeta.exe was not found` / `StudioMCP.exe was not found` | Studio is not installed here; set `ROBLOX_STUDIO_EXE` / `STUDIO_MCP_EXE`, or run in the cloud with `--cloud`. |
 | `... never showed up on the MCP proxy` | The window opened but "MCP server" is disabled in Studio's Assistant settings. |
 | `Workspace.FlameworkTests did not appear within 30 seconds` | The place was built without the `testing` scope active (`FLAMEWORK_SCOPES` in `.env`), so the plugin stayed inert. |
+| `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started; the next line names the last test that reported, and the one after it in that section is the hanging one. |
 | `no Studio window has the testing place ... open` | Nothing has it open, or the window has "MCP server" disabled and so is not listed. |
 | `a cloud run needs "testing": { "entry": ... }` | The cloud needs the ModuleScript that ignites the game; Studio does not. |
 | `403 PERMISSION_DENIED` naming a scope | The key lacks that scope for this experience. |

@@ -424,7 +424,39 @@ export class Components {
 			(streamingMode === ComponentStreamingMode.Contextual && RunService.IsClient()) ||
 			streamingMode === ComponentStreamingMode.Watching;
 
+		// The plain attributes -- a link attribute is its link's business -- whose guards are a
+		// criterion: one that fails, with no default to stand in for it, takes the component down,
+		// and a value the guard accepts builds it again. The same reading `getAttributes` makes on
+		// the way in, kept true for as long as the component stands.
+		const plainGuards = new Map<string, t.check<unknown>>();
+		for (const [name, guard] of this.getAttributeGuards(component)) {
+			if (!componentInfo.attributeLinks.has(name)) plainGuards.set(name, guard);
+		}
+
+		const defaults = this.getConfigValue(component, "defaults");
+		const checkAttributes = plainGuards.isEmpty()
+			? undefined
+			: (instance: Instance) => {
+					const invalid = new Array<string>();
+					for (const [name, guard] of plainGuards) {
+						if (!guard(instance.GetAttribute(name)) && defaults?.[name] === undefined) invalid.push(name);
+					}
+
+					return invalid;
+				};
+		const watchAttributes = plainGuards.isEmpty()
+			? undefined
+			: (instance: Instance, changed: () => void) => {
+					const connection = instance.AttributeChanged.Connect((name) => {
+						if (plainGuards.has(name)) changed();
+					});
+
+					return () => connection.Disconnect();
+				};
+
 		const tracker = new ComponentTracker(componentInfo.identifier, {
+			checkAttributes,
+			watchAttributes,
 			checkLinks: hasLinks ? (instance) => this.areLinksMet(componentInfo, instance) : undefined,
 			watchLinks: hasLinks
 				? (instance, update) => this.watchLinks(componentInfo, instance, update, pollsTree)
@@ -469,6 +501,14 @@ export class Components {
 		if (criterion === "type guard") {
 			const reason = shape !== undefined ? describeShapeMismatch(shape, instance) : undefined;
 			return reason !== undefined ? `instance guard (${reason})` : "instance guard";
+		}
+
+		const [attributeName] = criterion.match("^invalid attribute '(.*)'$");
+		if (attributeName !== undefined) {
+			const value = instance.GetAttribute(attributeName as string);
+			const shown = value === undefined ? "missing" : typeIs(value, "string") ? `"${value}"` : tostring(value);
+
+			return `${criterion} (${shown})`;
 		}
 
 		const link = componentInfo.links.find((candidate) => describeLink(candidate) === criterion);
