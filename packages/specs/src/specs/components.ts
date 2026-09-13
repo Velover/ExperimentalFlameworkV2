@@ -3351,7 +3351,11 @@ export = suite("components", [
 			root.Destroy();
 			__harness.flush();
 			expectDefined(components.getComponent<FrozenRig>(core), "the child's component after its tree broke");
-			expectEqual(components.getComponent<FrozenRigOwner>(instance), owner, "the owner after the child's tree broke");
+			expectEqual(
+				components.getComponent<FrozenRigOwner>(instance),
+				owner,
+				"the owner after the child's tree broke",
+			);
 
 			// The child itself is the owner's tree.
 			core.Parent = undefined;
@@ -3376,7 +3380,11 @@ export = suite("components", [
 
 			root.Parent = undefined;
 			__harness.flush();
-			expectEqual(components.getComponent<LateRig>(core), undefined, "the child's component after its tree broke");
+			expectEqual(
+				components.getComponent<LateRig>(core),
+				undefined,
+				"the child's component after its tree broke",
+			);
 			expectEqual(
 				components.getComponent<LateRigChildOwner>(instance),
 				undefined,
@@ -3386,7 +3394,10 @@ export = suite("components", [
 			root.Parent = core;
 			__harness.flush();
 			expectDefined(components.getComponent<LateRig>(core), "the child's component once its tree is back");
-			expectDefined(components.getComponent<LateRigChildOwner>(instance), "the owner once the child's component is back");
+			expectDefined(
+				components.getComponent<LateRigChildOwner>(instance),
+				"the owner once the child's component is back",
+			);
 
 			module.extinguish();
 		},

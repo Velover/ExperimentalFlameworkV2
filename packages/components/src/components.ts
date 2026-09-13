@@ -1111,7 +1111,10 @@ export class Components {
 				// this component and destroy it mid-write, so the write is refused and said out
 				// loud instead -- wait for the component first, then assign.
 				const linkedComponent = link.component !== undefined ? this.getLinkedComponent(link) : undefined;
-				if (linkedComponent !== undefined && this.resolveLinkedComponent(value, linkedComponent) === undefined) {
+				if (
+					linkedComponent !== undefined &&
+					this.resolveLinkedComponent(value, linkedComponent) === undefined
+				) {
 					// An instance that can never carry the component -- the wrong tree for it -- is a
 					// mistake in the value, said in that component's own words; one that merely has
 					// no component yet is left to the warning below.
