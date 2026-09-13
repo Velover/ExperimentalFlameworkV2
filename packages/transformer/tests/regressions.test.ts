@@ -195,33 +195,33 @@ describe("component links", () => {
 		expect(source).toContain(`Target = t.typeof("InstanceHandle")`);
 		expect(source).toContain(`Spare = t.optional(t.typeof("InstanceHandle"))`);
 		expect(source).toContain(
-			`kind = "attribute", name = "Target", optional = false, guard = t.instanceIsA("BasePart"),`,
+			`kind = "attribute", name = "Target", optional = false, shape = { isA = { "BasePart" }, },`,
 		);
-		expect(source).toContain(`kind = "attribute", name = "Spare", optional = true, guard = t.instanceIsA("Part"),`);
+		expect(source).toContain(`kind = "attribute", name = "Spare", optional = true, shape = { isA = { "Part" }, },`);
 	});
 
 	test("links the component an attribute names, by its identifier", () => {
 		expect(normalize(emitted("components"))).toContain(
-			`kind = "attribute", name = "Handler", optional = false, guard = t.instanceIsA("BasePart"), component = "fw:components@HandlerComponent",`,
+			`kind = "attribute", name = "Handler", optional = false, shape = { isA = { "BasePart" }, }, component = "fw:components@HandlerComponent",`,
 		);
 	});
 
 	test("links a component named by the instance tree, guarding the child as its instance", () => {
 		const source = normalize(emitted("components"));
 
-		// The child's own class is part of the instance guard, so the link only has to name the
+		// The child's own class is part of the instance shape, so the link only has to name the
 		// component that must be attached to it.
-		expect(source).toContain(`EffectHandler = t.instanceIsA("BasePart")`);
+		expect(source).toContain(`EffectHandler = { isA = { "BasePart" }, }`);
 		expect(source).toContain(
 			`kind = "child", name = "EffectHandler", optional = false, component = "fw:components@HandlerComponent",`,
 		);
 	});
 
-	test("carries the structure a linked component needs into the link's guard", () => {
+	test("carries the structure a linked component needs into the link's shape", () => {
 		// Not just the class: a component that declares a tree only accepts an instance that has it,
 		// wherever it is named from.
 		expect(normalize(emitted("components"))).toContain(
-			`name = "Rig", optional = false, guard = t.intersection(t.instanceIsA("Model"), t.children({ Root = t.instanceIsA("BasePart"), })), component =`,
+			`name = "Rig", optional = false, shape = { isA = { "Model" }, children = { Root = { isA = { "BasePart" }, }, }, }, component =`,
 		);
 	});
 
@@ -259,11 +259,43 @@ describe("component links", () => {
 		// required child, an optional attribute, and a child naming a component optionally.
 		const source = normalize(emitted("components"));
 
-		expect(source).toContain(`Plain = t.instanceIsA("BasePart")`);
+		expect(source).toContain(`Plain = { isA = { "BasePart" }, }`);
 		expect(source).toContain(`label = t.optional(t.string)`);
-		expect(source).toContain(`SpareHandler = t.optional(t.instanceIsA("BasePart"))`);
+		expect(source).toContain(`SpareHandler = { isA = { "BasePart" }, optional = true, }`);
 		expect(source).toContain(
 			`kind = "child", name = "SpareHandler", optional = true, component = "fw:components@HandlerComponent",`,
+		);
+	});
+});
+
+describe("instance shapes", () => {
+	test("writes the instance tree as data, class names and children by name", () => {
+		const source = normalize(emitted("components"));
+
+		expect(source).toContain(
+			`instanceShape = { isA = { "Model" }, children = { Root = { isA = { "BasePart" }, }, }, }`,
+		);
+		expect(source).toContain(`instanceShape = { isA = { "BasePart" }, }`);
+	});
+
+	test("nests the shape as deep as the tree goes, and lists the classes a child may be", () => {
+		expect(normalize(emitted("components"))).toContain(
+			`instanceShape = { isA = { "Model" }, children = { Root = { isA = { "BasePart" }, children = { Texture = { isA = { "Texture", "Decal" }, }, }, }, }, }`,
+		);
+	});
+
+	test("falls back to a guard for a union whose members declare children of their own", () => {
+		// Which children go with which class is more than a shape says.
+		const source = normalize(emitted("components"));
+
+		expect(source).toContain(
+			`tag = "FixtureEither", attributes = {}, instanceGuard = t.union(t.intersection(t.instanceIsA("Model"), t.children({ Root = t.instanceIsA("BasePart"), })), t.intersection(t.instanceIsA("Folder"), t.children({ Core = t.instanceIsA("Folder"), }))), }`,
+		);
+	});
+
+	test("keeps a guard written by hand, with no shape beside it", () => {
+		expect(normalize(emitted("components"))).toContain(
+			`tag = "FixtureCustom", instanceGuard = t.instanceIsA("Part"), attributes = {}, }`,
 		);
 	});
 

@@ -144,14 +144,26 @@ accepts it and the attribute is cleared.
 
 ## Instance guards
 
-The second type parameter generates an instance guard: `BaseComponent<{}, Part>` will not attach to
-a Folder. Intersect it with an object type to require children:
+The second type parameter is the instance tree: `BaseComponent<{}, Part>` will not attach to a
+Folder. Intersect it with an object type to require children, as deep as you like:
 
 ```ts
-// Requires a Humanoid child before the component is created
+// Requires a Humanoid child, and a Head with a Face, before the component is created
 @Component({ tag: "Character" })
-export class Character extends BaseComponent<{}, Model & { Humanoid: Humanoid }> {}
+export class Character extends BaseComponent<{}, Model & { Humanoid: Humanoid; Head: BasePart & { Face: Decal } }> {}
 ```
+
+The transformer writes the tree down as data -- the classes each instance may be and the children
+it must have, by name -- and Flamework reads it the way your code reads `this.instance.Head`: with
+`FindFirstChild`, the first child of that name. A second child of the same name is therefore
+neither an error nor the one that is checked, and it can come and go without the component
+noticing. A child may be a union of classes (`Texture | Decal`); a union of whole trees,
+`(Model & { Root: Part }) | (Folder & { Core: Folder })`, cannot be written down this way and gets
+a `t` guard instead, which can only be re-run whole.
+
+A mismatch is named: `addComponent` raises with `child 'Head.Face' is missing (expected Decal)` or
+`child 'Head' is a Folder, expected BasePart`, and the warning for a tagged instance that never
+qualifies says the same (see [Streaming](#streaming)).
 
 A child cannot be optional, and Flamework rejects one at compile time:
 
@@ -169,7 +181,8 @@ exception, because Flamework watches whether it is there; see [links](#links).
 Attributes are a different mechanism and stay optional: a missing one reads back as `undefined`, so
 `label?: string` is fine.
 
-Override it entirely with `instanceGuard` if the generated one is not what you want.
+Override it entirely with `instanceGuard` if the generated one is not what you want. A guard
+written by hand can only say that it failed, and can only be re-run whole when the tree changes.
 
 ## Links
 
@@ -432,26 +445,36 @@ A component left out by scope is not registered in the plugin at all: it is neve
 
 ## Streaming
 
-With StreamingEnabled an instance can arrive before its descendants, so an instance guard that
-checks for children may fail and then pass a moment later.
+With StreamingEnabled an instance can arrive before its descendants, so an instance tree that asks
+for children may be incomplete, and complete a moment later.
 
 | `ComponentStreamingMode` | Behaviour |
 |---|---|
 | `Contextual` (default) | Watches on the client; never on the server; skips atomic models, which replicate whole. |
-| `Watching` | Always re-runs the instance guard as the tree changes. |
-| `Disabled` | Runs the instance guard once. |
+| `Watching` | Always follows the tree as it changes. |
+| `Disabled` | Reads the tree once. |
 
 ```ts
 @Component({ tag: "Character", streamingMode: ComponentStreamingMode.Watching })
 ```
 
+Watching is one watcher per required child, not a re-check of the whole tree. `Model & { Root:
+Part & { Texture: Texture } }` listens for children arriving and leaving on the model and, once
+`Root` has resolved, on `Root`, plus the `Name` of each resolved child. A `Texture` arriving three
+levels down re-resolves that one slot; a child that is not in the tree, or a second child of a
+required name, changes nothing however often it moves. A child renamed away is noticed, and so is
+renaming it back; a *sibling* renamed to a required name while the slot is empty fires nothing the
+watcher listens to, and is picked up the next time the tree is read (a tag arriving, or the child
+moving). A guard written by hand with `instanceGuard` has no such structure and is re-run whole on
+every descendant change.
+
 When a watched component's tree breaks apart again, the component is removed. That holds however the
 component came to qualify: a tag arriving at an instance another component's link was already
-watching re-reads the instance guard, and what it reads is what the tree is watched for next, so the
-component still goes and comes back with its tree afterwards. If an instance never
-qualifies, Flamework warns after `warningTimeout` seconds (default 5, `0` disables) listing the
-criteria it is still waiting on -- that warning is usually the fastest way to find a typo in a tag
-or a missing child.
+watching re-reads the tree, and what it reads is what is watched next, so the component still goes
+and comes back with its tree afterwards. If an instance never qualifies, Flamework warns after
+`warningTimeout` seconds (default 5, `0` disables) listing the criteria it is still waiting on --
+`instance guard (child 'Root.Texture' is missing (expected Texture))`, say -- which is usually the
+fastest way to find a typo in a tag or a missing child.
 
 ## Component dependencies
 

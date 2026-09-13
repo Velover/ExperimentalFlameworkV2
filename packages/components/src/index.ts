@@ -7,5 +7,6 @@ export { ComponentPlugin } from "./componentModule";
 // declares dependencies of its own.
 export type { ComponentMetadata } from "./baseComponent";
 
-export type { ComponentConfig } from "./decorator";
+export type { ComponentConfig, ComponentLink } from "./decorator";
+export type { InstanceShape } from "./instanceTree";
 export type { ComponentModuleConfig } from "./componentModule";

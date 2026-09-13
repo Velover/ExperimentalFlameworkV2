@@ -202,6 +202,16 @@ function methods:GetAttributeChangedSignal(name: string)
 	return registry[name]
 end
 
+--- `Name` is the only property the harness announces a change of: it is what a component's
+--- instance tree is resolved by, and the engine fires it through the same queue as the tree signals.
+function methods:GetPropertyChangedSignal(name: string)
+	local registry = rawget(self, "_propertySignals")
+	if not registry[name] then
+		registry[name] = signals.create()
+	end
+	return registry[name]
+end
+
 function methods:ClearAllChildren()
 	for _, child in table.clone(rawget(self, "_children")) do
 		child:Destroy()
@@ -215,6 +225,10 @@ local function disconnectAll(instance: Instance)
 	end
 
 	for _, signal in rawget(instance, "_attributeSignals") do
+		signal:DisconnectAll()
+	end
+
+	for _, signal in rawget(instance, "_propertySignals") do
 		signal:DisconnectAll()
 	end
 end
@@ -391,6 +405,15 @@ local function fireTree(signal: any, argument: any)
 	fireDeferred("tree", signal, argument)
 end
 
+--- Announces a property change through `GetPropertyChangedSignal`, deferred with the tree signals
+--- as the engine defers it.
+local function fireProperty(instance: Instance, name: string)
+	local signal = rawget(instance, "_propertySignals")[name]
+	if signal then
+		fireTree(signal, nil)
+	end
+end
+
 local function fireDeferrable(signal: any, ...: any)
 	fireDeferred("signals", signal, ...)
 end
@@ -491,6 +514,7 @@ end
 instanceMeta.__newindex = function(instance: Instance, key: string, value: any)
 	if key == "Name" then
 		rawset(instance, "_name", value)
+		fireProperty(instance, "Name")
 	elseif key == "Parent" then
 		local previousParent = rawget(instance, "_parent")
 		local wasInDataModel = isInDataModel(instance)
@@ -674,6 +698,7 @@ function instances.new(className: string, parent: Instance?): Instance
 		_children = {},
 		_attributes = {},
 		_attributeSignals = {},
+		_propertySignals = {},
 		_destroyed = false,
 		_signals = {},
 	}, instanceMeta)

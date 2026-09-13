@@ -1,3 +1,4 @@
+import { t } from "@rbxts/t";
 import { BaseComponent, Component, ComponentMetadata, Components } from "@flamework-experimental/components";
 
 @Component({ tag: "FixtureHandler" })
@@ -85,3 +86,18 @@ export class CounterComponent extends BaseComponent<{ count: number }, BasePart>
 		this.components.getComponent<CounterComponent>(other)!.attributes.count += 1;
 	}
 }
+
+/** A tree three levels deep, with a child that may be one of two classes. */
+@Component({ tag: "FixtureDeep" })
+export class DeepComponent extends BaseComponent<{}, Model & { Root: BasePart & { Texture: Texture | Decal } }> {}
+
+/**
+ * A union whose members declare children of their own has no shape: which children go with which
+ * class is more than a shape says, so the guard is kept for it.
+ */
+@Component({ tag: "FixtureEither" })
+export class EitherComponent extends BaseComponent<{}, (Model & { Root: BasePart }) | (Folder & { Core: Folder })> {}
+
+/** A guard written by hand is kept as it is, with no shape beside it. */
+@Component({ tag: "FixtureCustom", instanceGuard: t.instanceIsA("Part") })
+export class CustomGuardComponent extends BaseComponent<{}, Part> {}

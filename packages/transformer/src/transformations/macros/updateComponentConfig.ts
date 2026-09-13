@@ -8,6 +8,7 @@ import { withDiagnosticContext } from "../../util/diagnosticsUtils";
 import { getInstanceTypeFromType } from "../../util/functions/getInstanceTypeFromType";
 import { Diagnostics } from "../../classes/diagnostics";
 import { getTypeUid } from "../../util/uid";
+import { buildInstanceShape } from "../../util/functions/buildInstanceShape";
 
 /**
  * The property every component carries, which is how a component type is told apart from the
@@ -144,8 +145,16 @@ function updateInstanceGuard(
 	if (!superInstanceType) return;
 
 	if (!type.checker.isTypeAssignableTo(superInstanceType, instanceType)) {
-		const guard = buildGuardFromType(state, node, instanceType);
-		properties.push(f.propertyAssignmentDeclaration("instanceGuard", guard));
+		// As data wherever the type is only classes and children, which the runtime watches one
+		// child at a time and can explain; as a guard otherwise.
+		const shape = buildInstanceShape(state, node, instanceType);
+		if (shape !== undefined) {
+			properties.push(f.propertyAssignmentDeclaration("instanceShape", shape));
+		} else {
+			properties.push(
+				f.propertyAssignmentDeclaration("instanceGuard", buildGuardFromType(state, node, instanceType)),
+			);
+		}
 	}
 
 	return properties;
@@ -203,15 +212,18 @@ function createLink(
 	];
 
 	if (guardType) {
+		const shape = buildInstanceShape(state, node.name ?? node, guardType);
 		fields.push(
-			f.propertyAssignmentDeclaration(
-				"guard",
-				withDiagnosticContext(
-					node.name ?? node,
-					() => `Failed to generate a guard for the '${name}' link`,
-					() => buildGuardFromType(state, node.name ?? node, guardType),
-				),
-			),
+			shape !== undefined
+				? f.propertyAssignmentDeclaration("shape", shape)
+				: f.propertyAssignmentDeclaration(
+						"guard",
+						withDiagnosticContext(
+							node.name ?? node,
+							() => `Failed to generate a guard for the '${name}' link`,
+							() => buildGuardFromType(state, node.name ?? node, guardType),
+						),
+					),
 		);
 	}
 

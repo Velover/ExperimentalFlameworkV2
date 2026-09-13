@@ -315,11 +315,33 @@ This is what makes dependencies and streaming work with one mechanism:
 
 - A component that depends on another registers a listener on the dependency's tracker, so it
   qualifies only once the dependency does, in either tag order.
-- Under `Watching` (or `Contextual` on a client), the tracker subscribes to the instance's descendant
-  signals and re-runs the instance guard on a deferred task, flipping the criterion as the tree fills
-  in or breaks apart. Atomic models are exempt under `Contextual` because they replicate whole.
+- Under `Watching` (or `Contextual` on a client), the tracker follows the instance tree and flips the
+  criterion as it fills in or breaks apart. Atomic models are exempt under `Contextual` because they
+  replicate whole.
 
-Only one of those two signals is connected at a time: a guard that fails can only be met by the tree
+How it follows the tree depends on what the transformer could say about it. An instance type that is
+only classes and children is written down as an `InstanceShape` (`instanceShape` in the decorator
+config, `shape` on an attribute link), and [`instanceTree.ts`](../../packages/components/src/instanceTree.ts)
+turns that into a watcher: one slot per required child, resolved with `FindFirstChild` -- what
+`this.instance.Root` reads -- and a node per resolved child that has children of its own. A node
+connects `ChildAdded` and `ChildRemoved` on its instance and follows the `Name` of each child it
+resolved (and, after that child is renamed away, still that child until it leaves the parent, so
+renaming it back is noticed). An addition matters only when it changes what a slot's name resolves
+to, a removal only when it was the resolved child, so a second child of a required name and anything
+outside the tree cost nothing. Each change re-resolves its own slot, and the tracker's poll, deferred
+once per burst, reads the watcher's answer rather than the tree. `testInstance` re-reads through the
+watcher's `refresh`, which resolves every slot again -- the only way a sibling renamed to a required
+name while the slot was empty is ever seen -- so what the watcher holds and what the tracker recorded
+cannot drift. The same shape is what `describeShapeMismatch` names a failure by, in `addComponent`'s
+error and in the tracker's warning. `t.children`, which the guard used to be built from, refused two
+children of one name outright; with the poll re-running the guard whole, a stray second `Root` took
+the component down at the next unrelated removal, and the poll then listened only for additions, so
+removing the stray one was never seen.
+
+A guard written by hand (`instanceGuard`), or one the transformer fell back to because the type says
+more than classes and children (a union of trees), has no structure to follow, so the tracker
+watches the whole tree: it subscribes to the instance's descendant signals and re-runs the guard on
+a deferred task. Only one of those two signals is connected at a time: a guard that fails can only be met by the tree
 gaining something, and one that passes can only be broken by it losing something. Which of them is
 live is derived from the criterion rather than remembered beside it, so every path that writes the
 criterion re-points the poll with it -- the poll's own handler, and the re-read a tag performs when
@@ -378,9 +400,9 @@ component the criterion had just refused, under the very ancestor the lists exis
 
 The guard is part of the criterion rather than a question asked once on the way in: it carries the
 whole shape the target has to have, and a target can gain that shape -- or lose it -- long after the
-attribute naming it was written. So a link with a guard subscribes to the target's `DescendantAdded`
-and `DescendantRemoving` and re-reads the criterion on a deferred task, the same shape the instance
-guard's own poll has. This is how a link to a component whose tree fills in late is ever met: without
+attribute naming it was written. So a link with a shape follows the target one required child at a
+time, as the instance guard's own watcher does, and a link with a guard subscribes to the target's
+`DescendantAdded` and `DescendantRemoving`; either re-reads the criterion on a deferred task. This is how a link to a component whose tree fills in late is ever met: without
 it the target would have nothing watching it at all, because a failing guard is what kept the
 subscription to the linked component's tracker from being made in the first place. Only attribute
 links carry a guard; a child's shape is already part of its owner's instance guard.

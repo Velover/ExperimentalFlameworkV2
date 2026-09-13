@@ -24,6 +24,7 @@ import Maid from "@rbxts/maid";
 import Signal from "@rbxts/signal";
 import type { ComponentModuleConfig } from "./componentModule";
 import { ComponentStreamingMode, type ComponentConfig, type ComponentLink } from "./decorator";
+import { checkShape, deferOnce, describeShapeMismatch, watchShape, type InstanceShape } from "./instanceTree";
 import type { Module } from "@flamework-experimental/core";
 
 interface ComponentInfo {
@@ -360,7 +361,7 @@ export class Components {
 			error(this.missingComponentMessage(component));
 		}
 
-		const instanceGuard = this.getConfigValue(component, "instanceGuard");
+		const { guard: instanceGuard, shape: instanceShape } = this.getInstanceCheck(component);
 		const dependencies = new Array<ComponentTracker>();
 
 		for (const dependency of componentInfo.componentDependencies) {
@@ -385,6 +386,12 @@ export class Components {
 			linksMet: hasLinks ? (instance) => this.areLinksMet(componentInfo, instance) : undefined,
 			tag: componentInfo.config.tag,
 			typeGuard: instanceGuard,
+			describeTypeGuard:
+				instanceShape !== undefined ? (instance) => describeShapeMismatch(instanceShape, instance) : undefined,
+			watchTypeGuard:
+				instanceShape !== undefined
+					? (instance, changed) => watchShape(instance, instanceShape, changed)
+					: undefined,
 			typeGuardPoll: pollsTree,
 			typeGuardPollAtomic: streamingMode !== ComponentStreamingMode.Contextual,
 			warningTimeout: componentInfo.config.warningTimeout ?? getRuntimeConfig().components?.warningTimeout,
@@ -431,7 +438,15 @@ export class Components {
 	}
 
 	private passesLinkGuard(link: ComponentLink, target: Instance) {
-		return link.guard === undefined || link.guard(target);
+		if (link.guard !== undefined) return link.guard(target);
+		if (link.shape !== undefined) return checkShape(link.shape, target);
+
+		return true;
+	}
+
+	/** Why a link's target does not have the tree the link asks for, when the link asks with a shape. */
+	private describeLinkGuard(link: ComponentLink, target: Instance) {
+		return link.shape !== undefined ? describeShapeMismatch(link.shape, target) : undefined;
 	}
 
 	private getLinkedComponent(link: ComponentLink) {
@@ -459,31 +474,17 @@ export class Components {
 	}
 
 	/**
-	 * Watches an instance's tree, calling `changed` on a deferred task so that a burst of changes
-	 * costs one call.
-	 *
-	 * This is the shape the tracker's own instance-guard poll has, for the same reason: a structural
-	 * guard is answered by children that may not have arrived yet. Returns the cleanup.
+	 * Watches an instance's whole tree, calling `changed` on a deferred task so that a burst of
+	 * changes costs one call. For a guard written by hand, which can only be re-run whole; a link
+	 * with a shape is followed one required child at a time instead. Returns the cleanup.
 	 */
 	private watchInstanceTree(instance: Instance, changed: () => void) {
-		let isScheduled = false;
-		let isReleased = false;
-
-		const schedule = () => {
-			if (isScheduled || isReleased) return;
-			isScheduled = true;
-
-			task.defer(() => {
-				isScheduled = false;
-				if (!isReleased) changed();
-			});
-		};
-
-		const added = instance.DescendantAdded.Connect(schedule);
-		const removing = instance.DescendantRemoving.Connect(schedule);
+		const deferred = deferOnce(changed);
+		const added = instance.DescendantAdded.Connect(deferred.schedule);
+		const removing = instance.DescendantRemoving.Connect(deferred.schedule);
 
 		return () => {
-			isReleased = true;
+			deferred.release();
 			added.Disconnect();
 			removing.Disconnect();
 		};
@@ -720,9 +721,18 @@ export class Components {
 			// The guard is a criterion rather than an answer given once. It carries the whole shape
 			// the target has to have, and that shape can arrive -- or break -- long after the
 			// attribute naming the instance was written, which is what a link to a component whose
-			// own tree fills in late looks like. Only an attribute link carries a guard; a child's
-			// shape is already part of its owner's instance guard.
-			if (link.guard !== undefined) {
+			// own tree fills in late looks like. Only an attribute link carries a guard or a shape;
+			// a child's shape is already part of its owner's instance guard. A shape is followed one
+			// required child at a time, a guard written by hand whole.
+			if (link.shape !== undefined) {
+				const deferred = deferOnce(refresh);
+				const watcher = watchShape(target, link.shape, deferred.schedule);
+
+				targetMaid.GiveTask(() => {
+					deferred.release();
+					watcher.release();
+				});
+			} else if (link.guard !== undefined) {
 				targetMaid.GiveTask(this.watchInstanceTree(target, refresh));
 			}
 
@@ -867,7 +877,8 @@ export class Components {
 			}
 
 			if (!this.passesLinkGuard(link, target)) {
-				throw `${target.GetFullName()} did not pass the guard for ${describeLink(link)} of '${componentInfo.identifier}'`;
+				const reason = this.describeLinkGuard(link, target);
+				throw `${target.GetFullName()} did not pass the guard for ${describeLink(link)} of '${componentInfo.identifier}'${reason !== undefined ? `: ${reason}` : ""}`;
 			}
 
 			// The attribute is stored as a handle; the component sees the instance it resolves to.
@@ -1005,8 +1016,9 @@ export class Components {
 				instance.SetAttribute(key, undefined);
 			} else {
 				if (!typeIs(value, "Instance") || !this.passesLinkGuard(link, value)) {
+					const reason = typeIs(value, "Instance") ? this.describeLinkGuard(link, value) : undefined;
 					error(
-						`'${tostring(value)}' did not pass the guard for attribute '${key}' of '${componentInfo.identifier}'`,
+						`'${tostring(value)}' did not pass the guard for attribute '${key}' of '${componentInfo.identifier}'${reason !== undefined ? `: ${reason}` : ""}`,
 					);
 				}
 
@@ -1112,6 +1124,28 @@ export class Components {
 		}
 
 		return newAttributes;
+	}
+
+	/**
+	 * How a component's instance is checked: the shape the transformer wrote from its instance
+	 * type, or a guard written by hand, whichever the nearest class in the hierarchy declares. A
+	 * shape is what can be watched one child at a time and can say which child is wrong.
+	 */
+	private getInstanceCheck(ctor: AbstractConstructor): {
+		guard?: (instance: Instance) => boolean;
+		shape?: InstanceShape;
+	} {
+		const metadata = this.components.get(ctor as Constructor);
+		if (metadata === undefined) return {};
+
+		const { instanceGuard, instanceShape } = metadata.config;
+		if (instanceGuard !== undefined) return { guard: instanceGuard };
+		if (instanceShape !== undefined) {
+			return { shape: instanceShape, guard: (instance) => checkShape(instanceShape, instance) };
+		}
+
+		const parentCtor = getmetatable(ctor) as { __index?: AbstractConstructor };
+		return parentCtor.__index !== undefined ? this.getInstanceCheck(parentCtor.__index) : {};
 	}
 
 	private getConfigValue<T extends keyof ComponentConfig>(ctor: AbstractConstructor, key: T): ComponentConfig[T] {
@@ -1437,12 +1471,13 @@ export class Components {
 		const attributes = this.getAttributes(instance, componentInfo, attributeGuards);
 
 		if (skipInstanceCheck !== true) {
-			const instanceGuard = this.getConfigValue(component, "instanceGuard");
-			if (instanceGuard !== undefined) {
-				assert(
-					instanceGuard(instance),
-					`${instance.GetFullName()} did not pass instance guard check for '${componentInfo.identifier}'`,
-				);
+			// A shape says which child is wrong; a guard written by hand only that it failed.
+			const { guard, shape } = this.getInstanceCheck(component);
+			const reason = shape !== undefined ? describeShapeMismatch(shape, instance) : undefined;
+			const passes = shape !== undefined ? reason === undefined : guard === undefined || guard(instance);
+
+			if (!passes) {
+				throw `${instance.GetFullName()} did not pass instance guard check for '${componentInfo.identifier}'${reason !== undefined ? `: ${reason}` : ""}`;
 			}
 		}
 

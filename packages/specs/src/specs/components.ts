@@ -115,6 +115,18 @@ class Contextual extends BaseComponent<{}, Folder & { Core: Folder }> {}
 @Component({ tag: "Atomic", warningTimeout: 0 })
 class Atomic extends BaseComponent<{}, Model & { Core: Folder }> {}
 
+/** A tree two levels deep, watched, so a change under `Root` is a change to this component's tree. */
+@Component({ tag: "Deep", streamingMode: ComponentStreamingMode.Watching, warningTimeout: 0 })
+class Deep extends BaseComponent<{}, Folder & { Root: Folder & { Texture: Folder } }> {}
+
+/** The same tree, warning almost at once, so a spec can read what the warning names. */
+@Component({ tag: "DeepImpatient", streamingMode: ComponentStreamingMode.Watching, warningTimeout: 0.1 })
+class DeepImpatient extends BaseComponent<{}, Folder & { Root: Folder & { Texture: Folder } }> {}
+
+/** Requires a Part child, so a Folder of the right name is the wrong class. */
+@Component({ tag: "Parted", streamingMode: ComponentStreamingMode.Watching, warningTimeout: 0 })
+class Parted extends BaseComponent<{}, Folder & { Core: Part }> {}
+
 @Component({ tag: "Blocked" })
 class Blocked extends BaseComponent<{}, Folder> {}
 
@@ -415,6 +427,9 @@ function createComponentModule() {
 		.registerComponent(Frozen)
 		.registerComponent(Contextual)
 		.registerComponent(Atomic)
+		.registerComponent(Deep)
+		.registerComponent(DeepImpatient)
+		.registerComponent(Parted)
 		.registerComponent(Blocked)
 		.registerComponent(Allowed)
 		.registerComponent(Enemy)
@@ -3055,6 +3070,236 @@ export = suite("components", [
 
 			instance.SetAttribute("speed", 4);
 			expectArrayEqual(changes, ["1->4"], "attribute changes");
+
+			module.extinguish();
+		},
+	],
+	[
+		"keeps a watched component while a second child of the required name comes and goes",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("Doubled");
+			const core = addCore(instance);
+			collectionService().AddTag(instance, "Watched");
+			const component = expectDefined(components.getComponent<Watched>(instance), "component");
+
+			// A second `Core` is not the one `this.instance.Core` reads, so it is none of the
+			// tree's business: not arriving, not being there while something unrelated moves, and
+			// not leaving.
+			const spare = folderIn(instance, "Core");
+			__harness.flush();
+			expectEqual(components.getComponent<Watched>(instance), component, "component after a second Core arrived");
+
+			folderIn(instance, "Extra").Destroy();
+			__harness.flush();
+			expectEqual(
+				components.getComponent<Watched>(instance),
+				component,
+				"component after an unrelated child came and went",
+			);
+
+			spare.Destroy();
+			__harness.flush();
+			expectEqual(components.getComponent<Watched>(instance), component, "component after the second Core left");
+
+			// The one it reads leaving is the tree breaking.
+			core.Destroy();
+			__harness.flush();
+			expectEqual(components.getComponent<Watched>(instance), undefined, "component after the Core it read left");
+
+			module.extinguish();
+		},
+	],
+	[
+		"reads the next child of the required name when the one it read leaves",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("Succession");
+			const first = addCore(instance);
+			const second = addCore(instance);
+			collectionService().AddTag(instance, "Watched");
+			const component = expectDefined(components.getComponent<Watched>(instance), "component");
+			expectEqual(instance.FindFirstChild("Core"), first, "the Core the component reads");
+
+			// The name resolves to the second one now, which is the same tree as far as the guard
+			// is concerned: a plain child is read through the instance, not held.
+			first.Destroy();
+			__harness.flush();
+			expectEqual(components.getComponent<Watched>(instance), component, "component after the first Core left");
+			expectEqual(instance.FindFirstChild("Core"), second, "the Core the component reads now");
+
+			module.extinguish();
+		},
+	],
+	[
+		"builds a component when a child two levels down arrives, and drops it when that child leaves",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("DeepTree");
+			const root = folderIn(instance, "Root");
+			collectionService().AddTag(instance, "Deep");
+			expectEqual(components.getComponent<Deep>(instance), undefined, "component while Root has no Texture");
+
+			const texture = folderIn(root, "Texture");
+			__harness.flush();
+			const built = expectDefined(components.getComponent<Deep>(instance), "component once the Texture arrived");
+
+			// Something else under Root is not part of the tree.
+			folderIn(root, "Decal").Destroy();
+			__harness.flush();
+			expectEqual(
+				components.getComponent<Deep>(instance),
+				built,
+				"component after an unrelated grandchild came and went",
+			);
+
+			texture.Parent = undefined;
+			__harness.flush();
+			expectEqual(components.getComponent<Deep>(instance), undefined, "component after the Texture left");
+
+			texture.Parent = root;
+			__harness.flush();
+			expectDefined(components.getComponent<Deep>(instance), "component once the Texture returned");
+
+			module.extinguish();
+		},
+	],
+	[
+		"re-resolves a required child when it is renamed away, and when it is renamed back",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("Renamed");
+			const core = addCore(instance);
+			collectionService().AddTag(instance, "Watched");
+			expectDefined(components.getComponent<Watched>(instance), "component");
+
+			core.Name = "Shell";
+			__harness.flush();
+			expectEqual(
+				components.getComponent<Watched>(instance),
+				undefined,
+				"component after its Core was renamed away",
+			);
+
+			core.Name = "Core";
+			__harness.flush();
+			expectDefined(components.getComponent<Watched>(instance), "component once the child is Core again");
+
+			module.extinguish();
+		},
+	],
+	[
+		"names the child a watched component is waiting for",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("Explained");
+			folderIn(instance, "Root");
+
+			__harness.clearWarnings();
+			collectionService().AddTag(instance, "DeepImpatient");
+			task.wait(0.3);
+
+			expectTrue(
+				__harness
+					.warnings()
+					.some(
+						(line) =>
+							line.find(
+								"instance guard (child 'Root.Texture' is missing (expected Folder))",
+								1,
+								true,
+							)[0] !== undefined,
+					),
+				`warnings: ${__harness.warnings().join(" | ")}`,
+			);
+			expectEqual(components.getComponent<DeepImpatient>(instance), undefined, "component");
+
+			// Destroyed rather than left behind: an instance that never qualifies arms a warning in
+			// every later module.
+			instance.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"names what is wrong with the tree when a component is added by hand",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const bare = folder("Bare");
+			const missing = expectThrows(
+				() => components.addComponent<Deep>(bare),
+				"adding a component to an instance without its tree",
+			);
+			expectTrue(
+				missing.find("child 'Root' is missing (expected Folder)", 1, true)[0] !== undefined,
+				`message: ${missing}`,
+			);
+
+			folderIn(bare, "Root");
+			const partly = expectThrows(() => components.addComponent<Deep>(bare), "adding it with half the tree");
+			expectTrue(
+				partly.find("child 'Root.Texture' is missing (expected Folder)", 1, true)[0] !== undefined,
+				`message: ${partly}`,
+			);
+
+			const wrongClass = folder("WrongClass");
+			folderIn(wrongClass, "Core");
+			const mismatch = expectThrows(
+				() => components.addComponent<Parted>(wrongClass),
+				"adding a component whose child is the wrong class",
+			);
+			expectTrue(
+				mismatch.find("child 'Core' is a Folder, expected Part", 1, true)[0] !== undefined,
+				`message: ${mismatch}`,
+			);
+
+			const notAPart = expectThrows(
+				() => components.addComponent<PartOnly>(folder("NotAPart2")),
+				"adding a Part component to a Folder",
+			);
+			expectTrue(
+				notAPart.find("it is a Folder, expected Part", 1, true)[0] !== undefined,
+				`message: ${notAPart}`,
+			);
+
+			module.extinguish();
+		},
+	],
+	[
+		"keeps waiting for a child of the right class while one of the wrong class holds the name",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("WrongThenRight");
+			const decoy = folderIn(instance, "Core");
+			collectionService().AddTag(instance, "Parted");
+			expectEqual(components.getComponent<Parted>(instance), undefined, "component while Core is a Folder");
+
+			// A Part of the same name behind the Folder is not what the name resolves to.
+			const part = partIn(instance, "Core");
+			__harness.flush();
+			expectEqual(
+				components.getComponent<Parted>(instance),
+				undefined,
+				"component while the Folder still comes first",
+			);
+
+			decoy.Destroy();
+			__harness.flush();
+			expectDefined(components.getComponent<Parted>(instance), "component once the name resolves to the Part");
+			expectEqual(instance.FindFirstChild("Core"), part, "the Core it reads");
 
 			module.extinguish();
 		},

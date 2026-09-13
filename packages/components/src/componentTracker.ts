@@ -1,5 +1,5 @@
 import { CollectionService } from "@rbxts/services";
-import { t } from "@rbxts/t";
+import { deferOnce } from "./instanceTree";
 
 const ATOMIC_MODES = new Set<Enum.ModelStreamingMode>([
 	Enum.ModelStreamingMode.Atomic,
@@ -38,6 +38,13 @@ interface InstanceTracker {
 	syncTypeGuardPoll?: (isMet: boolean) => void;
 
 	/**
+	 * The watcher following the instance guard's tree, present only while the guard is polled
+	 * through a shape. `testInstance` re-reads the guard through it rather than running it whole,
+	 * so that what the watcher holds stays in step with the answer it gave.
+	 */
+	typeGuardWatcher?: TypeGuardWatcher;
+
+	/**
 	 * Whether this entry is still being set up, and its answer therefore provisional.
 	 *
 	 * An entry starts out qualified and is corrected as each criterion subscribes, so a question
@@ -60,9 +67,28 @@ interface InstanceTracker {
 	unheardLoss?: boolean;
 }
 
+/** A watched instance guard: the tree's answer as it was last resolved, re-read on demand. */
+export interface TypeGuardWatcher {
+	isMet: () => boolean;
+	refresh: () => boolean;
+	release: () => void;
+}
+
 export interface Criteria {
 	tag?: string;
-	typeGuard?: t.check<unknown>;
+	typeGuard?: (instance: Instance) => boolean;
+
+	/**
+	 * Why the instance guard fails on an instance, for the warning. Only a guard the transformer
+	 * wrote as a shape can say; one written by hand only says that it failed.
+	 */
+	describeTypeGuard?: (instance: Instance) => string | undefined;
+
+	/**
+	 * Watches the instance for the guard one required child at a time, calling `changed` whenever
+	 * one was resolved again. Without it, a polled guard is re-run whole on every descendant change.
+	 */
+	watchTypeGuard?: (instance: Instance, changed: () => void) => TypeGuardWatcher;
 	typeGuardPoll?: boolean;
 	typeGuardPollAtomic?: boolean;
 	dependencies?: ComponentTracker[];
@@ -162,10 +188,40 @@ export class ComponentTracker {
 	}
 
 	private setupTracker(instance: Instance, tracker: InstanceTracker, observeOnly = false) {
-		const { typeGuard, typeGuardPoll, typeGuardPollAtomic, dependencies } = this.criteria;
+		const { typeGuard, typeGuardPoll, typeGuardPollAtomic, watchTypeGuard, dependencies } = this.criteria;
 
 		const isAtomicModel = instance.IsA("Model") && ATOMIC_MODES.has(instance.ModelStreamingMode);
-		if (typeGuard && typeGuardPoll && (typeGuardPollAtomic || !isAtomicModel)) {
+		const pollsTree = typeGuard !== undefined && typeGuardPoll === true && (typeGuardPollAtomic || !isAtomicModel);
+
+		if (pollsTree && watchTypeGuard !== undefined) {
+			// A shape is followed one required child at a time: the watcher keeps the slot that
+			// moved current, and the poll only reads the answer. Nothing is re-pointed here, because
+			// the watcher listens for a child arriving and leaving alike.
+			const deferred = deferOnce(() => {
+				// The entry's own watcher, set below before anything can schedule this and cleared
+				// as the poll is released.
+				const watcher = tracker.typeGuardWatcher;
+				if (watcher === undefined) return;
+
+				const wasMet = !tracker.unmetCriteria.has("type guard");
+				const isMet = watcher.isMet();
+				if (isMet === wasMet) return;
+
+				this.setTypeGuardMet(tracker, isMet);
+				this.updateListeners(instance, tracker);
+			});
+
+			const watcher = watchTypeGuard(instance, deferred.schedule);
+			tracker.typeGuardWatcher = watcher;
+
+			tracker.cleanup.add(() => {
+				tracker.typeGuardWatcher = undefined;
+				deferred.release();
+				watcher.release();
+			});
+		} else if (pollsTree) {
+			// A guard written by hand can only be run whole, so the tree is watched whole: every
+			// descendant change re-runs it.
 			let addedConnection: RBXScriptConnection | undefined;
 			let removingConnection: RBXScriptConnection | undefined;
 			let isScheduled = false;
@@ -293,11 +349,19 @@ export class ComponentTracker {
 			tracker.timeoutWarningThread = undefined;
 
 			const reasons = new Array<string>();
+			const { describeTypeGuard } = this.criteria;
 
 			for (const criteria of tracker.unmetCriteria) {
-				if (typeIs(criteria, "string")) {
-					reasons.push(criteria);
-				}
+				if (!typeIs(criteria, "string")) continue;
+
+				// The instance guard can say which child it is waiting for when it was written as
+				// a shape; a guard written by hand only says that it failed.
+				const reason =
+					criteria === "type guard" && describeTypeGuard !== undefined
+						? describeTypeGuard(instance)
+						: undefined;
+
+				reasons.push(reason !== undefined ? `instance guard (${reason})` : criteria);
 			}
 
 			const { dependencies } = this.criteria;
@@ -414,7 +478,12 @@ export class ComponentTracker {
 		}
 
 		if (this.criteria.typeGuard) {
-			if (this.criteria.typeGuard(instance)) {
+			// Through the watcher where there is one: it resolves every slot again, which also
+			// catches what no signal reported, and what it holds stays in step with the answer.
+			const watcher = tracker?.typeGuardWatcher;
+			const isMet = watcher !== undefined ? watcher.refresh() : this.criteria.typeGuard(instance);
+
+			if (isMet) {
 				if (tracker) {
 					this.setTypeGuardMet(tracker, true);
 				}
