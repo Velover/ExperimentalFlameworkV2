@@ -6,7 +6,7 @@ import {
 	ComponentStreamingMode,
 	Components,
 } from "@flamework-experimental/components";
-import { Flamework, OnInit, OnStart } from "@flamework-experimental/core";
+import { Flamework, OnInit, OnStart, Provider } from "@flamework-experimental/core";
 import { ReplicatedStorage, RunService } from "@rbxts/services";
 import {
 	expectArrayEqual,
@@ -172,11 +172,50 @@ class InitialisedOwner extends BaseComponent<{}, Folder & { Core: Initialised }>
 	}
 }
 
-/** Raises out of `onInit`, so it is never attached. */
+/** How many times a broken `onInit` has run: once per construction, never for a lookup. */
+let initAttempts = 0;
+
+/** Raises out of `onInit`, so it is never valid. */
 @Component({ warningTimeout: 0 })
 class BrokenInit extends BaseComponent<{}, Folder> implements OnInit {
 	public onInit() {
+		initAttempts += 1;
 		throw "not today";
+	}
+}
+
+/** The same, tagged, with an `onStart` that must never run. */
+@Component({ tag: "BrokenInitTagged", warningTimeout: 0 })
+class BrokenInitTagged extends BaseComponent<{}, Folder> implements OnInit, OnStart {
+	public onInit() {
+		initAttempts += 1;
+		throw "not today";
+	}
+
+	public onStart() {
+		events.push(`brokenstart:${this.instance.Name}`);
+	}
+}
+
+/** Links to `BrokenInitTagged`, and warns almost at once about what it is waiting for. */
+@Component({ tag: "BrokenOwner", warningTimeout: 0.1 })
+class BrokenOwner extends BaseComponent<{}, Folder & { Core: BrokenInitTagged }> {}
+
+/** The instance `EarlyAdder` gives a component to during ignition. */
+let earlyInstance: Instance | undefined;
+
+/** A provider that builds a component from its `onInit`, before ignition has finished. */
+@Provider()
+class EarlyAdder implements OnInit, OnStart {
+	constructor(private readonly components: Components) {}
+
+	public onInit() {
+		this.components.addComponent<Initialised>(earlyInstance!);
+		events.push("adder:init-done");
+	}
+
+	public onStart() {
+		events.push("adder:start");
 	}
 }
 
@@ -470,8 +509,8 @@ class Static extends BaseComponent<{ speed: number }, Folder> {}
  * Builds a module with the component plugin and just the components the specs use, so that no spec
  * depends on path-based discovery.
  */
-function createComponentModule() {
-	const plugin = ComponentPlugin.createPlugin()
+function createComponentPlugin() {
+	return ComponentPlugin.createPlugin()
 		.registerComponent(Tagged)
 		.registerComponent(Defaulted)
 		.registerComponent(PartOnly)
@@ -491,6 +530,8 @@ function createComponentModule() {
 		.registerComponent(Initialised)
 		.registerComponent(InitialisedOwner)
 		.registerComponent(BrokenInit)
+		.registerComponent(BrokenInitTagged)
+		.registerComponent(BrokenOwner)
 		.registerComponent(Blocked)
 		.registerComponent(Allowed)
 		.registerComponent(Enemy)
@@ -529,8 +570,11 @@ function createComponentModule() {
 		.registerComponent(Bolt)
 		.registerComponent(Chassis)
 		.build();
+}
 
-	return Flamework.createModule().includePlugin(plugin).ignite();
+/** A module with the spec plugin, which every spec works against. */
+function createComponentModule() {
+	return Flamework.createModule().includePlugin(createComponentPlugin()).ignite();
 }
 
 function folderIn(parent: Instance, name: string, attributes?: { [key: string]: unknown }) {
@@ -3520,8 +3564,9 @@ export = suite("components", [
 		},
 	],
 	[
-		"does not attach a component whose onInit raises",
+		"keeps a component whose onInit raised as invalid until it is removed",
 		() => {
+			initAttempts = 0;
 			const module = createComponentModule();
 			const components = module.resolveDependency<Components>();
 
@@ -3532,12 +3577,88 @@ export = suite("components", [
 			);
 			expectTrue(message.find("failed to initialise", 1, true)[0] !== undefined, `message: ${message}`);
 			expectTrue(message.find("not today", 1, true)[0] !== undefined, `message: ${message}`);
-			expectEqual(
-				components.getComponent<BrokenInit>(instance),
-				undefined,
-				"component after the failed construction",
-			);
+
+			// Absent from every lookup, and yet in place: nothing is built on top of it.
+			expectEqual(components.getComponent<BrokenInit>(instance), undefined, "component while invalid");
 			expectEqual(components.getAllComponents<BrokenInit>().size(), 0, "components of that kind");
+			const again = expectThrows(() => components.addComponent<BrokenInit>(instance), "adding it again");
+			expectTrue(again.find("waiting to be removed", 1, true)[0] !== undefined, `message: ${again}`);
+			expectEqual(initAttempts, 1, "onInit attempts");
+
+			// Removed, it is built from the ground up, onInit and all.
+			components.removeComponent<BrokenInit>(instance);
+			expectThrows(() => components.addComponent<BrokenInit>(instance), "adding it after the removal");
+			expectEqual(initAttempts, 2, "onInit attempts after the rebuild");
+
+			module.extinguish();
+		},
+	],
+	[
+		"hides a component whose onInit raised from links, and rebuilds it only when its tag comes back",
+		() => {
+			events.clear();
+			initAttempts = 0;
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("BrokenOwner1");
+			const core = folderIn(instance, "Core");
+			collectionService().AddTag(instance, "BrokenOwner");
+
+			__harness.clearWarnings();
+			collectionService().AddTag(core, "BrokenInitTagged");
+			expectEqual(initAttempts, 1, "onInit attempts");
+			expectTrue(
+				__harness.warnings().some((line) => line.find("failed to initialise", 1, true)[0] !== undefined),
+				`warnings: ${__harness.warnings().join(" | ")}`,
+			);
+
+			// No lifecycle events, no lookups, no link: the owner keeps waiting, and says why.
+			expectFalse(events.includes("brokenstart:Core"), "onStart for the invalid component");
+			expectEqual(components.getComponent<BrokenInitTagged>(core), undefined, "the child's component");
+			expectEqual(components.getComponent<BrokenOwner>(instance), undefined, "the owner");
+			expectEqual(initAttempts, 1, "onInit attempts after asking again");
+
+			// A fresh wait says why it waits: the warning belongs to a wait, and the owner had qualified
+			// before the link was lost.
+			collectionService().RemoveTag(instance, "BrokenOwner");
+			collectionService().AddTag(instance, "BrokenOwner");
+			task.wait(0.3);
+			expectTrue(
+				__harness.warnings().some((line) => line.find("carries an invalid", 1, true)[0] !== undefined),
+				`warnings: ${__harness.warnings().join(" | ")}`,
+			);
+
+			// The tag going and coming back is a reason: a fresh component, and a fresh onInit.
+			collectionService().RemoveTag(core, "BrokenInitTagged");
+			collectionService().AddTag(core, "BrokenInitTagged");
+			expectEqual(initAttempts, 2, "onInit attempts after the tag came back");
+
+			instance.Destroy();
+			module.extinguish();
+		},
+	],
+	[
+		"starts a component built during ignition only once ignition has finished",
+		() => {
+			events.clear();
+			earlyInstance = folder("Early");
+
+			const module = Flamework.createModule()
+				.includePlugin(createComponentPlugin())
+				.registerClassProvider(EarlyAdder)
+				.ignite();
+
+			// Initialised at once, so the provider's onInit can rely on it; started once every
+			// provider has, and once.
+			expectArrayEqual(
+				events.filter(
+					(event) =>
+						event.find("Early", 1, true)[0] !== undefined || event.find("adder:", 1, true)[0] !== undefined,
+				),
+				["init:Early", "adder:init-done", "adder:start", "start:Early"],
+				"lifecycle order across ignition",
+			);
 
 			module.extinguish();
 		},

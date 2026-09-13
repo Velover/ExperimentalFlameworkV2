@@ -67,14 +67,25 @@ even with `disableDefaultLifecycle()`. In order:
 | Step | When |
 |---|---|
 | constructor | Dependencies injected; `this.instance`, `this.attributes` and every link already resolved. |
-| `onInit()` | Synchronously, right after construction, **before the component can be seen**: `getComponent` has not handed it back yet, no other component holds it in `childComponents` or `attributeComponents`, no `onComponentAdded` listener has heard of it. A Promise it returns is not awaited. A raise fails the construction: the component is not attached, and `addComponent` raises `component '...' failed to initialise for ...`. |
+| `onInit()` | Synchronously, right after construction, **before the component can be seen**: `getComponent` has not handed it back yet, no other component holds it in `childComponents` or `attributeComponents`, no `onComponentAdded` listener has heard of it. A Promise it returns is not awaited. A raise makes the component **invalid** (below). |
 | attached | `getComponent` answers, links resolve to it, added listeners fire. |
-| `onStart()` | On its own thread, after the component is attached. |
+| `onStart()` | On its own thread, after the component is attached -- and not before ignition has finished, so a component built from a provider's `onInit` starts once every provider has. |
 | per-frame events | From the module's lifecycle plugin. |
 | `destroy()` | When the component is removed. |
 
 Do the setup that anything else may rely on in `onInit`: another component linking to this one
 receives it initialised, whichever of the two was tagged first.
+
+**An `onInit` that raises** does not take the component away, and does not build another. The
+component stays where it is, marked invalid: it gets no `onStart` and no per-frame events, it is
+absent from `getComponent`, `getComponents`, `getAllComponents` and `waitForComponent`, no added
+listener hears of it, and a component that links to it keeps waiting -- the warning says `carries an
+invalid '...', whose onInit raised: ...`. It holds its place, though: nothing is built on top of it
+until the tracker takes it down for a reason of its own (the tag goes, the tree breaks, a link is
+lost), and the component built when the reason has passed is a fresh one, `onInit` and all. A
+tagged instance's failure is warned about (`Failed to instantiate ...`); `addComponent` by hand
+raises `component '...' failed to initialise for ...`, and again with `waiting to be removed` while
+the invalid one is there -- `removeComponent` clears it.
 
 Register by glob when the components are spread across feature folders:
 

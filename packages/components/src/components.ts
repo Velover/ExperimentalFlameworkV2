@@ -122,12 +122,34 @@ export class Components {
 	 */
 	private checkingLinks = new Map<Instance, Set<Constructor>>();
 
+	/**
+	 * Components whose `onInit` raised, per instance, with what it raised. Such a component keeps
+	 * its place in `activeComponents` -- so nothing is built on top of it -- but is in no other
+	 * lookup and is answered as absent everywhere, until the tracker takes it down for a reason of
+	 * its own and builds a fresh one.
+	 */
+	private invalid = new Map<Instance, Map<Constructor, string>>();
+
+	/**
+	 * Components built before ignition finished, whose `onStart` waits for it; nothing once it
+	 * has. A component built from a provider's `onInit` starts once every provider has, as a
+	 * provider would.
+	 */
+	private pendingStarts?: Array<[BaseComponent, ComponentInfo, Instance]> = [];
+
 	private trackers = new Map<Constructor, ComponentTracker>();
 	private componentWaiters = new Map<Instance, Map<Constructor, Set<(value: unknown) => void>>>();
 	private componentCleanup = new Map<BaseComponent, Maid>();
 
 	private componentAddedListeners = new Map<string, Signal<(value: never, instance: Instance) => void>>();
 	private componentRemovedListeners = new Map<string, Signal<(value: never, instance: Instance) => void>>();
+
+	/**
+	 * Fired, by the component's own id, when a component turns invalid on an instance: its `onInit`
+	 * raised. What a link watching that instance loses its criterion to, since the invalid
+	 * component is never announced as added or removed.
+	 */
+	private componentInvalidatedListeners = new Map<string, Signal<(instance: Instance) => void>>();
 
 	private connections = new Array<RBXScriptConnection>();
 	private isStopped = false;
@@ -226,6 +248,19 @@ export class Components {
 
 	/** @internal */
 	public startCollectionService() {
+		// Ignition has finished: the components built during it start now, as providers would --
+		// those still attached.
+		const pending = this.pendingStarts;
+		this.pendingStarts = undefined;
+
+		if (pending !== undefined) {
+			for (const [component, componentInfo, instance] of pending) {
+				if (this.activeComponents.get(instance)?.get(componentInfo.ctor) === component) {
+					this.startComponent(component, componentInfo, instance);
+				}
+			}
+		}
+
 		for (const [, componentInfo] of this.components) {
 			const { config, ctor } = componentInfo;
 
@@ -472,6 +507,11 @@ export class Components {
 		if (this.hasComponent(target, linkedComponent)) return undefined;
 
 		const name = target.GetFullName();
+		const invalidReason = this.invalid.get(target)?.get(linkedComponent);
+		if (invalidReason !== undefined) {
+			return `${name} carries an invalid '${link.component}', whose onInit raised: ${invalidReason}`;
+		}
+
 		const predicate = this.getConfigValue(linkedComponent, "predicate");
 		if (predicate !== undefined && !predicate(target)) {
 			return `${name} is refused by the predicate of '${link.component}'`;
@@ -524,9 +564,18 @@ export class Components {
 		return typeIs(fallback, "Instance") ? fallback : undefined;
 	}
 
-	/** Whether a component is attached to an instance, without constructing one. */
+	/**
+	 * Whether a valid component is attached to an instance, without constructing one. An invalid
+	 * one -- whose `onInit` raised -- holds its place but is not here.
+	 */
 	private hasComponent(instance: Instance, component: Constructor) {
-		return this.activeComponents.get(instance)?.get(component) !== undefined;
+		return (
+			this.activeComponents.get(instance)?.get(component) !== undefined && !this.isInvalid(instance, component)
+		);
+	}
+
+	private isInvalid(instance: Instance, component: Constructor) {
+		return this.invalid.get(instance)?.has(component) === true;
 	}
 
 	private passesLinkGuard(link: ComponentLink, target: Instance) {
@@ -558,7 +607,7 @@ export class Components {
 	 */
 	private resolveLinkedComponent(target: Instance, component: Constructor) {
 		const existing = this.activeComponents.get(target)?.get(component);
-		if (existing !== undefined) return existing;
+		if (existing !== undefined) return this.isInvalid(target, component) ? undefined : existing;
 
 		if (this.canCreateComponentEager(target, component, true) !== true) return undefined;
 
@@ -847,9 +896,24 @@ export class Components {
 			let removedSignal = this.componentRemovedListeners.get(link.component!);
 			if (!removedSignal) this.componentRemovedListeners.set(link.component!, (removedSignal = new Signal()));
 
+			let invalidatedSignal = this.componentInvalidatedListeners.get(link.component!);
+			if (!invalidatedSignal) {
+				this.componentInvalidatedListeners.set(link.component!, (invalidatedSignal = new Signal()));
+			}
+
 			targetMaid.GiveTask(
 				addedSignal.Connect((_, changed) => {
 					if (changed === target) refresh();
+				}),
+			);
+
+			// The component the link names was built and its `onInit` raised: it holds its place,
+			// invalid, until the tracker takes it down, and the link is lost until a fresh one is
+			// announced as added. The criterion had been met on the strength of a component
+			// Flamework would build, which is what a build that fails this way disproves.
+			targetMaid.GiveTask(
+				invalidatedSignal.Connect((changed) => {
+					if (changed === target) update(criterion, false);
 				}),
 			);
 
@@ -952,8 +1016,17 @@ export class Components {
 	/**
 	 * Resolves every link for a component that is about to be constructed, filling in the instances
 	 * its attributes name and the components it is linked to.
+	 *
+	 * Nothing when a component a link names turns out invalid -- built here, its `onInit` raised --
+	 * which is a state the owner waits out rather than a link reported met and then not built. A
+	 * construction by hand (`quiet` false) raises for it instead, naming the reason.
 	 */
-	private resolveLinks(instance: Instance, componentInfo: ComponentInfo, attributes: Map<string, unknown>) {
+	private resolveLinks(
+		instance: Instance,
+		componentInfo: ComponentInfo,
+		attributes: Map<string, unknown>,
+		quiet: boolean,
+	) {
 		const childComponents = new Map<string, unknown>();
 		const attributeComponents = new Map<string, unknown>();
 
@@ -977,8 +1050,16 @@ export class Components {
 			if (link.kind === "attribute") attributes.set(link.name, target);
 
 			if (link.component !== undefined) {
-				const linked = this.resolveLinkedComponent(target, this.getLinkedComponent(link));
+				const linkedComponent = this.getLinkedComponent(link);
+				const linked = this.resolveLinkedComponent(target, linkedComponent);
 				if (linked === undefined) {
+					const invalidReason = this.invalid.get(target)?.get(linkedComponent);
+					if (invalidReason !== undefined) {
+						if (quiet) return undefined;
+
+						throw `${target.GetFullName()} carries an invalid '${link.component}' for ${describeLink(link)} of '${componentInfo.identifier}', whose onInit raised: ${invalidReason}`;
+					}
+
 					throw `${target.GetFullName()} has no component for ${describeLink(link)} of '${componentInfo.identifier}'`;
 				}
 
@@ -1051,8 +1132,9 @@ export class Components {
 		const component = this.activeComponents.get(instance)?.get(componentInfo.ctor);
 		if (component === undefined) return;
 
-		const linked = this.activeComponents.get(target)?.get(this.getLinkedComponent(link));
-		if (linked === undefined) return;
+		const linkedComponent = this.getLinkedComponent(link);
+		const linked = this.activeComponents.get(target)?.get(linkedComponent);
+		if (linked === undefined || this.isInvalid(target, linkedComponent)) return;
 
 		const holder = (link.kind === "attribute"
 			? component.attributeComponents
@@ -1264,6 +1346,18 @@ export class Components {
 		}
 	}
 
+	/** Runs a component's `onStart` on its own thread, reporting a raise against the instance. */
+	private startComponent(component: BaseComponent, componentInfo: ComponentInfo, instance: Instance) {
+		safeCall(
+			[
+				`[Flamework] Component '${componentInfo.ctor}' failed to start for`,
+				instance,
+				`[${instance.GetFullName()}]`,
+			],
+			() => (component as unknown as OnStart).onStart(),
+		);
+	}
+
 	private setupComponent(
 		instance: Instance,
 		attributes: Map<string, unknown>,
@@ -1273,10 +1367,13 @@ export class Components {
 		const { ctor } = componentInfo;
 
 		if (Flamework.implements<OnStart>(component)) {
-			safeCall(
-				[`[Flamework] Component '${ctor}' failed to start for`, instance, `[${instance.GetFullName()}]`],
-				() => component.onStart(),
-			);
+			// Not before ignition has finished: a component built from a provider's `onInit` starts
+			// once every provider has, as a provider would.
+			if (this.pendingStarts !== undefined) {
+				this.pendingStarts.push([component, componentInfo, instance]);
+			} else {
+				this.startComponent(component, componentInfo, instance);
+			}
 		}
 
 		const maid = new Maid();
@@ -1398,6 +1495,12 @@ export class Components {
 			return false;
 		}
 
+		// Nor is one whose `onInit` raised built again on its own: it holds its place until the
+		// tracker takes it down for a reason of its own.
+		if (this.isInvalid(instance, component)) {
+			return false;
+		}
+
 		const tag = componentInfo.config.tag;
 		if (tag !== undefined && instance.IsDescendantOf(game) && CollectionService.HasTag(instance, tag)) {
 			const tracker = this.getComponentTracker(component);
@@ -1512,12 +1615,11 @@ export class Components {
 			return undefined;
 		}
 
-		const activeComponents = this.activeComponents.get(instance);
-		if (activeComponents) {
-			const activeComponent = activeComponents.get(component);
-			if (activeComponent) {
-				return activeComponent as T;
-			}
+		const activeComponent = this.activeComponents.get(instance)?.get(component);
+		if (activeComponent !== undefined) {
+			// An invalid component -- whose `onInit` raised -- answers as absent, and holds its
+			// place: nothing is built on top of it until the tracker takes it down.
+			return this.isInvalid(instance, component) ? undefined : (activeComponent as T);
 		}
 
 		if (this.canCreateComponentEager(instance, component)) {
@@ -1589,7 +1691,18 @@ export class Components {
 		}
 
 		const existingComponent = this.activeComponents.get(instance)?.get(component);
-		if (existingComponent !== undefined) return existingComponent;
+		if (existingComponent !== undefined) {
+			// An invalid one is not handed back, and not replaced either: it waits for the tracker,
+			// or for `removeComponent`.
+			const invalidReason = this.invalid.get(instance)?.get(component);
+			if (invalidReason !== undefined) {
+				if (skipInstanceCheck === true) return undefined as never;
+
+				throw `component '${componentInfo.identifier}' failed to initialise for ${instance.GetFullName()} earlier and is waiting to be removed: ${invalidReason}`;
+			}
+
+			return existingComponent;
+		}
 
 		let constructingSet = this.constructing.get(instance);
 		if (constructingSet?.has(component)) {
@@ -1605,8 +1718,15 @@ export class Components {
 		constructingSet.add(component);
 
 		let componentInstance: BaseComponent;
+		let initError: string | undefined;
 		try {
-			const { childComponents, attributeComponents } = this.resolveLinks(instance, componentInfo, attributes);
+			const resolved = this.resolveLinks(instance, componentInfo, attributes, skipInstanceCheck === true);
+			if (resolved === undefined) {
+				// A component a link names is invalid: the link is lost, the owner waits.
+				return undefined as never;
+			}
+
+			const { childComponents, attributeComponents } = resolved;
 			const metadata = identity<ComponentMetadata>({
 				instance,
 				attributes,
@@ -1624,14 +1744,14 @@ export class Components {
 			// any lookup: nothing can see it yet -- not `getComponent`, not a link's
 			// `childComponents`, not an added listener -- and asking for it raises as cyclic rather
 			// than building a second one. It is synchronous, so a Promise it returns is not waited
-			// for; a raise fails the construction, and the instance is detached from the lifecycle
-			// events it was attached to as it was built.
+			// for. A raise makes the component invalid, below; it is detached at once from the
+			// lifecycle events it was attached to as it was built, so it ticks no more than it starts.
 			if (Flamework.implements<OnInit>(componentInstance)) {
 				const initialising = componentInstance;
 				const [ok, err] = pcall(() => initialising.onInit());
 				if (!ok) {
 					this.module.removeClassInstance(initialising);
-					throw `component '${componentInfo.identifier}' failed to initialise for ${instance.GetFullName()}: ${tostring(err)}`;
+					initError = tostring(err);
 				}
 			}
 		} finally {
@@ -1650,10 +1770,39 @@ export class Components {
 		let activeComponents = this.activeComponents.get(instance);
 		if (!activeComponents) this.activeComponents.set(instance, (activeComponents = new Map()));
 
+		activeComponents.set(component, componentInstance);
+
+		// A component whose `onInit` raised keeps its place and nothing else: no id mapping, so no
+		// polymorphic lookup finds it; no `onStart`, no announcement, no waiter resolved. It stays
+		// until the tracker takes it down for a reason of its own -- the tag, the tree, a link --
+		// and builds a fresh one, rather than being built again on every lookup while whatever made
+		// `onInit` raise is still there.
+		if (initError !== undefined) {
+			let invalidHere = this.invalid.get(instance);
+			if (!invalidHere) this.invalid.set(instance, (invalidHere = new Map()));
+			invalidHere.set(component, initError);
+
+			const message = `component '${componentInfo.identifier}' failed to initialise for ${instance.GetFullName()}: ${initError}`;
+
+			// A link watching this instance for this component loses its criterion here: the
+			// component it counted on Flamework building is one Flamework could not.
+			this.componentInvalidatedListeners.get(componentInfo.identifier)?.Fire(instance);
+
+			// Flamework building for itself -- the tag, a link, `getComponent` -- reports it and
+			// answers that there is no component, which is what every lookup will say; a call by
+			// hand raises, as a construction that fails by hand does.
+			if (skipInstanceCheck === true) {
+				warn(`[Flamework] ${message}`);
+				warn(`It is invalid until it is removed and built again`);
+
+				return undefined as never;
+			}
+
+			throw message;
+		}
+
 		let inheritedComponents = this.activeInheritedComponents.get(instance);
 		if (!inheritedComponents) this.activeInheritedComponents.set(instance, (inheritedComponents = new Map()));
-
-		activeComponents.set(component, componentInstance);
 
 		for (const id of componentInfo.polymorphicIds) {
 			this.addIdMapping(componentInstance, id, inheritedComponents);
@@ -1694,6 +1843,15 @@ export class Components {
 		const existingComponent = activeComponents.get(component);
 		if (!existingComponent) return;
 
+		// An invalid component -- one whose `onInit` raised -- was never announced, mapped or
+		// started, so it leaves without a removal announcement; being taken down is what lets the
+		// next construction on this instance try again.
+		const invalidHere = this.invalid.get(instance);
+		const wasInvalid = invalidHere?.delete(component) === true;
+		if (wasInvalid && invalidHere!.isEmpty()) {
+			this.invalid.delete(instance);
+		}
+
 		// Out of every lookup before the removal is announced, which mirrors a component being
 		// announced only once it is in them. A link that names this component reacts to that
 		// announcement by taking its own component down, and a cycle of links would otherwise come
@@ -1722,16 +1880,29 @@ export class Components {
 		removingSet.add(component);
 
 		try {
-			for (const id of componentInfo.polymorphicIds) {
-				const signal = this.componentRemovedListeners.get(id);
-				if (signal) {
-					signal.Fire(existingComponent as never, instance);
+			if (!wasInvalid) {
+				for (const id of componentInfo.polymorphicIds) {
+					const signal = this.componentRemovedListeners.get(id);
+					if (signal) {
+						signal.Fire(existingComponent as never, instance);
+					}
 				}
 			}
 
 			this.module.removeClassInstance(existingComponent);
 
-			existingComponent.destroy();
+			if (wasInvalid) {
+				// Its constructor ran, so what it took, `destroy` gives back -- reported rather than
+				// raised, since `onInit` never finished setting it up.
+				const [ok, err] = pcall(() => existingComponent.destroy());
+				if (!ok) {
+					warn(
+						`[Flamework] Failed to destroy invalid '${component}' on ${instance.GetFullName()}: ${tostring(err)}`,
+					);
+				}
+			} else {
+				existingComponent.destroy();
+			}
 		} finally {
 			removingSet.delete(component);
 

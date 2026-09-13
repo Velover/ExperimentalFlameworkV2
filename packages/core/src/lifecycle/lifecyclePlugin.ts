@@ -37,6 +37,8 @@ export class LifecycleProvider {
 	private onInit = new Array<OnInit>();
 	private initMembers = new Set<OnInit>();
 
+	/** The providers `postIgnite` starts, in attachment order; `onStart` is every member. */
+	private startOrder = new Array<OnStart>();
 	public onStart = new Set<OnStart>();
 	public onTick = new Set<OnTick>();
 	public onPhysics = new Set<OnPhysics>();
@@ -204,7 +206,14 @@ export class LifecycleProvider {
 	public addStart(object: OnStart, context: InterfaceContext) {
 		this.onStart.add(object);
 
-		if (this.hasStarted && context.kind === "provider") {
+		// Only a provider is started by the plugin, as with `onInit`: an instance attached through
+		// `listen` or `createClassInstance` is owned by whoever created it. `Components` starts a
+		// component itself, once the component is attached and ignition has finished.
+		if (context.kind !== "provider") return;
+
+		if (!this.hasStarted) {
+			this.startOrder.push(object);
+		} else {
 			this.scheduleLateProvider(object);
 		}
 	}
@@ -212,6 +221,12 @@ export class LifecycleProvider {
 	public removeStart(object: OnStart) {
 		this.onStart.delete(object);
 		this.lateProviders.delete(object);
+
+		const index = this.startOrder.indexOf(object);
+		if (index !== -1) {
+			this.startOrder.remove(index);
+		}
+
 		this.forget(object);
 	}
 
@@ -223,7 +238,7 @@ export class LifecycleProvider {
 
 		this.hasStarted = true;
 
-		for (const object of [...this.onStart]) {
+		for (const object of [...this.startOrder]) {
 			this.runStart(object);
 		}
 

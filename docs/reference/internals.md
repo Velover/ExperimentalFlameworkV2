@@ -424,11 +424,23 @@ A component's `onInit` runs inside the constructing window -- after `createClass
 the component enters any lookup -- so nothing can see it until it has run: `getComponent` is still
 on its way in, a link that would resolve to it has not been handed it, and an added listener has not
 been told. Asking for the component from inside its own `onInit` raises as cyclic rather than
-building a second one. It is synchronous (a Promise is not waited for), and a raise fails the
-construction: the instance is detached from the lifecycle events `createClassInstance` attached it
-to, and the error names the component and the instance. The lifecycle plugin, for its part, runs
-`onInit` only for providers, before and after ignition alike, so a component built during ignition
-is not initialised a second time at `postIgnite`.
+building a second one. It is synchronous (a Promise is not waited for). A raise does not fail the
+construction so much as freeze it: the component keeps its `activeComponents` slot -- so nothing is
+built on top of it, by the tracker, by `getComponent` or by a link -- and gets nothing else: no id
+mapping (so no polymorphic lookup finds it), no `onStart`, no announcement, and it is detached at
+once from the lifecycle events `createClassInstance` attached it to. `invalid` records it with the
+error; `hasComponent`, `getComponent`, `canCreateComponentEager`, `resolveLinkedComponent` and
+`refreshLinkedComponent` all read it as absent. It leaves only when the tracker takes it down (or
+`removeComponent` by hand), without a removal announcement and with its `destroy` under `pcall`;
+the next construction on that instance is a fresh one, `onInit` and all. A link that names the
+component is told through `componentInvalidatedListeners` the moment the build fails -- its
+criterion was met on the strength of a component Flamework would build -- and `resolveLinks`, for
+an owner already under construction when that happens, returns nothing rather than raising, so the
+owner waits. A construction by hand raises with the reason; Flamework's own paths warn and answer
+that there is no component. The lifecycle plugin, for its part, runs `onInit` and `onStart` only
+for providers, before and after ignition alike; `Components` starts a component itself, once it is
+attached and -- for one built during ignition -- once `startCollectionService` has run at
+`postIgnite`, so it starts after every provider has.
 
 Removal is announced once the component is out of both lookups, which mirrors an addition being
 announced only after it is in them. A link that names the departing component reacts to the

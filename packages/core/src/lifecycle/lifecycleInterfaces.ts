@@ -26,6 +26,10 @@ export interface OnInit {
 
 /**
  * Hook into the OnStart lifecycle event.
+ *
+ * A component implements it too: `Components` starts a component on its own thread once it is
+ * attached -- and not before ignition has finished, so one built during ignition starts once
+ * every provider has.
  */
 export interface OnStart {
 	/**
