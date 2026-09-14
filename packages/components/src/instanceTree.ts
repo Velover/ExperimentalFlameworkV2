@@ -149,7 +149,6 @@ interface Slot {
 interface Node {
 	instance: Instance;
 	slots: Map<string, Slot>;
-	slotsByChild: Map<Instance, Slot>;
 	connections: RBXScriptConnection[];
 }
 
@@ -170,7 +169,6 @@ function isNodeMet(node: Node): boolean {
 function unwatchName(node: Node, slot: Slot) {
 	if (slot.watched === undefined) return;
 
-	node.slotsByChild.delete(slot.watched);
 	slot.watchedConnection?.Disconnect();
 	slot.watched = undefined;
 	slot.watchedConnection = undefined;
@@ -180,7 +178,6 @@ function watchName(node: Node, slot: Slot, child: Instance, changed: () => void)
 	unwatchName(node, slot);
 
 	slot.watched = child;
-	node.slotsByChild.set(child, slot);
 
 	// A rename in either direction: the resolved child renamed away, or the one that was resolved
 	// renamed back. What the name resolves to now is the whole question.
@@ -257,7 +254,7 @@ function refreshNode(node: Node, changed: () => void) {
 function createNode(instance: Instance, shape: InstanceShape, path: string, changed: () => void): Node | undefined {
 	if (shape.children === undefined) return undefined;
 
-	const node: Node = { instance, slots: new Map(), slotsByChild: new Map(), connections: [] };
+	const node: Node = { instance, slots: new Map(), connections: [] };
 
 	for (const [key, childShape] of pairs(shape.children)) {
 		const name = key as string;
@@ -280,15 +277,22 @@ function createNode(instance: Instance, shape: InstanceShape, path: string, chan
 	);
 
 	// A child leaving matters only when it is the one a slot resolved to, or was following the
-	// name of. A second child of the same name that nothing resolved to can come and go.
+	// name of. A second child of the same name that nothing resolved to can come and go. The
+	// slots are asked one by one, because one child can be followed by two of them: the slot it
+	// was renamed away from, and the slot whose name it took.
 	node.connections.push(
 		instance.ChildRemoved.Connect((child) => {
-			const slot = node.slotsByChild.get(child);
-			if (slot === undefined) return;
+			let wasFollowed = false;
 
-			unwatchName(node, slot);
-			resolveSlot(node, slot, changed);
-			changed();
+			for (const [, slot] of node.slots) {
+				if (slot.watched !== child) continue;
+
+				unwatchName(node, slot);
+				resolveSlot(node, slot, changed);
+				wasFollowed = true;
+			}
+
+			if (wasFollowed) changed();
 		}),
 	);
 

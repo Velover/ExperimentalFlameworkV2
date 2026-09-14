@@ -18,7 +18,7 @@ import {
 } from "@rbxts/services";
 import { t } from "@rbxts/t";
 import { BaseComponent, ComponentMetadata, SYMBOL_ATTRIBUTE_HANDLERS } from "./baseComponent";
-import { ComponentTracker, isAtomicModel, LinkWatcher } from "./componentTracker";
+import { ComponentTracker, Holder, isAtomicModel, LinkWatcher } from "./componentTracker";
 import {
 	AbstractConstructor,
 	AbstractConstructorRef,
@@ -464,7 +464,8 @@ export class Components {
 			watchAttributes,
 			checkLinks: hasLinks ? (instance) => this.areLinksMet(componentInfo, instance) : undefined,
 			watchLinks: hasLinks
-				? (instance, update) => this.watchLinks(componentInfo, instance, update, followsTree(instance))
+				? (instance, update, holder) =>
+						this.watchLinks(componentInfo, instance, update, holder, followsTree(instance))
 				: undefined,
 			linksMet: hasLinks ? (instance) => this.areLinksMet(componentInfo, instance) : undefined,
 			tag: componentInfo.config.tag,
@@ -812,18 +813,30 @@ export class Components {
 	 * Watches every link of a component on one instance, so that the component exists only while
 	 * the instances and components it names do. The watcher's `refresh` reads every link again --
 	 * once, as `readingLinks` keeps a ring of links to -- re-pointing each at the target it has now.
+	 * `holder` is the entry the links belong to, which what they register on a target's entry is
+	 * held by.
 	 */
 	private watchLinks(
 		componentInfo: ComponentInfo,
 		instance: Instance,
 		update: (criterion: string, isMet: boolean) => void,
+		holder: Holder,
 		pollsTree: boolean,
 	): LinkWatcher {
 		const maid = new Maid();
 		const rereads = new Array<() => void>();
 
-		for (const link of componentInfo.links) {
-			rereads.push(this.watchLink(componentInfo, instance, link, update, maid, pollsTree));
+		// Setting a link up runs code written by hand -- the linked component's guard or predicate,
+		// against the target -- which can raise. The links before it have by then put their
+		// subscriptions on this instance, and their observers on other trackers' entries, into a
+		// maid nothing outside holds until the watcher is returned: released here, or never.
+		try {
+			for (const link of componentInfo.links) {
+				rereads.push(this.watchLink(componentInfo, instance, link, update, holder, maid, pollsTree));
+			}
+		} catch (err) {
+			maid.Destroy();
+			error(err, 0);
 		}
 
 		return {
@@ -842,6 +855,7 @@ export class Components {
 		instance: Instance,
 		link: ComponentLink,
 		update: (criterion: string, isMet: boolean) => void,
+		holder: Holder,
 		maid: Maid,
 		pollsTree: boolean,
 	): () => void {
@@ -1042,10 +1056,16 @@ export class Components {
 			const tracker = this.getComponentTracker(linkedComponent);
 
 			// Observing, not waiting: this component's own tracker is the one that reports the link
-			// as a criterion it is still missing.
+			// as a criterion it is still missing. Held by this component's entry, so that a ring of
+			// links -- or one naming its own instance -- lets go once every tag has.
 			const listener = () => refresh();
-			tracker.trackInstance(target, listener, true);
+
+			// The untrack is handed over first, because registering can raise -- the target's guard
+			// as the entry is read, or this link's own `refresh` as the observer is answered -- with
+			// the entry, or the observer already on it, left on the tracker for nothing else to
+			// release. Untracking an observer the raise kept from registering is harmless.
 			targetMaid.GiveTask(() => tracker.untrackInstance(target, listener));
+			tracker.trackInstance(target, listener, holder);
 
 			let addedSignal = this.componentAddedListeners.get(link.component!);
 			if (!addedSignal) this.componentAddedListeners.set(link.component!, (addedSignal = new Signal()));

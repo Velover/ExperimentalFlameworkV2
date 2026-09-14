@@ -55,6 +55,9 @@ declare const __harness: {
 
 	/** Streams in the instance a pending handle names, resuming whatever was waiting on it. */
 	streamIn: (handle: InstanceHandle) => void;
+
+	/** Every handler connected to an instance, across its own signals and the per-attribute ones. */
+	connectionCount: (instance: Instance) => number;
 };
 
 interface TaggedAttributes {
@@ -524,6 +527,10 @@ class TwoChildOwner extends BaseComponent<{}, Folder & { Core: Handler; Extra: F
 	}
 }
 
+/** Two plain required children, so one can take the other's name and be followed by both slots. */
+@Component({ tag: "LeakPair", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
+class LeakPair extends BaseComponent<{}, Folder & { Core: Folder; Extra: Folder }> {}
+
 /** Runs a callback from its constructor, which is synchronous inside the tag's handler on every engine: a tree it moves moves mid-batch. */
 @Component({ tag: "Repairer" })
 class Repairer extends BaseComponent<{}, Folder> {
@@ -635,6 +642,26 @@ class Pointer extends BaseComponent<PointerAttributes, Folder> {
 @Component({ tag: "Picky", predicate: (instance) => instance.Name === "Chosen" })
 class Picky extends BaseComponent<{}, Folder> {}
 
+/** An instance guard written by hand that raises, rather than answers, on an instance short of `X`. */
+@Component({
+	tag: "Throwy",
+	warningTimeout: 0,
+	instanceGuard: (value): value is Folder => typeIs(value, "Instance") && value.FindFirstChild("X")!.Name !== "",
+})
+class Throwy extends BaseComponent<{}, Folder> {}
+
+/** Links to `Throwy` after a plain link, so a link set up ahead of the one that raises has subscriptions of its own. */
+@Component({ tag: "ThrowyPointer", warningTimeout: 0, attributeWarningTimeout: 0 })
+class ThrowyPointer extends BaseComponent<{ Target: Folder; Linked: Throwy }, Folder> {}
+
+/** A predicate that raises, rather than answers, on an instance short of `X`. */
+@Component({ tag: "Fussy", warningTimeout: 0, predicate: (instance) => instance.FindFirstChild("X")!.Name !== "" })
+class Fussy extends BaseComponent<{}, Folder> {}
+
+/** Links to `Fussy` after a plain link. */
+@Component({ tag: "FussyPointer", warningTimeout: 0, attributeWarningTimeout: 0 })
+class FussyPointer extends BaseComponent<{ Target: Folder; Linked: Fussy }, Folder> {}
+
 @Component({ tag: "Static", refreshAttributes: false })
 class Static extends BaseComponent<{ speed: number }, Folder> {}
 
@@ -704,6 +731,11 @@ function createComponentPlugin() {
 		.registerComponent(BrokenOwnerPointer)
 		.registerComponent(SpeedOwner)
 		.registerComponent(TwoChildOwner)
+		.registerComponent(LeakPair)
+		.registerComponent(Throwy)
+		.registerComponent(ThrowyPointer)
+		.registerComponent(Fussy)
+		.registerComponent(FussyPointer)
 		.registerComponent(Repairer)
 		.registerComponent(Choosy)
 		.registerComponent(ChoosyOwner)
@@ -782,6 +814,14 @@ function handlerFolder(name: string) {
 
 function collectionService() {
 	return game.GetService("CollectionService");
+}
+
+/** How many instances a component's tracker holds an entry for, which is what a leaked entry shows up in. */
+function trackedCount(components: Components, component: object) {
+	const trackers = (components as unknown as { trackers: Map<object, { instances: Map<Instance, unknown> }> })
+		.trackers;
+
+	return trackers.get(component)?.instances.size() ?? 0;
 }
 
 export = suite("components", [
@@ -4918,6 +4958,211 @@ export = suite("components", [
 			instance.Destroy();
 			elsewhere.Destroy();
 			module.extinguish();
+		},
+	],
+	[
+		"releases the entry of a component whose link names its own instance once the tag has gone",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("SelfTwin");
+			try {
+				instance.SetAttribute("Partner", new InstanceHandle(instance));
+				collectionService().AddTag(instance, "Twin");
+				expectEqual(trackedCount(components, Twin), 1, "entries while tagged");
+
+				// The link observer this entry registered is a listener of the entry itself, so the
+				// tag leaving must not leave the entry holding itself open.
+				collectionService().RemoveTag(instance, "Twin");
+				task.wait();
+				expectEqual(components.getComponent<Twin>(instance), undefined, "component after the tag went");
+				expectEqual(trackedCount(components, Twin), 0, "entries after the tag went");
+
+				instance.Parent = undefined;
+				instance.Destroy();
+				task.wait();
+				expectEqual(trackedCount(components, Twin), 0, "entries after the instance was destroyed");
+				expectEqual(__harness.connectionCount(instance), 0, "connections on the destroyed instance");
+			} finally {
+				instance.Destroy();
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"releases the entries of a link ring once both tags have gone",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const first = folder("RingTwinA");
+			const second = folder("RingTwinB");
+			try {
+				collectionService().AddTag(first, "Twin");
+				collectionService().AddTag(second, "Twin");
+				const firstComponent = expectDefined(components.getComponent<Twin>(first), "first component");
+				const secondComponent = expectDefined(components.getComponent<Twin>(second), "second component");
+
+				first.SetAttribute("Partner", new InstanceHandle(second));
+				second.SetAttribute("Partner", new InstanceHandle(first));
+				__harness.flush();
+				expectEqual(firstComponent.attributeComponents.Partner, secondComponent, "the link the first holds");
+				expectEqual(secondComponent.attributeComponents.Partner, firstComponent, "the link the second holds");
+				expectEqual(trackedCount(components, Twin), 2, "entries while tagged");
+
+				// Each entry's link observer is a listener of the other: the tags leaving must not
+				// leave the two holding each other open.
+				collectionService().RemoveTag(first, "Twin");
+				collectionService().RemoveTag(second, "Twin");
+				task.wait();
+				expectEqual(firstComponent.destroyCount, 1, "first destroyed");
+				expectEqual(secondComponent.destroyCount, 1, "second destroyed");
+				expectEqual(components.getComponent<Twin>(first), undefined, "first component after the tag went");
+				expectEqual(components.getComponent<Twin>(second), undefined, "second component after the tag went");
+				expectEqual(trackedCount(components, Twin), 0, "entries after the tags went");
+
+				first.Destroy();
+				second.Destroy();
+				task.wait();
+				expectEqual(trackedCount(components, Twin), 0, "entries after the instances were destroyed");
+				expectEqual(__harness.connectionCount(first), 0, "connections on the first instance");
+				expectEqual(__harness.connectionCount(second), 0, "connections on the second instance");
+			} finally {
+				first.Destroy();
+				second.Destroy();
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"drops a child two slots followed once it leaves, and takes the component down with it",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("LeakPair");
+			const elsewhere = folder("LeakPairElsewhere");
+			try {
+				const core = addCore(instance);
+				const extra = folderIn(instance, "Extra");
+				collectionService().AddTag(instance, "LeakPair");
+				expectDefined(components.getComponent<LeakPair>(instance), "component");
+
+				// `core` takes the name `Extra`: slot Core keeps following it for a rename back,
+				// and slot Extra resolves to it once the old `Extra` is renamed away. One child,
+				// two slots following it.
+				core.Name = "Extra";
+				__harness.flush();
+				expectEqual(components.getComponent<LeakPair>(instance), undefined, "component after Core was renamed");
+
+				extra.Name = "Zed";
+				__harness.flush();
+				expectEqual(components.getComponent<LeakPair>(instance), undefined, "component while Core is missing");
+
+				// A fresh `Core` arrives: slot Core lets go of `core`, which slot Extra still reads.
+				addCore(instance);
+				__harness.flush();
+				expectDefined(components.getComponent<LeakPair>(instance), "component rebuilt");
+
+				// The child slot Extra reads leaves: the tree is short of `Extra` and the component
+				// comes down, and nothing goes on following the name of a child that is gone.
+				core.Parent = elsewhere;
+				__harness.flush();
+				expectEqual(instance.FindFirstChild("Extra"), undefined, "the Extra child");
+				expectEqual(
+					components.getComponent<LeakPair>(instance),
+					undefined,
+					"component after the Extra child left",
+				);
+				expectEqual(__harness.connectionCount(core), 0, "connections on the child that left");
+			} finally {
+				instance.Destroy();
+				elsewhere.Destroy();
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"releases what a link set up when the linked component's instance guard raises out of the setup",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("ThrowyPointer");
+			const target = folder("ThrowyTarget");
+			const linked = folder("ThrowyLinked");
+			try {
+				instance.SetAttribute("Target", new InstanceHandle(target));
+				instance.SetAttribute("Linked", new InstanceHandle(linked));
+
+				// `linked` has no `X`, so the linked component raises the moment the second link
+				// asks about it -- partway through this entry's setup, with the first link already
+				// watching its own target -- and the tag's handler raises with it.
+				const [ok] = pcall(() => collectionService().AddTag(instance, "ThrowyPointer"));
+				expectEqual(ok, false, "the tag's handler raised");
+
+				// The tag leaving releases everything the failed setup had registered: the entry
+				// the link created on the linked component's tracker, and the subscriptions on
+				// the owner that no watcher ever came back to hold.
+				collectionService().RemoveTag(instance, "ThrowyPointer");
+				task.wait();
+				expectEqual(trackedCount(components, ThrowyPointer), 0, "owner entries after the tag went");
+				expectEqual(trackedCount(components, Throwy), 0, "linked entries after the tag went");
+				expectEqual(__harness.connectionCount(instance), 0, "connections on the owner after the tag went");
+
+				instance.Destroy();
+				target.Destroy();
+				linked.Destroy();
+				task.wait();
+				expectEqual(trackedCount(components, Throwy), 0, "linked entries after the instances were destroyed");
+			} finally {
+				instance.Destroy();
+				target.Destroy();
+				linked.Destroy();
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"releases what a link set up when the linked component's predicate raises out of the setup",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("FussyPointer");
+			const target = folder("FussyTarget");
+			const linked = folder("FussyLinked");
+			try {
+				instance.SetAttribute("Target", new InstanceHandle(target));
+				instance.SetAttribute("Linked", new InstanceHandle(linked));
+
+				// `linked` has no `X`, so the linked component raises the moment the second link
+				// asks about it -- partway through this entry's setup, with the first link already
+				// watching its own target -- and the tag's handler raises with it.
+				const [ok] = pcall(() => collectionService().AddTag(instance, "FussyPointer"));
+				expectEqual(ok, false, "the tag's handler raised");
+
+				// The tag leaving releases everything the failed setup had registered: the entry
+				// the link created on the linked component's tracker, and the subscriptions on
+				// the owner that no watcher ever came back to hold.
+				collectionService().RemoveTag(instance, "FussyPointer");
+				task.wait();
+				expectEqual(trackedCount(components, FussyPointer), 0, "owner entries after the tag went");
+				expectEqual(trackedCount(components, Fussy), 0, "linked entries after the tag went");
+				expectEqual(__harness.connectionCount(instance), 0, "connections on the owner after the tag went");
+
+				instance.Destroy();
+				target.Destroy();
+				linked.Destroy();
+				task.wait();
+				expectEqual(trackedCount(components, Fussy), 0, "linked entries after the instances were destroyed");
+			} finally {
+				instance.Destroy();
+				target.Destroy();
+				linked.Destroy();
+				module.extinguish();
+			}
 		},
 	],
 ]);

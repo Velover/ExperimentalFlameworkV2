@@ -14,6 +14,15 @@ export function isAtomicModel(instance: Instance) {
 
 type Listener = (isQualified: boolean, instance: Instance) => void;
 
+/**
+ * The entry an observer was registered from -- a link's owner, or a dependent, on its instance --
+ * which is what holds the observed entry open: for as long as it is itself held open, and no longer.
+ */
+export interface Holder {
+	tracker: ComponentTracker;
+	instance: Instance;
+}
+
 /** How far a warning follows links and dependencies for their reasons before it stops naming them. */
 const MAX_REASON_DEPTH = 2;
 
@@ -38,6 +47,15 @@ interface InstanceTracker {
 	 * link's it reads nothing and keeps nothing current: the entry is held open, not owned.
 	 */
 	owners: Set<Listener>;
+
+	/**
+	 * The entry each observer in `listeners` was registered from. An entry lives while something
+	 * holds it open: an owner, or an observer whose own entry is held open in turn. Counting every
+	 * listener alike is what left a ring of links -- or a link naming its own instance -- holding
+	 * itself open after every tag had gone, each entry's observer keeping the other's set from
+	 * ever emptying.
+	 */
+	holders: Map<Listener, Holder>;
 
 	/**
 	 * The listener this entry registered on each of its component's dependencies, so that a wait
@@ -177,9 +195,14 @@ export interface Criteria {
 	 * Links live outside the instance -- another instance's component, or one an attribute points
 	 * at -- so unlike the other criteria they cannot be recomputed from the instance alone. For an
 	 * entry whose links are read once -- a child link under a streaming mode that does not follow
-	 * the tree -- the watcher's `refresh` is the only thing that ever reads them again.
+	 * the tree -- the watcher's `refresh` is the only thing that ever reads them again. `holder` is
+	 * the entry the links belong to, which every observer they register is held by.
 	 */
-	watchLinks?: (instance: Instance, update: (criterion: string, isMet: boolean) => void) => LinkWatcher;
+	watchLinks?: (
+		instance: Instance,
+		update: (criterion: string, isMet: boolean) => void,
+		holder: Holder,
+	) => LinkWatcher;
 
 	/**
 	 * Whether every link is met on this instance right now, read from the instance rather than from
@@ -206,6 +229,7 @@ export class ComponentTracker {
 				listeners: new Set(),
 				waiting: new Set(),
 				owners: new Set(),
+				holders: new Map(),
 				dependencyListeners: new Map(),
 				cleanup: new Set(),
 				isQualified: true,
@@ -316,6 +340,10 @@ export class ComponentTracker {
 
 	private setupTracker(instance: Instance, tracker: InstanceTracker, observeOnly = false) {
 		const { typeGuard, typeGuardPoll, typeGuardPollAtomic, watchTypeGuard, dependencies } = this.criteria;
+
+		// What every observer this entry registers -- on a dependency, on a link's target -- is
+		// held by, and released along with.
+		const holder: Holder = { tracker: this, instance };
 
 		const pollsTree =
 			typeGuard !== undefined && typeGuardPoll === true && (typeGuardPollAtomic || !isAtomicModel(instance));
@@ -447,7 +475,7 @@ export class ComponentTracker {
 				// a dependency's warning would be the same "wrong way round" report `observeOnly`
 				// exists to suppress -- said about a component nobody has asked for on an
 				// instance nothing is tagged with.
-				dependency.trackInstance(instance, listener, true);
+				dependency.trackInstance(instance, listener, holder);
 				tracker.dependencyListeners.set(dependency, listener);
 
 				tracker.cleanup.add(() => {
@@ -459,15 +487,19 @@ export class ComponentTracker {
 
 		const { watchLinks } = this.criteria;
 		if (watchLinks) {
-			const watcher = watchLinks(instance, (criterion, isMet) => {
-				if (isMet) {
-					tracker.unmetCriteria.delete(criterion);
-				} else {
-					tracker.unmetCriteria.add(criterion);
-				}
+			const watcher = watchLinks(
+				instance,
+				(criterion, isMet) => {
+					if (isMet) {
+						tracker.unmetCriteria.delete(criterion);
+					} else {
+						tracker.unmetCriteria.add(criterion);
+					}
 
-				this.updateListeners(instance, tracker);
-			});
+					this.updateListeners(instance, tracker);
+				},
+				holder,
+			);
 			tracker.linkWatcher = watcher;
 
 			tracker.cleanup.add(() => {
@@ -871,13 +903,15 @@ export class ComponentTracker {
 	/**
 	 * Starts tracking an instance, calling `listener` whenever it starts or stops qualifying.
 	 *
-	 * `observeOnly` is for a listener that is watching rather than waiting -- a link, whose own
-	 * component already reports the wait, or a dependent, whose wait reaches this entry through
-	 * `armWarningChain` instead. Without it the instance would be reported as one this component
-	 * is being kept from, which is the wrong way round and says it twice; and the entry would be
-	 * read as if for the tag path, and frozen on that reading before the tag has arrived.
+	 * `holder` marks a listener that is watching rather than waiting -- a link, whose own component
+	 * already reports the wait, or a dependent, whose wait reaches this entry through
+	 * `armWarningChain` instead -- and names the entry it was registered from, which is what holds
+	 * this one open. Without it the instance would be reported as one this component is being kept
+	 * from, which is the wrong way round and says it twice; and the entry would be read as if for
+	 * the tag path, and frozen on that reading before the tag has arrived.
 	 */
-	public trackInstance(instance: Instance, listener: Listener, observeOnly = false) {
+	public trackInstance(instance: Instance, listener: Listener, holder?: Holder) {
+		const observeOnly = holder !== undefined;
 		const isNewInstance = !this.instances.has(instance);
 		const tracker = this.getInstanceTracker(instance);
 		if (isNewInstance) {
@@ -909,7 +943,9 @@ export class ComponentTracker {
 		}
 
 		tracker.listeners.add(listener);
-		if (!observeOnly) {
+		if (holder !== undefined) {
+			tracker.holders.set(listener, holder);
+		} else {
 			tracker.waiting.add(listener);
 			tracker.owners.add(listener);
 		}
@@ -937,18 +973,60 @@ export class ComponentTracker {
 	 * Releases every tracked instance: connections, dependency subscriptions and pending warnings.
 	 */
 	public dispose() {
-		for (const [, tracker] of this.instances) {
-			for (const cleanup of tracker.cleanup) {
-				cleanup();
-			}
-
-			if (tracker.timeoutWarningThread) {
-				task.cancel(tracker.timeoutWarningThread);
-				tracker.timeoutWarningThread = undefined;
+		for (const [instance, tracker] of [...this.instances]) {
+			// Releasing one entry can take another of this tracker's down with it -- the other
+			// half of a ring -- which is then not released a second time.
+			if (this.instances.get(instance) === tracker) {
+				this.releaseTracker(instance, tracker);
 			}
 		}
 
 		this.instances.clear();
+	}
+
+	/**
+	 * Drops an entry: its connections, dependency subscriptions, link watcher and pending warning.
+	 *
+	 * Out of the map before any of that runs, because releasing what the entry registered reaches
+	 * back here -- a link naming its own instance untracks an observer of this very entry -- and
+	 * an entry that is already gone has nothing left to release twice.
+	 */
+	private releaseTracker(instance: Instance, tracker: InstanceTracker) {
+		this.instances.delete(instance);
+
+		for (const cleanup of tracker.cleanup) {
+			cleanup();
+		}
+
+		if (tracker.timeoutWarningThread) {
+			task.cancel(tracker.timeoutWarningThread);
+			tracker.timeoutWarningThread = undefined;
+		}
+	}
+
+	/**
+	 * Whether anything still holds the entry open: an owner, or an observer whose own entry is held
+	 * open in turn -- however far the links and dependencies that registered it lead, short of
+	 * coming back round. An entry only observers hold, none of them from an entry anything owns,
+	 * is one nothing can reach any more: a ring of links whose every tag has gone, or a link that
+	 * names its own instance, each observer keeping an entry that is only there for its sake.
+	 */
+	private isHeldOpen(tracker: InstanceTracker, visited: Set<InstanceTracker>): boolean {
+		if (!tracker.owners.isEmpty()) return true;
+
+		visited.add(tracker);
+
+		for (const listener of tracker.listeners) {
+			const holder = tracker.holders.get(listener);
+			if (holder === undefined) continue;
+
+			const holding = holder.tracker.instances.get(holder.instance);
+			if (holding === undefined || visited.has(holding)) continue;
+
+			if (holder.tracker.isHeldOpen(holding, visited)) return true;
+		}
+
+		return false;
 	}
 
 	public untrackInstance(instance: Instance, listener: Listener) {
@@ -957,6 +1035,7 @@ export class ComponentTracker {
 			tracker.listeners.delete(listener);
 			tracker.waiting.delete(listener);
 			tracker.owners.delete(listener);
+			tracker.holders.delete(listener);
 
 			// The warning outlives the listener that armed it otherwise. A link can create a
 			// tracker that the tag path later arms, so an observer left holding the entry open is
@@ -967,12 +1046,10 @@ export class ComponentTracker {
 				this.disarmWarningChain(instance, tracker);
 			}
 
-			if (tracker.listeners.isEmpty()) {
-				for (const cleanup of tracker.cleanup) {
-					cleanup();
-				}
-
-				this.instances.delete(instance);
+			// Releasing the entry releases every observer it registered, so an entry only this one
+			// was holding open is asked the same question next, as far round as the ring goes.
+			if (!this.isHeldOpen(tracker, new Set())) {
+				this.releaseTracker(instance, tracker);
 			}
 		}
 	}
