@@ -118,7 +118,7 @@ waits for the providers, prints every `[FWTEST]` line, stops the session and exi
 node scripts/studio/run-studio-tests.mjs                          # current Workspace settings
 node scripts/studio/run-studio-tests.mjs --streaming off          # flips StreamingEnabled, restores it after
 node scripts/studio/run-studio-tests.mjs --streaming on --wait 40
-node scripts/studio/run-studio-tests.mjs --studio "Dive In"       # another open Studio window
+node scripts/studio/run-studio-tests.mjs --studio "Other Place"   # another open Studio window
 ```
 
 `scripts/studio/mcp.mjs` is the lower-level driver: `--studios`, `--tools`, `<tool> '<json>'`, and

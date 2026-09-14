@@ -46,7 +46,7 @@ export interface FakeStudio {
 }
 
 export const TESTING_STUDIO: StudioEntry = { id: "studio-1", name: `TestingExperience (placeId: ${PLACE})` };
-export const OTHER_STUDIO: StudioEntry = { id: "studio-2", name: "Dive In  (placeId: 107977544283224)" };
+export const OTHER_STUDIO: StudioEntry = { id: "studio-2", name: "Other Place  (placeId: 123456789012345)" };
 
 export function json(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status });

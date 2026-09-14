@@ -27,7 +27,7 @@ describe("studio helpers", () => {
 		// A place id that is a prefix of another must not match it.
 		expect(findStudioForPlace([{ id: "x", name: "Other (placeId: 1089731514552860)" }], PLACE)).toBeUndefined();
 		expect(placeNameOf(TESTING_STUDIO.name)).toBe("TestingExperience");
-		expect(placeNameOf(OTHER_STUDIO.name)).toBe("Dive In");
+		expect(placeNameOf(OTHER_STUDIO.name)).toBe("Other Place");
 	});
 
 	test("a local file's window is told apart, and findStudio prefers a target, then the place, then a lone local file", () => {
@@ -37,7 +37,7 @@ describe("studio helpers", () => {
 		const all = [OTHER_STUDIO, TESTING_STUDIO, LOCAL_STUDIO];
 		expect(findStudio(all, PLACE)).toBe(TESTING_STUDIO);
 		expect(findStudio(all, PLACE, "studio-3")).toBe(LOCAL_STUDIO);
-		expect(findStudio(all, PLACE, "Dive In")).toBe(OTHER_STUDIO);
+		expect(findStudio(all, PLACE, "Other Place")).toBe(OTHER_STUDIO);
 		expect(findStudio([OTHER_STUDIO, LOCAL_STUDIO], PLACE)).toBe(LOCAL_STUDIO);
 		expect(findStudio([OTHER_STUDIO, LOCAL_STUDIO, { id: "x", name: "other.rbxl" }], PLACE)).toBeUndefined();
 		expect(findStudio([OTHER_STUDIO], PLACE)).toBeUndefined();
@@ -118,7 +118,7 @@ describe("studio commands", () => {
 		expect(local.code).toBe(0);
 		expect(local.studioCalls[0]!.args.studio_id).toBe("studio-3");
 
-		const named = await runCli(["studio", "status", "--studio", "Dive In"], {
+		const named = await runCli(["studio", "status", "--studio", "Other Place"], {
 			studio: { studios: [OTHER_STUDIO, TESTING_STUDIO], answers: { get_studio_state: EDITING } },
 		});
 		expect(named.studioCalls[0]!.args.studio_id).toBe("studio-2");
@@ -128,7 +128,7 @@ describe("studio commands", () => {
 		});
 		expect(missing.code).toBe(1);
 		expect(missing.err).toContain('no Studio window is named "Nope"');
-		expect(missing.err).toContain("Dive In");
+		expect(missing.err).toContain("Other Place");
 	});
 
 	test("open without Studio installed says so", async () => {
