@@ -62,7 +62,8 @@ export class ModuleDefinition {
 
 		// Claimed before ignition rather than after it, so that `Dependency<T>()` answers inside a
 		// provider constructor, as it did in v1.
-		const claimsDefault = options?.default === true || getDefaultModule() === undefined;
+		const previous = getDefaultModule();
+		const claimsDefault = options?.default === true || previous === undefined;
 		if (claimsDefault) {
 			setDefaultModule(module);
 		}
@@ -71,9 +72,15 @@ export class ModuleDefinition {
 			return module.ignite();
 		} catch (err) {
 			// A module that failed to ignite must not stay the default: the next root ignited would
-			// never claim it, and `Dependency<T>()` would keep answering from the wreck.
+			// never claim it, and `Dependency<T>()` would keep answering from the wreck. The root it
+			// replaced is put back, if it is still ignited, so that a failed ignition leaves the
+			// default as it found it.
 			if (claimsDefault) {
 				clearDefaultModule(module);
+
+				if (previous !== undefined && previous.isIgnited() && getDefaultModule() === undefined) {
+					setDefaultModule(previous);
+				}
 			}
 
 			error(err, 0);

@@ -198,8 +198,9 @@ export class Telemetry implements OnStart {}
 
 A lazy provider that nothing ever resolves is never created. One that is resolved after ignition
 still gets `onInit` and `onStart`, on the next resume point after it is constructed, so it behaves
-like any other provider from then on. This is v1's `@Optional()`; there is no equivalent of
-`includeOptionalClass`, because resolving it is how you include it.
+like any other provider from then on; one resolved during ignition, from another provider's
+`onInit`, is initialised in its turn, before anything starts. This is v1's `@Optional()`; there is
+no equivalent of `includeOptionalClass`, because resolving it is how you include it.
 
 ### Scoped providers
 

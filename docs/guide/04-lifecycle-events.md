@@ -115,6 +115,8 @@ registered with it. Per-frame events start immediately.
 
 The same applies to anything built with `createClassInstance`: it is attached to the lifecycle
 events it implements, and detached by `removeClassInstance` or when the module extinguishes.
+Detached means no further event, `onExtinguished` included: an instance that an earlier
+`onExtinguished` handler removes is not told.
 `onInit` and `onStart` are a provider's: the plugin never runs them for an instance, before or after
 ignition; whoever created the instance owns its initialisation and its start.
 
@@ -219,7 +221,11 @@ one provider iterating them over hundreds of `listen` calls.
   releases the providers, so a dead module stops ticking. This was a bug once; it is covered by a
   spec now.
 - **A failing `onExtinguished` does not abort extinguish.** It is warned about and the remaining
-  handlers still run, so the module cannot get stuck half-extinguished.
+  handlers still run, so the module cannot get stuck half-extinguished. The same goes for a
+  plugin's extinguished hook.
+- **A failing ignition is extinguished.** A raise during ignition -- a constructor, an `onInit`, a
+  plugin's hook -- runs the extinguished hooks for what had been set up, so nothing keeps ticking,
+  and then comes out of `ignite()`.
 - **`onInit` blocks.** A yielding `onInit` delays every provider after it; a rejected Promise fails
   ignition.
 - **A yielding constructor stalls ignition**, because construction is synchronous. Yield in

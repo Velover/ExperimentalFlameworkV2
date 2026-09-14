@@ -1,9 +1,22 @@
-import { Dependency, Flamework, OnStart, Provider } from "@flamework-experimental/core";
-import { expectArrayEqual, expectEqual, expectFalse, expectThrows, expectTrue, suite } from "../testkit";
+import {
+	Dependency,
+	Flamework,
+	HookPriority,
+	OnExtinguished,
+	OnStart,
+	OnTick,
+	Provider,
+	type Module,
+} from "@flamework-experimental/core";
+import { expectArrayEqual, expectEqual, expectFalse, expectNoThrow, expectThrows, expectTrue, suite } from "../testkit";
 
 declare const __harness: {
 	/** Runs what was deferred to the next resume point. */
 	flush: () => void;
+	/** Fires the RunService signals the per-frame lifecycle events hang off. */
+	step: (delta: number) => void;
+	warnings: () => string[];
+	clearWarnings: () => void;
 };
 
 @Provider()
@@ -40,6 +53,21 @@ class Counted {
 
 	constructor() {
 		Counted.constructed += 1;
+	}
+}
+
+/** Ticks and counts its extinguish, to show what a module still holds after it went wrong. */
+@Provider()
+class Ticking implements OnTick, OnExtinguished {
+	public static frames = 0;
+	public static extinguished = 0;
+
+	public onTick() {
+		Ticking.frames += 1;
+	}
+
+	public onExtinguished() {
+		Ticking.extinguished += 1;
 	}
 }
 
@@ -360,6 +388,107 @@ export = suite("modules", [
 			);
 
 			module.extinguish();
+		},
+	],
+	[
+		// Regression: `ignite` ran the hooks bare, so a postIgnite hook that raised after the
+		// lifecycle plugin's left its RunService connections live, ticking the failed module's
+		// providers on every frame, and left the module in `Igniting`, where `extinguish` refused
+		// it. Nothing could take it down.
+		"a module whose ignition raises is extinguished, and holds nothing",
+		() => {
+			Ticking.frames = 0;
+			Ticking.extinguished = 0;
+
+			const log = new Array<string>();
+			let seen: Module | undefined;
+
+			const failing = Flamework.createPlugin("FailingPostIgnite", (target) => {
+				seen = target.module;
+				target.onExtinguished(() => log.push("extinguished"));
+				target.onPostIgnite(() => error("post-ignite failed"));
+			});
+
+			const message = expectThrows(
+				() =>
+					Flamework.createModule()
+						.includePlugin(failing)
+						.registerClassProvider(Ticking)
+						.ignite({ default: true }),
+				"igniting past a hook that raises",
+			);
+			expectTrue(contains(message, "post-ignite failed"), `the hook's error comes out: ${message}`);
+
+			__harness.step(0.25);
+			expectEqual(Ticking.frames, 0, "frames delivered to the failed module's provider");
+			expectArrayEqual(log, ["extinguished"], "the extinguished hooks ran");
+			expectEqual(Ticking.extinguished, 1, "the provider's onExtinguished ran");
+			expectTrue(seen!.isExtinguished(), "the module reports itself extinguished");
+			expectThrows(() => seen!.resolveDependency<Ticking>(), "resolving from the failed module");
+			expectThrows(() => Dependency<Ticking>(), "Dependency, with the failed module let go of as default");
+		},
+	],
+	[
+		// Regression: the extinguished hooks ran bare too, so one that raised left the hooks after it
+		// unrun and the providers attached to their lifecycle events, with the state stuck in
+		// `Extinguishing`, where a second `extinguish` was refused, and the module held as the
+		// default for good.
+		"extinguishes past a hook that raises, and reports it",
+		() => {
+			__harness.clearWarnings();
+			Ticking.frames = 0;
+			Ticking.extinguished = 0;
+
+			const log = new Array<string>();
+			const failing = Flamework.createPlugin("FailingExtinguished", (target) => {
+				// First, so that the lifecycle plugin's own hook is among those after the raise.
+				target.onExtinguished(() => error("extinguished hook failed"), { priority: HookPriority.First });
+			});
+
+			const module = Flamework.createModule()
+				.includePlugin(failing)
+				.includePlugin(tracked("after", log))
+				.registerClassProvider(Ticking)
+				.ignite({ default: true });
+
+			expectNoThrow(() => module.extinguish(), "extinguishing past a hook that raises");
+			expectTrue(
+				__harness.warnings().some((line) => contains(line, "extinguished hook failed")),
+				`the failure is reported: ${__harness.warnings().join(" | ")}`,
+			);
+			expectArrayEqual(log, ["after"], "the hooks after the raise ran");
+			expectEqual(Ticking.extinguished, 1, "the provider's onExtinguished ran");
+
+			__harness.step(0.25);
+			expectEqual(Ticking.frames, 0, "frames delivered after extinguish");
+			expectThrows(() => module.resolveDependency<Ticking>(), "resolving from the extinguished module");
+			expectThrows(() => Dependency<Ticking>(), "Dependency, with the module let go of as default");
+		},
+	],
+	[
+		// Regression: the default is claimed before ignition, and a failed ignition only let go of
+		// the claim, so `ignite({ default: true })` raising left no default at all: the root that had
+		// been the default, still ignited, no longer answered `Dependency<T>()`.
+		"a failed ignition with default: true leaves the previous default as it was",
+		() => {
+			const anchor = Flamework.createModule().registerClassProvider(Widget).ignite({ default: true });
+
+			try {
+				const failing = Flamework.createPlugin("FailingPostIgnite", (target) => {
+					target.onPostIgnite(() => error("post-ignite failed"));
+				});
+				expectThrows(
+					() => Flamework.createModule().includePlugin(failing).ignite({ default: true }),
+					"igniting past a hook that raises",
+				);
+
+				expectTrue(
+					Dependency<Widget>() === anchor.resolveDependency<Widget>(),
+					"the previous default still answers",
+				);
+			} finally {
+				anchor.extinguish();
+			}
 		},
 	],
 ]);

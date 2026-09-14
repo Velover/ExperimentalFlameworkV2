@@ -16,6 +16,11 @@ function reusableThread(func: () => void) {
 		}
 
 		inactiveThread = thread;
+
+		// Let go of the callback while idle: it closes over whatever it was run for -- a lifecycle
+		// listener, a component -- which would otherwise stay reachable from this thread until the
+		// next callback comes through, and for good when none does.
+		func = undefined!;
 		[func] = coroutine.yield() as LuaTuple<[never]>;
 	}
 }

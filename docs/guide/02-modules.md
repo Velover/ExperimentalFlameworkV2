@@ -96,8 +96,9 @@ const module = definition.ignite({ default: true });
 ```
 
 Extinguishing the default releases it, so the next root ignited claims it -- a test that ignites and
-extinguishes per case never leaks one into the next. With no default, `Dependency<T>()` raises
-`Dependency<T>() was called before any module was ignited`.
+extinguishes per case never leaks one into the next. A root that fails to ignite never becomes it:
+one ignited with `{ default: true }` that raises leaves the previous default as it was. With no
+default, `Dependency<T>()` raises `Dependency<T>() was called before any module was ignited`.
 
 With more than one module live, pass the one to resolve from. It is `module.resolveDependency<T>()`
 for code that has the handle but prefers the global's shape:

@@ -231,9 +231,15 @@ export class LifecycleProvider {
 	}
 
 	public postIgnite(module: Module) {
-		// Copied: an `onInit` may resolve a lazy provider, which attaches while we iterate.
-		for (const object of [...this.onInit]) {
-			this.runInit(object);
+		// Walked live rather than over a copy: an `onInit` may resolve a lazy provider, which joins
+		// the end of the list while we iterate and is initialised in its turn -- over a copy it was
+		// skipped, and then started with the rest, never initialised. Nothing leaves the list
+		// during ignition, so the index stays true. A `while`, since a `for` compiles to a numeric
+		// loop that reads the length once.
+		let index = 0;
+		while (index < this.onInit.size()) {
+			this.runInit(this.onInit[index]);
+			index += 1;
 		}
 
 		this.hasStarted = true;
@@ -291,8 +297,14 @@ export class LifecycleProvider {
 			}
 		}
 
+		// Over a copy, since a handler may detach objects; one detached by a handler before it --
+		// `removeClassInstance` from an `onExtinguished` -- has left the event, so it is not told.
 		// One failing handler must not leave the module stuck half-extinguished.
 		for (const provider of [...this.onExtinguished]) {
+			if (!this.onExtinguished.has(provider)) {
+				continue;
+			}
+
 			const [success, err] = pcall(() => provider.onExtinguished());
 			if (!success) {
 				warn(`[Flamework] onExtinguished failed for '${this.getIdentifier(provider)}': ${tostring(err)}`);

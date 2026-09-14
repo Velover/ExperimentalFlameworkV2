@@ -331,7 +331,7 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		hooks.push({ phase, callback, priority: priority ?? HookPriority.Normal });
 	};
 
-	const runHooks = (phase: HookPhase) => {
+	const sortedHooks = (phase: HookPhase) => {
 		const matching = hooks.filter((hook) => hook.phase === phase);
 
 		// `table.sort` is not stable, so hooks of equal priority are ordered by the position they
@@ -347,21 +347,59 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 			return order.get(a)! < order.get(b)!;
 		});
 
-		for (const hook of matching) {
+		return matching;
+	};
+
+	const runHooks = (phase: HookPhase) => {
+		for (const hook of sortedHooks(phase)) {
 			hook.callback(module);
 		}
 	};
 
+	/**
+	 * Runs one step of a teardown, reporting a raise rather than letting it out, so that the steps
+	 * after it still run: one hook or removal callback that fails must not leave the module holding
+	 * the rest -- the guarantee the lifecycle plugin gives for its own handlers, made the module's.
+	 */
+	const guarded = (what: string, callback: () => void) => {
+		const [success, err] = pcall(callback);
+		if (!success) {
+			warn(`[Flamework] module '${state.debugName}': ${what} failed: ${tostring(err)}`);
+		}
+	};
+
+	/**
+	 * Attaches an object to every observer of every interface it implements, all or nothing: an
+	 * observer that raises from its `onAdded` has the ones before it told `onRemoved`, and the
+	 * error comes out, so a refused object is attached nowhere -- rather than left ticking in the
+	 * lifecycle's sets, with no handle to remove it by.
+	 */
 	const registerClassInterfaces = (instance: object, kind: InterfaceTargetKind) => {
-		for (const interfaceId of getClassImplements(instance)) {
-			const interested = observers.get(interfaceId);
-			if (!interested) {
-				continue;
+		const added = new Array<[string, InterfaceConfiguration<unknown>]>();
+
+		const [success, err] = pcall(() => {
+			for (const interfaceId of getClassImplements(instance)) {
+				const interested = observers.get(interfaceId);
+				if (!interested) {
+					continue;
+				}
+
+				for (const observer of interested) {
+					observer.onAdded?.(instance, { interfaceId, kind });
+					added.push([interfaceId, observer]);
+				}
+			}
+		});
+
+		if (!success) {
+			// Undone in reverse, each step guarded, so that one `onRemoved` raising does not leave
+			// the rest attached; the observer's error is what comes out.
+			for (let i = added.size() - 1; i >= 0; i--) {
+				const [interfaceId, observer] = added[i];
+				guarded("undoing an attachment", () => observer.onRemoved?.(instance, { interfaceId, kind }));
 			}
 
-			for (const observer of interested) {
-				observer.onAdded?.(instance, { interfaceId, kind });
-			}
+			error(err, 0);
 		}
 	};
 
@@ -488,8 +526,11 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		assertAlive("create class instances");
 
 		const instance = instantiateClassWithDependencies(constructor, config?.overrideDependency);
-		temporaryInstances.add(instance);
+
+		// Attached before it is held: an observer that refuses it leaves it attached nowhere, so
+		// there is nothing for the module to hold, or to release on extinguish.
 		registerClassInterfaces(instance, "instance");
+		temporaryInstances.add(instance);
 		return instance as never;
 	};
 
@@ -510,7 +551,31 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		if (metaKey === undefined) {
 			// Non-shorthand
 			// We create a proxy object so that we have a unique reference for this specific listener.
-			listener = setmetatable({}, { __index: param as never });
+			// It stands in for the object without being it: a method reached through it runs with
+			// the object as `self`, so what the method writes to `this` lands on the object; and
+			// its `__index` is a function rather than the object, which is where the metadata walk
+			// stops -- through the object it went on to the object's class, and attached the proxy
+			// to every interface the class implements instead of the one named here.
+			const target = param as unknown as Record<string, unknown>;
+			listener = setmetatable(
+				{},
+				{
+					__index: (_, key) => {
+						const value = target[key as string];
+						if (typeIs(value, "function")) {
+							return (_self: unknown, ...args: unknown[]) => (value as Callback)(target, ...args);
+						}
+
+						return value;
+					},
+				},
+			);
+
+			// The class's identifier is what the object was profiled under through the old walk.
+			const identifier = Reflect.getMetadata<string>(target, "identifier");
+			if (identifier !== undefined) {
+				Reflect.defineMetadata(listener, "identifier", identifier);
+			}
 		} else {
 			assert(typeIs(param, "function"));
 
@@ -524,8 +589,9 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		// Register the lifecycle event
 		Reflect.defineMetadata(listener, "flamework:implements", [metaId]);
 
-		temporaryInstances.add(listener);
+		// Attached before it is held, as in `createClassInstance`.
 		registerClassInterfaces(listener, "instance");
+		temporaryInstances.add(listener);
 
 		return () => {
 			assert(listener !== undefined, "listeners cannot be destructed more than once");
@@ -548,34 +614,47 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		// Raises on a module that has ignited already: a definition is what gets ignited twice.
 		switchInitState(ModuleInitState.Created, ModuleInitState.PreIgniting);
 
-		// Plugins are set up before any provider exists, so a setup that resolves is refused the
-		// same way an `onPreIgnite` hook is.
-		for (const inclusion of state.plugins) {
-			includePlugin(inclusion.plugin, inclusion.scope);
-		}
-
-		runHooks("preIgnite");
-
-		// Every registration is in by now, the plugins' included, so this is where the conditions
-		// are judged and the ids checked for collisions among what is kept.
-		activateProviders();
-
-		switchInitState(ModuleInitState.PreIgniting, ModuleInitState.Igniting);
-
-		// Provided instances exist already; here they join the interfaces they implement, now that
-		// every plugin's observers are in place.
-		for (const instance of providedInstances) {
-			registerClassInterfaces(instance, "provider");
-		}
-
-		for (const provider of providers) {
-			// Lazy providers are constructed the first time they are resolved instead.
-			if (provider.config.type === "class" && provider.config.lazy !== true) {
-				resolveDependency(provider.injectionId);
+		// From here on the module holds things: what the plugins set up, then the providers, then
+		// what the hooks connect. A raise anywhere in it takes the module down the way `extinguish`
+		// does before it comes out, so that a failed ignition holds nothing. The lifecycle plugin's
+		// postIgnite hook connects the RunService signals, and a hook after it that raised used to
+		// leave those ticking a module stuck in `Igniting`, which nothing could extinguish.
+		const [success, err] = pcall(() => {
+			// Plugins are set up before any provider exists, so a setup that resolves is refused the
+			// same way an `onPreIgnite` hook is.
+			for (const inclusion of state.plugins) {
+				includePlugin(inclusion.plugin, inclusion.scope);
 			}
-		}
 
-		runHooks("postIgnite");
+			runHooks("preIgnite");
+
+			// Every registration is in by now, the plugins' included, so this is where the conditions
+			// are judged and the ids checked for collisions among what is kept.
+			activateProviders();
+
+			switchInitState(ModuleInitState.PreIgniting, ModuleInitState.Igniting);
+
+			// Provided instances exist already; here they join the interfaces they implement, now that
+			// every plugin's observers are in place.
+			for (const instance of providedInstances) {
+				registerClassInterfaces(instance, "provider");
+			}
+
+			for (const provider of providers) {
+				// Lazy providers are constructed the first time they are resolved instead.
+				if (provider.config.type === "class" && provider.config.lazy !== true) {
+					resolveDependency(provider.injectionId);
+				}
+			}
+
+			runHooks("postIgnite");
+		});
+
+		if (!success) {
+			moduleInitState = ModuleInitState.Extinguishing;
+			release();
+			error(err, 0);
+		}
 
 		switchInitState(ModuleInitState.Igniting, ModuleInitState.Ignited);
 
@@ -600,23 +679,40 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 
 		importers.clear();
 
-		runHooks("extinguished");
+		release();
+	};
+
+	/**
+	 * Lets go of everything this instantiation holds, from `Extinguishing`: the extinguished hooks
+	 * run, the instances it created and the providers it constructed leave their interfaces, and
+	 * the default is released. Shared by `extinguish` and by an ignition that raised, so the hooks
+	 * that ran before the raise are undone by the same hooks that undo them on extinguish.
+	 *
+	 * Every step is guarded: one that raises is warned about and the rest still run, so the module
+	 * cannot get stuck half-extinguished -- which used to hold it, and everything in it, for good,
+	 * as the default `Dependency<T>()` answered from.
+	 */
+	const release = () => {
+		for (const hook of sortedHooks("extinguished")) {
+			guarded("an onExtinguished hook", () => hook.callback(module));
+		}
 
 		// Copied first: removal callbacks may themselves remove instances.
 		for (const temporaryInstance of [...temporaryInstances]) {
-			removeClassInstance(temporaryInstance);
+			guarded("removing an instance", () => removeClassInstance(temporaryInstance));
 		}
 
 		// Providers join their interfaces when they are instantiated, so they have to leave them
 		// too. Without this, a plugin such as the lifecycle plugin keeps holding (and ticking)
 		// providers that belong to an extinguished module.
 		for (const [, provider] of instantiatedProviders) {
-			unregisterClassInterfaces(provider, "provider");
+			guarded("removing a provider", () => unregisterClassInterfaces(provider, "provider"));
 		}
 
+		// A removal that raised leaves its instance behind, and nothing can add one any more.
+		temporaryInstances.clear();
 		instantiatedProviders.clear();
 
-		assert(temporaryInstances.size() === 0);
 		switchInitState(ModuleInitState.Extinguishing, ModuleInitState.Extinguished);
 
 		for (const imported of imports) {
