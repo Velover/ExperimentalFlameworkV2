@@ -203,8 +203,9 @@ export class Character extends BaseComponent<{}, Model & { Head?: BasePart }> {}
 `this.instance.Head` is an index into the instance itself, and Roblox raises on a child that is not
 there rather than handing back nothing -- the `if (this.instance.Head)` written to check for it
 raises too. The optional type would promise a read that cannot be made. Require the child, or leave
-it out of the tree and reach for it with `FindFirstChild`. A child naming a **component** is the
-exception, because Flamework watches whether it is there; see [links](#links).
+it out of the tree and reach for it with `FindFirstChild`. A child naming a **component** is no
+exception: a component that may or may not be there is named by an optional link attribute, or
+looked up with `getComponent`; see [links](#links).
 
 Attributes are a different mechanism and stay optional: a missing one reads back as `undefined`, so
 `label?: string` is fine.
@@ -345,22 +346,10 @@ A component can only be named as a **direct** member of the tree. One further do
 time, because `this.instance` would have nowhere to put it -- declare it on the component attached to
 that child instead, or look it up with `getComponent`.
 
-A child naming a component may be **optional**, which a plain child may not:
-
-```ts
-@Component({ tag: "Cannon" })
-export class Cannon extends BaseComponent<{}, Folder & { Core?: CoreComponent }> {
-    public onStart() {
-        // The link is what says whether the child is there.
-        this.childComponents.Core?.spin();
-    }
-}
-```
-
-The component builds with or without `Core`, and is built again when it arrives or leaves, so
-`childComponents.Core` is either the component or `undefined` for the whole life of one. Read it
-there rather than on the instance: `this.instance.Core` is still an index into the instance and
-raises while the child is missing.
+A child naming a component cannot be optional, any more than a plain child can: `this.instance.Core`
+is still an index into the instance, and raises while the child is missing. A component that may or
+may not be there is named through an [attribute](#instance-attributes) instead, which can be
+optional, or looked up with `getComponent` when it is needed.
 
 #### Writing one
 
@@ -399,7 +388,6 @@ that instance is tagged.
 | A required link attribute is cleared from outside | Removed. |
 | A plain attribute is changed to a value its guard rejects | Removed, and built again once it is valid -- the warning names it, `invalid attribute 'speed' ("fast")`. With a `defaults` entry for it, **kept** with its last good value, and `onAttributeChanged` does not fire. |
 | A child a link names is replaced by another instance of the same name | Removed and built again around the new one, so it never holds a child that has left. |
-| The child of an **optional** link arrives, or leaves | Removed and built again, so `childComponents` never names an instance the tree no longer holds. An optional link never holds construction up, but it is still part of the tree. |
 | The instance tree stops matching -- a child goes, including one a link names | Follows `streamingMode` (below). |
 
 A swap is worth calling out because signals are deferred: a child parented out and its replacement
@@ -514,12 +502,15 @@ Watching is one watcher per required child, not a re-check of the whole tree. `M
 Part & { Texture: Texture } }` listens for children arriving and leaving on the model and, once
 `Root` has resolved, on `Root`, plus the `Name` of each resolved child. A `Texture` arriving three
 levels down re-resolves that one slot; a child that is not in the tree, or a second child of a
-required name, changes nothing however often it moves. A rename is announced by the renamed child
-alone, so while a required child is missing the watcher follows the `Name` of every other child as
-well -- a sibling renamed to the required name is heard from the sibling -- and drops those the
-moment the child is there; a child renamed away is noticed, and so is renaming it back. A guard
-written by hand with `instanceGuard` has no such structure: it is re-run whole on every descendant
-change, and hears no rename at all.
+required name, changes nothing however often it moves. Renames are not followed unless the component
+asks for it with `watchRenames: true` (or `components.watchRenames` in `flamework.config.json`): a
+child is rarely renamed, and a rename is announced by the renamed child alone, so following names
+costs a connection on each resolved child and, while a required child is missing, one on every other
+child -- the only way a sibling renamed to the required name can be heard. Left off, a child renamed
+away or a sibling renamed into a required name is noticed the next time that slot is read: a child of
+that name arriving, the child it resolved to leaving, or the tag arriving. A guard written by hand
+with `instanceGuard` has no such structure: it is re-run whole on every descendant change, and hears
+no rename at all.
 
 When a watched component's tree breaks apart again, the component is removed. That holds however the
 component came to qualify: a tag arriving at an instance another component's link was already

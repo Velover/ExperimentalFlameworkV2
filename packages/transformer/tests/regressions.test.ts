@@ -256,17 +256,37 @@ describe("component links", () => {
 		expect(source).not.toContain(`getComponent(other).attributes`);
 	});
 
-	test("links an optional child, and keeps the shapes beside it legal", () => {
+	test("links a second child naming a component, and keeps the shapes beside it legal", () => {
 		// The fixture compiling at all is the assertion for the legal shapes (see `beforeAll`): a
-		// required child, an optional attribute, and a child naming a component optionally.
+		// required child, an optional attribute, and two children naming a component.
 		const source = normalize(emitted("components"));
 
 		expect(source).toContain(`Plain = { isA = { "BasePart" }, }`);
 		expect(source).toContain(`label = t.optional(t.string)`);
-		expect(source).toContain(`SpareHandler = { isA = { "BasePart" }, optional = true, }`);
+		expect(source).toContain(`SpareHandler = { isA = { "BasePart" }, }`);
 		expect(source).toContain(
-			`kind = "child", name = "SpareHandler", optional = true, component = "fw:components@HandlerComponent",`,
+			`kind = "child", name = "SpareHandler", optional = false, component = "fw:components@HandlerComponent",`,
 		);
+	});
+
+	test("rejects an optional child naming a component", () => {
+		// A component that may be missing is not a child `this.instance` can be indexed for
+		// either: it is reached through an optional link attribute, or looked up.
+		const result = compileProbe(
+			"optionalComponentChild",
+			`import { BaseComponent, Component } from "@flamework-experimental/components";
+
+@Component({ tag: "FixtureOptionalCore" })
+export class CoreComponent extends BaseComponent<{}, BasePart> {}
+
+@Component({ tag: "FixtureOptionalCannon" })
+export class CannonComponent extends BaseComponent<{}, Model & { Core?: CoreComponent }> {}
+`,
+		);
+
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("Child 'Core' of the instance tree of 'CannonComponent' is optional");
+		expect(result.output).toContain("optional link attribute");
 	});
 });
 

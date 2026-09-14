@@ -31,9 +31,8 @@ interface LinkedAttributes {
 @Component({ tag: "FixtureLinked" })
 export class LinkedComponent extends BaseComponent<
 	LinkedAttributes,
-	// `SpareHandler` is optional, which only a child naming a component may be: its presence is a
-	// link, so `childComponents` says whether it is there without indexing the instance.
-	Model & { EffectHandler: HandlerComponent; SpareHandler?: HandlerComponent; Plain: BasePart }
+	// A child naming a component is a link; `SpareHandler` is one beside a plain child.
+	Model & { EffectHandler: HandlerComponent; SpareHandler: HandlerComponent; Plain: BasePart }
 > {
 	public rename() {
 		this.attributes.label = "renamed";

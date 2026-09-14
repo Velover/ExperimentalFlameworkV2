@@ -106,7 +106,7 @@ entry the tsconfig needs is `transform`; each package has its own section in the
   },
   "core": { "profiling": true },
   "networking": { "serialization": true },
-  "components": { "warningTimeout": 5, "attributeWarningTimeout": 5, "streamingMode": "Contextual" },
+  "components": { "warningTimeout": 5, "attributeWarningTimeout": 5, "streamingMode": "Contextual", "watchRenames": false },
   "scopes": { "active": "${FLAMEWORK_SCOPES:-}" }
 }
 ```
@@ -120,7 +120,7 @@ entry the tsconfig needs is `transform`; each package has its own section in the
 | | `salt`, `noSemanticDiagnostics`, `optimizations` | Hash salt, skipping semantic diagnostics, [guard deduplication](#guard-deduplication). |
 | `core` | `profiling` | Default for `LifecyclePlugin` profiling; `createLifecyclePlugin({ profiling })` overrides it per module. |
 | `networking` | `serialization` | Serializes every event and function payload into a buffer with code generated at compile time; see [Networking](06-networking.md#serialization). |
-| `components` | `warningTimeout`, `attributeWarningTimeout`, `streamingMode` | Defaults for components that do not set their own. |
+| `components` | `warningTimeout`, `attributeWarningTimeout`, `streamingMode`, `watchRenames` | Defaults for components that do not set their own. |
 | `scopes` | `active` | The scopes this build is compiled with; see [Scopes](11-scopes.md). |
 | `testing` | `activeIn`, `inactiveIn`, `enabled`, `autoRun`, `timeout`, `entry` | In-place tests: the scopes under which the plugin attaches (`["testing"]` by default) and an override, whether tests run at start, the per-test timeout, and `entry`, the ModuleScript a cloud task ignites the game from (a cloud task runs none of the place's Scripts; Studio needs no entry); see [Testing in the place](12-testing.md). |
 | `cloud` | `testingUniverseId`, `testingPlaceId`, `apiKey`, `originalPlace` | The testing place `flamework-test` publishes to and runs in when asked for the cloud, and a copy of the original place to lay the build over (used by Studio runs too); read by that CLI only, never compiled in; see [Running the tests](../testing/place.md). |

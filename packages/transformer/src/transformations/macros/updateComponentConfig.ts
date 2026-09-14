@@ -287,15 +287,18 @@ function updateLinks(state: TransformState, node: ts.ClassDeclaration, propertie
 	if (instanceType) {
 		for (const [property, declaredType] of getDeclaredChildren(state, node, instanceType)) {
 			const targetType = state.typeChecker.getNonNullableType(declaredType);
-			const optional = isOptionalMember(state, property, declaredType);
+
+			// Whether it names a component or a plain instance: a child that may be missing is a
+			// child `this.instance` cannot be indexed for, so the tree does not describe one.
+			if (isOptionalMember(state, property, declaredType)) {
+				assertChildIsRequired(node, property, property.name);
+			}
 
 			if (getComponentInstanceType(state, targetType, node)) {
 				// A child's own guard is part of the component's instance guard, so the link only
 				// has to name the component that must exist on it.
-				links.push(createLink(state, node, "child", property.name, optional, targetType));
+				links.push(createLink(state, node, "child", property.name, false, targetType));
 			} else if (isInstanceType(targetType)) {
-				if (optional) assertChildIsRequired(node, property, property.name);
-
 				assertInstanceTree(state, node, targetType, property.name);
 			}
 		}
@@ -320,27 +323,19 @@ function getPropertyNode(node: ts.ClassDeclaration, property: ts.Symbol): ts.Nod
 }
 
 /**
- * A child of the instance tree cannot be optional. `this.instance.Head` is an index into the
- * instance itself, and Roblox raises on a child that is not there rather than handing back nothing,
- * so the optional type would promise a read that is not safe to make.
- *
- * A child typed as a *component* is the exception, and is let through above: it is a link, so its
- * presence is watched and `childComponents.Head` -- an ordinary table read -- is what says whether
- * the child is there.
+ * A child of the instance tree cannot be optional, whether it names a component or a plain
+ * instance. `this.instance.Head` is an index into the instance itself, and Roblox raises on a
+ * child that is not there rather than handing back nothing, so the optional type would promise a
+ * read that is not safe to make. A component that may or may not be there is reached through an
+ * optional link attribute, or looked up with `getComponent`.
  */
 function assertChildIsRequired(node: ts.ClassDeclaration, property: ts.Symbol, path: string): never {
 	const component = node.name ? ` of '${node.name.text}'` : "";
 
-	// Naming a component is only an option for a direct child; one deeper in the tree cannot be
-	// linked at all, so it is not offered as a way out there.
-	const link = path.includes(".")
-		? ""
-		: " type it as a component so that Flamework watches it and 'childComponents' says whether it is there, or";
-
 	Diagnostics.error(
 		getPropertyNode(node, property),
 		`Child '${path}' of the instance tree${component} is optional, which Flamework does not allow: Roblox raises when a child that does not exist is indexed, so 'this.instance.${path}' would error rather than be undefined.`,
-		`Require the child,${link} leave it out of the tree and reach for it with FindFirstChild.`,
+		"Require the child, or leave it out of the tree and reach for it with FindFirstChild; a component that may be missing can be named by an optional link attribute, or looked up with getComponent.",
 	);
 }
 

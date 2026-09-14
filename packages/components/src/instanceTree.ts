@@ -18,7 +18,10 @@ export interface InstanceShape {
 	/** The children the instance must have, by name. */
 	children?: { [name: string]: InstanceShape };
 
-	/** Whether the child may be missing, which only a child that names a component is allowed to be. */
+	/**
+	 * Whether the child may be missing. Never for a component's own tree, where an optional child
+	 * is refused at compile time; a shape written for a link attribute's target can still say so.
+	 */
 	optional?: boolean;
 }
 
@@ -161,6 +164,9 @@ interface Node {
 	 * while it is short of something.
 	 */
 	candidates: Map<Instance, RBXScriptConnection>;
+
+	/** Whether names are followed at all: the resolved children's, and the candidates'. */
+	watchRenames: boolean;
 }
 
 function isSlotMet(slot: Slot): boolean {
@@ -186,6 +192,8 @@ function unwatchName(node: Node, slot: Slot) {
 }
 
 function watchName(node: Node, slot: Slot, child: Instance, changed: () => void) {
+	if (!node.watchRenames) return;
+
 	unwatchName(node, slot);
 
 	slot.watched = child;
@@ -252,7 +260,7 @@ function dropCandidates(node: Node) {
  * followed for its name; once none is, no child is followed for anything but a rename back.
  */
 function syncCandidates(node: Node, changed: () => void) {
-	if (!hasEmptySlot(node)) {
+	if (!node.watchRenames || !hasEmptySlot(node)) {
 		dropCandidates(node);
 		return;
 	}
@@ -320,7 +328,7 @@ function resolveSlot(node: Node, slot: Slot, changed: () => void) {
 
 	slot.reason = undefined;
 	if (slot.node === undefined) {
-		slot.node = createNode(child, slot.shape, slot.path, changed);
+		slot.node = createNode(child, slot.shape, slot.path, changed, node.watchRenames);
 	}
 }
 
@@ -336,10 +344,16 @@ function refreshNode(node: Node, changed: () => void) {
 	syncCandidates(node, changed);
 }
 
-function createNode(instance: Instance, shape: InstanceShape, path: string, changed: () => void): Node | undefined {
+function createNode(
+	instance: Instance,
+	shape: InstanceShape,
+	path: string,
+	changed: () => void,
+	watchRenames: boolean,
+): Node | undefined {
 	if (shape.children === undefined) return undefined;
 
-	const node: Node = { instance, slots: new Map(), connections: [], candidates: new Map() };
+	const node: Node = { instance, slots: new Map(), connections: [], candidates: new Map(), watchRenames };
 
 	for (const [key, childShape] of pairs(shape.children)) {
 		const name = key as string;
@@ -369,7 +383,8 @@ function createNode(instance: Instance, shape: InstanceShape, path: string, chan
 	// A child leaving matters only when it is the one a slot resolved to, or was following the
 	// name of. A second child of the same name that nothing resolved to can come and go. The
 	// slots are asked one by one, because one child can be followed by two of them: the slot it
-	// was renamed away from, and the slot whose name it took.
+	// was renamed away from, and the slot whose name it took. With names not followed, the
+	// resolved child stands in for the followed one.
 	node.connections.push(
 		instance.ChildRemoved.Connect((child) => {
 			dropCandidate(node, child);
@@ -377,7 +392,7 @@ function createNode(instance: Instance, shape: InstanceShape, path: string, chan
 			let wasFollowed = false;
 
 			for (const [, slot] of node.slots) {
-				if (slot.watched !== child) continue;
+				if ((node.watchRenames ? slot.watched : slot.resolved) !== child) continue;
 
 				unwatchName(node, slot);
 				resolveSlot(node, slot, changed);
@@ -400,10 +415,17 @@ function createNode(instance: Instance, shape: InstanceShape, path: string, chan
  * read once.
  *
  * The instance's own class cannot change, so it is judged once; the children are what moves.
+ * `watchRenames` is whether their names are followed as well: off, a rename is only seen by the
+ * next `refresh`, or by the child signals of the slot it concerns.
  */
-export function watchShape(instance: Instance, shape: InstanceShape, changed: () => void): ShapeWatcher {
+export function watchShape(
+	instance: Instance,
+	shape: InstanceShape,
+	changed: () => void,
+	watchRenames = false,
+): ShapeWatcher {
 	const classReason = isOneOf(instance, shape) ? undefined : describeClassMismatch("", instance, shape);
-	let node = classReason === undefined ? createNode(instance, shape, "", changed) : undefined;
+	let node = classReason === undefined ? createNode(instance, shape, "", changed, watchRenames) : undefined;
 
 	const isMet = () => classReason === undefined && (node === undefined || isNodeMet(node));
 

@@ -32,6 +32,9 @@ export interface ComponentsRuntimeConfig {
 
 	/** Default `streamingMode` for components that do not set one. */
 	streamingMode?: "Disabled" | "Watching" | "Contextual";
+
+	/** Default `watchRenames` for components that do not set one. */
+	watchRenames?: boolean;
 }
 
 export interface ScopesRuntimeConfig {

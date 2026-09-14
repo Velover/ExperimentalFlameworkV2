@@ -427,6 +427,12 @@ export class Components {
 		const followsTree = (instance: Instance) =>
 			pollsTree && (streamingMode !== ComponentStreamingMode.Contextual || !isAtomicModel(instance));
 
+		// Whether the names of the children are followed as well, for the shape and the child links
+		// alike: off unless asked for, since a rename is rare and following names costs a connection
+		// per child while a required one is missing.
+		const watchRenames =
+			this.getConfigValue(component, "watchRenames") ?? getRuntimeConfig().components?.watchRenames ?? false;
+
 		// The attributes whose guards are a criterion: one that fails, with no default to stand in
 		// for it, takes the component down, and a value the guard accepts builds it again. The same
 		// reading `getAttributes` makes on the way in, kept true for as long as the component stands.
@@ -465,7 +471,7 @@ export class Components {
 			checkLinks: hasLinks ? (instance) => this.areLinksMet(componentInfo, instance) : undefined,
 			watchLinks: hasLinks
 				? (instance, update, holder) =>
-						this.watchLinks(componentInfo, instance, update, holder, followsTree(instance))
+						this.watchLinks(componentInfo, instance, update, holder, followsTree(instance), watchRenames)
 				: undefined,
 			linksMet: hasLinks ? (instance) => this.areLinksMet(componentInfo, instance) : undefined,
 			tag: componentInfo.config.tag,
@@ -480,7 +486,7 @@ export class Components {
 				: undefined,
 			watchTypeGuard:
 				instanceShape !== undefined
-					? (instance, changed) => watchShape(instance, instanceShape, changed)
+					? (instance, changed) => watchShape(instance, instanceShape, changed, watchRenames)
 					: undefined,
 			typeGuardPoll: pollsTree,
 			typeGuardPollAtomic: streamingMode !== ComponentStreamingMode.Contextual,
@@ -822,6 +828,7 @@ export class Components {
 		update: (criterion: string, isMet: boolean) => void,
 		holder: Holder,
 		pollsTree: boolean,
+		watchRenames: boolean,
 	): LinkWatcher {
 		const maid = new Maid();
 		const rereads = new Array<() => void>();
@@ -832,7 +839,9 @@ export class Components {
 		// maid nothing outside holds until the watcher is returned: released here, or never.
 		try {
 			for (const link of componentInfo.links) {
-				rereads.push(this.watchLink(componentInfo, instance, link, update, holder, maid, pollsTree));
+				rereads.push(
+					this.watchLink(componentInfo, instance, link, update, holder, maid, pollsTree, watchRenames),
+				);
 			}
 		} catch (err) {
 			maid.Destroy();
@@ -858,8 +867,12 @@ export class Components {
 		holder: Holder,
 		maid: Maid,
 		pollsTree: boolean,
+		watchRenames: boolean,
 	): () => void {
 		const criterion = describeLink(link);
+
+		// Names are followed only for a child link that follows the tree, and only when asked to.
+		const followsNames = link.kind === "child" && pollsTree && watchRenames;
 
 		// `refreshAttributes: false` freezes a link attribute the way it freezes a plain one: the
 		// criterion behind the link is still watched -- re-pointing one at something its guard
@@ -902,7 +915,7 @@ export class Components {
 		};
 
 		const watchName = (target: Instance | undefined) => {
-			if (link.kind !== "child" || !pollsTree) return;
+			if (!followsNames) return;
 			if (target === undefined || target === named) return;
 
 			unwatchName();
@@ -934,7 +947,7 @@ export class Components {
 		};
 
 		const syncCandidates = () => {
-			if (link.kind !== "child" || !pollsTree) return;
+			if (!followsNames) return;
 
 			if (instance.FindFirstChild(link.name) !== undefined) {
 				dropCandidates();

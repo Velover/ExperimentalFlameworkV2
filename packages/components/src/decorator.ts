@@ -172,6 +172,18 @@ export interface ComponentConfig {
 	streamingMode?: ComponentStreamingMode;
 
 	/**
+	 * Whether the instance tree is followed through renames as well as through children arriving
+	 * and leaving. Off by default: a child is rarely renamed, and following names costs a
+	 * connection on each resolved child, plus one on every other child while a required child is
+	 * missing (the only way a sibling taking the name can be heard). With it off, a child renamed
+	 * away or into a required name is noticed the next time that child's slot is read: a child of
+	 * that name arriving, the child it resolved to leaving, or the tag arriving. Only matters while
+	 * the tree is watched at all, so never under `Disabled`. Defaults to `components.watchRenames`
+	 * in flamework.config.json.
+	 */
+	watchRenames?: boolean;
+
+	/**
 	 * Registered only while at least one of these scopes is active in the build, on top of the
 	 * module's and the registration's own conditions. An unregistered component is never attached
 	 * to a tagged instance.

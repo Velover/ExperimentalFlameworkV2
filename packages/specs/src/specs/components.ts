@@ -104,8 +104,12 @@ class PartOnly extends BaseComponent<{}, Part> {}
 class Manual extends BaseComponent<{}, Folder> {}
 
 /** Requires a `Core` child, so its instance guard fails until one is parented under it. */
-@Component({ tag: "Watched", streamingMode: ComponentStreamingMode.Watching, warningTimeout: 0 })
+@Component({ tag: "Watched", streamingMode: ComponentStreamingMode.Watching, warningTimeout: 0, watchRenames: true })
 class Watched extends BaseComponent<{}, Folder & { Core: Folder }> {}
+
+/** `Watched` with names left alone, which is the default: a rename is heard by nothing. */
+@Component({ tag: "Unrenamed", streamingMode: ComponentStreamingMode.Watching, warningTimeout: 0 })
+class Unrenamed extends BaseComponent<{}, Folder & { Core: Folder }> {}
 
 @Component({ tag: "Frozen", streamingMode: ComponentStreamingMode.Disabled, warningTimeout: 0 })
 class Frozen extends BaseComponent<{}, Folder & { Core: Folder }> {}
@@ -408,13 +412,9 @@ class Choosy extends BaseComponent<{}, Folder> {}
 @Component({ tag: "ChoosyOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
 class ChoosyOwner extends BaseComponent<{}, Folder & { Core: Choosy }> {}
 
-/** An optional child link, so the component is built with or without the child it names. */
-@Component({ tag: "LooseOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
-class LooseOwner extends BaseComponent<{}, Folder & { Core?: Handler }> {}
-
 /** A required child link alongside an optional one, which is what churns the tree the most. */
 @Component({ tag: "PairOwner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
-class PairOwner extends BaseComponent<{}, Folder & { Core: Handler; Aux?: Handler }> {}
+class PairOwner extends BaseComponent<{}, Folder & { Core: Handler; Aux: Handler }> {}
 
 /**
  * A child link that is read once beside an attribute link that is followed forever.
@@ -463,7 +463,7 @@ class StarterOwner extends BaseComponent<{}, Folder & { Core: Starter }> {}
  * Watching, so the child arriving late re-runs the instance guard on both realms: contextual
  * streaming does not watch on a server, and the tree filling in is the case being tested.
  */
-@Component({ tag: "Owner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
+@Component({ tag: "Owner", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching, watchRenames: true })
 class Owner extends BaseComponent<{}, Folder & { Core: Handler }> {
 	/** Counts the takedowns, so a rebuild can be told from a component that was never replaced. */
 	public destroyCount = 0;
@@ -528,7 +528,7 @@ class TwoChildOwner extends BaseComponent<{}, Folder & { Core: Handler; Extra: F
 }
 
 /** Two plain required children, so one can take the other's name and be followed by both slots. */
-@Component({ tag: "LeakPair", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
+@Component({ tag: "LeakPair", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching, watchRenames: true })
 class LeakPair extends BaseComponent<{}, Folder & { Core: Folder; Extra: Folder }> {}
 
 /** Runs a callback from its constructor, which is synchronous inside the tag's handler on every engine: a tree it moves moves mid-batch. */
@@ -559,7 +559,7 @@ interface ChassisAttributes {
 	attributeWarningTimeout: 0,
 	streamingMode: ComponentStreamingMode.Watching,
 })
-class Chassis extends BaseComponent<ChassisAttributes, Model & { Core: Bolt; Aux?: Bolt }> {
+class Chassis extends BaseComponent<ChassisAttributes, Model & { Core: Bolt }> {
 	public static created = 0;
 	public static destroyed = 0;
 
@@ -739,8 +739,8 @@ function createComponentPlugin() {
 		.registerComponent(Repairer)
 		.registerComponent(Choosy)
 		.registerComponent(ChoosyOwner)
-		.registerComponent(LooseOwner)
 		.registerComponent(PairOwner)
+		.registerComponent(Unrenamed)
 		.registerComponent(FrozenPair)
 		.registerComponent(Impatient)
 		.registerComponent(ImpatientOwner)
@@ -826,7 +826,7 @@ function trackedCount(components: Components, component: object) {
 
 export = suite("components", [
 	[
-		"leaves a component down when a rebuild is asked for by the first of two queued child signals",
+		"leaves a component down when a rebuild is asked for by a queued child signal after a later one broke the tree",
 		() => {
 			const module = createComponentModule();
 			const components = module.resolveDependency<Components>();
@@ -834,22 +834,21 @@ export = suite("components", [
 			const instance = folder("QueuedPair");
 			const core = addCore(instance);
 			collectionService().AddTag(core, "Handler");
+			const aux = folderIn(instance, "Aux");
+			collectionService().AddTag(aux, "Handler");
 			collectionService().AddTag(instance, "PairOwner");
 			expectDefined(components.getComponent<PairOwner>(instance), "component");
 
-			const aux = new Instance("Folder");
-			aux.Name = "Aux";
-			collectionService().AddTag(aux, "Handler");
-
 			const elsewhere = folder("QueuedPairElsewhere");
 
-			// Both moves happen in one resumption, so the optional child arriving is delivered
-			// before the required one leaving. The optional link takes the component down and asks
-			// for it straight back, while the required link's criterion still says a `Core` is
-			// there and the tree no longer holds one: the rebuild must not trust it and raise out
-			// of a handler that is only there because something else moved.
+			// Three moves in one resumption: `Aux` out, back in, and `Core` out. Its return is
+			// delivered before `Core` leaving, so the `Aux` link takes the component down and asks
+			// for it straight back while the `Core` link's criterion still says a `Core` is there
+			// and the tree no longer holds one: the rebuild must not trust it and raise out of a
+			// handler that is only there because something else moved.
 			expectNoThrow(() => {
 				__harness.deferTree(() => {
+					aux.Parent = elsewhere;
 					aux.Parent = instance;
 					core.Parent = elsewhere;
 				});
@@ -870,8 +869,8 @@ export = suite("components", [
 				components.getComponent<PairOwner>(instance),
 				"component once the required child returned",
 			);
-			expectEqual(rebuilt.childComponents.Core, components.getComponent<Handler>(core), "the required link");
-			expectEqual(rebuilt.childComponents.Aux, components.getComponent<Handler>(aux), "the optional link");
+			expectEqual(rebuilt.childComponents.Core, components.getComponent<Handler>(core), "the Core link");
+			expectEqual(rebuilt.childComponents.Aux, components.getComponent<Handler>(aux), "the Aux link");
 
 			instance.Destroy();
 			core.Destroy();
@@ -1086,43 +1085,6 @@ export = suite("components", [
 			core.Destroy();
 			good.Destroy();
 			bare.Destroy();
-			module.extinguish();
-		},
-	],
-	[
-		"keeps a required link watching after an optional one has come and gone",
-		() => {
-			const module = createComponentModule();
-			const components = module.resolveDependency<Components>();
-
-			const instance = folder("ProbeSeq");
-			const core = addCore(instance);
-			collectionService().AddTag(core, "Handler");
-			collectionService().AddTag(instance, "PairOwner");
-			expectDefined(components.getComponent<PairOwner>(instance), "component");
-
-			// The optional child arrives, then leaves, each rebuilding the component.
-			const aux = new Instance("Folder");
-			aux.Name = "Aux";
-			collectionService().AddTag(aux, "Handler");
-			aux.Parent = instance;
-			__harness.flush();
-			expectDefined(components.getComponent<PairOwner>(instance), "component with the optional child");
-
-			aux.Parent = folder("ProbeSeqElsewhere");
-			__harness.flush();
-			expectDefined(components.getComponent<PairOwner>(instance), "component after the optional child left");
-
-			// Now the required link's component goes: this has to take the owner down.
-			collectionService().RemoveTag(core, "Handler");
-			__harness.flush();
-
-			expectEqual(
-				components.getComponent<PairOwner>(instance),
-				undefined,
-				"component after the required link's component went",
-			);
-
 			module.extinguish();
 		},
 	],
@@ -2009,76 +1971,6 @@ export = suite("components", [
 		},
 	],
 	[
-		"rebuilds a component as an optional linked child arrives tagged and then moves away",
-		() => {
-			const module = createComponentModule();
-			const components = module.resolveDependency<Components>();
-
-			const root = folder("OptionalChildRoot");
-			const model = new Instance("Model");
-			model.Name = "OptionalChildModel";
-			model.Parent = root;
-
-			const core = partIn(model, "Core");
-			const target = partIn(root, "OptionalChildTarget");
-			const linked = partIn(root, "OptionalChildLinked");
-			collectionService().AddTag(linked, "Bolt");
-			collectionService().AddTag(core, "Bolt");
-			model.SetAttribute("Target", new InstanceHandle(target));
-			model.SetAttribute("Linked", new InstanceHandle(linked));
-			collectionService().AddTag(model, "Chassis");
-
-			const built = expectDefined(components.getComponent<Chassis>(model), "component");
-			expectEqual(built.childComponents.Aux, undefined, "the optional child before it arrives");
-
-			const created = Chassis.created;
-
-			// Tagged before it is parented, the way a clone is prepared: nothing is announced while
-			// it is outside the DataModel, and the tag lands as it enters, just before ChildAdded.
-			const aux = new Instance("Part");
-			aux.Name = "Aux";
-			collectionService().AddTag(aux, "Bolt");
-
-			__harness.deferSignals(() => {
-				__harness.deferTags(() => {
-					__harness.deferTree(() => {
-						aux.Parent = model;
-					});
-				});
-			});
-			__harness.flush();
-
-			expectEqual(Chassis.created - created, 1, "constructions once the optional child arrived");
-
-			const withAux = expectDefined(components.getComponent<Chassis>(model), "component with the child");
-			expectTrue(withAux !== built, "the component was rebuilt around the optional child");
-			expectEqual(withAux.childComponents.Aux, components.getComponent<Bolt>(aux), "the optional child");
-
-			// Moved rather than destroyed, so the component on it lives on: the tree is what changed.
-			__harness.deferSignals(() => {
-				__harness.deferTags(() => {
-					__harness.deferTree(() => {
-						aux.Parent = root;
-					});
-				});
-			});
-			__harness.flush();
-
-			expectEqual(Chassis.created - created, 2, "constructions once the optional child left");
-
-			const withoutAux = expectDefined(components.getComponent<Chassis>(model), "component without the child");
-			expectEqual(withoutAux.childComponents.Aux, undefined, "the optional child after it moved away");
-			expectDefined(components.getComponent<Bolt>(aux), "the component on the child that moved");
-
-			// And the component the required link names going takes the owner down with it.
-			collectionService().RemoveTag(core, "Bolt");
-			expectEqual(components.getComponent<Chassis>(model), undefined, "component after the linked one went");
-
-			root.Destroy();
-			module.extinguish();
-		},
-	],
-	[
 		"resolves a link to the component it names, not to whatever else is on the instance",
 		() => {
 			const module = createComponentModule();
@@ -2177,59 +2069,6 @@ export = suite("components", [
 				components.getComponent<Choosy>(chosenCore),
 				"the linked component",
 			);
-
-			module.extinguish();
-		},
-	],
-	[
-		"rebuilds a component when the child of an optional link arrives",
-		() => {
-			const module = createComponentModule();
-			const components = module.resolveDependency<Components>();
-
-			const instance = folder("OptionalArrives");
-			collectionService().AddTag(instance, "LooseOwner");
-
-			const built = expectDefined(components.getComponent<LooseOwner>(instance), "component without the child");
-			expectEqual(built.childComponents.Core, undefined, "the link before the child arrived");
-
-			// Tagged before it is parented, the way a template is tagged and then dropped in.
-			const core = new Instance("Folder");
-			core.Name = "Core";
-			collectionService().AddTag(core, "Handler");
-			core.Parent = instance;
-			__harness.flush();
-
-			const rebuilt = expectDefined(components.getComponent<LooseOwner>(instance), "component after it arrived");
-			expectEqual(rebuilt.childComponents.Core, components.getComponent<Handler>(core), "the child's component");
-
-			module.extinguish();
-		},
-	],
-	[
-		"rebuilds a component when the child of an optional link leaves the tree",
-		() => {
-			const module = createComponentModule();
-			const components = module.resolveDependency<Components>();
-
-			const instance = folder("OptionalLeaves");
-			const core = addCore(instance);
-			collectionService().AddTag(core, "Handler");
-			collectionService().AddTag(instance, "LooseOwner");
-
-			const built = expectDefined(components.getComponent<LooseOwner>(instance), "component with the child");
-			const handler = expectDefined(components.getComponent<Handler>(core), "the child's component");
-			expectEqual(built.childComponents.Core, handler, "the link while the child is in the tree");
-
-			// Moved rather than destroyed, so the component on it lives on: a link is about the
-			// tree, and this tree no longer holds it.
-			core.Parent = folder("Elsewhere");
-			__harness.flush();
-
-			expectEqual(components.getComponent<Handler>(core), handler, "the child's component after it moved");
-
-			const rebuilt = expectDefined(components.getComponent<LooseOwner>(instance), "component after it left");
-			expectEqual(rebuilt.childComponents.Core, undefined, "the link after the child left the tree");
 
 			module.extinguish();
 		},
@@ -4339,6 +4178,51 @@ export = suite("components", [
 			__harness.flush();
 			expectDefined(components.getComponent<Watched>(instance), "component once the child is Core again");
 
+			module.extinguish();
+		},
+	],
+	[
+		"leaves names alone unless asked to, and still follows children arriving and leaving",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("Unrenamed");
+			const core = addCore(instance);
+			collectionService().AddTag(instance, "Unrenamed");
+			const built = expectDefined(components.getComponent<Unrenamed>(instance), "component");
+			expectEqual(__harness.connectionCount(core), 0, "connections on the child with names not followed");
+
+			// A rename is announced by nothing that is listened to, so the component stands on a
+			// tree that no longer has a `Core`, until the child it read leaves for real.
+			core.Name = "Shell";
+			__harness.flush();
+			expectEqual(
+				components.getComponent<Unrenamed>(instance),
+				built,
+				"component after a rename nothing follows",
+			);
+
+			core.Parent = undefined;
+			__harness.flush();
+			expectEqual(components.getComponent<Unrenamed>(instance), undefined, "component after the child left");
+
+			// A child of the name arriving is heard; a sibling renamed into it is not.
+			const spare = folderIn(instance, "Spare");
+			spare.Name = "Core";
+			__harness.flush();
+			expectEqual(
+				components.getComponent<Unrenamed>(instance),
+				undefined,
+				"component after a sibling took the name",
+			);
+			expectEqual(__harness.connectionCount(spare), 0, "connections on the sibling with names not followed");
+
+			addCore(instance);
+			__harness.flush();
+			expectDefined(components.getComponent<Unrenamed>(instance), "component once a Core arrived");
+
+			instance.Destroy();
 			module.extinguish();
 		},
 	],

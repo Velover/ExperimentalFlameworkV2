@@ -346,14 +346,16 @@ connects `ChildAdded` and `ChildRemoved` on its instance and follows the `Name` 
 resolved (and, after that child is renamed away, still that child until it leaves the parent, so
 renaming it back is noticed). An addition matters only when it changes what a slot's name resolves
 to, a removal only when it was the resolved child, so a second child of a required name and anything
-outside the tree cost nothing while the tree is whole. A rename is announced by the renamed child
-alone -- nothing fires on the parent or on the siblings -- so while a slot is empty the node follows
-the `Name` of every child no slot is following (its *candidates*, one connection per child, also
-taken up by a child arriving under another name), and drops them all the moment every slot resolves:
-a sibling renamed to the required name is heard from the sibling, and a tree pays per child only
-while it is short of something. A rename heard anywhere re-resolves every slot whose name no longer
-resolves to what it records, since a child followed for a rename back can take another slot's name
-instead. Each change re-resolves its own slot, and the tracker's poll, deferred once per burst,
+outside the tree cost nothing while the tree is whole. Names are followed only under `watchRenames`
+(off by default; `components.watchRenames` in the project config sets the default): a rename is
+announced by the renamed child alone -- nothing fires on the parent or on the siblings -- so with it
+on, each resolved child's `Name` is followed and, while a slot is empty, so is the `Name` of every
+child no slot is following (the node's *candidates*, one connection per child, also taken up by a
+child arriving under another name), dropped the moment every slot resolves: a sibling renamed to the
+required name is heard from the sibling, and a tree pays per child only while it is short of
+something. A rename heard anywhere re-resolves every slot whose name no longer resolves to what it
+records, since a child followed for a rename back can take another slot's name instead. With it off,
+a rename is seen by the next `refresh`, or by the child signals of the slot it concerns. Each change re-resolves its own slot, and the tracker's poll, deferred once per burst,
 reads the watcher's answer rather than the tree. `testInstance` re-reads through the watcher's
 `refresh`, which resolves every slot again, so what the watcher holds and what the tracker recorded
 cannot drift. The child link in `watchLink` follows its name the same way: the child it resolved to
@@ -501,7 +503,7 @@ A child link re-resolves only when the component re-reads its tree at all, which
 `typeGuardPoll` the instance guard uses: a child is part of the tree, while an attribute is not and
 is followed regardless. Each link remembers the instance it resolved to and reports itself lost
 whenever that changes, undefined at either end included, which is what rebuilds a component around a
-swapped child and what keeps an optional link's `childComponents` in step with the tree.
+swapped child.
 
 What it starts from is read out of the component, not out of the instance, because a component
 outlives the watcher that follows its tree. `getComponent` builds one the moment it is asked for,
