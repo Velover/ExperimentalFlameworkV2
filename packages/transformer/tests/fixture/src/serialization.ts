@@ -51,6 +51,11 @@ class Thing {
 	value = 1;
 }
 
+/** An element that takes no bytes: a count of these is capped per payload, not per collection. */
+interface Marker {
+	readonly type: "marker";
+}
+
 /**
  * A field named after its own datatype. Imported by a probe rather than used here: the local the
  * decoder declares for it only clashes when the file it lands in never spells `CFrame` itself.
@@ -67,6 +72,7 @@ export const pairSerializer = Flamework.createSerializer<[number, string?, ...bo
 export const walletSerializer = Flamework.createSerializer<Wallet>();
 export const crazySerializer = Flamework.createSerializer<Crazy>();
 export const thingSerializer = Flamework.createSerializer<Thing>();
+export const markersSerializer = Flamework.createSerializer<Array<Array<Marker>>>();
 
 interface ServerEvents {
 	ping(value: number, where: Vector3): void;
@@ -76,6 +82,12 @@ interface ServerEvents {
 	toggle(on: boolean): void;
 	/** Declared raw: its arguments travel as they are. */
 	rawPing: Networking.RawReliable<(value: number) => void>;
+	/**
+	 * One anonymous union spelled two ways: TypeScript keeps one type for both, and each side has to
+	 * number its members as written where the value is reached. Sent from `spelling.ts`.
+	 */
+	sortA(value: string | number): void;
+	sortB(value: number | string): void;
 }
 
 interface ClientEvents {

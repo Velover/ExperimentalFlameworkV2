@@ -152,6 +152,125 @@ export = suite("networking", [
 		},
 	],
 	[
+		// Regression: with serialization on, the packing was hoisted in front of the whole statement,
+		// so a call behind `&&` or in an untaken branch still packed (raising on an undefined
+		// argument), one in a loop condition packed once for every pass, and one after a sibling
+		// with side effects packed before the sibling ran.
+		"packs a call where it is evaluated, not ahead of its statement",
+		() => {
+			const holder: { score?: number } = {};
+			const scores = new Array<number>();
+			const log = new Array<string>();
+			let i = 0;
+
+			if (RunService.IsServer()) {
+				const server = GlobalEvents.createServer({});
+				const player = __harness.newPlayer("Placed");
+				const remote = expectDefined(__harness.findRemote("scoreChanged"), "scoreChanged remote");
+				__harness.clearSent(remote);
+
+				const skipped = holder.score !== undefined && server.scoreChanged.fire(player as never, holder.score);
+				const picked = scores.size() > 0 ? server.scoreChanged.fire(player as never, scores[0]) : 0;
+				expectEqual(skipped, false, "short-circuited call");
+				expectEqual(picked, 0, "untaken branch");
+				expectEqual(__harness.sent(remote).size(), 0, "nothing sent from an untaken position");
+
+				do {
+					i++;
+				} while (i <= 3 && (server.scoreChanged.fire(player as never, i), true));
+				const ordered = [log.push("first"), server.scoreChanged.fire(player as never, log.size())];
+				expectEqual(ordered[0], 1, "sibling ran first");
+
+				const sent = __harness.sent(remote).map((message) => carried(wire.number, message)[0]);
+				expectEqual(sent.size(), 4, "one message per pass, then one after the sibling");
+				expectEqual(sent[0], 1, "first pass");
+				expectEqual(sent[2], 3, "last pass");
+				expectEqual(sent[3], 1, "packed after the sibling's push");
+			} else {
+				primeRemotes();
+				const client = GlobalEvents.createClient({});
+				const remote = expectDefined(__harness.findRemote("setScore"), "setScore remote");
+				__harness.clearSent(remote);
+
+				const skipped = holder.score !== undefined && client.setScore.fire(holder.score);
+				const picked = scores.size() > 0 ? client.setScore.fire(scores[0]) : 0;
+				expectEqual(skipped, false, "short-circuited call");
+				expectEqual(picked, 0, "untaken branch");
+				expectEqual(__harness.sent(remote).size(), 0, "nothing sent from an untaken position");
+
+				do {
+					i++;
+				} while (i <= 3 && (client.setScore.fire(i), true));
+				const ordered = [log.push("first"), client.setScore.fire(log.size())];
+				expectEqual(ordered[0], 1, "sibling ran first");
+
+				const sent = __harness.sent(remote).map((message) => carried(wire.number, message)[0]);
+				expectEqual(sent.size(), 4, "one message per pass, then one after the sibling");
+				expectEqual(sent[0], 1, "first pass");
+				expectEqual(sent[2], 3, "last pass");
+				expectEqual(sent[3], 1, "packed after the sibling's push");
+			}
+		},
+	],
+	[
+		// Regression: a handler reached through `?.` was not packed at all -- its type carries
+		// `undefined`, and the marker was looked for on that -- so the call put raw values on the wire
+		// that the peer dropped; and the target of a send was evaluated after the arguments it must
+		// come ahead of, so `pick()` ran after `picks` was read.
+		"packs a call through `?.` and evaluates the target ahead of the arguments",
+		() => {
+			let picks = 0;
+
+			if (RunService.IsServer()) {
+				const server = GlobalEvents.createServer({});
+				const player = __harness.newPlayer("Chained");
+				const remote = expectDefined(__harness.findRemote("scoreChanged"), "scoreChanged remote");
+				__harness.clearSent(remote);
+
+				const maybe = server as typeof server | undefined;
+				const missing = undefined as typeof server | undefined;
+				maybe?.scoreChanged.fire(player as never, 1);
+				missing?.scoreChanged.fire(player as never, 2);
+				const pick = () => {
+					picks++;
+					return server;
+				};
+				pick().scoreChanged.fire(player as never, picks);
+
+				const messages = __harness.sent(remote);
+				expectEqual(messages.size(), 2, "one message through `?.`, one through the picked target");
+				if (wire.number.decode !== undefined) {
+					expectTrue(typeIs(messages[0].args[0], "buffer"), "packed through `?.`");
+				}
+				expectEqual(carried(wire.number, messages[0])[0], 1, "value sent through `?.`");
+				expectEqual(carried(wire.number, messages[1])[0], 1, "target evaluated before the argument");
+			} else {
+				primeRemotes();
+				const client = GlobalEvents.createClient({});
+				const remote = expectDefined(__harness.findRemote("setScore"), "setScore remote");
+				__harness.clearSent(remote);
+
+				const maybe = client as typeof client | undefined;
+				const missing = undefined as typeof client | undefined;
+				maybe?.setScore.fire(1);
+				missing?.setScore.fire(2);
+				const pick = () => {
+					picks++;
+					return client;
+				};
+				pick().setScore.fire(picks);
+
+				const messages = __harness.sent(remote);
+				expectEqual(messages.size(), 2, "one message through `?.`, one through the picked target");
+				if (wire.number.decode !== undefined) {
+					expectTrue(typeIs(messages[0].args[0], "buffer"), "packed through `?.`");
+				}
+				expectEqual(carried(wire.number, messages[0])[0], 1, "value sent through `?.`");
+				expectEqual(carried(wire.number, messages[1])[0], 1, "target evaluated before the argument");
+			}
+		},
+	],
+	[
 		"broadcasts to every client",
 		() => {
 			if (!RunService.IsServer()) {

@@ -18,7 +18,8 @@ import { NETWORKING_PACKAGE } from "../util/packages";
  * Call sites are found by type: the handler members carry hidden `_flamework_send` /
  * `_flamework_fn` markers. A member declared `Networking.Raw*` has no marker and is left alone, as is
  * a handler reached through a widened type (which then sends unpacked values that the peer rejects
- * as malformed). An argument list that carries nothing (`bump(): void`) sends no payload at all.
+ * as malformed). A handler reached through `?.` is typed with `undefined` in it; the marker is looked
+ * for on the rest. An argument list that carries nothing (`bump(): void`) sends no payload at all.
  */
 
 /** Sending methods and the hidden entry point each becomes. */
@@ -38,27 +39,31 @@ export function transformNetworkingCall(state: TransformState, node: ts.CallExpr
 
 	if (f.is.propertyAccessExpression(callee)) {
 		const name = callee.name.text;
-		const target = typeChecker.getTypeAtLocation(callee.expression);
+		const target = typeChecker.getNonNullableType(typeChecker.getTypeAtLocation(callee.expression));
+		const optional = callee.questionDotToken !== undefined;
 
 		if (name === "setCallback" && target.getProperty("_flamework_fn")) {
-			return transformReceiverCallback(state, node, callee.expression, target);
+			return transformReceiverCallback(state, node, callee.expression, target, optional);
 		}
 
 		if (SENDERS[name] !== undefined && target.getProperty("_flamework_send")) {
-			return transformSend(state, node, callee.expression, target, SENDERS[name]);
+			return transformSend(state, node, callee.expression, target, SENDERS[name], optional);
 		}
 	}
 
 	// `handler.event(...)` and `handler.fn(...)`: the call signature is the sender itself.
-	const target = typeChecker.getTypeAtLocation(callee);
+	const target = typeChecker.getNonNullableType(typeChecker.getTypeAtLocation(callee));
 	if (target.getProperty("_flamework_send")) {
-		return transformSend(state, node, callee, target, target.getProperty("_invoke") ? "_invoke" : "_fire");
+		const method = target.getProperty("_invoke") ? "_invoke" : "_fire";
+		return transformSend(state, node, callee, target, method, node.questionDotToken !== undefined);
 	}
 }
 
 /**
  * `handler.x.fire(lead..., a, b)` becomes `handler.x._fire(lead..., payload, blobs?)`, with the packing
- * emitted ahead of the statement. The leading arguments (players, a timeout) pass through.
+ * emitted ahead of the statement. The leading arguments (players, a timeout) pass through. The
+ * target is evaluated first, as the call would: one that is more than a plain read is bound to a
+ * local ahead of the arguments.
  */
 function transformSend(
 	state: TransformState,
@@ -66,6 +71,7 @@ function transformSend(
 	target: ts.Expression,
 	targetType: ts.Type,
 	method: string,
+	optionalTarget: boolean,
 ): ts.Expression | undefined {
 	const typeChecker = state.typeChecker;
 	const signature = typeChecker.getResolvedSignature(node);
@@ -91,6 +97,8 @@ function transformSend(
 	}
 
 	const statements = new Array<ts.Statement>();
+	const chained = guardOptionalChain(state, statements, target, optionalTarget);
+	const transformedTarget = chained.target;
 	const leadingValues = leading.map((argument, index) =>
 		bindArgument(statements, argument, "target", emptyListAnnotation(state, node.arguments[index])),
 	);
@@ -108,12 +116,84 @@ function transformSend(
 
 	statements.push(...encoding.statements);
 
-	const transformedTarget = state.transformNode(target);
 	const call = f.call(f.propertyAccessExpression(transformedTarget, f.identifier(method)), [
 		...leadingValues,
 		...packedArguments(encoding),
 	]);
-	return emitWithStatements(state, node, statements, call);
+	return emitWithStatements(state, node, statements, call, [target, ...args], chained.wrap);
+}
+
+/**
+ * The target of a send or `setCallback`, evaluated ahead of the arguments the way the call would
+ * evaluate it: a plain read stays where it is, anything else is bound to a local first.
+ *
+ * A target reached through `?.` decides whether the call happens at all, so the packing has to
+ * stay behind that decision: the call is wrapped in a function (`wrap`) that returns `undefined`
+ * where the chain would short-circuit. The test goes on the operand ahead of each `?.` when every
+ * one of them is a reference, which keeps the narrowing the chain gave the arguments; otherwise
+ * the target is bound to a local and the test goes on that.
+ */
+function guardOptionalChain(
+	state: TransformState,
+	statements: ts.Statement[],
+	target: ts.Expression,
+	optionalTarget: boolean,
+): { target: ts.Expression; wrap: boolean } {
+	const transformedTarget = state.transformNode(target);
+	const operands = optionalOperands(target, optionalTarget);
+
+	if (operands.length > 0 && operands.every(isReference)) {
+		for (const operand of operands) statements.push(shortCircuit(state.transformNode(operand)));
+	} else if (operands.length > 0) {
+		const bound = bindArgument(statements, transformedTarget, "target");
+		statements.push(shortCircuit(bound));
+		return { target: bound, wrap: true };
+	}
+
+	const bound = isPure(target) ? transformedTarget : bindArgument(statements, transformedTarget, "target");
+	return { target: bound, wrap: operands.length > 0 };
+}
+
+/** `if (value === undefined) return undefined;` */
+function shortCircuit(value: ts.Expression): ts.Statement {
+	return ts.factory.createIfStatement(
+		f.binary(value, ts.SyntaxKind.EqualsEqualsEqualsToken, f.nil()),
+		f.block([f.returnStatement(f.nil())]),
+	);
+}
+
+/**
+ * The operands ahead of each `?.` in `target`, outermost first, then `target` itself when the
+ * access after it is the optional one (`handler.x?.fire(...)`).
+ */
+function optionalOperands(target: ts.Expression, optionalTarget: boolean): ts.Expression[] {
+	const operands = new Array<ts.Expression>();
+
+	let current: ts.Expression = target;
+	while (
+		ts.isPropertyAccessExpression(current) ||
+		ts.isElementAccessExpression(current) ||
+		ts.isCallExpression(current) ||
+		ts.isNonNullExpression(current)
+	) {
+		if (!ts.isNonNullExpression(current) && current.questionDotToken) operands.unshift(current.expression);
+		current = current.expression;
+	}
+
+	if (optionalTarget) operands.push(target);
+	return operands;
+}
+
+/** A reference TypeScript narrows: an identifier, `this`, or a property (or literal index) of one. */
+function isReference(node: ts.Expression): boolean {
+	if (ts.isIdentifier(node) || node.kind === ts.SyntaxKind.ThisKeyword) return true;
+	if (ts.isParenthesizedExpression(node) || ts.isPropertyAccessExpression(node)) return isReference(node.expression);
+	if (ts.isElementAccessExpression(node)) {
+		const index = node.argumentExpression;
+		return (ts.isStringLiteral(index) || ts.isNumericLiteral(index)) && isReference(node.expression);
+	}
+
+	return false;
 }
 
 /** `payload, blobs`, `payload`, or nothing at all when the list carries nothing. */
@@ -124,28 +204,243 @@ function packedArguments(encoding: { payload: ts.Identifier | undefined; blobs: 
 
 /**
  * The packing statements go ahead of the enclosing statement when that keeps them in the call's
- * scope. Inside an expression-bodied arrow there is no such statement, so the call is wrapped in an
- * immediately invoked function that holds them instead.
+ * scope and runs them exactly when the call runs: once, unconditionally, and ahead of nothing that
+ * could tell the difference. Anywhere else -- behind `&&`, `||`, `??` or a conditional, in a loop
+ * condition, after a sibling with side effects, or inside an expression-bodied arrow, which has no
+ * statement of its own -- the call is wrapped in an immediately invoked function that holds them.
+ * `wrap` asks for that function outright: the statements then hold a short-circuit of their own.
  */
 function emitWithStatements(
 	state: TransformState,
 	node: ts.Node,
 	statements: ts.Statement[],
 	call: ts.Expression,
+	hoisted: readonly ts.Expression[],
+	wrap = false,
 ): ts.Expression {
 	if (statements.length === 0) return call;
 
-	let current: ts.Node | undefined = node.parent;
-	while (current !== undefined && !ts.isStatement(current)) {
-		if (ts.isFunctionLike(current)) {
-			return f.call(f.arrowFunction(f.block([...statements, f.returnStatement(call)])), []);
-		}
-
-		current = current.parent;
+	if (wrap || !hoistsCleanly(node, hoisted)) {
+		return f.call(f.arrowFunction(f.block([...statements, f.returnStatement(call)])), []);
 	}
 
 	state.prereqList(statements);
 	return call;
+}
+
+/**
+ * Whether evaluating `hoisted` ahead of the statement that holds `node` is the same as evaluating it
+ * where `node` is: the position must be reached once and unconditionally, and whatever the
+ * statement evaluates before it must be unable to notice the difference -- plain reads on both
+ * sides, or nothing that reads at all on that side.
+ */
+function hoistsCleanly(node: ts.Node, hoisted: readonly ts.Expression[]): boolean {
+	const ahead = new Array<ts.Expression>();
+
+	let child: ts.Node = node;
+	let parent: ts.Node | undefined = node.parent;
+	while (parent !== undefined && !ts.isStatement(parent)) {
+		if (ts.isFunctionLike(parent)) return false;
+
+		const before = evaluatedBefore(parent, child);
+		if (before === undefined) return false;
+
+		ahead.push(...before);
+		child = parent;
+		parent = parent.parent;
+	}
+
+	if (parent !== undefined && isRepeatedIn(parent, child)) return false;
+	if (!ahead.every(isPure)) return false;
+	return ahead.every(isConstant) || hoisted.every(isPure);
+}
+
+/**
+ * The expressions `parent` evaluates before `child` when `child` is evaluated once and
+ * unconditionally as part of it, or `undefined` when it is not (a short-circuited operand, a
+ * conditional branch, a `case` label) or the position is not one this understands.
+ */
+function evaluatedBefore(parent: ts.Node, child: ts.Node): ts.Expression[] | undefined {
+	if (
+		ts.isParenthesizedExpression(parent) ||
+		ts.isAsExpression(parent) ||
+		ts.isTypeAssertionExpression(parent) ||
+		ts.isNonNullExpression(parent) ||
+		ts.isSatisfiesExpression(parent) ||
+		ts.isAwaitExpression(parent) ||
+		ts.isYieldExpression(parent) ||
+		ts.isVoidExpression(parent) ||
+		ts.isTypeOfExpression(parent) ||
+		ts.isDeleteExpression(parent) ||
+		ts.isPrefixUnaryExpression(parent) ||
+		ts.isSpreadElement(parent) ||
+		ts.isSpreadAssignment(parent) ||
+		ts.isTemplateSpan(parent)
+	) {
+		return [];
+	}
+
+	if (ts.isPropertyAccessExpression(parent)) {
+		return child === parent.expression ? [] : undefined;
+	}
+
+	if (ts.isElementAccessExpression(parent)) {
+		return child === parent.expression ? [] : [parent.expression];
+	}
+
+	if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) {
+		if (child === parent.expression) return [];
+
+		const args: readonly ts.Expression[] = parent.arguments ?? [];
+		const index = args.indexOf(child as ts.Expression);
+		return index === -1 ? undefined : [parent.expression, ...args.slice(0, index)];
+	}
+
+	if (ts.isBinaryExpression(parent)) {
+		if (child === parent.left) return [];
+
+		const operator = parent.operatorToken.kind;
+		if (
+			operator === ts.SyntaxKind.AmpersandAmpersandToken ||
+			operator === ts.SyntaxKind.BarBarToken ||
+			operator === ts.SyntaxKind.QuestionQuestionToken
+		) {
+			return undefined;
+		}
+
+		if (!isAssignmentOperator(operator)) return [parent.left];
+
+		// An assignment target is not a value: what runs ahead of the right-hand side is the object
+		// (and index) it is stored into.
+		if (ts.isIdentifier(parent.left)) return [];
+		if (ts.isPropertyAccessExpression(parent.left)) return [parent.left.expression];
+		if (ts.isElementAccessExpression(parent.left)) {
+			return [parent.left.expression, parent.left.argumentExpression];
+		}
+
+		return undefined;
+	}
+
+	if (ts.isConditionalExpression(parent)) {
+		return child === parent.condition ? [] : undefined;
+	}
+
+	if (ts.isArrayLiteralExpression(parent)) {
+		const index = parent.elements.indexOf(child as ts.Expression);
+		return index === -1 ? undefined : parent.elements.slice(0, index);
+	}
+
+	if (ts.isPropertyAssignment(parent)) {
+		if (child !== parent.initializer) return undefined;
+		return ts.isComputedPropertyName(parent.name) ? [parent.name.expression] : [];
+	}
+
+	if (ts.isObjectLiteralExpression(parent)) {
+		const index = parent.properties.indexOf(child as ts.ObjectLiteralElementLike);
+		if (index === -1) return undefined;
+
+		const before = new Array<ts.Expression>();
+		for (const property of parent.properties.slice(0, index)) {
+			if (ts.isPropertyAssignment(property)) {
+				if (ts.isComputedPropertyName(property.name)) before.push(property.name.expression);
+				before.push(property.initializer);
+			} else if (ts.isShorthandPropertyAssignment(property)) {
+				before.push(property.name);
+			} else if (ts.isSpreadAssignment(property)) {
+				before.push(property.expression);
+			}
+		}
+
+		return before;
+	}
+
+	if (ts.isTemplateExpression(parent)) {
+		const index = parent.templateSpans.indexOf(child as ts.TemplateSpan);
+		return index === -1 ? undefined : parent.templateSpans.slice(0, index).map((span) => span.expression);
+	}
+
+	if (ts.isVariableDeclaration(parent)) {
+		return child === parent.initializer ? [] : undefined;
+	}
+
+	if (ts.isVariableDeclarationList(parent)) {
+		const index = parent.declarations.indexOf(child as ts.VariableDeclaration);
+		if (index === -1) return undefined;
+
+		return parent.declarations
+			.slice(0, index)
+			.map((declaration) => declaration.initializer)
+			.filter((initializer): initializer is ts.Expression => initializer !== undefined);
+	}
+
+	return undefined;
+}
+
+/** Whether `statement` evaluates `child` on every pass of a loop rather than once on the way in. */
+function isRepeatedIn(statement: ts.Node, child: ts.Node): boolean {
+	if (ts.isWhileStatement(statement) || ts.isDoStatement(statement)) return child === statement.expression;
+	if (ts.isForStatement(statement)) return child === statement.condition || child === statement.incrementor;
+	return false;
+}
+
+/** An expression that evaluates without touching state: a literal, a closure, or a plain read. */
+function isPure(node: ts.Expression): boolean {
+	if (isConstant(node) || ts.isIdentifier(node) || node.kind === ts.SyntaxKind.ThisKeyword) return true;
+	if (ts.isPropertyAccessExpression(node)) return isPure(node.expression);
+	if (ts.isElementAccessExpression(node)) return isPure(node.expression) && isPure(node.argumentExpression);
+	if (
+		ts.isParenthesizedExpression(node) ||
+		ts.isAsExpression(node) ||
+		ts.isTypeAssertionExpression(node) ||
+		ts.isNonNullExpression(node) ||
+		ts.isSatisfiesExpression(node) ||
+		ts.isTypeOfExpression(node)
+	) {
+		return isPure(node.expression);
+	}
+
+	if (ts.isPrefixUnaryExpression(node)) {
+		const mutates =
+			node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken;
+		return !mutates && isPure(node.operand);
+	}
+
+	if (ts.isBinaryExpression(node)) {
+		return !isAssignmentOperator(node.operatorToken.kind) && isPure(node.left) && isPure(node.right);
+	}
+
+	if (ts.isTemplateExpression(node)) return node.templateSpans.every((span) => isPure(span.expression));
+	if (ts.isArrayLiteralExpression(node)) return node.elements.every(isPure);
+	if (ts.isSpreadElement(node)) return isPure(node.expression);
+	if (ts.isObjectLiteralExpression(node)) {
+		return node.properties.every((property) => {
+			if (ts.isPropertyAssignment(property)) {
+				const name = property.name;
+				return (!ts.isComputedPropertyName(name) || isPure(name.expression)) && isPure(property.initializer);
+			}
+
+			return !ts.isSpreadAssignment(property) || isPure(property.expression);
+		});
+	}
+
+	return false;
+}
+
+/** `=` and the compound assignments, which TypeScript numbers in one run. */
+function isAssignmentOperator(operator: ts.SyntaxKind): boolean {
+	return operator >= ts.SyntaxKind.FirstAssignment && operator <= ts.SyntaxKind.LastAssignment;
+}
+
+/** An expression that reads nothing: a literal, a keyword, or a closure that is only being created. */
+function isConstant(node: ts.Expression): boolean {
+	return (
+		ts.isLiteralExpression(node) ||
+		node.kind === ts.SyntaxKind.TrueKeyword ||
+		node.kind === ts.SyntaxKind.FalseKeyword ||
+		node.kind === ts.SyntaxKind.NullKeyword ||
+		ts.isArrowFunction(node) ||
+		ts.isFunctionExpression(node)
+	);
 }
 
 /**
@@ -158,6 +453,7 @@ function transformReceiverCallback(
 	node: ts.CallExpression,
 	target: ts.Expression,
 	targetType: ts.Type,
+	optionalTarget: boolean,
 ): ts.Expression | undefined {
 	const typeChecker = state.typeChecker;
 	const callbackArgument = node.arguments[0];
@@ -179,13 +475,15 @@ function transformReceiverCallback(
 
 	// The callback keeps the parameter types `setCallback` would have given it: an arrow bound to a
 	// plain local would lose its contextual typing and end up with implicit `any` parameters.
-	const boundTarget = bindArgument(statements, state.transformNode(target), "target");
+	const chained = guardOptionalChain(state, statements, target, optionalTarget);
+	const boundTarget = bindArgument(statements, chained.target, "target");
 	const callbackAnnotation = f.indexedAccessType(
 		f.referenceType("Parameters", [f.queryType(f.qualifiedNameType(boundTarget as ts.Identifier, "setCallback"))]),
 		f.literalType(f.number(0)),
 	);
 	const callback = f.identifier("callback", true);
-	statements.push(f.variableStatement(callback, state.transformNode(callbackArgument), callbackAnnotation));
+	const transformedCallback = state.transformNode(callbackArgument);
+	statements.push(f.variableStatement(callback, transformedCallback, callbackAnnotation));
 
 	// The wrapper mirrors the callback's parameters, so nothing is gathered into a table per call.
 	const parameters = new Array<ts.ParameterDeclaration>();
@@ -233,7 +531,7 @@ function transformReceiverCallback(
 
 	const wrapper = f.arrowFunction(f.block(body), parameters);
 	const call = f.call(f.propertyAccessExpression(boundTarget, f.identifier("_setCallback")), [wrapper]);
-	return emitWithStatements(state, node, statements, call);
+	return emitWithStatements(state, node, statements, call, [target, transformedCallback], chained.wrap);
 }
 
 /**

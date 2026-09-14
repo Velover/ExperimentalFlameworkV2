@@ -49,6 +49,7 @@ local link = bridge.link(serverEnv, clientEnv)
 
 local server = serverContext.require("@flamework-experimental/specs", "out", "replication")
 local client = clientContext.require("@flamework-experimental/specs", "out", "replication")
+local clientSender = clientContext.require("@flamework-experimental/specs", "out", "replicationSender")
 
 --- Lets deferred work -- remote wiring, replication, delivery -- run.
 local function flush(frames: number?)
@@ -121,6 +122,24 @@ local cases: { { name: string, run: () -> () } } = {
 			local received = client.drain()
 			assertEqual(#received, 1, "events the client received")
 			assertEqual(received[1], "score:42", "payload")
+		end,
+	},
+	{
+		-- Regression: `string | number` and `number | string` are one TypeScript type, and each file
+		-- numbered its members by the first spelling it met, so a sender in one file and a receiver
+		-- in another tagged them differently and every message on both events was dropped or
+		-- decoded as something else.
+		name = "a union spelled in two orders crosses as written on both sides",
+		run = function()
+			clientSender.fireSorted()
+			flush()
+
+			local received = server.drain()
+			assertEqual(#received, 4, "events the server received")
+			assertEqual(received[1], "sortB:b", "string on the number-first spelling")
+			assertEqual(received[2], "sortA:7", "number on the string-first spelling")
+			assertEqual(received[3], "sortB:3", "number on the number-first spelling")
+			assertEqual(received[4], "sortA:a", "string on the string-first spelling")
 		end,
 	},
 	{

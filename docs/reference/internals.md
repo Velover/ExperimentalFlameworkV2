@@ -233,6 +233,14 @@ rather than half-working.
    place; then every kept provider is resolved, which constructs it.
 5. `onPostIgnite` hooks run, and the module records itself as an importer on each of its imports.
 
+A raise anywhere past step 0 -- a plugin's setup, a hook, a constructor, `onInit` -- is caught: the
+module goes `Extinguishing → Extinguished` through the same release as `extinguish` (below), so
+the hooks that ran before the raise are undone by the plugins' `onExtinguished` hooks, and the
+error comes out afterwards. Without this the lifecycle plugin's `RunService` connections outlived
+a failed ignition, ticking providers of a module stuck in `Igniting` that nothing could extinguish.
+The default, claimed before ignition so that `Dependency<T>()` answers inside a constructor, goes
+back to the root that had it, if that one is still ignited: a failed ignition leaves it as it was.
+
 ### Resolution
 
 `tryResolveDependency` checks the instantiated providers, then the kept registrations, constructing
@@ -252,9 +260,12 @@ Resolution during `PreIgniting` is refused: providers do not exist yet, and allo
 construction order depend on hook order.
 
 Every constructed object is passed to `registerClassInterfaces`, which checks its
-`flamework:implements` metadata against the interfaces plugins observe and calls each observer's
+`flamework:implements` metadata -- own and inherited, each id once, since a subclass may re-declare
+what its parent implements -- against the interfaces plugins observe and calls each observer's
 `onAdded`. `createClassInstance` and `listen` go through the same path, which is why a lifecycle
-listener does not have to be a provider.
+listener does not have to be a provider. The attachment is all or nothing: an observer that raises
+from `onAdded` has the ones before it told `onRemoved`, and the error comes out of the call, so
+`createClassInstance` and `listen` that raise have attached nothing and hold nothing.
 
 ### Extinguishing
 
@@ -262,7 +273,10 @@ listener does not have to be a provider.
 before returning, so the deepest importer goes first; then it runs `onExtinguished` hooks, releases
 the temporary instances the module created, unregisters every provider from the interfaces it was
 added to, and removes itself from its imports' importer sets. An importer extinguished on its own
-detaches the same way, so the import carries on.
+detaches the same way, so the import carries on. Every step of the release runs under `pcall`: a
+hook or removal callback that raises is warned about and the rest still run, the state reaches
+`Extinguished` and the default is let go of, so a module cannot get stuck half-extinguished --
+held, with everything in it, as the module `Dependency<T>()` answers from.
 
 ### Reflection
 
@@ -609,11 +623,21 @@ With `networking.serialization` enabled in the project config, sending and recei
 on purpose. Sending is a call-site transform (`transformer/src/transformations/transformNetworkingCall.ts`):
 a call to `fire`/`except`/`broadcast`/`invoke`/`invokeWithTimeout` (or the handler's call signature)
 on a member whose type carries the hidden `_flamework_send` marker has its argument list packed
-inline, ahead of the statement, and is rewritten to the member's hidden `_fire`/`_invoke`
-counterpart with `(payload, blobs?)`; `setCallback` on a member with `_flamework_result` gets its
-callback wrapped so a successful result (a Promise's resolved value included) returns `[payload,
-blobs?]`, registered through `_setCallback`. Receiving is metadata: the `network-decoder` intrinsic
-resolves to a decoder function per event and function (arguments, results for `predict`, responses);
+inline and is rewritten to the member's hidden `_fire`/`_invoke` counterpart with `(payload,
+blobs?)`. The packing goes ahead of the statement when that runs it exactly when the call would --
+once, unconditionally, after nothing with side effects; behind `&&`/`||`/`??` or a conditional, in
+a loop condition, after a sibling with side effects, or in an expression-bodied arrow, the call is
+wrapped in an immediately invoked function that holds it instead, so an untaken branch packs
+nothing and a narrowed argument is read where its narrowing holds. The target is evaluated ahead
+of the arguments, bound to a local when it is more than a plain read; a target reached through
+`?.` (typed with `undefined` in it, so the marker is looked for on the rest) always gets the
+function, which returns where the chain would short-circuit -- testing the operand ahead of each
+`?.` when those are references, so the narrowing the chain gave the arguments still holds, else
+the bound target. `setCallback` on a member with
+`_flamework_result` gets its callback wrapped so a successful result (a Promise's resolved value
+included) returns `[payload, blobs?]`, registered through `_setCallback`. Receiving is metadata:
+the `network-decoder` intrinsic resolves to a decoder function per event and function (arguments,
+results for `predict`, responses);
 `createEvent` decodes under `pcall` before the middleware chain, so guards and middleware see plain
 values, and a decode failure is reported through `onMalformed`. Functions keep the request id and
 process result as plain arguments and pack only the payload after them. No encoder exists as a
@@ -636,10 +660,18 @@ LEB128 varints through three helpers (`vsize`, `vwrite`, `vread`) hoisted once p
 addressed by a u32 index written into the buffer, never by their position in the list; what counts
 as a blob is decided structurally (declared by `@rbxts/types`, a `_nominal_` marker, `unknown`,
 `object`, a class, an empty object type), not by a list of names. Union members are numbered in
-the order they were written: the generator keeps the `UnionTypeNode` it saw a union declared with
-(an alias's declaration, or the first property, parameter or type argument) and reads the member
-order off it, since TypeScript's own order is by internal type id. Result decoders take the
+the order they were written: an aliased union reads the order off its own declaration, and an
+anonymous one off the spelling the value is reached through -- the parameter, property, return
+type or tuple element, walked into array, `Set`, `Map` and `Promise` arguments -- as a union kind
+of that spelling's own (`spell`), since TypeScript's own order is by internal type id and it keeps
+one type for every spelling of `string | number`. A union that reaches the generator with no
+spelling of its own (through a generic's type argument) keeps TypeScript's order, which is the same
+in every file of a program. The order used to be keyed on the type, first spelling wins, which
+made a sender in one file and a receiver in another disagree on the tags. Result decoders take the
 function type (`network-result-decoder`) so the declared return type node is available for that.
+A count of elements that take no bytes cannot be checked against what is left, so such counts are
+tallied in a per-file variable that every decode resets on entry (decoding never yields) and the
+tally is capped at 65535, so nesting cannot multiply what one count may announce.
 Members declared `Networking.Raw*` get handler types without the hidden markers and `undefined`
 decoders through a type-level conditional. `core/src/serialization/types.ts` holds only types: the
 brands and the `Serializer`/`Decoder` shapes. `Flamework.createSerializer<T>()` exposes the same

@@ -111,6 +111,11 @@ interface Header {
 
 const NONE: None = { __none: "__none" };
 
+/** An element that takes no bytes at all: a collection of these is nothing but its count. */
+interface Marker {
+	readonly type: "marker";
+}
+
 /** One union over every family of kind: a blob, a datatype, discriminated objects, an array and literals. */
 type Mixed = Instance | Vector3 | { kind: "a"; v: number } | { kind: "b"; s: string } | number[] | "lit" | 5;
 
@@ -147,6 +152,8 @@ const noneArraySerializer = Flamework.createSerializer<Array<true | None>>();
 const flagMapSerializer = Flamework.createSerializer<ReadonlyMap<string, Flag>>();
 const slotMapSerializer = Flamework.createSerializer<ReadonlyMap<string, Slot>>();
 const headerSerializer = Flamework.createSerializer<Header>();
+const bytesSerializer = Flamework.createSerializer<buffer>();
+const markersSerializer = Flamework.createSerializer<Array<Array<Marker>>>();
 
 /** Whether decoding raises, which is how a malformed payload is reported. */
 function rejects(run: () => unknown): boolean {
@@ -327,6 +334,42 @@ export = suite("serialization", [
 				rejects(() => listSerializer.deserialize(hostileCount)),
 				"hostile element count",
 			);
+
+			// A buffer length is checked the same way, before `buffer.create` gets to allocate it: this
+			// five-byte payload announces 2^30 bytes, which once cost a gibibyte of heap per message.
+			const hostileLength = buffer.create(5);
+			[0x80, 0x80, 0x80, 0x80, 0x04].forEach((byte, i) => buffer.writeu8(hostileLength, i, byte));
+			const heapBefore = gcinfo();
+			expectTrue(
+				rejects(() => bytesSerializer.deserialize(hostileLength)),
+				"hostile buffer length",
+			);
+			expectTrue(gcinfo() - heapBefore < 1024, "refused before allocating the announced length");
+
+			// Counts of elements that take no bytes cannot be checked against what is left, so they are
+			// capped at 65535 per payload in all. Regression: the cap was per collection, so nesting
+			// multiplied it and a 151-byte `Array<Array<Marker>>` payload built 50 × 65535 tables.
+			// Two inner arrays announcing 32768 markers each go one past the cap; 32767 each fit.
+			const twoInner = (inner: number) => {
+				const payload = buffer.create(7);
+				buffer.writeu8(payload, 0, 2);
+				for (const at of [1, 4]) {
+					buffer.writeu8(payload, at, (inner % 128) + 128);
+					buffer.writeu8(payload, at + 1, (math.floor(inner / 128) % 128) + 128);
+					buffer.writeu8(payload, at + 2, math.floor(inner / 16384));
+				}
+				return payload;
+			};
+			expectTrue(
+				rejects(() => markersSerializer.deserialize(twoInner(32768))),
+				"zero-size counts past the payload's cap",
+			);
+			const markers = markersSerializer.deserialize(twoInner(32767));
+			expectEqual(markers.size(), 2, "zero-size counts within the payload's cap");
+			expectEqual(markers[1].size(), 32767, "second inner count");
+			expectEqual(markers[1][32766].type, "marker", "zero-size element");
+			// The tally starts over with each payload: the next one is not charged for the last.
+			expectEqual(markersSerializer.deserialize(twoInner(32767))[0].size(), 32767, "tally reset per payload");
 
 			// A varint that never ends is refused after five bytes rather than read forever.
 			const endless = buffer.create(8);

@@ -65,7 +65,12 @@ const BUFFER_BRANDS: Record<string, LengthWidth> = { u16_buffer: "u16", u32_buff
 /** A blob's 1-based index in the blob list, 0 for nil. */
 const BLOB_SIZE = 4;
 const VARINT_MAX_BYTES = 5;
-/** Counts of zero-size elements cannot be bounded by the bytes left, so they get a plain cap. */
+/**
+ * Counts of zero-size elements cannot be bounded by the bytes left, so a payload gets a plain cap on
+ * how many of them it may hold in all. Per payload rather than per collection: a cap per collection
+ * multiplies through nesting, and `Array<Array<Marker>>` let a 151-byte payload drive 50 × 65535
+ * element tables.
+ */
 const ZERO_SIZE_COUNT_MAX = 0xffff;
 
 /** Where roblox-ts declares the Roblox API: everything in there without a layout travels as a blob. */
@@ -129,7 +134,8 @@ const GLOBAL_MEANING = ts.SymbolFlags.Value | ts.SymbolFlags.Namespace;
 
 /**
  * What the generator knows about a type. Children are kept as types so that named ones can be
- * hoisted; the synthetic kinds (literal groups, optionals) only appear where a type cannot stand.
+ * hoisted; the synthetic kinds (literal groups, optionals, a union ordered by its spelling) only
+ * appear where a type cannot stand.
  */
 type Kind =
 	| { kind: "number"; width: Width }
@@ -145,10 +151,10 @@ type Kind =
 	| { kind: "cframe" }
 	| { kind: "enum"; name: string }
 	| { kind: "optional"; inner: Shape }
-	| { kind: "array"; element: ts.Type }
-	| { kind: "set"; element: ts.Type }
-	| { kind: "map"; key: ts.Type; value: ts.Type }
-	| { kind: "list"; elements: Shape[]; rest?: ts.Type }
+	| { kind: "array"; element: Shape }
+	| { kind: "set"; element: Shape }
+	| { kind: "map"; key: Shape; value: Shape }
+	| { kind: "list"; elements: Shape[]; rest?: Shape }
 	| { kind: "object"; fields: Array<{ name: string; shape: Shape }> }
 	| { kind: "union"; alternatives: Alternative[] };
 
@@ -173,6 +179,8 @@ interface Layout {
 	min: number;
 	/** Whether any value of the type can put something in the blob list. */
 	blobs: boolean;
+	/** Whether a value of the type can hold a count of elements that take no bytes; see `readCount`. */
+	zeros: boolean;
 }
 
 /** Where the next write or read goes: `base + offset`, with `offset` folded at compile time. */
@@ -350,8 +358,8 @@ export function buildSerializerFromType(
 ): ts.Expression {
 	const generator = generatorFor(state, node, file);
 	// The type argument as written is where the unions in it get their member order from.
-	if (ts.isCallExpression(node)) generator.hint(node.typeArguments?.[0], type);
-	const serializer = generator.buildSerializer(unwrapPromise(state, type));
+	const written = ts.isCallExpression(node) ? node.typeArguments?.[0] : undefined;
+	const serializer = generator.buildSerializer(generator.spell(written, unwrapPromise(state, type)));
 	emitHoisted(state, generator);
 
 	// roblox-ts type-checks the transformed file. The generated functions are typed loosely inside
@@ -446,7 +454,7 @@ export function buildInlineResultEncoding(
 	return encoding;
 }
 
-/** The one-element list a function's (resolved) result travels as, with its declared return type node registered. */
+/** The one-element list a function's (resolved) result travels as, shaped by its declared return type node. */
 function resultOf(
 	state: TransformState,
 	generator: ReturnType<typeof createSerializerGenerator>,
@@ -461,9 +469,8 @@ function resultOf(
 		);
 	}
 
-	const returnType = signature.getReturnType();
-	generator.hint(signature.getDeclaration()?.type, returnType);
-	return { kind: "list", elements: [unwrapPromise(state, returnType)] };
+	const returnType = unwrapPromise(state, signature.getReturnType());
+	return { kind: "list", elements: [generator.spell(signature.getDeclaration()?.type, returnType)] };
 }
 
 /** Unwraps `Promise<T>` to `T`. */
@@ -500,9 +507,11 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	const enumTables = new Map<string, ts.Identifier>();
 	const literalTables = new Map<Kind, { list: ts.Identifier; index: ts.Identifier }>();
 	const discriminants = new Map<UnionKind, string | undefined>();
-	/** Where each union was written, which is the order its members are numbered in. */
-	const unionNodes = new Map<ts.Type, ts.UnionTypeNode>();
+	/** A union's members as alternatives, shared by every spelling of it so a literal group is one table. */
+	const unionAlternatives = new Map<ts.UnionType, { isOptional: boolean; alternatives: Alternative[] }>();
 	let varint: Varint | undefined;
+	/** The per-file tally of zero-size elements the payload being decoded has announced; see `readCount`. */
+	let zeros: ts.Identifier | undefined;
 
 	/**
 	 * Parameters of the generated functions. roblox-ts copies a parameter into a temporary wherever one
@@ -511,7 +520,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 */
 	const parameters = new Set<ts.Identifier>();
 
-	return { buildSerializer, buildDecoder, encodeList, use, hint, markParameter, takeHoisted };
+	return { buildSerializer, buildDecoder, encodeList, use, spell, markParameter, takeHoisted };
 
 	/** A fresh identifier declared as a parameter of a generated function. */
 	function parameter(hint: string): ts.Identifier {
@@ -537,11 +546,6 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		diagnosticNode = node;
 	}
 
-	/** Registers where a type was written; see {@link registerTypeNode}. */
-	function hint(node: ts.TypeNode | undefined, type: ts.Type | undefined) {
-		registerTypeNode(node, type);
-	}
-
 	/** Hoisted statements added since the last call, in an order that keeps every reference in scope. */
 	function takeHoisted(): ts.Statement[] {
 		const statements = [
@@ -562,7 +566,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	// --- top level -----------------------------------------------------------------------------------
 
-	function buildSerializer(type: ts.Type): ts.Expression {
+	function buildSerializer(type: Shape): ts.Expression {
 		const layout = layoutOf(type);
 		const value = parameter("v");
 		const serialize = f.arrowFunction(f.block(encodeBody(type, layout, value)), [
@@ -676,26 +680,33 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return bytes;
 	}
 
-	/** The argument list a tuple type describes, with Promise elements unwrapped. */
-	function listOf(type: ts.Type): ListKind {
+	/**
+	 * The argument list a tuple type describes, with Promise elements unwrapped. Each element is shaped
+	 * by where it was written: the tuple node when there is one, else the parameter or member it was
+	 * declared with (`Parameters<F>` keeps those).
+	 */
+	function listOf(type: ts.Type, node?: ts.TupleTypeNode): ListKind {
 		if (!isTupleType(state, type)) {
 			return { kind: "list", elements: [unwrapPromise(state, type)] };
 		}
 
 		const elements = new Array<Shape>();
-		let rest: ts.Type | undefined;
+		let rest: Shape | undefined;
 		const types = typeChecker.getTypeArguments(type);
 		for (let i = 0; i < types.length; i++) {
 			const element = unwrapPromise(state, types[i]);
 			const flags = type.target.elementFlags[i];
-			const declaration = type.target.labeledElementDeclarations?.[i];
-			registerDeclaration(declaration, types[i], (flags & ts.ElementFlags.Rest) !== 0);
-			if (flags & ts.ElementFlags.Rest) {
-				rest = element;
+			const isRest = (flags & ts.ElementFlags.Rest) !== 0;
+			const written = node
+				? tupleElementNode(node.elements[i])
+				: declaredTypeNode(type.target.labeledElementDeclarations?.[i]);
+			const shape = spellElement(written, element, isRest);
+			if (isRest) {
+				rest = shape;
 			} else if (flags & ts.ElementFlags.Optional && !hasUndefined(element)) {
-				elements.push({ kind: "optional", inner: element });
+				elements.push({ kind: "optional", inner: shape });
 			} else {
-				elements.push(element);
+				elements.push(shape);
 			}
 		}
 
@@ -744,6 +755,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		body: ts.Statement[],
 	): ts.Expression {
 		const length = bufferCall("len", [buf]);
+		// The payload's own tally of zero-size elements starts here; decoding never yields, so one
+		// per file is never shared between two payloads.
+		if (layout.zeros) body.push(assign(zeroTally(), num(0)));
+
 		const top = isKind(shape) ? undefined : hoist(shape);
 		if (top) {
 			const value = uid("value");
@@ -898,38 +913,51 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return type.getProperties().some((property) => property.name.startsWith("_nominal_"));
 	}
 
-	function classifyUnion(type: ts.UnionType): Kind {
+	/** A union as a kind; `node` is the spelling its members are numbered by, else the alias's own. */
+	function classifyUnion(type: ts.UnionType, node?: ts.UnionTypeNode): Kind {
 		if (type === typeChecker.getBooleanType()) return { kind: "boolean" };
 
-		const { enums, literals, types } = simplifyUnion(type);
-		const [isOptional, members] = extractTypes(typeChecker, types);
-		const alternatives = new Array<Alternative>();
-
-		for (const member of members) alternatives.push({ shape: member, type: member });
-		for (const name of enums) alternatives.push({ shape: { kind: "enum", name } });
-		if (literals.length === 1) alternatives.push({ shape: { kind: "constant", value: literals[0] } });
-		if (literals.length > 1) alternatives.push({ shape: { kind: "literals", values: literals } });
+		const { isOptional, alternatives } = alternativesOf(type);
 
 		let inner: Shape;
 		if (alternatives.length === 0) inner = { kind: "nothing" };
 		else if (alternatives.length === 1) inner = alternatives[0].shape;
 		// A one-byte tag numbers at most 256 members; past that the value travels whole.
 		else if (alternatives.length > 0xff) inner = { kind: "blob" };
-		else inner = { kind: "union", alternatives: orderAlternatives(type, alternatives) };
+		else inner = { kind: "union", alternatives: orderAlternatives(alternatives, node ?? aliasNode(type)) };
 
 		if (isOptional) return { kind: "optional", inner };
 		return describe(inner);
 	}
 
+	function alternativesOf(type: ts.UnionType): { isOptional: boolean; alternatives: Alternative[] } {
+		let entry = unionAlternatives.get(type);
+		if (!entry) {
+			const { enums, literals, types } = simplifyUnion(type);
+			const [isOptional, members] = extractTypes(typeChecker, types);
+			const alternatives = new Array<Alternative>();
+
+			for (const member of members) alternatives.push({ shape: member, type: member });
+			for (const name of enums) alternatives.push({ shape: { kind: "enum", name } });
+			if (literals.length === 1) alternatives.push({ shape: { kind: "constant", value: literals[0] } });
+			if (literals.length > 1) alternatives.push({ shape: { kind: "literals", values: literals } });
+
+			entry = { isOptional, alternatives };
+			unionAlternatives.set(type, entry);
+		}
+
+		return entry;
+	}
+
 	/**
 	 * Union members in the order they were written: `{ Coins } | { Items }` numbers Coins 0 and Items
 	 * 1. TypeScript lists them by internal id instead, so the order comes from the union's type node:
-	 * an alias's own declaration, or the first property, parameter or type argument seen declaring
-	 * it. Members that node does not account for (a generic alias instantiation, say) keep
-	 * TypeScript's order after the others; a union with no node at all keeps it throughout.
+	 * an alias's own declaration, or the spelling the value is reached through (see {@link spell}).
+	 * Members that node does not account for (a generic alias instantiation, say) keep TypeScript's
+	 * order after the others; a union with no node at all keeps it throughout, which is the same in
+	 * every file of a program.
 	 */
-	function orderAlternatives(type: ts.UnionType, alternatives: Alternative[]): Alternative[] {
-		const node = unionNodes.get(type) ?? aliasNode(type);
+	function orderAlternatives(alternatives: Alternative[], node: ts.UnionTypeNode | undefined): Alternative[] {
 		if (!node) return alternatives;
 
 		const positions = new Map<Alternative, number>();
@@ -994,70 +1022,79 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	}
 
 	/**
-	 * Remembers where a type was written, walking into the node (array elements, type arguments, tuple
-	 * elements, inline object members) so that anonymous unions inside get their order from the source
-	 * too. The first place a type is seen wins; an aliased union is looked up on its own declaration.
+	 * The shape of `type` as written at `node`. TypeScript keeps one type for every spelling of an
+	 * anonymous union -- `string | number` here and `number | string` elsewhere are the same object
+	 * -- so its member order, which is the wire tag, has to come from the spelling the value is
+	 * reached through: a union node gives a union kind numbered as written, and the walk goes on
+	 * into array elements, `Set`, `Map` and `Promise` arguments, tuple elements, `readonly` and
+	 * parentheses. Where the node adds nothing -- a reference to an alias, whose own declaration
+	 * decides; a generic's type argument, which is not where the value is reached -- the type
+	 * itself, whose unions keep TypeScript's order. Either way the sender and the receiver of a
+	 * value go through the same declaration and number its members the same way.
 	 */
-	function registerTypeNode(node: ts.TypeNode | undefined, type: ts.Type | undefined): void {
-		if (!node || !type) return;
-		if (ts.isParenthesizedTypeNode(node)) return registerTypeNode(node.type, type);
+	function spell(node: ts.TypeNode | undefined, type: ts.Type): Shape {
+		if (!node) return type;
+		if (ts.isParenthesizedTypeNode(node)) return spell(node.type, type);
+		if (ts.isTypeOperatorNode(node) && node.operator === ts.SyntaxKind.ReadonlyKeyword) {
+			return spell(node.type, type);
+		}
 
 		if (ts.isUnionTypeNode(node)) {
-			if (!unionNodes.has(type)) unionNodes.set(type, node);
-			return;
+			return type.isUnion() ? classifyUnion(type, node) : type;
 		}
 
 		if (ts.isArrayTypeNode(node)) {
-			const element = typeChecker.isArrayType(type)
-				? typeChecker.getTypeArguments(type as ts.TypeReference)[0]
-				: undefined;
-			return registerTypeNode(node.elementType, element);
+			const kind = describe(type);
+			if (kind.kind !== "array" || isKind(kind.element)) return type;
+			return { kind: "array", element: spell(node.elementType, kind.element) };
 		}
 
 		if (ts.isTypeReferenceNode(node) && node.typeArguments) {
-			const isReference =
-				(type.flags & ts.TypeFlags.Object) !== 0 &&
-				((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0;
-			if (!isReference) return;
-
-			const args = typeChecker.getTypeArguments(type as ts.TypeReference);
-			node.typeArguments.forEach((argument, index) => registerTypeNode(argument, args[index]));
-			return;
-		}
-
-		if (ts.isTupleTypeNode(node) && isTupleType(state, type)) {
-			const args = typeChecker.getTypeArguments(type);
-			node.elements.forEach((element, index) => {
-				if (ts.isNamedTupleMember(element))
-					return registerElement(element.type, args[index], element.dotDotDotToken !== undefined);
-				if (ts.isRestTypeNode(element)) return registerElement(element.type, args[index], true);
-				if (ts.isOptionalTypeNode(element)) return registerTypeNode(element.type, args[index]);
-				registerTypeNode(element, args[index]);
-			});
-			return;
-		}
-
-		if (ts.isTypeLiteralNode(node)) {
-			for (const member of node.members) {
-				if (!ts.isPropertySignature(member) || !member.type) continue;
-				const name =
-					ts.isIdentifier(member.name) || ts.isStringLiteral(member.name) ? member.name.text : undefined;
-				if (name !== undefined) registerTypeNode(member.type, typeChecker.getTypeOfPropertyOfType(type, name));
+			const args = node.typeArguments;
+			const written = typeChecker.getTypeFromTypeNode(node);
+			// `Promise<T>` in a declaration: what crosses is `T`, so its spelling is the argument.
+			if (written !== type) {
+				return args.length === 1 && unwrapPromise(state, written) === type ? spell(args[0], type) : type;
 			}
+
+			const kind = describe(type);
+			if ((kind.kind === "array" || kind.kind === "set") && args.length === 1 && !isKind(kind.element)) {
+				return { kind: kind.kind, element: spell(args[0], kind.element) };
+			}
+			if (kind.kind === "map" && args.length === 2 && !isKind(kind.key) && !isKind(kind.value)) {
+				return { kind: "map", key: spell(args[0], kind.key), value: spell(args[1], kind.value) };
+			}
+			return type;
 		}
+
+		if (ts.isTupleTypeNode(node) && isTupleType(state, type)) return listOf(type, node);
+
+		return type;
 	}
 
 	/** A tuple element or parameter: a rest element's node is the array, its type the element. */
-	function registerElement(node: ts.TypeNode, type: ts.Type | undefined, rest: boolean) {
-		if (!rest) return registerTypeNode(node, type);
-		if (ts.isArrayTypeNode(node)) return registerTypeNode(node.elementType, type);
+	function spellElement(node: ts.TypeNode | undefined, type: ts.Type, rest: boolean): Shape {
+		if (!node || !rest) return spell(node, type);
+		if (ts.isArrayTypeNode(node)) return spell(node.elementType, type);
 		if (ts.isTypeReferenceNode(node) && node.typeArguments?.length === 1) {
-			return registerTypeNode(node.typeArguments[0], type);
+			return spell(node.typeArguments[0], type);
 		}
+
+		return type;
 	}
 
-	/** A property's, parameter's or tuple member's declared type node is where its unions were written. */
-	function registerDeclaration(declaration: ts.Declaration | undefined, type: ts.Type, rest = false) {
+	/** The node a tuple element's type was written in, past its name, `?` or `...`. */
+	function tupleElementNode(element: ts.TypeNode | undefined): ts.TypeNode | undefined {
+		if (!element) return;
+		if (ts.isNamedTupleMember(element) || ts.isRestTypeNode(element) || ts.isOptionalTypeNode(element)) {
+			return element.type;
+		}
+
+		return element;
+	}
+
+	/** A property's, parameter's or tuple member's declared type node, where its unions were written. */
+	function declaredTypeNode(declaration: ts.Declaration | undefined): ts.TypeNode | undefined {
 		if (!declaration) return;
 		if (
 			ts.isPropertySignature(declaration) ||
@@ -1065,7 +1102,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			ts.isParameter(declaration) ||
 			ts.isNamedTupleMember(declaration)
 		) {
-			if (declaration.type) registerElement(declaration.type, type, rest);
+			return declaration.type;
 		}
 	}
 
@@ -1150,10 +1187,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const fields = properties.map((property) => {
 			const propertyType = typeChecker.getTypeOfPropertyOfType(type, property.name)!;
 			if (propertyType.getCallSignatures().length > 0) fail(`property '${property.name}' is a function`);
-			registerDeclaration(property.valueDeclaration, propertyType);
+			const written = spell(declaredTypeNode(property.valueDeclaration), propertyType);
 
 			const optional = (property.flags & ts.SymbolFlags.Optional) !== 0 && !hasUndefined(propertyType);
-			const shape: Shape = optional ? { kind: "optional", inner: propertyType } : propertyType;
+			const shape: Shape = optional ? { kind: "optional", inner: written } : written;
 			return { name: property.name, shape };
 		});
 
@@ -1176,7 +1213,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		// A type reached again while it is being measured: its size is not fixed, whatever it is.
 		if (visiting.has(shape)) {
 			provisional += 1;
-			return { size: undefined, min: 0, blobs: false };
+			return { size: undefined, min: 0, blobs: false, zeros: false };
 		}
 
 		visiting.add(shape);
@@ -1199,18 +1236,18 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			return layout;
 		}
 
-		const fixed = (size: number, blobs = false): Layout => ({ size, min: size, blobs });
+		const fixed = (size: number, blobs = false): Layout => ({ size, min: size, blobs, zeros: false });
 		const kind = shape;
 		switch (kind.kind) {
 			case "number":
 				return fixed(WIDTH_SIZE[kind.width]);
 			case "varint":
-				return { size: undefined, min: 1, blobs: false };
+				return { size: undefined, min: 1, blobs: false, zeros: false };
 			case "boolean":
 				return fixed(1);
 			case "string":
 			case "buffer":
-				return { size: undefined, min: lengthMin(kind.length), blobs: false };
+				return { size: undefined, min: lengthMin(kind.length), blobs: false, zeros: false };
 			case "constant":
 			case "nothing":
 				return fixed(0);
@@ -1226,23 +1263,34 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				return fixed(2);
 			case "optional": {
 				const inner = layoutOf(kind.inner);
-				return { size: undefined, min: 1, blobs: inner.blobs };
+				return { size: undefined, min: 1, blobs: inner.blobs, zeros: inner.zeros };
 			}
 			case "array":
 			case "set": {
 				const element = layoutOf(kind.element);
-				return { size: undefined, min: 1, blobs: element.blobs };
+				// A zero-size element is a fixed size of 0; a type still being measured reports `min` 0 too.
+				return { size: undefined, min: 1, blobs: element.blobs, zeros: element.size === 0 || element.zeros };
 			}
 			case "map": {
 				const key = layoutOf(kind.key);
 				const value = layoutOf(kind.value);
-				return { size: undefined, min: 1, blobs: key.blobs || value.blobs };
+				return {
+					size: undefined,
+					min: 1,
+					blobs: key.blobs || value.blobs,
+					zeros: (key.size === 0 && value.size === 0) || key.zeros || value.zeros,
+				};
 			}
 			case "list": {
 				const layout = sumLayouts(kind.elements.map((element) => layoutOf(element)));
 				if (kind.rest) {
 					const rest = layoutOf(kind.rest);
-					return { size: undefined, min: layout.min + 1, blobs: layout.blobs || rest.blobs };
+					return {
+						size: undefined,
+						min: layout.min + 1,
+						blobs: layout.blobs || rest.blobs,
+						zeros: layout.zeros || rest.size === 0 || rest.zeros,
+					};
 				}
 
 				return layout;
@@ -1257,6 +1305,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 					size,
 					min: 1 + Math.min(...members.map((member) => member.min)),
 					blobs: members.some((member) => member.blobs),
+					zeros: members.some((member) => member.zeros),
 				};
 			}
 		}
@@ -1266,13 +1315,15 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		let size: number | undefined = 0;
 		let min = 0;
 		let blobs = false;
+		let zeros = false;
 		for (const layout of layouts) {
 			size = size === undefined || layout.size === undefined ? undefined : size + layout.size;
 			min += layout.min;
 			blobs ||= layout.blobs;
+			zeros ||= layout.zeros;
 		}
 
-		return { size, min, blobs };
+		return { size, min, blobs, zeros };
 	}
 
 	// --- hoisting ------------------------------------------------------------------------------------
@@ -2235,6 +2286,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			}
 			case "buffer": {
 				const length = readLength(ctx, kind.length);
+				// `buffer.copy` bounds-checks, but only after `buffer.create` has allocated the announced
+				// length: a hostile length must be refused against what is left before it drives that.
+				const remaining = f.binary(bufferCall("len", [ctx.buf]), ts.SyntaxKind.MinusToken, at(ctx));
+				ctx.out.push(
+					ifStatement(f.binary(length, ts.SyntaxKind.GreaterThanToken, remaining), [raise(MALFORMED)]),
+				);
 				const bytes = bind(ctx.out, bufferCall("create", [length]), "bytes");
 				ctx.out.push(f.statement(bufferCall("copy", [bytes, num(0), ctx.buf, at(ctx), length])));
 				advanceBy(ctx, length);
@@ -2449,15 +2506,18 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	/**
 	 * An element count from the buffer, refused when the elements it announces could not fit in what
 	 * is left: a hostile count must not drive a huge allocation or a long loop. Elements that take no
-	 * bytes cannot be bounded that way and get a plain cap instead.
+	 * bytes cannot be bounded that way; they are tallied across the whole payload instead, and the
+	 * tally is capped, so that nesting cannot multiply what one count may announce.
 	 */
 	function readCount(ctx: Ctx, minimumElementSize: number): ts.Expression {
 		const count = readVarint(ctx, "count");
 		sync(ctx);
 
 		if (minimumElementSize === 0) {
+			const tally = zeroTally();
+			ctx.out.push(addAssign(tally, count));
 			ctx.out.push(
-				ifStatement(f.binary(count, ts.SyntaxKind.GreaterThanToken, num(ZERO_SIZE_COUNT_MAX)), [
+				ifStatement(f.binary(tally, ts.SyntaxKind.GreaterThanToken, num(ZERO_SIZE_COUNT_MAX)), [
 					raise(MALFORMED),
 				]),
 			);
@@ -2469,5 +2529,15 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			minimumElementSize > 1 ? f.binary(count, ts.SyntaxKind.AsteriskToken, num(minimumElementSize)) : count;
 		ctx.out.push(ifStatement(f.binary(needed, ts.SyntaxKind.GreaterThanToken, remaining), [raise(MALFORMED)]));
 		return count;
+	}
+
+	/** The file's zero-size element tally, declared once ahead of the hoisted functions that share it. */
+	function zeroTally(): ts.Identifier {
+		if (!zeros) {
+			zeros = uid("zeros");
+			tables.push(letDecl(zeros, num(0)));
+		}
+
+		return zeros;
 	}
 }

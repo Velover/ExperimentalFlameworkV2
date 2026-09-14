@@ -10,6 +10,14 @@ import { Networking } from "@flamework-experimental/networking";
  */
 interface ServerEvents {
 	setScore(score: number): void;
+
+	/**
+	 * One anonymous union spelled two ways. TypeScript keeps a single type for both, and each side has
+	 * to number its members as written where the value is reached, or the tags disagree on the wire.
+	 * Sent from `replicationSender.ts`: a file of its own, as a client script would be.
+	 */
+	sortA(value: string | number): void;
+	sortB(value: number | string): void;
 }
 
 interface ClientEvents {
@@ -23,7 +31,7 @@ interface ServerFunctions {
 	echo(value: string): string;
 }
 
-const GlobalEvents = Networking.createEvent<ServerEvents, ClientEvents>();
+export const GlobalEvents = Networking.createEvent<ServerEvents, ClientEvents>();
 const GlobalFunctions = Networking.createFunction<ServerFunctions, {}>();
 
 /** Whatever this graph has received, drained by the runner between cases. */
@@ -33,6 +41,8 @@ const log = new Array<string>();
 export function setupServer() {
 	const events = GlobalEvents.createServer({});
 	events.setScore.connect((player, score) => log.push(`${player.Name}:${score}`));
+	events.sortA.connect((_player, value) => log.push(`sortA:${value}`));
+	events.sortB.connect((_player, value) => log.push(`sortB:${value}`));
 
 	GlobalFunctions.createServer({}).echo.setCallback((_player, value) => `${value}!`);
 }

@@ -115,6 +115,47 @@ describe("Flamework.createSerializer", () => {
 		expect(source()).toMatch(/if count\w* > buffer\.len\(buf\w*\) - o\w* then\s*error\("malformed payload"\)/);
 		expect(source()).toMatch(/if o\w* ~= buffer\.len\(buf\w*\) then\s*error\("malformed payload"\)/);
 	});
+
+	test("refuses a hostile buffer length before allocating it", () => {
+		// Regression: `buffer.create(length)` ran on the announced length and only the `buffer.copy`
+		// after it noticed, so a five-byte payload made the decoder allocate a gibibyte first.
+		expect(source()).toMatch(
+			/if length\w* > buffer\.len\(buf\w*\) - o\w* then\s*error\("malformed payload"\)\s*end\s*local bytes\w* = buffer\.create\(length\w*\)/,
+		);
+	});
+
+	test("caps counts of zero-size elements per payload, not per collection", () => {
+		// Regression: each count of elements that take no bytes was checked against a cap of its
+		// own, so nesting multiplied it: a 151-byte `Array<Array<Marker>>` payload built 50 × 65535
+		// tables. The counts are tallied across the payload in a variable the file's decoders share,
+		// reset where a decode starts, and only a type that holds such a count pays for it.
+		expect(source()).toMatch(/local zeros\w* = 0/);
+		expect(source()).toMatch(/zeros\w* \+= count\w*\s*if zeros\w* > 65535 then\s*error\("malformed payload"\)/);
+		expect(source()).not.toMatch(/if count\w* > 65535 then/);
+		expect(source().match(/^\s*zeros\w* = 0$/gm)).toHaveLength(1);
+		expect(source()).toMatch(/deserialize = function\(buf\w*\)\s*zeros\w* = 0\s*local o\w* = 0/);
+	});
+
+	test("numbers an anonymous union as written where the value is reached, on both sides", () => {
+		// Regression: `string | number` and `number | string` are one TypeScript type, and it was
+		// numbered by the first spelling a file happened to meet: the receiver, walking the events in
+		// declaration order, numbered both `sortA` and `sortB` as `sortA` spells it; the sender, in
+		// another file, numbered both as its first call site did, and every message was dropped.
+		const decoderFor = (name: string) =>
+			new RegExp(
+				`${name} = \\(?function\\(buf\\w*\\)\\s*local o\\w* = 0\\s*local tag\\w* = buffer\\.readu8\\(buf\\w*, o\\w*\\)\\s*local value\\w*\\s*o\\w* \\+= 1\\s*if tag\\w* == 0 then\\s*(.*)`,
+			);
+		expect(source().match(decoderFor("sortA"))?.[1]).toMatch(/^local length\w*, o\w* = vread/);
+		expect(source().match(decoderFor("sortB"))?.[1]).toMatch(/^value\w* = buffer\.readf64/);
+
+		const sender = emitted("spelling");
+		const sendB = sender.slice(sender.indexOf("local function sendB"), sender.indexOf("local function sendA"));
+		const sendA = sender.slice(sender.indexOf("local function sendA"));
+		expect(sendB).toMatch(/if type\(v\w*\) == "number" then\s*buffer\.writeu8\(buf\w*, o\w*, 0\)/);
+		expect(sendB).toMatch(/elseif type\(v\w*\) == "string" then\s*buffer\.writeu8\(buf\w*, o\w*, 1\)/);
+		expect(sendA).toMatch(/if type\(v\w*\) == "string" then\s*buffer\.writeu8\(buf\w*, o\w*, 0\)/);
+		expect(sendA).toMatch(/elseif type\(v\w*\) == "number" then\s*buffer\.writeu8\(buf\w*, o\w*, 1\)/);
+	});
 });
 
 describe("networking serialization", () => {
@@ -142,6 +183,64 @@ describe("networking serialization", () => {
 		expect(source()).toMatch(
 			/client\.pong:connect\(function\(value\w*\)\s*return \(function\(\)[\s\S]*?buffer\.create\(20\)[\s\S]*?return client\.ping:_fire\(buf\w*\)\s*end\)\(\)/,
 		);
+	});
+
+	test("packs where the call is evaluated, not ahead of the statement, when that would differ", () => {
+		// Regression: the packing was hoisted in front of the whole statement, so it ran when the call
+		// did not (behind `&&`, in an untaken branch), once for a whole loop instead of per pass, and
+		// ahead of a sibling with side effects. Each of these is now an immediately invoked function.
+		const body = emitted("placement");
+		expect(body).toMatch(
+			/holder\.score ~= nil and \(function\(\)\s*local arg\w* = holder\.score[\s\S]*?return server\.pong:_fire\(player, buf\w*\)\s*end\)\(\)/,
+		);
+		expect(body).toMatch(/if #scores > 0 then \(function\(\)\s*local arg\w* = scores\[1\]/);
+		// A narrowed argument is read inside the closure, where the narrowing still holds, so the
+		// transformed file type-checks (this was TS18048 when it was read ahead of the statement).
+		expect(body).toMatch(/if missing ~= nil then \(function\(\)\s*local arg\w* = missing\.score/);
+		expect(body).toMatch(
+			/if _condition then\s*\(function\(\)\s*local buf\w* = buffer\.create\(8\)\s*buffer\.writef64\(buf\w*, 0, i\)/,
+		);
+		expect(body).toMatch(
+			/table\.insert\(log, "first"\)\s*local ordered = \{ #log, \(function\(\)\s*local arg\w* = `\{#log\}`/,
+		);
+		// A call that is the whole statement, or the value of a `return` or a declaration, still
+		// packs in front of it with no closure.
+		expect(source()).toMatch(
+			/local buf\w* = buffer\.create\(8\)\s*buffer\.writef64\(buf\w*, 0, value\)\s*server\.pong:_broadcast\(buf\w*\)/,
+		);
+		expect(source()).toMatch(/o\w* \+= length\w*\s*return clientFunctions\.echo:_invoke\(buf\w*\)/);
+	});
+
+	test("packs a call through `?.` behind its short-circuit", () => {
+		// Regression: `maybe?.pong.fire(...)` was left alone -- the target's type carries `undefined`
+		// and the marker was looked for on that -- and sent raw values the peer dropped as malformed.
+		// The call is wrapped in a function that returns where the chain would short-circuit, testing
+		// the operand ahead of each `?.` so the narrowing the chain gave the arguments still holds.
+		const body = emitted("placement");
+		expect(body).toMatch(
+			/if maybe == nil then\s*return nil\s*end\s*local arg\w* = if maybe == nil then 0 else 1[\s\S]*?return _result\w*:_fire\(player, buf\w*\)/,
+		);
+		expect(body).toMatch(/if callers == nil then\s*return nil\s*end[\s\S]*?return _result\w*:_invoke\(buf\w*\)/);
+		expect(body).toMatch(
+			/if receivers == nil then\s*return nil\s*end[\s\S]*?return target\w*:_setCallback\(function\(lead\w*, arg\w*\)/,
+		);
+		// A target that is not a reference is bound first and the local is tested.
+		expect(body).toMatch(
+			/local target\w* = _target\w*\s*if target\w* == nil then\s*return nil\s*end\s*local buf\w* = buffer\.create\(8\)\s*buffer\.writef64\(buf\w*, 0, 2\)\s*return target\w*:_fire\(player, buf\w*\)/,
+		);
+		expect(body).not.toMatch(/\.pong:fire\(/);
+		expect(body).not.toMatch(/\.echo:invoke\(/);
+		expect(body).not.toMatch(/\.echo:setCallback\(/);
+	});
+
+	test("evaluates the target ahead of the arguments", () => {
+		// Regression: the packing read `calls` before `pick()` ran, since the target was only
+		// evaluated inside the call after it.
+		expect(emitted("placement")).toMatch(
+			/local target\w* = pick\(\)\.pong\s*local buf\w* = buffer\.create\(8\)\s*buffer\.writef64\(buf\w*, 0, calls\)\s*target\w*:_fire\(player, buf\w*\)/,
+		);
+		// A plain reference is left where it was: no local, no change to the emit.
+		expect(source()).toMatch(/server\.pong:_fire\(player, buf\w*\)/);
 	});
 
 	test("packs function requests and wraps callbacks so results leave packed", () => {

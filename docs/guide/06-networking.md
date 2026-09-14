@@ -195,8 +195,9 @@ on what was decoded.
 Call sites are found by type. Send and register callbacks through the handler's own type
 (`Events.X.fire(...)`, a typed reference to `Events.X`, a helper generic over the event name), not
 through a hand-written interface that widens `fire` to `(...args: unknown[])`: such a call is left
-alone and sends unpacked values, which the peer drops as malformed. `predict` takes plain values
-and needs no typing; `connect` is untouched.
+alone and sends unpacked values, which the peer drops as malformed. A handler reached through `?.`
+(`this.events?.X.fire(...)`) is packed like any other, behind the same short-circuit. `predict`
+takes plain values and needs no typing; `connect` is untouched.
 
 Sizes are what the types say: a `number` is eight bytes, a `boolean` one, an
 `"idle" | "walk" | "run"` one, an object is its fields in declaration order with nothing spent on
@@ -209,7 +210,13 @@ literal names counts, so existing branded types keep working. `Serialization.str
 
 A union member costs one tag byte, and the tag is the member's position as written:
 `{ Coins: number } | { Items: string[] }` is 0 for Coins and 1 for Items, `number | string` is 0
-for the number. Object members are told apart by a shared discriminant (`kind: "a"` against
+for the number. "As written" means at the declaration the value is reached through -- the
+parameter, property, return type or tuple element, into arrays, sets, maps and Promises -- so
+`a(x: string | number)` and `b(x: number | string)`, one TypeScript type, number their members
+each their own way, and both sides agree because both read the same declaration. A union with no
+spelling of its own where it is reached (one that only arrives as a generic's type argument, `Box<A
+| B>`) keeps TypeScript's order, which is the same everywhere in a program; declare an alias for it
+if the order matters to you. Object members are told apart by a shared discriminant (`kind: "a"` against
 `kind: "b"`) or by a key only one of them has, so no guard is generated for them. A union with
 more than 255 members travels whole, as a blob.
 
@@ -246,8 +253,11 @@ Use it for events whose payload is already a buffer of your own, or to compare t
 
 A payload that cannot be decoded (truncated, wrong shape, hostile) is dropped and reported through
 `onBadRequest` with `argIndex: -1`; a function reply that cannot be decoded rejects with
-`InvalidResult` and fires `onBadResponse`. Decoding never trusts a count it reads: one that
-announces more elements than the buffer could hold is refused before anything is allocated.
+`InvalidResult` and fires `onBadResponse`. Decoding never trusts a count or a length it reads: one
+that announces more elements, or more bytes, than the buffer could hold is refused before anything
+is allocated. Elements that take no bytes (a lone literal, `undefined`, an object of only literals)
+cannot be bounded that way, so a payload may announce at most 65535 of them in all, however they
+are nested.
 Sending a value that does not match its declared type raises at the sender, which is a bug in the
 caller, not in the peer.
 
