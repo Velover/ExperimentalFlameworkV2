@@ -1,6 +1,6 @@
 {
   "name": "@flamework-experimental/testing",
-  "version": "2.0.0-alpha.0",
+  "version": "2.0.0-alpha.1",
   "description": "In-place tests for Flamework games: define sections of tests, run them through a BindableFunction in Workspace, from the client through a RemoteFunction, or from an Open Cloud task; and the flamework-test CLI that opens the place in Roblox Studio or publishes it to the cloud and runs them.",
   "main": "out/init.luau",
   "types": "out/index.d.ts",

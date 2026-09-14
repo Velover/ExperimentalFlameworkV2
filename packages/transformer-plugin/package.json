@@ -1,6 +1,6 @@
 {
   "name": "@flamework-experimental/transformer-plugin",
-  "version": "2.0.0-alpha.0",
+  "version": "2.0.0-alpha.1",
   "description": "A module for creating Flamework transformer plugins.",
   "main": "out/index.js",
   "scripts": {
