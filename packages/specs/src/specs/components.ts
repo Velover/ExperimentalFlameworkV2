@@ -1729,6 +1729,90 @@ export = suite("components", [
 		},
 	],
 	[
+		"re-points a child link when the child it holds is renamed away before a sibling takes its name",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("RenamedLinkInOrder");
+			const core = folderIn(instance, "Core");
+			collectionService().AddTag(core, "Handler");
+			const spare = folderIn(instance, "Spare");
+			const bystander = folderIn(instance, "Bystander");
+			collectionService().AddTag(instance, "Owner");
+
+			const owner = expectDefined(components.getComponent<Owner>(instance), "component");
+			try {
+				expectEqual(__harness.connectionCount(bystander), 0, "connections on a bystander while Core resolves");
+
+				// Heard one at a time, as a place that does not defer them delivers them: the held
+				// child's rename resolves the name to nothing, and the sibling's rename after it is
+				// announced by the sibling alone. So while the name resolves to nothing, every other
+				// child is followed for it, and the sibling taking the name is heard from the sibling.
+				core.Name = "Old";
+				__harness.flush();
+				expectEqual(owner.destroyCount, 1, "takedowns after the rename away");
+				expectTrue(
+					__harness.connectionCount(bystander) > 0,
+					"a bystander is followed while Core names nothing",
+				);
+
+				spare.Name = "Core";
+				__harness.flush();
+				expectEqual(
+					components.getComponent<Owner>(instance),
+					undefined,
+					"component while the child named Core has no Handler",
+				);
+				expectEqual(
+					__harness.connectionCount(bystander),
+					0,
+					"connections on the bystander once Core resolves again",
+				);
+
+				collectionService().AddTag(spare, "Handler");
+				__harness.flush();
+				const rebuilt = expectDefined(
+					components.getComponent<Owner>(instance),
+					"component once the new Core carries Handler",
+				);
+				expectEqual(
+					rebuilt.childComponents.Core,
+					components.getComponent<Handler>(spare),
+					"the child it holds",
+				);
+
+				collectionService().RemoveTag(spare, "Handler");
+				__harness.flush();
+				expectEqual(
+					components.getComponent<Owner>(instance),
+					undefined,
+					"component after the new Core lost its Handler",
+				);
+
+				// Renamed back the same way: the sibling renamed away empties the name, and the old
+				// child -- followed once more as a candidate, since it is no longer the one held --
+				// taking it back is heard from the old child.
+				spare.Name = "Spare";
+				core.Name = "Core";
+				__harness.flush();
+				const restored = expectDefined(
+					components.getComponent<Owner>(instance),
+					"component once the old child is Core again",
+				);
+				expectEqual(
+					restored.childComponents.Core,
+					components.getComponent<Handler>(core),
+					"the child it holds again",
+				);
+				expectEqual(__harness.connectionCount(bystander), 0, "connections on the bystander at the end");
+			} finally {
+				instance.Destroy();
+				module.extinguish();
+			}
+		},
+	],
+	[
 		"rebuilds a component around the child that replaced the one it was built with",
 		() => {
 			const module = createComponentModule();
@@ -4256,6 +4340,84 @@ export = suite("components", [
 			expectDefined(components.getComponent<Watched>(instance), "component once the child is Core again");
 
 			module.extinguish();
+		},
+	],
+	[
+		"re-resolves a required child when a sibling is renamed into its name while it is missing",
+		() => {
+			const module = createComponentModule();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("RenamedSibling");
+			const core = addCore(instance);
+			const spare = folderIn(instance, "Spare");
+			const bystander = folderIn(instance, "Bystander");
+			collectionService().AddTag(instance, "Watched");
+			expectDefined(components.getComponent<Watched>(instance), "component");
+			expectEqual(__harness.connectionCount(bystander), 0, "connections on a bystander while the tree is whole");
+
+			try {
+				// A rename is announced by the renamed child alone, so a sibling taking the name of
+				// the child that was renamed away can only be heard from the sibling: while the slot
+				// is empty every other child is followed for its name, and no longer once it fills.
+				core.Name = "Shell";
+				__harness.flush();
+				expectEqual(
+					components.getComponent<Watched>(instance),
+					undefined,
+					"component after its Core was renamed away",
+				);
+				expectTrue(__harness.connectionCount(bystander) > 0, "a bystander is followed while Core is missing");
+
+				spare.Name = "Core";
+				__harness.flush();
+				expectDefined(components.getComponent<Watched>(instance), "component once the sibling is Core");
+				expectEqual(
+					__harness.connectionCount(bystander),
+					0,
+					"connections on the bystander once the tree is whole again",
+				);
+
+				// And back: the sibling renamed away empties the slot, and the old child -- no longer
+				// the one followed for a rename back -- taking the name is heard from the old child.
+				spare.Name = "Spare";
+				__harness.flush();
+				expectEqual(
+					components.getComponent<Watched>(instance),
+					undefined,
+					"component after the sibling was renamed away",
+				);
+
+				core.Name = "Core";
+				__harness.flush();
+				expectDefined(components.getComponent<Watched>(instance), "component once the old child is Core again");
+				expectEqual(__harness.connectionCount(bystander), 0, "connections on the bystander at the end");
+
+				// A child arriving under another name while the slot is empty is a candidate too.
+				core.Name = "Shell";
+				__harness.flush();
+				const late = folderIn(instance, "Late");
+				late.Name = "Core";
+				__harness.flush();
+				expectDefined(components.getComponent<Watched>(instance), "component once a late child is Core");
+
+				late.Name = "Late";
+				__harness.flush();
+				expectTrue(
+					__harness.connectionCount(bystander) > 0,
+					"a bystander is followed while Core is missing again",
+				);
+				instance.Destroy();
+				task.wait();
+				expectEqual(
+					__harness.connectionCount(bystander),
+					0,
+					"connections on the bystander after the instance went",
+				);
+			} finally {
+				instance.Destroy();
+				module.extinguish();
+			}
 		},
 	],
 	[

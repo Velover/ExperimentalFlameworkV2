@@ -514,11 +514,12 @@ Watching is one watcher per required child, not a re-check of the whole tree. `M
 Part & { Texture: Texture } }` listens for children arriving and leaving on the model and, once
 `Root` has resolved, on `Root`, plus the `Name` of each resolved child. A `Texture` arriving three
 levels down re-resolves that one slot; a child that is not in the tree, or a second child of a
-required name, changes nothing however often it moves. A child renamed away is noticed, and so is
-renaming it back; a *sibling* renamed to a required name while the slot is empty fires nothing the
-watcher listens to, and is picked up the next time the tree is read (a tag arriving, or the child
-moving). A guard written by hand with `instanceGuard` has no such structure and is re-run whole on
-every descendant change.
+required name, changes nothing however often it moves. A rename is announced by the renamed child
+alone, so while a required child is missing the watcher follows the `Name` of every other child as
+well -- a sibling renamed to the required name is heard from the sibling -- and drops those the
+moment the child is there; a child renamed away is noticed, and so is renaming it back. A guard
+written by hand with `instanceGuard` has no such structure: it is re-run whole on every descendant
+change, and hears no rename at all.
 
 When a watched component's tree breaks apart again, the component is removed. That holds however the
 component came to qualify: a tag arriving at an instance another component's link was already

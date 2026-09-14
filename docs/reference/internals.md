@@ -346,11 +346,19 @@ connects `ChildAdded` and `ChildRemoved` on its instance and follows the `Name` 
 resolved (and, after that child is renamed away, still that child until it leaves the parent, so
 renaming it back is noticed). An addition matters only when it changes what a slot's name resolves
 to, a removal only when it was the resolved child, so a second child of a required name and anything
-outside the tree cost nothing. Each change re-resolves its own slot, and the tracker's poll, deferred
-once per burst, reads the watcher's answer rather than the tree. `testInstance` re-reads through the
-watcher's `refresh`, which resolves every slot again -- the only way a sibling renamed to a required
-name while the slot was empty is ever seen -- so what the watcher holds and what the tracker recorded
-cannot drift. The same shape is what `describeShapeMismatch` names a failure by, in `addComponent`'s
+outside the tree cost nothing while the tree is whole. A rename is announced by the renamed child
+alone -- nothing fires on the parent or on the siblings -- so while a slot is empty the node follows
+the `Name` of every child no slot is following (its *candidates*, one connection per child, also
+taken up by a child arriving under another name), and drops them all the moment every slot resolves:
+a sibling renamed to the required name is heard from the sibling, and a tree pays per child only
+while it is short of something. A rename heard anywhere re-resolves every slot whose name no longer
+resolves to what it records, since a child followed for a rename back can take another slot's name
+instead. Each change re-resolves its own slot, and the tracker's poll, deferred once per burst,
+reads the watcher's answer rather than the tree. `testInstance` re-reads through the watcher's
+`refresh`, which resolves every slot again, so what the watcher holds and what the tracker recorded
+cannot drift. The child link in `watchLink` follows its name the same way: the child it resolved to
+(and, renamed away, still that one), plus every other child as a candidate while the name resolves
+to nothing. The same shape is what `describeShapeMismatch` names a failure by, in `addComponent`'s
 error and in the tracker's warning. `t.children`, which the guard used to be built from, refused two
 children of one name outright; with the poll re-running the guard whole, a stray second `Root` took
 the component down at the next unrelated removal, and the poll then listened only for additions, so

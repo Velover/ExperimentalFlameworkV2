@@ -895,17 +895,61 @@ export class Components {
 		// way the instance guard's shape follows it: what the name resolves to now is the whole
 		// question, and a name that resolves to something other than the watched target is resolved
 		// again. Nothing named is left as it is, so a child renamed away stays followed.
+		const renamed = () => {
+			if (instance.FindFirstChild(link.name) === watched) return;
+
+			resolve();
+		};
+
 		const watchName = (target: Instance | undefined) => {
 			if (link.kind !== "child" || !pollsTree) return;
 			if (target === undefined || target === named) return;
 
 			unwatchName();
 			named = target;
-			nameConnection = target.GetPropertyChangedSignal("Name").Connect(() => {
-				if (instance.FindFirstChild(link.name) === watched) return;
+			nameConnection = target.GetPropertyChangedSignal("Name").Connect(renamed);
+		};
 
-				resolve();
-			});
+		/**
+		 * The `Name` of every other child, followed while the name resolves to nothing. A rename is
+		 * announced by the renamed child alone, so a sibling taking the name can only be heard from
+		 * the sibling; the shape follows its empty slots the same way. Dropped once the name
+		 * resolves, so the link pays one connection per child only while it is short of one.
+		 */
+		const candidates = new Map<Instance, RBXScriptConnection>();
+
+		const dropCandidate = (child: Instance) => {
+			const connection = candidates.get(child);
+			if (connection === undefined) return;
+
+			connection.Disconnect();
+			candidates.delete(child);
+		};
+
+		const dropCandidates = () => {
+			for (const [, connection] of candidates) {
+				connection.Disconnect();
+			}
+			candidates.clear();
+		};
+
+		const syncCandidates = () => {
+			if (link.kind !== "child" || !pollsTree) return;
+
+			if (instance.FindFirstChild(link.name) !== undefined) {
+				dropCandidates();
+				return;
+			}
+
+			for (const [child] of candidates) {
+				if (child === named || child.Parent !== instance) dropCandidate(child);
+			}
+
+			for (const child of instance.GetChildren()) {
+				if (child === named || candidates.has(child)) continue;
+
+				candidates.set(child, child.GetPropertyChangedSignal("Name").Connect(renamed));
+			}
 		};
 
 		// A component outlives the watcher that follows its tree. The eager path builds one the
@@ -971,6 +1015,7 @@ export class Components {
 
 			const target = this.resolveLinkTarget(instance, componentInfo, link);
 			watchName(target);
+			syncCandidates();
 
 			if (target === undefined) {
 				noteTarget(undefined);
@@ -1161,18 +1206,27 @@ export class Components {
 			// An attribute is not part of the tree, so it is followed whatever the streaming mode.
 			maid.GiveTask(instance.GetAttributeChangedSignal(link.name).Connect(resolve));
 		} else if (pollsTree) {
-			const childChanged = (child: Instance) => {
-				if (child.Name === link.name) resolve();
-			};
-
 			maid.GiveTask(unwatchName);
-			maid.GiveTask(instance.ChildAdded.Connect(childChanged));
+			maid.GiveTask(dropCandidates);
+			maid.GiveTask(
+				instance.ChildAdded.Connect((child) => {
+					if (child.Name === link.name) {
+						resolve();
+						return;
+					}
+
+					// Arrived under another name, which it can still trade for this one.
+					syncCandidates();
+				}),
+			);
 			maid.GiveTask(
 				instance.ChildRemoved.Connect((child) => {
+					dropCandidate(child);
+
 					// A child that left under another name is no longer one a rename can bring back.
 					if (child === named) unwatchName();
 
-					childChanged(child);
+					if (child.Name === link.name) resolve();
 				}),
 			);
 		}

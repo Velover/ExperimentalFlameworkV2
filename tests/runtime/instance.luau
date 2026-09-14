@@ -658,8 +658,8 @@ function instances.clearSent(remote: Instance)
 end
 
 --[[
-	How many handlers are connected to an instance, across its own signals and the per-attribute
-	ones.
+	How many handlers are connected to an instance, across its own signals, the per-attribute
+	ones and the per-property ones.
 
 	Roblox has no way to ask this, but a connection nothing disconnects is exactly how a leaked
 	teardown shows itself: the count for a surviving instance climbs with every round and never
@@ -673,6 +673,10 @@ function instances.connectionCount(instance: Instance): number
 	end
 
 	for _, signal in rawget(instance, "_attributeSignals") do
+		total += signals.count(signal)
+	end
+
+	for _, signal in rawget(instance, "_propertySignals") do
 		total += signals.count(signal)
 	end
 

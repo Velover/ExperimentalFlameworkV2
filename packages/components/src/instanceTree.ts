@@ -7,7 +7,9 @@
  * reads the tree -- `FindFirstChild` per required name, which is what `this.instance.Root`
  * resolves to -- and watches it one slot at a time, so a change deep in the tree re-resolves the
  * slot it belongs to and touches nothing else. A second child of a required name is neither a
- * mismatch nor the one that is read, so it can come and go without the component noticing.
+ * mismatch nor the one that is read, so it can come and go without the component noticing. While
+ * a slot is empty, every other child is followed for its name as well: a sibling renamed into the
+ * required name is announced by nobody but the sibling.
  */
 export interface InstanceShape {
 	/** Class names the instance may be, any of them; absent, any Instance will do. */
@@ -150,6 +152,15 @@ interface Node {
 	instance: Instance;
 	slots: Map<string, Slot>;
 	connections: RBXScriptConnection[];
+
+	/**
+	 * The `Name` of every child no slot is following, followed while a slot is empty. A rename is
+	 * announced by the renamed child alone -- nothing fires on the parent, nothing on the siblings
+	 * -- so a child that was never resolved taking a required name can only be heard from that
+	 * child. Dropped as soon as every slot resolves, so a tree pays one connection per child only
+	 * while it is short of something.
+	 */
+	candidates: Map<Instance, RBXScriptConnection>;
 }
 
 function isSlotMet(slot: Slot): boolean {
@@ -180,13 +191,84 @@ function watchName(node: Node, slot: Slot, child: Instance, changed: () => void)
 	slot.watched = child;
 
 	// A rename in either direction: the resolved child renamed away, or the one that was resolved
-	// renamed back. What the name resolves to now is the whole question.
-	slot.watchedConnection = child.GetPropertyChangedSignal("Name").Connect(() => {
-		if (slot.resolved === node.instance.FindFirstChild(slot.name)) return;
+	// renamed back. What every name resolves to now is the whole question, not only this slot's:
+	// a child followed for a rename back can take another slot's name instead.
+	slot.watchedConnection = child.GetPropertyChangedSignal("Name").Connect(() => resolveMoved(node, changed));
+}
+
+/**
+ * Re-resolves every slot whose name resolves to something other than it records, after a rename
+ * somewhere among the children, and reports the change if there was one.
+ */
+function resolveMoved(node: Node, changed: () => void) {
+	let moved = false;
+
+	for (const [, slot] of node.slots) {
+		if (slot.resolved === node.instance.FindFirstChild(slot.name)) continue;
 
 		resolveSlot(node, slot, changed);
-		changed();
-	});
+		moved = true;
+	}
+
+	if (!moved) return;
+
+	syncCandidates(node, changed);
+	changed();
+}
+
+function hasEmptySlot(node: Node) {
+	for (const [, slot] of node.slots) {
+		if (slot.resolved === undefined) return true;
+	}
+
+	return false;
+}
+
+function isFollowedBySlot(node: Node, child: Instance) {
+	for (const [, slot] of node.slots) {
+		if (slot.watched === child) return true;
+	}
+
+	return false;
+}
+
+function dropCandidate(node: Node, child: Instance) {
+	const connection = node.candidates.get(child);
+	if (connection === undefined) return;
+
+	connection.Disconnect();
+	node.candidates.delete(child);
+}
+
+function dropCandidates(node: Node) {
+	for (const [, connection] of node.candidates) {
+		connection.Disconnect();
+	}
+	node.candidates.clear();
+}
+
+/**
+ * Brings the candidates in line with the slots: while one is empty, every child no slot follows is
+ * followed for its name; once none is, no child is followed for anything but a rename back.
+ */
+function syncCandidates(node: Node, changed: () => void) {
+	if (!hasEmptySlot(node)) {
+		dropCandidates(node);
+		return;
+	}
+
+	for (const [child] of node.candidates) {
+		if (isFollowedBySlot(node, child) || child.Parent !== node.instance) dropCandidate(node, child);
+	}
+
+	for (const child of node.instance.GetChildren()) {
+		if (node.candidates.has(child) || isFollowedBySlot(node, child)) continue;
+
+		node.candidates.set(
+			child,
+			child.GetPropertyChangedSignal("Name").Connect(() => resolveMoved(node, changed)),
+		);
+	}
 }
 
 function releaseNode(node: Node) {
@@ -194,6 +276,7 @@ function releaseNode(node: Node) {
 		connection.Disconnect();
 	}
 	node.connections.clear();
+	dropCandidates(node);
 
 	for (const [, slot] of node.slots) {
 		if (slot.node !== undefined) {
@@ -249,12 +332,14 @@ function refreshNode(node: Node, changed: () => void) {
 			refreshNode(slot.node, changed);
 		}
 	}
+
+	syncCandidates(node, changed);
 }
 
 function createNode(instance: Instance, shape: InstanceShape, path: string, changed: () => void): Node | undefined {
 	if (shape.children === undefined) return undefined;
 
-	const node: Node = { instance, slots: new Map(), connections: [] };
+	const node: Node = { instance, slots: new Map(), connections: [], candidates: new Map() };
 
 	for (const [key, childShape] of pairs(shape.children)) {
 		const name = key as string;
@@ -262,16 +347,21 @@ function createNode(instance: Instance, shape: InstanceShape, path: string, chan
 		node.slots.set(name, slot);
 		resolveSlot(node, slot, changed);
 	}
+	syncCandidates(node, changed);
 
 	// A child arriving matters to the slot of its name, and only when it is what the name now
-	// resolves to: an earlier child of the same name stays the one the component reads.
+	// resolves to: an earlier child of the same name stays the one the component reads. One
+	// arriving under another name is a candidate for a slot that is empty, and followed as one.
 	node.connections.push(
 		instance.ChildAdded.Connect((child) => {
 			const slot = node.slots.get(child.Name);
-			if (slot === undefined) return;
-			if (slot.resolved === instance.FindFirstChild(slot.name)) return;
+			if (slot === undefined || slot.resolved === instance.FindFirstChild(slot.name)) {
+				syncCandidates(node, changed);
+				return;
+			}
 
 			resolveSlot(node, slot, changed);
+			syncCandidates(node, changed);
 			changed();
 		}),
 	);
@@ -282,6 +372,8 @@ function createNode(instance: Instance, shape: InstanceShape, path: string, chan
 	// was renamed away from, and the slot whose name it took.
 	node.connections.push(
 		instance.ChildRemoved.Connect((child) => {
+			dropCandidate(node, child);
+
 			let wasFollowed = false;
 
 			for (const [, slot] of node.slots) {
@@ -292,7 +384,10 @@ function createNode(instance: Instance, shape: InstanceShape, path: string, chan
 				wasFollowed = true;
 			}
 
-			if (wasFollowed) changed();
+			if (!wasFollowed) return;
+
+			syncCandidates(node, changed);
+			changed();
 		}),
 	);
 
