@@ -25,7 +25,7 @@
     },
     "packages/components": {
       "name": "@flamework-experimental/components",
-      "version": "2.0.0-alpha.0",
+      "version": "2.0.0-alpha.1",
       "dependencies": {
         "@rbxts/maid": "^1.0.0-ts.1",
         "@rbxts/services": "^1.1.5",
@@ -44,7 +44,7 @@
     },
     "packages/core": {
       "name": "@flamework-experimental/core",
-      "version": "2.0.0-alpha.0",
+      "version": "2.0.0-alpha.1",
       "dependencies": {
         "@rbxts/maid": "^1.0.0-ts.1",
         "@rbxts/object-utils": "^1.0.4",
@@ -60,7 +60,7 @@
     },
     "packages/networking": {
       "name": "@flamework-experimental/networking",
-      "version": "2.0.0-alpha.0",
+      "version": "2.0.0-alpha.1",
       "dependencies": {
         "@rbxts/object-utils": "^1.0.4",
         "@rbxts/services": "^1.1.5",
@@ -79,7 +79,7 @@
     },
     "packages/specs": {
       "name": "@flamework-experimental/specs",
-      "version": "2.0.0-alpha.0",
+      "version": "2.0.0-alpha.1",
       "dependencies": {
         "@flamework-experimental/components": "workspace:*",
         "@flamework-experimental/core": "workspace:*",
@@ -96,7 +96,7 @@
     },
     "packages/testing": {
       "name": "@flamework-experimental/testing",
-      "version": "2.0.0-alpha.0",
+      "version": "2.0.0-alpha.1",
       "bin": {
         "flamework-test": "./cli/src/cli.ts",
       },
@@ -120,7 +120,7 @@
     },
     "packages/transformer": {
       "name": "@flamework-experimental/transformer",
-      "version": "2.0.0-alpha.0",
+      "version": "2.0.0-alpha.1",
       "dependencies": {
         "@roblox-ts/path-translator": "^1.1.0",
         "@roblox-ts/rojo-resolver": "^1.1.0",
@@ -137,6 +137,7 @@
         "@types/fs-extra": "^9.0.13",
         "@types/node": "^16.11.1",
         "@types/normalize-package-data": "^2.4.1",
+        "@types/ts-expose-internals": "npm:@roblox-ts/ts-expose-internals@5.9.3",
         "@types/uuid": "^8.3.1",
         "typescript": "^5.9.3",
       },
@@ -146,7 +147,7 @@
     },
     "packages/transformer-plugin": {
       "name": "@flamework-experimental/transformer-plugin",
-      "version": "2.0.0-alpha.0",
+      "version": "2.0.0-alpha.1",
       "devDependencies": {
         "@types/node": "^16.11.1",
       },
@@ -253,6 +254,8 @@
     "@types/normalize-package-data": ["@types/normalize-package-data@2.4.4", "", {}, "sha512-37i+OaWTh9qeK4LSHPsyRC7NahnGotNuZvjLSgcPzblpHB3rrCJxAOgI5gCdKm7coonsaX1Of0ILiTcnZjbfxA=="],
 
     "@types/semver": ["@types/semver@7.8.0", "", {}, "sha512-1mAINjtQCXXeLkJ9ehXkwOcBpqtLxiVtKhpUf83DdRNdQKV0iXZpaHYqRr7nj+wvxuJzoAmAwXI+sCNMv1CzLQ=="],
+
+    "@types/ts-expose-internals": ["@roblox-ts/ts-expose-internals@5.9.3", "", {}, "sha512-4j5E2TeJfSY+qUtLdHwkY+nVpfX5kb3ClsCZktTrKqNXP6fhuQ0KYrxazfoetdW5ISWIHbCUcUmPafB+5pfNQQ=="],
 
     "@types/uuid": ["@types/uuid@8.3.4", "", {}, "sha512-c/I8ZRb51j+pYGAu5CrFMRxqZ2ke4y2grEBO5AUjgSkSk+qT2Ea+OdWElz/OiMf5MNpn2b17kuVBwZLQJXzihw=="],
 

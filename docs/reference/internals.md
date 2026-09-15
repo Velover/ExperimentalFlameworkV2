@@ -54,13 +54,45 @@ Two pieces of state matter while transforming a file:
 - **Root statements.** `state.nextRootStatements` collects statements to prepend at the file root.
   This is how hoisted macro metadata and plugin results get their own top-level locals.
 
-Because the transformer is authored against a newer TypeScript than roblox-ts bundles, it declares
-the compiler internals it uses itself, in
-[`src/types/tsInternals.d.ts`](../../packages/transformer/src/types/tsInternals.d.ts), with the two
-non-public `TypeFlags` read through
-[`src/util/tsInternals.ts`](../../packages/transformer/src/util/tsInternals.ts). That replaced
-`ts-expose-internals`, which stopped tracking TypeScript at 5.6.3 and capped the repo to a 2024
-compiler.
+### Compiler internals
+
+The transformer reaches past TypeScript's public API in a few places. Those are typed by
+`@roblox-ts/ts-expose-internals`, the roblox-ts maintained fork of `ts-expose-internals` (upstream
+stopped at 5.6.3), which regenerates the compiler's full declarations, `@internal` included, for
+every TypeScript release. It is installed under the alias `@types/ts-expose-internals` so the
+transformer's `typeRoots` picks it up without being named anywhere, and it is pinned to the exact
+`typescript` version: bump the two together. A compile error after a bump is the signal that an
+internal changed shape, and that is the point -- 5.9 stopped exporting `isDiagnosticWithLocation`,
+which a hand-written declaration would have kept promising until it threw at runtime, so
+[`src/transformer.ts`](../../packages/transformer/src/transformer.ts) carries its own copy of the
+check.
+
+What is used, for whoever has to find replacements:
+
+- Module functions: `addRelatedInfo`, `copyComments`, `findPackageJson`, `forEachAncestorDirectory`,
+  `getEffectiveImplementsTypeNodes`, `getLineOfLocalPosition`, `getNameFromPropertyName`,
+  `getPropertyNameForPropertyNameNode`, `getSourceFileOfNode`, `hasStaticModifier`,
+  `isAccessExpression`, `isDeclarationReadonly`, `isNamedDeclaration`, `isNamespaceBody`,
+  `isSimpleInlineableExpression`, `isSuperKeyword`, `removeAllComments`, `signatureHasRestParameter`,
+  `skipAlias`.
+- `TypeChecker`: `getTypeOfPropertyOfType`, `getUnionType`, `getElementTypeOfArrayType`,
+  `getParameterType`. `Program.getCommonSourceDirectory`. `TransformationContext.addDiagnostic`.
+- Members: `Symbol.parent`, `Declaration.symbol`, `TypeReference.resolvedTypeArguments`,
+  `IntrinsicType.intrinsicName`, and the `TypeFlags.Intrinsic` and `TypeFlags.DisjointDomains` bits.
+
+The compiler the transformer runs on is whichever one roblox-ts bundles:
+[`src/index.ts`](../../packages/transformer/src/index.ts) hooks `require` so that every
+`typescript` import inside the transformer resolves to roblox-ts's copy, and warns when the versions
+differ. roblox-ts 3.0.0 bundles 5.5.3 while this repo is on 5.9.3, so today every build warns and
+runs on 5.5.3; everything listed above exists in both. roblox-ts's next build (`roblox-ts@next`,
+3.0.0-dev-1a44d8f at the time of writing) is on 5.9.3, so once that is a release the move is the
+`roblox-ts` pin plus a test run.
+
+**TypeScript 7.** The native compiler's stable API is expected with 7.1. Nothing here moves before
+roblox-ts does, but when it does the list above is the inventory to work from: each entry has to be
+re-found in the new API or replaced, the `ts-expose-internals` approach (a declaration overlay on the
+JavaScript compiler's module) does not carry across, and neither does the `require` hook. Plan that
+as its own change rather than a version bump.
 
 ### Configuration
 
@@ -840,9 +872,10 @@ it before it ends.
 
 ## Rough edges
 
-- roblox-ts 3.0.0 bundles TypeScript 5.5.3 while the transformer is authored against 5.9.3, so every
-  build prints a version warning and compiles with 5.5.3. Harmless -- the declared internals exist in
-  both -- but it means the transformer is not actually exercised against the compiler it targets.
+- roblox-ts 3.0.0 bundles TypeScript 5.5.3 while the transformer is authored and typed against 5.9.3,
+  so every build prints a version warning and runs on 5.5.3. Harmless -- every internal the
+  transformer uses exists in both -- but the transformer is not exercised against the compiler it
+  targets until roblox-ts releases its 5.9.3 build; see [compiler internals](#compiler-internals).
 - There is no v1 → v2 migration codemod; see [migrating from v1](../guide/10-migrating-from-v1.md).
 - `scripts/copy-readme.mjs` copies the root README into every package at publish time, and the root
   README now documents the monorepo's development workflow rather than the framework.

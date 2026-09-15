@@ -1,4 +1,3 @@
-// internals declared locally in src/types/tsInternals.d.ts
 import ts from "typescript";
 import path from "path";
 import { transformFile } from "./transformations/transformFile";
@@ -8,6 +7,11 @@ import { f } from "./util/factory";
 import chalk from "chalk";
 import { emitTypescriptMismatch } from "./util/functions/emitTypescriptMismatch";
 import { PKG_VERSION } from "./util/constants";
+
+// TypeScript 5.9 stopped exporting its own `isDiagnosticWithLocation`; this is the same check.
+function isDiagnosticWithLocation(diagnostic: ts.Diagnostic): diagnostic is ts.DiagnosticWithLocation {
+	return diagnostic.file !== undefined && diagnostic.start !== undefined && diagnostic.length !== undefined;
+}
 
 export default function (program: ts.Program, config?: TransformerConfig) {
 	return (context: ts.TransformationContext): ((file: ts.SourceFile) => ts.Node) => {
@@ -38,7 +42,7 @@ export default function (program: ts.Program, config?: TransformerConfig) {
 					const preEmitDiagnostics = ts.getPreEmitDiagnostics(program, originalFile);
 					if (preEmitDiagnostics.some((x) => x.category === ts.DiagnosticCategory.Error)) {
 						preEmitDiagnostics
-							.filter(ts.isDiagnosticWithLocation)
+							.filter(isDiagnosticWithLocation)
 							.forEach((diag) => context.addDiagnostic(diag));
 						return file;
 					}

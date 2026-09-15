@@ -2,7 +2,6 @@ import ts from "typescript";
 import { Diagnostics } from "../../classes/diagnostics";
 import { TransformState } from "../../classes/transformState";
 import { f } from "../factory";
-import { TYPE_FLAG_DISJOINT_DOMAINS } from "../tsInternals";
 import {
 	buildGuardFromType,
 	extractTypes,
@@ -1113,7 +1112,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		}
 
 		const brand = findBrand(type);
-		const disjoint = type.types.find((member) => (member.flags & TYPE_FLAG_DISJOINT_DOMAINS) !== 0);
+		const disjoint = type.types.find((member) => (member.flags & ts.TypeFlags.DisjointDomains) !== 0);
 		if (disjoint) {
 			if (disjoint.flags & ts.TypeFlags.Number) {
 				if (brand === VARINT_BRAND) return { kind: "varint" };

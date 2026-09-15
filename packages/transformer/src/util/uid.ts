@@ -3,7 +3,6 @@ import ts from "typescript";
 import { DiagnosticError, Diagnostics } from "../classes/diagnostics";
 import { TransformState } from "../classes/transformState";
 import { getDeclarationName } from "./functions/getDeclarationName";
-import { TYPE_FLAG_INTRINSIC } from "./tsInternals";
 import { getPackageJson } from "./functions/getPackageJson";
 import { isDefinedType } from "./functions/isDefinedType";
 import { isPathDescendantOfAny } from "./functions/isPathDescendantOf";
@@ -196,7 +195,7 @@ export function getTypeUid(state: TransformState, type: ts.Type, trace?: ts.Node
 		return getSymbolUid(state, type.symbol, trace);
 	} else if (isDefinedType(type)) {
 		return `$p:defined`;
-	} else if (type.flags & TYPE_FLAG_INTRINSIC) {
+	} else if (type.flags & ts.TypeFlags.Intrinsic) {
 		return `$p:${(type as ts.IntrinsicType).intrinsicName}`;
 	} else if (trace) {
 		Diagnostics.error(trace, `Could not find UID for type "${type.checker.typeToString(type)}"`);

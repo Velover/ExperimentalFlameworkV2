@@ -14,7 +14,6 @@ import type {
 } from "@flamework-experimental/transformer-plugin";
 import type { TransformState } from "../../classes/transformState";
 import { isArrayType, isTupleType } from "../../util/functions/isTupleType";
-import { TYPE_FLAG_INTRINSIC } from "../../util/tsInternals";
 
 /**
  * Wraps a `ts.Type` in the stable surface plugins are allowed to see.
@@ -95,7 +94,7 @@ export function createTypeFactory(state: TransformState) {
 		}
 
 		isPrimitive(primitive: PrimitiveTypeNames) {
-			if ((this.type.flags & TYPE_FLAG_INTRINSIC) === 0) {
+			if ((this.type.flags & ts.TypeFlags.Intrinsic) === 0) {
 				return false;
 			}
 
