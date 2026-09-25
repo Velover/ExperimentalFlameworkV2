@@ -4,7 +4,7 @@ import type { Module } from "../module/module";
 import { Provider } from "../provider";
 import type { OnExtinguished, OnInit, OnPhysics, OnRender, OnStart, OnTick } from "./lifecycleInterfaces";
 import { recycleThread } from "../utility/recycleThread";
-import { threadWaits } from "../utility/threadWaits";
+import { runsPromiseWork, threadWaits } from "../utility/threadWaits";
 import { Reflect } from "../reflect";
 import {
 	LIFECYCLE_SLOT,
@@ -13,6 +13,13 @@ import {
 	type InterfaceContext,
 	type PluginTarget,
 } from "../plugin/pluginDefinition";
+
+/**
+ * Late providers whose `onInit` has yet to finish, or to raise: what a dependent's waits for. Shared
+ * by every module's plugin, since a provider's constructor may take a lazy provider of an import,
+ * which the import's plugin initialises.
+ */
+const pendingInits = new Set<object>();
 
 export interface LifecyclePluginOptions {
 	/**
@@ -49,12 +56,16 @@ export class LifecycleProvider {
 	private identifiers = new Map<object, string>();
 	private moduleConnections = new Map<Module, RBXScriptConnection[]>();
 	private lateProviders = new Set<object>();
-	/** Late providers waiting for their turn, in the order they were resolved. */
+	/** Late providers resolved since the last turn began, in the order they were resolved: the next turn's. */
 	private lateQueue = new Array<object>();
-	/** Whether a turn is deferred, or running, that takes whatever joins `lateQueue`. */
+	/** Whether a turn is deferred that takes whatever joins `lateQueue`. */
 	private hasLateTurn = false;
+	/** The turns still running `onInit`, by their thread, to the providers each walks. */
+	private lateTurns = new Map<thread, Array<object>>();
 	/** Late providers whose turn came while the module was still igniting, for `start` to schedule again. */
 	private heldLateProviders = new Array<object>();
+	/** What each late provider's constructor was given, until its turn has waited for their `onInit`s. */
+	private initDependencies = new Map<object, ReadonlyArray<defined>>();
 
 	/**
 	 * What joined `onExtinguished` once `extinguished` had begun -- a lazy provider resolved for the
@@ -256,8 +267,21 @@ export class LifecycleProvider {
 	 * what needs it -- each finished before the next begins, then every `onStart`. A thread per
 	 * provider ran the next one's `onInit` as soon as the one before yielded, and started it before
 	 * its dependency had finished initialising.
+	 *
+	 * One that an `onInit` of a running turn resolves joins that turn, as one an eager `onInit`
+	 * resolves joins ignition's. One resolved anywhere else once a turn has begun gets the next turn
+	 * and does not wait for that one's `onInit`s: a single turn for everything held it back behind
+	 * an `onInit` it had nothing to do with that yielded -- for good, when that `onInit` waited for it.
+	 * It waits only for the `onInit`s of what its constructor took, when those are still running in
+	 * a turn of their own (see `awaitDependencies`).
 	 */
 	private deferLateProvider(object: object) {
+		const turn = this.findRunningTurn();
+		if (turn !== undefined) {
+			turn.push(object);
+			return;
+		}
+
 		this.lateQueue.push(object);
 		if (this.hasLateTurn) {
 			return;
@@ -267,18 +291,76 @@ export class LifecycleProvider {
 		task.defer(() => this.runLateProviders());
 	}
 
+	/**
+	 * The providers of the turn whose `onInit` the running thread is part of, if any: the `onInit`'s
+	 * own thread, which `callInit` records the turn waiting on; one it resumed and has not got back
+	 * from -- a thread it spawned, an `async` body before its first yield, a Promise's executor --
+	 * which leaves the turn's thread `normal`; or, while the turn waits on the Promise an `onInit`
+	 * returned, a thread doing Promise work (see `runsPromiseWork`): the `async` body once it has
+	 * yielded, a deferred executor, an `andThen` callback, whose threads nothing records.
+	 */
+	private findRunningTurn() {
+		const running = coroutine.running();
+		let waitingOnPromise: Array<object> | undefined;
+		for (const [turn, providers] of this.lateTurns) {
+			const waitedOn = threadWaits.get(turn);
+			if (waitedOn === running || coroutine.status(turn) === "normal") {
+				return providers;
+			}
+
+			if (waitedOn !== undefined && !typeIs(waitedOn, "thread")) {
+				waitingOnPromise ??= providers;
+			}
+		}
+
+		if (waitingOnPromise !== undefined && runsPromiseWork(running)) {
+			return waitingOnPromise;
+		}
+
+		return undefined;
+	}
+
+	/**
+	 * Waits until no provider a late provider's constructor took has an `onInit` still to finish, as
+	 * an eager provider's `onInit` comes after its dependencies' -- one resolved in a turn of its own
+	 * had the provider using it initialised, and started, against a dependency not yet initialised.
+	 * Resolved together, a dependency comes first in the same turn, so this finds nothing to wait for.
+	 *
+	 * Polled, since a dependency's `onInit` ends in several ways -- it finishes, it raises, its turn
+	 * drops it as the module extinguishes -- and a wait nothing ended would hold this turn for good.
+	 * Stops once the module has begun to extinguish.
+	 */
+	private awaitDependencies(object: object) {
+		const dependencies = this.initDependencies.get(object);
+		if (dependencies === undefined) return;
+		this.initDependencies.delete(object);
+
+		const pending = () => dependencies.some((dependency) => pendingInits.has(dependency as object));
+		while (!this.hasBegunExtinguishing() && pending()) {
+			task.wait();
+		}
+	}
+
 	private runLateProviders() {
+		// This turn takes what was resolved before it began; anything resolved from here on, but by
+		// its own `onInit`s, is the next one's.
+		const providers = this.lateQueue;
+		this.lateQueue = new Array<object>();
+		this.hasLateTurn = false;
+
+		const turn = coroutine.running();
+		this.lateTurns.set(turn, providers);
 		const initialised = new Array<object>();
 
 		// Walked live, as `postIgnite` walks: an `onInit` may resolve another lazy provider, which
-		// joins the end of the queue and is initialised in its turn.
-		while (!this.lateQueue.isEmpty()) {
+		// joins the end of this turn and is initialised after the ones before it.
+		while (!providers.isEmpty()) {
 			// Nothing once the module has begun to extinguish: by then it may have been told
 			// `onExtinguished` -- one an `onExtinguished` handler resolved for the first time is --
 			// and a later step that yields let this run after it, and before `release` detached it.
 			// Nor once an `onInit` that yielded saw it begin.
 			if (this.hasBegunExtinguishing()) {
-				this.lateQueue.clear();
+				providers.clear();
 				break;
 			}
 
@@ -286,23 +368,30 @@ export class LifecycleProvider {
 			// resolved, whose turn came when a hook yielded: it was started before the module was
 			// ignited, even by an ignition that then failed. `start` gives them their turn again.
 			if (this.module?.isIgnited() !== true) {
-				for (const object of this.lateQueue) {
+				for (const object of providers) {
 					this.heldLateProviders.push(object);
 				}
 
-				this.lateQueue.clear();
+				providers.clear();
 				break;
 			}
 
-			const object = this.lateQueue.shift()!;
+			const object = providers.shift()!;
 			if (!this.lateProviders.has(object)) {
 				continue;
 			}
 
 			if (this.initMembers.has(object as OnInit)) {
+				this.awaitDependencies(object);
+				if (this.hasBegunExtinguishing()) {
+					providers.clear();
+					break;
+				}
+
 				// One that raises is reported and left out -- never ticking, never started, as on a
 				// thread of its own -- and does not hold back the ones after it.
 				const [success, err] = pcall(() => this.runInit(object as OnInit));
+				pendingInits.delete(object);
 				if (!success) {
 					task.spawn(error, err, 0);
 					continue;
@@ -314,7 +403,7 @@ export class LifecycleProvider {
 		}
 
 		// Over from here: one an `onStart` resolves gets a turn of its own.
-		this.hasLateTurn = false;
+		this.lateTurns.delete(turn);
 
 		for (const object of initialised) {
 			if (this.hasBegunExtinguishing()) {
@@ -339,6 +428,11 @@ export class LifecycleProvider {
 		if (!this.hasStarted) {
 			this.onInit.push(object);
 		} else {
+			pendingInits.add(object);
+			if (context.dependencies !== undefined && !context.dependencies.isEmpty()) {
+				this.initDependencies.set(object, context.dependencies);
+			}
+
 			this.scheduleLateProvider(object);
 		}
 	}
@@ -346,6 +440,8 @@ export class LifecycleProvider {
 	public removeInit(object: OnInit) {
 		this.initMembers.delete(object);
 		this.lateProviders.delete(object);
+		pendingInits.delete(object);
+		this.initDependencies.delete(object);
 
 		const index = this.onInit.indexOf(object);
 		if (index !== -1) {

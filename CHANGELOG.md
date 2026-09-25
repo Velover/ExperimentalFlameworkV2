@@ -31,8 +31,11 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   so importers finish before the import is released. A wait that would close a cycle, or wait on a
   thread that was cancelled, returns at once instead of deadlocking.
 - Lazy providers resolved after ignition get `onInit` and `onStart` only once the module is ignited
-  and never after extinguish has begun. Several resolved together run `onInit` in dependency order.
-  A lazy provider whose `onInit` raises never ticks or starts.
+  and never after extinguish has begun. Several resolved together (one, and the lazy providers its
+  constructor takes) run `onInit` in dependency order, and one resolved from inside one of their
+  `onInit`s, sync or `async`, joins them. One resolved anywhere else meanwhile gets its own turn:
+  its `onInit` waits only for the pending `onInit`s of the providers its constructor takes, and for
+  nothing else. A lazy provider whose `onInit` raises never ticks or starts.
 - An import that is extinguished while an importer is still igniting now fails that importer's
   ignition (`imported module '…' was extinguished while this module was igniting`).
 
@@ -141,8 +144,9 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 - core: the `async` `onInit` deadlock fix lets an unrelated thread's `extinguish()` of an import skip
   waiting for an importer that is waiting on a pending `onInit` Promise.
-- core: a lazy provider resolved on its own can wait behind another lazy provider's yielding `onInit`,
-  and hang if that `onInit` waits for it.
+- core: while a lazy provider's `onInit` Promise is pending, a lazy provider resolved on any thread
+  running Promise work joins its batch, an unrelated Promise's too; one resolved by a thread the
+  `onInit`'s executor spawned, after that thread yielded, gets its own turn.
 - networking: a sender created inside the leaving player's own `PlayerRemoving` handler never settles
   an infinite-timeout invoke of that player under Default or Immediate signal behaviour.
 - docs: the harness sections of `docs/reference/internals.md` still describe the old harness.

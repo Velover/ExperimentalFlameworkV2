@@ -395,8 +395,14 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 	 * observer that raises from its `onAdded` has the ones before it told `onRemoved`, and the
 	 * error comes out, so a refused object is attached nowhere -- rather than left ticking in the
 	 * lifecycle's sets, with no handle to remove it by.
+	 *
+	 * `dependencies`, what a provider's constructor was given, is handed to the observers with it.
 	 */
-	const registerClassInterfaces = (instance: object, kind: InterfaceTargetKind) => {
+	const registerClassInterfaces = (
+		instance: object,
+		kind: InterfaceTargetKind,
+		dependencies?: ReadonlyArray<defined>,
+	) => {
 		const added = new Array<[string, InterfaceConfiguration<unknown>]>();
 
 		const [success, err] = pcall(() => {
@@ -407,7 +413,7 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 				}
 
 				for (const observer of interested) {
-					observer.onAdded?.(instance, { interfaceId, kind });
+					observer.onAdded?.(instance, { interfaceId, kind, dependencies });
 					added.push([interfaceId, observer]);
 				}
 			}
@@ -442,12 +448,13 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		}
 	};
 
+	/** Constructs a class, resolving what its constructor takes into `resolvedParameters`. */
 	const instantiateClassWithDependencies = (
 		constructor: Constructor,
 		resolve?: (info: Modding.DependencyInfo) => unknown,
+		resolvedParameters = new Array<defined>(),
 	) => {
 		const dependencies = Reflect.getMetadata<Modding.DependencyInfo[]>(constructor, "flamework:dependencies") ?? [];
-		const resolvedParameters = new Array<defined>();
 		for (const dependency of dependencies) {
 			resolvedParameters.push(resolve?.(dependency) ?? resolveDependencyWithOrigin(dependency, constructor));
 		}
@@ -480,13 +487,20 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		if (moduleProvider) {
 			const config = moduleProvider.config;
 			if (config.type === "class") {
-				const instantiatedProvider = instantiateClassWithDependencies(config.value as Constructor);
+				const dependencies = new Array<defined>();
+				const instantiatedProvider = instantiateClassWithDependencies(
+					config.value as Constructor,
+					undefined,
+					dependencies,
+				);
 				instantiatedProviders.set(info.id, instantiatedProvider);
 
 				// Held only if it is attached: one an observer refuses is attached nowhere, so it must
 				// not be cached either -- the next resolve handed it out with no lifecycle at all, and
 				// `release` told every observer, the refusing one included, it was removed again.
-				const [attached, err] = pcall(() => registerClassInterfaces(instantiatedProvider, "provider"));
+				const [attached, err] = pcall(() =>
+					registerClassInterfaces(instantiatedProvider, "provider", dependencies),
+				);
 				if (!attached) {
 					instantiatedProviders.delete(info.id);
 					error(err, 0);

@@ -124,8 +124,17 @@ A **lazy provider** is different: it is a provider, so when it is first resolved
 plugin runs its `onInit` and `onStart` for it, on the next resume point, in that order. Several
 resolved together -- one, and the lazy providers its constructor takes -- go the way eager providers
 do: every `onInit` in the order they were resolved, a dependency first, each finished before the
-next begins, then every `onStart`. One whose `onInit` raises is reported, never ticks and is never
-started, and the ones after it carry on. One first
+next begins, then every `onStart`. One that one of those `onInit`s resolves, sync or `async`, before
+or after it yields, joins them: one resolved on the `onInit`'s own thread, on a thread it started and
+has not yet got back from, or, while a Promise the `onInit` returned is pending, on a thread running
+Promise work (an `async` body, a Promise executor, an `andThen` callback -- any Promise's, since
+which one a thread works for cannot be told). One resolved anywhere else meanwhile -- a thread an
+`onInit` spawned counts, once it has yielded -- gets its own turn, and its `onInit` waits for
+nothing but the `onInit`s still running of the providers its constructor takes: one taking a
+dependency that another turn is still initialising is initialised once that dependency's `onInit`
+has finished, so it never sees it half-initialised. A dependency waiting in turn for what depends on
+it hangs both, as with eager providers. One whose `onInit` raises is reported, never ticks and is
+never started, and the ones after it, or waiting for it, carry on. One first
 resolved while the module is still igniting, by a plugin's `onPostIgnite` hook after the lifecycle
 plugin's, waits for ignition to finish, and hears neither if the ignition fails. Its
 per-frame events wait for that too: it does not tick before its `onInit` has finished. Once the

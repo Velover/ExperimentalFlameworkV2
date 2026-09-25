@@ -33,6 +33,9 @@ Read in order the first time. Each page ends with the caveats for that topic.
   does with the result. Read this to change Flamework, or to debug something that only fails at
   runtime.
 - [Transformer plugins](reference/transformer-plugins.md) -- adding macro types of your own.
+- [Future considerations](future-considerations.md) -- possible directions (estimated cost of each
+  feature, Deferred-only signal behaviour, simpler rules for rare features) and the known limits left
+  alone.
 
 ## Testing
 

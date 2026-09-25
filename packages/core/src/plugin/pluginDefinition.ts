@@ -183,4 +183,12 @@ export interface InterfaceContext {
 	 * @internal
 	 */
 	refused?: boolean;
+
+	/**
+	 * What a provider's constructor was given, when the module constructed it: the lifecycle plugin
+	 * runs a lazy provider's `onInit` once theirs have finished.
+	 *
+	 * @internal
+	 */
+	dependencies?: ReadonlyArray<defined>;
 }
