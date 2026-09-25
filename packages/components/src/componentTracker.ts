@@ -183,6 +183,16 @@ export interface Criteria {
 	isRefused?: (instance: Instance) => boolean;
 
 	/**
+	 * Whether the component's removal is running on the instance. It has left every lookup, and
+	 * `getComponent` answers nothing for it until the removal is over, however qualified the entry
+	 * is -- and a tag added back by a handler of the removal's announcement qualifies it again
+	 * inside the removal, under immediate signal behaviour. Like `isInvalid`, not a criterion of the
+	 * entry but one for a dependent: built in that window, it raises asking for a dependency it
+	 * cannot resolve. The removal tells the dependents again as it ends.
+	 */
+	isRemoving?: (instance: Instance) => boolean;
+
+	/**
 	 * Whether the component's links are all met on this instance, right now. Used for instances
 	 * that are not tracked, where there is nothing watching and nothing to wait on.
 	 *
@@ -776,11 +786,12 @@ export class ComponentTracker {
 	 * down, and its entry goes on qualifying; what is asked here is asked by a dependent, or by the
 	 * eager path, and neither can be handed a component that is not there. Nor one that is missing
 	 * and that Flamework would not build (`isRefused`): a dependent counting it as met is built, and
-	 * raises asking for it.
+	 * raises asking for it. Nor one whose removal is running (`isRemoving`), for the same reason.
 	 */
 	public checkInstance(instance: Instance) {
 		if (this.criteria.isInvalid?.(instance) === true) return false;
 		if (this.criteria.isRefused?.(instance) === true) return false;
+		if (this.criteria.isRemoving?.(instance) === true) return false;
 
 		const tracker = this.getInstanceTracker(instance, false);
 
@@ -888,14 +899,15 @@ export class ComponentTracker {
 
 	/**
 	 * What an observer is told about an entry: whether the component can be had here, as
-	 * `checkInstance` answers -- the entry qualifies, no invalid component holds the place, and the
-	 * component is here or Flamework would build it.
+	 * `checkInstance` answers -- the entry qualifies, no invalid component holds the place, the
+	 * component is here or Flamework would build it, and its removal is not running.
 	 */
 	private isAvailable(instance: Instance, tracker: InstanceTracker) {
 		return (
 			tracker.isQualified &&
 			this.criteria.isInvalid?.(instance) !== true &&
-			this.criteria.isRefused?.(instance) !== true
+			this.criteria.isRefused?.(instance) !== true &&
+			this.criteria.isRemoving?.(instance) !== true
 		);
 	}
 

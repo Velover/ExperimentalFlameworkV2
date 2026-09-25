@@ -534,6 +534,7 @@ export class Components {
 			warningTimeout: componentInfo.config.warningTimeout ?? getRuntimeConfig().components?.warningTimeout,
 			dependencies,
 			isInvalid: (instance) => this.isInvalid(instance, component),
+			isRemoving: (instance) => this.isRemoving(instance, component),
 		});
 
 		this.trackers.set(component, tracker);
@@ -2465,31 +2466,36 @@ export class Components {
 			if (maid !== undefined) {
 				maid.Destroy();
 			}
-		}
 
-		// The place the invalid component held is free again, which is what the observers at its
-		// entry -- a dependent waiting on it, a link watching it -- were told the opposite of when
-		// it turned invalid, and what nothing else tells them: no removal was announced, and the
-		// entry never stopped qualifying. Told once the removal is over, so that the construction
-		// this lets try again finds nothing of it left. Not at extinguish, where nothing may be built.
-		if (wasInvalid && !this.isStopped) {
-			this.trackers.get(component)?.noteCleared(instance);
-		}
+			// The observers below are told here too, whatever the teardown did: a `destroy` that
+			// raises out of a removal by hand has still taken the component out of every lookup, and
+			// a dependent left untold goes on holding a destroyed component, with nothing left to
+			// take it down.
 
-		// A dependent holding it is taken down with it and waits for the next one, whether or not
-		// Flamework would build that one on its own: a removal by hand leaves the tag and the entry
-		// qualified, so nothing else tells the dependent the component it was built with has gone.
-		// An invalid one was never handed to a dependent, and what it frees is said above.
-		if (!this.isStopped) {
-			const tracker = this.trackers.get(component);
-			tracker?.noteProvided(instance, !wasInvalid);
+			// The place the invalid component held is free again, which is what the observers at its
+			// entry -- a dependent waiting on it, a link watching it -- were told the opposite of when
+			// it turned invalid, and what nothing else tells them: no removal was announced, and the
+			// entry never stopped qualifying. Told once the removal is over, so that the construction
+			// this lets try again finds nothing of it left. Not at extinguish, where nothing may be built.
+			if (wasInvalid && !this.isStopped) {
+				this.trackers.get(component)?.noteCleared(instance);
+			}
 
-			// Added back while the removal ran -- by a handler of its announcement, which runs inside
-			// it under immediate signal behaviour, or by `destroy` -- the new one told the dependents
-			// it was there before this told them the one they hold had gone, and nothing tells them
-			// again: they would wait for good on a component that is already here.
-			if (!wasInvalid && this.activeComponents.get(instance)?.get(component) !== undefined) {
-				tracker?.noteProvided(instance);
+			// A dependent holding it is taken down with it and waits for the next one, whether or not
+			// Flamework would build that one on its own: a removal by hand leaves the tag and the entry
+			// qualified, so nothing else tells the dependent the component it was built with has gone.
+			// An invalid one was never handed to a dependent, and what it frees is said above.
+			if (!this.isStopped) {
+				const tracker = this.trackers.get(component);
+				tracker?.noteProvided(instance, !wasInvalid);
+
+				// Added back while the removal ran -- by a handler of its announcement, which runs inside
+				// it under immediate signal behaviour, or by `destroy` -- the new one was kept from the
+				// dependents while the removal ran (`isRemoving`), and nothing else tells them it is
+				// here: they would wait for good on a component that is already here.
+				if (!wasInvalid && this.activeComponents.get(instance)?.get(component) !== undefined) {
+					tracker?.noteProvided(instance);
+				}
 			}
 		}
 	}

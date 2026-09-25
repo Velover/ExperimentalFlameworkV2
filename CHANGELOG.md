@@ -92,6 +92,10 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - Hand-written `t` instance guards were re-checked only in one direction; their queued poll could
   run after extinguish and raise.
 - `getComponent` raised after the module had extinguished.
+- Under Immediate, re-adding a tag from `onComponentRemoved` during that tag's own removal left the
+  instance tagged with no component; dependents now see a dependency as missing while its removal
+  runs, and are rebuilt around the new one when it ends.
+- A hand `removeComponent` of a dependency whose own `destroy` raises left its dependent holding it.
 
 ### networking
 
@@ -139,10 +143,6 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   waiting for an importer that is waiting on a pending `onInit` Promise.
 - core: a lazy provider resolved on its own can wait behind another lazy provider's yielding `onInit`,
   and hang if that `onInit` waits for it.
-- components: under Immediate, re-adding a tag from `onComponentRemoved` during that tag's own removal
-  leaves the instance tagged with no component.
-- components: a hand `removeComponent` of a dependency whose own `destroy` raises leaves its dependent
-  holding it.
 - networking: a sender created inside the leaving player's own `PlayerRemoving` handler never settles
   an infinite-timeout invoke of that player under Default or Immediate signal behaviour.
 - docs: the harness sections of `docs/reference/internals.md` still describe the old harness.

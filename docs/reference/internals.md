@@ -379,10 +379,15 @@ This is what makes dependencies and streaming work with one mechanism:
   dependent the component has gone whatever its tag, and the next build tells it of the next one; a
   dependent used to go on holding the destroyed one for good. The tag path's listener builds nothing
   while a construction by hand of its component is under way, which that telling can qualify it under.
-  A component added back while its removal runs -- from a handler of the removal's announcement,
-  which runs inside it under immediate signal behaviour -- tells the dependents it is there before
-  the removal tells them the old one went, so the removal tells them of it again as it finishes;
-  told only in that order, they went down and stayed down.
+  A component whose removal is running counts as missing to its dependents (`isRemoving`, read
+  where `isRefused` is), since `getComponent` answers nothing for it until the removal is over. A
+  tag added back from a handler of the removal's announcement, which runs inside it under immediate
+  signal behaviour, qualifies the entry again at once, and a dependent built there raised asking for
+  it -- out of the tag's announcement, before the tag path had registered, leaving the instance
+  tagged with nothing built. A component added back while its removal runs -- by that tag, by an
+  `addComponent` from the handler, or by `destroy` -- is told to the dependents as the removal
+  finishes. The removal tells them whatever its teardown did: a `destroy` that raised out of a
+  removal by hand used to skip the telling, and the dependent held the destroyed component for good.
 - The tag path's listener reports a `destroy` that raises rather than raising it into whatever
   handed it the loss. A dependency's tag going hands the loss round to its dependents before the
   dependency's own removal, and a dependent's raise there skipped that removal, leaving the
