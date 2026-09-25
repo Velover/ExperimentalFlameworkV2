@@ -1,5 +1,6 @@
 import { NetworkInfo } from "../types";
 import { Middleware, MiddlewareFactory, MiddlewareProcessor } from "./types";
+import { trimArguments } from "../util/trimArguments";
 
 export function createMiddlewareProcessor<I extends readonly unknown[], O>(
 	middlewareFactories: MiddlewareFactory<I, O>[] | undefined,
@@ -14,7 +15,12 @@ export function createMiddlewareProcessor<I extends readonly unknown[], O>(
 		for (let i = middlewareFactories.size() - 1; i >= 0; i--) {
 			const factory = middlewareFactories[i];
 			const processNext = middleware[i + 1] ?? finalize;
-			middleware[i] = factory(async (player, ...args) => processNext(player, ...args), networkInfo);
+			middleware[i] = factory(async (player, ...args) => {
+				// A middleware that names its parameters, `(player, id, name) => processNext(player, id, name)`,
+				// passes on a list ending in nil when `name` was not sent. Trimmed, it spreads whole.
+				const passed = trimArguments(args as unknown as unknown[]) as unknown as I;
+				return processNext(player, ...passed);
+			}, networkInfo);
 		}
 	}
 

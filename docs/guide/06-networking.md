@@ -110,7 +110,7 @@ A rejection is always a `NetworkingFunctionError`:
 | Value | Means |
 |---|---|
 | `Timeout` | No response in time. |
-| `Cancelled` | Middleware returned `Networking.Skip`, or the player left. |
+| `Cancelled` | Middleware returned `Networking.Skip`, the callback or a middleware returned a promise that was cancelled, or the player left. |
 | `BadRequest` | The arguments failed the generated guards. |
 | `Unprocessed` | The other realm has not called `setCallback`. |
 | `InvalidResult` | The response failed the return type's guard. |
@@ -184,13 +184,14 @@ it arrives, and the code that does it is plain buffer code generated from the de
 
 The encoding is generated **at each call site**: `Events.X.fire(value, where)` compiles to
 `buffer.create(20)`, four writes at literal offsets and `Events.X._fire(payload)`, right where the
-call was. A function callback is wrapped the same way so that its result leaves packed. No encoder
+call was. A function callback is registered with a generated packer for its result type, applied
+after the middleware, so that its result leaves packed. Apart from those result packers, no encoder
 exists as a value anywhere in the output, so there is nothing for an exploiter to call to forge a
-valid payload; the only way to produce one is the code path that legitimately sends it. Decoding is
-generated once per event and function into the `createServer` / `createClient` metadata, because a
-payload has to be unpacked before the guards and middleware see it. Nothing describes the type in
-the output, no schema table, no runtime library. Nothing about the API changes; the guards still run
-on what was decoded.
+valid request or event payload; the only way to produce one is the code path that legitimately
+sends it. Decoding is generated once per event and function into the `createServer` /
+`createClient` metadata, because a payload has to be unpacked before the guards and middleware see
+it. Nothing describes the type in the output, no schema table, no runtime library. Nothing about
+the API changes; the guards still run on what was decoded.
 
 Call sites are found by type. Send and register callbacks through the handler's own type
 (`Events.X.fire(...)`, a typed reference to `Events.X`, a helper generic over the event name), not

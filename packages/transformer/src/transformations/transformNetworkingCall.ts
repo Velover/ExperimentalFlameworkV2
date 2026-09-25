@@ -3,17 +3,18 @@ import { Diagnostics } from "../classes/diagnostics";
 import { TransformState } from "../classes/transformState";
 import { f } from "../util/factory";
 import { buildInlineEncoding, buildInlineResultEncoding } from "../util/functions/buildSerializerFromType";
-import { NETWORKING_PACKAGE } from "../util/packages";
 
 /**
  * With `networking.serialization` on, a call that sends over a networking handler packs its
  * argument list right where it is made: the encoding is generated inline from the handler's types
  * and the packed `(payload, blobs?)` goes to the handler's hidden `_fire` / `_invoke` entry point.
- * A function receiver's callback is wrapped the same way so that its results leave packed.
+ * A function receiver's callback is registered with a generated `pack` for its result type, which
+ * the runtime applies to what the middleware chain resolves with, so that results leave packed.
  *
- * Nothing in the output can encode on its own; only these call sites do. Decoding stays in the
- * handler metadata, because a remote's payload has to be unpacked before the guards and middleware
- * see it, which is why the receiving side needs a function and the sending side does not.
+ * Apart from those result packers, nothing in the output can encode on its own; only these call
+ * sites do. Decoding stays in the handler metadata, because a remote's payload has to be unpacked
+ * before the guards and middleware see it, which is why the receiving side needs a function and
+ * the sending side does not.
  *
  * Call sites are found by type: the handler members carry hidden `_flamework_send` /
  * `_flamework_fn` markers. A member declared `Networking.Raw*` has no marker and is left alone, as is
@@ -444,9 +445,10 @@ function isConstant(node: ts.Expression): boolean {
 }
 
 /**
- * `handler.fn.setCallback(cb)` becomes `handler.fn._setCallback((lead..., a, b) => pack(cb(lead..., a, b)))`,
- * where `pack` turns a successful result into `[payload, blobs?]` (or nothing, for a `void` result),
- * follows a Promise if the callback returned one, and lets `Networking.Skip` through untouched.
+ * `handler.fn.setCallback(cb)` becomes `handler.fn._setCallback(cb, (value) => pack(value))`, where
+ * `pack` turns a successful result into `[payload, blobs?]` (or nothing, for a `void` result). The
+ * callback itself is registered as it is: the runtime packs whatever the middleware chain resolves
+ * with, so middleware sees plain results and one it returns is packed like the callback's own.
  */
 function transformReceiverCallback(
 	state: TransformState,
@@ -455,21 +457,11 @@ function transformReceiverCallback(
 	targetType: ts.Type,
 	optionalTarget: boolean,
 ): ts.Expression | undefined {
-	const typeChecker = state.typeChecker;
 	const callbackArgument = node.arguments[0];
 	if (!callbackArgument) return;
 
-	const listType = markerType(state, targetType, "_flamework_receive", node);
 	const fnType = markerType(state, targetType, "_flamework_fn", node);
-	if (!listType || !fnType) return;
-
-	// How many arguments precede the list: the callback type is declared `(lead..., ...args: I) => ...`.
-	const signature = typeChecker.getResolvedSignature(node);
-	const declaration = signature?.declaration;
-	if (!declaration || !ts.isFunctionLike(declaration)) return;
-	const callbackType = declaration.parameters[0]?.type;
-	if (!callbackType || !ts.isFunctionTypeNode(callbackType)) return;
-	const leadingCount = callbackType.parameters.filter((parameter) => parameter.dotDotDotToken === undefined).length;
+	if (!fnType) return;
 
 	const statements = new Array<ts.Statement>();
 
@@ -485,76 +477,27 @@ function transformReceiverCallback(
 	const transformedCallback = state.transformNode(callbackArgument);
 	statements.push(f.variableStatement(callback, transformedCallback, callbackAnnotation));
 
-	// The wrapper mirrors the callback's parameters, so nothing is gathered into a table per call.
-	const parameters = new Array<ts.ParameterDeclaration>();
-	const forwarded = new Array<ts.Expression>();
-	for (let i = 0; i < leadingCount; i++) {
-		const id = f.identifier("lead", true);
-		parameters.push(f.parameterDeclaration(id, f.keywordType(ts.SyntaxKind.UnknownKeyword)));
-		forwarded.push(id);
-	}
-
-	if (typeChecker.isTupleType(listType)) {
-		const tuple = listType as ts.TupleTypeReference;
-		tuple.target.elementFlags.forEach((flags) => {
-			const id = f.identifier("arg", true);
-			if (flags & ts.ElementFlags.Rest) {
-				parameters.push(f.parameterDeclaration(id, arrayType(), undefined, false, true));
-				forwarded.push(ts.factory.createSpreadElement(id));
-			} else {
-				parameters.push(f.parameterDeclaration(id, f.keywordType(ts.SyntaxKind.UnknownKeyword)));
-				forwarded.push(id);
-			}
-		});
-	}
-
-	const callable = f.functionType(
-		[f.parameterDeclaration("args", arrayType(), undefined, false, true)],
-		f.keywordType(ts.SyntaxKind.UnknownKeyword),
-	);
-	const result = f.identifier("result", true);
-	const body = new Array<ts.Statement>();
-	body.push(f.variableStatement(result, f.call(f.as(callback, callable), forwarded)));
-
-	// A Promise is followed; its value is packed once it resolves.
+	// The runtime calls `pack` only with a resolved, successful value: never a Promise or a Skip.
 	const value = f.identifier("value", true);
-	const packLater = f.arrowFunction(f.block(packResult(state, node, fnType, value, true)), [
-		f.parameterDeclaration(value),
+	const pack = f.arrowFunction(f.block(packResult(state, node, fnType, value)), [
+		f.parameterDeclaration(value, f.keywordType(ts.SyntaxKind.UnknownKeyword)),
 	]);
-	body.push(
-		ts.factory.createIfStatement(
-			f.call(f.propertyAccessExpression(f.identifier("Promise"), f.identifier("is")), [result]),
-			f.block([f.returnStatement(f.call(f.propertyAccessExpression(result, f.identifier("then")), [packLater]))]),
-		),
-	);
-	body.push(...packResult(state, node, fnType, result, false));
 
-	const wrapper = f.arrowFunction(f.block(body), parameters);
-	const call = f.call(f.propertyAccessExpression(boundTarget, f.identifier("_setCallback")), [wrapper]);
+	const call = f.call(f.propertyAccessExpression(boundTarget, f.identifier("_setCallback")), [callback, pack]);
 	return emitWithStatements(state, node, statements, call, [target, transformedCallback], chained.wrap);
 }
 
-/**
- * `if (v === Networking.Skip) return v; <pack v>; return [payload, blobs?]`, or `return undefined`
- * when the result type carries nothing.
- */
+/** `<pack v>; return [payload, blobs?]`, or `return undefined` when the result type carries nothing. */
 function packResult(
 	state: TransformState,
 	node: ts.CallExpression,
 	fnType: ts.Type,
 	value: ts.Identifier,
-	isParameter: boolean,
 ): ts.Statement[] {
-	const networking = state.addFileImport(state.getSourceFile(node), NETWORKING_PACKAGE, "Networking");
-	const skip = f.propertyAccessExpression(networking, f.identifier("Skip"));
-	const encoding = buildInlineResultEncoding(state, node, fnType, value, isParameter);
+	const encoding = buildInlineResultEncoding(state, node, fnType, value, true);
 	const packed = packedArguments(encoding);
 
 	return [
-		ts.factory.createIfStatement(
-			f.binary(value, ts.SyntaxKind.EqualsEqualsEqualsToken, skip),
-			f.block([f.returnStatement(value)]),
-		),
 		...encoding.statements,
 		f.returnStatement(packed.length > 0 ? f.as(f.array(packed, false), arrayType()) : f.nil()),
 	];

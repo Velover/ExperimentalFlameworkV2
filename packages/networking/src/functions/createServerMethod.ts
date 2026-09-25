@@ -2,6 +2,7 @@ import { FunctionReceiverInterface } from "../function/createFunctionReceiver";
 import { FunctionSenderInterface } from "../function/createFunctionSender";
 import { NetworkingFunctionError } from "../function/errors";
 import { timeoutPromise } from "../util/timeoutPromise";
+import { trimArguments } from "../util/trimArguments";
 import { FunctionCreateConfiguration, ServerReceiver, ServerSender } from "./types";
 
 type ServerMethod = ServerSender<unknown[], unknown> & ServerReceiver<unknown[], unknown>;
@@ -11,9 +12,11 @@ export function createServerMethod(
 	receiver?: FunctionReceiverInterface,
 	sender?: FunctionSenderInterface,
 ) {
+	// A method that takes an argument list trims it before spreading it, or an explicit trailing
+	// `undefined` would lose the arguments after a gap (see `trimArguments`).
 	const method: { [k in keyof ServerMethod]: ServerMethod[k] } = {
 		invoke(player: Player, ...args: unknown[]) {
-			return this.invokeWithTimeout(player, config.defaultTimeout, ...args);
+			return this.invokeWithTimeout(player, config.defaultTimeout, ...trimArguments(args));
 		},
 
 		invokeWithTimeout(player: Player, timeout: number, ...args: unknown[]) {
@@ -21,7 +24,7 @@ export function createServerMethod(
 
 			return Promise.race([
 				timeoutPromise(timeout, NetworkingFunctionError.Timeout),
-				sender.invokeClient(player, ...args),
+				sender.invokeClient(player, ...trimArguments(args)),
 			]);
 		},
 
@@ -41,23 +44,23 @@ export function createServerMethod(
 			receiver.setServerCallback(callback);
 		},
 
-		// The transformer wraps the callback so its successful results arrive as `[payload, blobs?]`.
-		_setCallback(callback) {
+		// The transformer passes `pack`, which turns a successful result into `[payload, blobs?]`.
+		_setCallback(callback, pack) {
 			assert(receiver, "This is not a receiver remote.");
 
-			receiver.setServerCallback(callback as never, true);
+			receiver.setServerCallback(callback as never, pack);
 		},
 
 		predict(player, ...args) {
 			assert(receiver, "This is not a receiver remote.");
 
-			return receiver.invoke(player, ...args);
+			return receiver.invoke(player, ...trimArguments(args));
 		},
 	};
 
 	setmetatable(method, {
 		__call: (method, player, ...args) => {
-			return method.invoke(player as Player, ...args);
+			return method.invoke(player as Player, ...trimArguments(args));
 		},
 	});
 

@@ -77,11 +77,12 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 			? createFunctionReceiver({
 					namespace: globalName,
 					debugName: name,
-					id: isSender ? `${receiverPrefix}${effectiveName}` : effectiveName,
+					// Prefixed even when the function goes one way: `$` and `@` are valid in names, so a bare
+					// `$name` would be the same id as the prefixed receiver of a two-way `name`.
+					id: `${receiverPrefix}${effectiveName}`,
 					networkInfo,
 					incomingMiddleware,
 					argsDecoder: metadata.incomingSerializers?.[name] as never,
-					resultDecoder: metadata.incomingResults?.[name] as never,
 					onMalformed,
 				})
 			: undefined;
@@ -90,7 +91,7 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 			? createFunctionSender({
 					namespace: globalName,
 					debugName: name,
-					id: isReceiver ? `${senderPrefix}${effectiveName}` : effectiveName,
+					id: `${senderPrefix}${effectiveName}`,
 					networkInfo,
 					resultDecoder: metadata.outgoingResults?.[name] as never,
 					// A response that cannot be decoded is a bad response, like one failing the return guard.

@@ -2,6 +2,7 @@ import { FunctionReceiverInterface } from "../function/createFunctionReceiver";
 import { FunctionSenderInterface } from "../function/createFunctionSender";
 import { NetworkingFunctionError } from "../function/errors";
 import { timeoutPromise } from "../util/timeoutPromise";
+import { trimArguments } from "../util/trimArguments";
 import { ClientReceiver, ClientSender, FunctionCreateConfiguration } from "./types";
 
 type ClientMethod = ClientSender<unknown[], unknown> & ClientReceiver<unknown[], unknown>;
@@ -11,9 +12,11 @@ export function createClientMethod(
 	receiver?: FunctionReceiverInterface,
 	sender?: FunctionSenderInterface,
 ) {
+	// A method that takes an argument list trims it before spreading it, or an explicit trailing
+	// `undefined` would lose the arguments after a gap (see `trimArguments`).
 	const method: { [k in keyof ClientMethod]: ClientMethod[k] } = {
 		invoke(...args: unknown[]) {
-			return this.invokeWithTimeout(config.defaultTimeout, ...args);
+			return this.invokeWithTimeout(config.defaultTimeout, ...trimArguments(args));
 		},
 
 		invokeWithTimeout(timeout: number, ...args: unknown[]) {
@@ -21,7 +24,7 @@ export function createClientMethod(
 
 			return Promise.race([
 				timeoutPromise(timeout, NetworkingFunctionError.Timeout),
-				sender.invokeServer(...args),
+				sender.invokeServer(...trimArguments(args)),
 			]);
 		},
 
@@ -41,23 +44,23 @@ export function createClientMethod(
 			receiver.setClientCallback(callback);
 		},
 
-		// The transformer wraps the callback so its successful results arrive as `[payload, blobs?]`.
-		_setCallback(callback) {
+		// The transformer passes `pack`, which turns a successful result into `[payload, blobs?]`.
+		_setCallback(callback, pack) {
 			assert(receiver, "This is not a receiver remote.");
 
-			receiver.setClientCallback(callback as never, true);
+			receiver.setClientCallback(callback as never, pack);
 		},
 
 		predict(...args) {
 			assert(receiver, "This is not a receiver remote.");
 
-			return receiver.invoke(undefined, ...args);
+			return receiver.invoke(undefined, ...trimArguments(args));
 		},
 	};
 
 	setmetatable(method, {
 		__call: (method, ...args) => {
-			return method.invoke(...args);
+			return method.invoke(...trimArguments(args));
 		},
 	});
 

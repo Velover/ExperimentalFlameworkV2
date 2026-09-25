@@ -1,12 +1,15 @@
 import { ClientReceiver, ClientSender } from "./types";
 import { EventInterface } from "../event/createEvent";
+import { trimArguments } from "../util/trimArguments";
 
 type ClientMethod = ClientSender<never[]> & ClientReceiver<never[]>;
 
 export function createClientMethod(receiver: EventInterface, sender: EventInterface) {
+	// A method that takes an argument list trims it before spreading it, or an explicit trailing
+	// `undefined` would lose the arguments after a gap (see `trimArguments`).
 	const method: { [k in keyof ClientMethod]: ClientMethod[k] } = {
 		fire(...args) {
-			sender.fireServer(...args);
+			sender.fireServer(...trimArguments(args));
 		},
 
 		// With serialization on, the transformer rewrites every `fire` into this with the packed list:
@@ -20,13 +23,13 @@ export function createClientMethod(receiver: EventInterface, sender: EventInterf
 		},
 
 		predict(...args) {
-			return receiver.invoke(undefined, ...args);
+			return receiver.invoke(undefined, ...trimArguments(args));
 		},
 	};
 
 	setmetatable(method, {
 		__call: (method, ...args) => {
-			method.fire(...(args as never[]));
+			method.fire(...(trimArguments(args) as never[]));
 		},
 	});
 

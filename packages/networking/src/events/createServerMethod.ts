@@ -1,12 +1,17 @@
 import { Players } from "@rbxts/services";
 import { ServerReceiver, ServerSender } from "./types";
 import { EventInterface } from "../event/createEvent";
+import { trimArguments } from "../util/trimArguments";
 
 type ServerMethod = ServerSender<unknown[]> & ServerReceiver<unknown[]>;
 
 export function createServerMethod(receiver: EventInterface, sender: EventInterface) {
+	// A method that takes an argument list trims it before spreading it, or an explicit trailing
+	// `undefined` would lose the arguments after a gap (see `trimArguments`).
 	const method: { [k in keyof ServerMethod]: ServerMethod[k] } = {
 		fire(players, ...args) {
+			args = trimArguments(args);
+
 			if (typeIs(players, "Instance")) {
 				sender.fireClient(players, ...args);
 			} else {
@@ -17,10 +22,12 @@ export function createServerMethod(receiver: EventInterface, sender: EventInterf
 		},
 
 		broadcast(...args) {
-			sender.fireAllClients(...args);
+			sender.fireAllClients(...trimArguments(args));
 		},
 
 		except(players, ...args) {
+			args = trimArguments(args);
+
 			if (typeIs(players, "Instance")) players = [players];
 
 			for (const player of Players.GetPlayers()) {
@@ -49,13 +56,13 @@ export function createServerMethod(receiver: EventInterface, sender: EventInterf
 		},
 
 		predict(player, ...args) {
-			receiver.invoke(player, ...args);
+			receiver.invoke(player, ...trimArguments(args));
 		},
 	};
 
 	setmetatable(method, {
 		__call: (method, player, ...args) => {
-			method.fire(player as Player, ...args);
+			method.fire(player as Player, ...trimArguments(args));
 		},
 	});
 

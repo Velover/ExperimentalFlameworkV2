@@ -68,8 +68,8 @@ export interface ServerReceiver<I extends unknown[], O, F = unknown> extends Raw
 	/** @hidden The declared function type; its return type is what the transformer packs. */
 	readonly _flamework_fn?: F;
 
-	/** @hidden Registers a callback whose successful results are already packed as `[payload, blobs?]`. */
-	_setCallback(callback: (player: Player, ...args: never[]) => unknown): void;
+	/** @hidden Registers a callback with `pack`, which turns a successful result into `[payload, blobs?]`. */
+	_setCallback(callback: (player: Player, ...args: never[]) => unknown, pack: (value: unknown) => unknown): void;
 }
 
 export interface RawClientSender<I extends unknown[], O> {
@@ -119,8 +119,8 @@ export interface ClientReceiver<I extends unknown[], O, F = unknown> extends Raw
 	/** @hidden The declared function type; its return type is what the transformer packs. */
 	readonly _flamework_fn?: F;
 
-	/** @hidden Registers a callback whose successful results are already packed as `[payload, blobs?]`. */
-	_setCallback(callback: (...args: never[]) => unknown): void;
+	/** @hidden Registers a callback with `pack`, which turns a successful result into `[payload, blobs?]`. */
+	_setCallback(callback: (...args: never[]) => unknown, pack: (value: unknown) => unknown): void;
 }
 
 export type ServerHandler<E, R> = NetworkingObfuscationMarker & {
@@ -250,21 +250,18 @@ export type NamespaceMetadata<R, S> = Modding.Emit<{
 	incoming: IntrinsicObfuscate<{ [k in keyof Functions<R>]: IntrinsicTupleGuards<Parameters<R[k]>> }>;
 
 	outgoingIds: ObfuscateNames<keyof Functions<S>>;
-	outgoing: IntrinsicObfuscate<{ [k in keyof Functions<S>]: Modding.Target.Guard<ReturnType<S[k]>> }>;
+	// A response carries the resolved value: a `Promise<T>` result is checked as `T`.
+	outgoing: IntrinsicObfuscate<{ [k in keyof Functions<S>]: Modding.Target.Guard<Awaited<ReturnType<S[k]>>> }>;
 
 	/**
 	 * Decoders, present only with `networking.serialization` on and absent for raw functions: the
-	 * argument lists of requests this realm receives, the results its callbacks return (so `predict`
-	 * can unpack them) and the responses to requests it sends. Requests and results are packed inline
-	 * where they are produced.
+	 * argument lists of requests this realm receives and the responses to requests it sends. Requests
+	 * and results are packed inline where they are produced.
 	 */
 	incomingSerializers: IntrinsicObfuscate<{
 		[k in keyof Functions<R>]: R[k] extends NetworkRaw<unknown>
 			? undefined
 			: IntrinsicNetworkDecoder<Parameters<R[k]>>;
-	}>;
-	incomingResults: IntrinsicObfuscate<{
-		[k in keyof Functions<R>]: R[k] extends NetworkRaw<unknown> ? undefined : IntrinsicNetworkResultDecoder<R[k]>;
 	}>;
 	outgoingResults: IntrinsicObfuscate<{
 		[k in keyof Functions<S>]: S[k] extends NetworkRaw<unknown> ? undefined : IntrinsicNetworkResultDecoder<S[k]>;

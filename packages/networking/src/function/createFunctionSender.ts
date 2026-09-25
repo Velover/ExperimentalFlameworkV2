@@ -104,6 +104,11 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 	// We don't need to defer here because we only accept responses to our explicit invocations.
 	const requestInfoServer = new Map<Player, RequestInfo>();
 	const requestInfoClient = createRequestInfo();
+
+	// A player who has left never answers: `FireClient` drops the request without a word, and only a
+	// finite timeout would ever settle it. Weak, so that remembering them does not keep them alive.
+	const departedPlayers = setmetatable(new Set<Player>(), { __mode: "k" });
+
 	if (RunService.IsServer()) {
 		event.connectServer((player, id, processResult, ...response) => {
 			const requestInfo = requestInfoServer.get(player);
@@ -115,6 +120,8 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 		});
 
 		Players.PlayerRemoving.Connect((player) => {
+			departedPlayers.add(player);
+
 			const requestInfo = requestInfoServer.get(player);
 			requestInfoServer.delete(player);
 
@@ -132,8 +139,19 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 	}
 
 	const createInvocation = (player: Player | undefined, id: number, requestInfo: RequestInfo) => {
+		// A player's entry lives only while requests to them are in flight, so a request that is
+		// never answered holds the Player only until it times out or is cancelled.
+		const settle = () => {
+			requestInfo.requests.delete(id);
+			if (player && requestInfo.requests.isEmpty() && requestInfoServer.get(player) === requestInfo) {
+				requestInfoServer.delete(player);
+			}
+		};
+
 		return new Promise((resolve, reject, onCancel) => {
 			requestInfo.requests.set(id, (value, rejection) => {
+				settle();
+
 				if (rejection) {
 					return reject(rejection);
 				}
@@ -145,9 +163,7 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 				}
 			});
 
-			onCancel(() => {
-				requestInfo!.requests.delete(id);
-			});
+			onCancel(settle);
 		});
 	};
 
@@ -160,6 +176,10 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 		},
 
 		invokeClient(player, ...args) {
+			if (departedPlayers.has(player) || hasLeft(player)) {
+				return Promise.reject(NetworkingFunctionError.Cancelled);
+			}
+
 			let requestInfo = requestInfoServer.get(player);
 			if (!requestInfo) requestInfoServer.set(player, (requestInfo = createRequestInfo()));
 
@@ -169,6 +189,16 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 			return createInvocation(player, id, requestInfo);
 		},
 	};
+}
+
+/**
+ * A player who left before this sender existed, whom its `PlayerRemoving` never saw: a player in the
+ * game is parented to `Players`. Inside `PlayerRemoving` the leaving player may still read as
+ * parented (Immediate signals), which is what `departedPlayers` is for. A Player that never was
+ * parented there (the Lune harness's) counts as present while `Players` lists it.
+ */
+function hasLeft(player: Player) {
+	return player.Parent !== Players && !Players.GetPlayers().includes(player);
 }
 
 function createRequestInfo(): RequestInfo {

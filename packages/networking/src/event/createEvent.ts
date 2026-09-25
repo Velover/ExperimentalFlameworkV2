@@ -1,9 +1,11 @@
 import { Serialization } from "@flamework-experimental/core";
 import { RunService } from "@rbxts/services";
+import Signal from "@rbxts/signal";
 import { MiddlewareFactory, MiddlewareProcessor } from "../middleware/types";
 import { createRemoteInstance } from "./createRemoteInstance";
 import { NetworkInfo } from "../types";
 import { createMiddlewareProcessor } from "../middleware/createMiddlewareProcessor";
+import { trimArguments } from "../util/trimArguments";
 
 export interface CreateEventOptions {
 	/**
@@ -70,6 +72,10 @@ const NO_BLOBS = new Array<defined>();
  * The argument list a remote delivered: `args` as they are without a decoder, otherwise the buffer
  * and blob list unpacked. `undefined` when the payload was malformed, after reporting it through
  * `onMalformed`. Decoding runs under `pcall`: a hostile buffer raises instead of yielding garbage.
+ *
+ * Either way the list is trimmed after its last value, so that no hop after it loses the values
+ * that follow a nil (see `trimArguments`). A decoded list keeps one slot per declared parameter,
+ * so an absent trailing optional would otherwise end it in nil.
  */
 export function decodeArguments(
 	decoder: Serialization.Decoder | undefined,
@@ -77,7 +83,7 @@ export function decodeArguments(
 	args: unknown[],
 	onMalformed?: (player: Player | undefined, message: string) => void,
 ): unknown[] | undefined {
-	if (!decoder) return args;
+	if (!decoder) return trimArguments(args);
 
 	const [payload, blobs] = args;
 	if (!typeIs(payload, "buffer") || (blobs !== undefined && !typeIs(blobs, "table"))) {
@@ -91,7 +97,7 @@ export function decodeArguments(
 		return undefined;
 	}
 
-	return result as unknown[];
+	return trimArguments(result as unknown[]);
 }
 
 export function createEvent(options: CreateEventOptions): EventInterface {
@@ -102,13 +108,16 @@ export function createEvent(options: CreateEventOptions): EventInterface {
 		options.id,
 	) as RemoteEvent;
 
-	let bindable: BindableEvent | undefined;
+	// Passes the arguments by reference. A plain BindableEvent would copy them, turning a decoded
+	// `Map<Instance, ...>` into one keyed by strings and raising on a `Set<boolean>`.
+	let signal: Signal<(...args: never[]) => void> | undefined;
 
+	// Nothing to deliver to until something connects (a `predict` may come first).
 	const invoke = createMiddlewareProcessor(options.incomingMiddleware, options.networkInfo, (player, ...args) => {
 		if (RunService.IsServer()) {
-			bindable!.Fire(player as never, ...(args as never[]));
+			signal?.Fire(player as never, ...(args as never[]));
 		} else {
-			bindable!.Fire(...(args as never[]));
+			signal?.Fire(...(args as never[]));
 		}
 	});
 
@@ -120,11 +129,11 @@ export function createEvent(options: CreateEventOptions): EventInterface {
 	};
 
 	const createConnection = (callback: (...args: never[]) => void) => {
-		if (bindable) {
-			return bindable.Event.Connect(callback);
+		if (signal) {
+			return signal.Connect(callback);
 		}
 
-		bindable = new Instance("BindableEvent");
+		signal = new Signal();
 
 		// We defer to allow any other immediate connections to take place before unloading Roblox's queue.
 		task.defer(() => {
@@ -135,7 +144,7 @@ export function createEvent(options: CreateEventOptions): EventInterface {
 			}
 		});
 
-		return bindable.Event.Connect(callback);
+		return signal.Connect(callback);
 	};
 
 	return {

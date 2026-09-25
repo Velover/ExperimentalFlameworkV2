@@ -163,7 +163,9 @@ describe("networking serialization", () => {
 		expect(source()).not.toContain("encode = function");
 		expect(source()).not.toContain("outgoingSerializers");
 		expect(source()).toMatch(/incomingSerializers = \{\s*ping = \(?function\(buf\w*\)/);
-		expect(source()).toMatch(/incomingResults = \{\s*echo = \(?function\(buf\w*\)/);
+		expect(source()).toMatch(/outgoingResults = \{\s*echo = \(?function\(buf\w*\)/);
+		// `predict` gets the callback's value as it is, so a receiver has no result decoder.
+		expect(source()).not.toContain("incomingResults");
 	});
 
 	test("packs event arguments at each call site and sends them through the hidden entry point", () => {
@@ -222,7 +224,7 @@ describe("networking serialization", () => {
 		);
 		expect(body).toMatch(/if callers == nil then\s*return nil\s*end[\s\S]*?return _result\w*:_invoke\(buf\w*\)/);
 		expect(body).toMatch(
-			/if receivers == nil then\s*return nil\s*end[\s\S]*?return target\w*:_setCallback\(function\(lead\w*, arg\w*\)/,
+			/if receivers == nil then\s*return nil\s*end[\s\S]*?return target\w*:_setCallback\(callback\w*, function\(value\w*\)/,
 		);
 		// A target that is not a reference is bound first and the local is tested.
 		expect(body).toMatch(
@@ -243,14 +245,17 @@ describe("networking serialization", () => {
 		expect(source()).toMatch(/server\.pong:_fire\(player, buf\w*\)/);
 	});
 
-	test("packs function requests and wraps callbacks so results leave packed", () => {
+	test("packs function requests and registers callbacks with a packer for their results", () => {
 		expect(source()).toMatch(/return clientFunctions\.echo:_invoke\(buf\w*\)/);
-		expect(source()).toMatch(/target\w*:_setCallback\(function\(lead\w*, arg\w*\)/);
-		expect(source()).toMatch(
-			/if TS\.Promise\.is\(result\w*\) then\s*return result\w*:andThen\(function\(value\w*\)/,
-		);
-		expect(source()).toMatch(/if result\w* == Networking\.Skip then\s*return result\w*/);
+		// Regression: the packing wrapped the callback, below the middleware, so a value a middleware
+		// returned left unpacked and a middleware awaiting the next step saw `[payload, blobs]`. The
+		// callback is now registered as it is; the runtime packs what the chain resolves with.
+		expect(source()).toMatch(/target\w*:_setCallback\(callback\w*, function\(value\w*\)/);
+		expect(source()).not.toMatch(/Networking\.Skip/);
 		expect(source()).toMatch(/return \{ buf\w* \}/);
+		// Regression: a `Promise<string>` result was guarded with `Promise.is`, which a value that
+		// crossed a remote never passes; the guard checks the resolved type.
+		expect(source()).toMatch(/outgoing = \{\s*echo = t\.string,/);
 	});
 
 	test("sends nothing for a list that carries nothing", () => {
@@ -259,11 +264,8 @@ describe("networking serialization", () => {
 		// No decoder for it either: the runtime passes the empty list through.
 		expect(source()).not.toMatch(/bump = \(?function/);
 		expect(source()).not.toMatch(/nothing = \(?function\(buf/);
-		// A void callback's wrapper returns nothing instead of a packed list.
-		expect(source()).toMatch(
-			/target\w*:_setCallback\(function\(lead\w*\)\s*local result\w* = callback\w*\(lead\w*\)/,
-		);
-		expect(source()).toMatch(/if result\w* == Networking\.Skip then\s*return result\w*\s*end\s*return nil/);
+		// A void callback's packer returns nothing instead of a packed list.
+		expect(source()).toMatch(/target\w*:_setCallback\(callback\w*, function\(value\w*\)\s*return nil\s*end\)/);
 	});
 
 	test("leaves raw members exactly as written", () => {

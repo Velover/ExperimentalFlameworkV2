@@ -5,6 +5,7 @@ import { FunctionNetworkingEvents } from "../handlers";
 import { createGenericHandler } from "./createGenericHandler";
 import { createServerMethod } from "./createServerMethod";
 import { createClientMethod } from "./createClientMethod";
+import { createOnce } from "../util/createOnce";
 
 const SERVER_PREFIX = "$";
 const CLIENT_PREFIX = "@";
@@ -22,7 +23,9 @@ export function createNetworkingFunction<S, C>(globalName: string): GlobalFuncti
 	const signals = createSignalContainer<FunctionNetworkingEvents>();
 
 	let server: ServerHandler<C, S> | undefined;
-	let client: ClientHandler<S, C> | undefined;
+	// Built once: building it waits for the server's remotes, and a thread that asks meanwhile gets the
+	// same handler rather than a second one wired to the same remotes.
+	const client = createOnce<ClientHandler<S, C>>();
 
 	return {
 		createServer(config, meta) {
@@ -51,8 +54,8 @@ export function createNetworkingFunction<S, C>(globalName: string): GlobalFuncti
 				return undefined!;
 			}
 
-			if (client === undefined) {
-				client = createGenericHandler<ClientHandler<S, C>, S, C>(
+			return client(() =>
+				createGenericHandler<ClientHandler<S, C>, S, C>(
 					globalName,
 					undefined,
 					CLIENT_PREFIX,
@@ -61,10 +64,8 @@ export function createNetworkingFunction<S, C>(globalName: string): GlobalFuncti
 					getDefaultConfiguration(config),
 					signals,
 					createClientMethod,
-				);
-			}
-
-			return client;
+				),
+			);
 		},
 
 		registerHandler(key, callback) {
