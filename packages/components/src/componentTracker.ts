@@ -67,13 +67,6 @@ interface InstanceTracker {
 	timeoutWarningThread?: thread;
 
 	/**
-	 * Re-points the instance guard's poll at the change that could overturn the guard's current
-	 * answer. Present only while that poll is running, which is not every component and not every
-	 * streaming mode.
-	 */
-	syncTypeGuardPoll?: (isMet: boolean) => void;
-
-	/**
 	 * The watcher following the instance guard's tree, present only while the guard is polled
 	 * through a shape. `testInstance` re-reads the guard through it rather than running it whole,
 	 * so that what the watcher holds stays in step with the answer it gave.
@@ -178,6 +171,16 @@ export interface Criteria {
 	 * on top of it.
 	 */
 	isInvalid?: (instance: Instance) => boolean;
+
+	/**
+	 * Whether the component is missing from the instance and Flamework would not build it there of
+	 * its own accord, however qualified the entry is: it has no tag, so it exists only once somebody
+	 * adds it, or its predicate refuses the instance. Like `isInvalid`, not a criterion of the entry
+	 * -- the tag path never builds such a component, whatever the entry says -- but one for a
+	 * dependent, which cannot be handed a component that is not there. Present only for a component
+	 * that can be refused this way.
+	 */
+	isRefused?: (instance: Instance) => boolean;
 
 	/**
 	 * Whether the component's links are all met on this instance, right now. Used for instances
@@ -377,66 +380,33 @@ export class ComponentTracker {
 		} else if (pollsTree) {
 			// A guard written by hand can only be run whole, so the tree is watched whole: every
 			// descendant change re-runs it.
-			let addedConnection: RBXScriptConnection | undefined;
-			let removingConnection: RBXScriptConnection | undefined;
-			let isScheduled = false;
-
+			//
 			// Re-reads the guard against the tree as it now stands, whichever signal reported that
 			// it moved. Both connections run the same body because the poll is not told what
-			// changed: it is here to report the tree it finds when it runs, and a poll that was
-			// re-pointed while this was already queued still has to. As above, a reading that
+			// changed: it is here to report the tree it finds when it runs. As above, a reading that
 			// matches the record is reported too: the gate can have refused a flip on a tree that
-			// is whole again by now, and the record says nothing of it.
-			const poll = () => {
+			// is whole again by now, and the record says nothing of it. Released with the entry,
+			// as the other polls are: one already queued when the entry goes -- the tree moved in
+			// the resumption the tag went, or the module extinguished -- would otherwise run against
+			// the released entry and hand its listeners an answer, the tag path's own included.
+			const deferred = deferOnce(() => {
 				this.setTypeGuardMet(tracker, typeGuard(instance));
 				this.updateListeners(instance, tracker);
-			};
-
-			const schedule = () => {
-				if (isScheduled) return;
-				isScheduled = true;
-
-				task.defer(() => {
-					isScheduled = false;
-					poll();
-				});
-			};
-
-			const connectAdded = () => {
-				if (addedConnection) return;
-
-				removingConnection?.Disconnect();
-				removingConnection = undefined;
-				addedConnection = instance.DescendantAdded.Connect(schedule);
-			};
-			const connectRemoving = () => {
-				if (removingConnection) return;
-
-				addedConnection?.Disconnect();
-				addedConnection = undefined;
-				removingConnection = instance.DescendantRemoving.Connect(schedule);
-			};
-
-			// Only ever one of the two: a guard that fails can only be met by the tree gaining
-			// something, and one that passes can only be broken by it losing something. Which of
-			// them is live is derived from the criterion rather than remembered beside it, so that
-			// every path writing the criterion re-points the poll with it and the two -- one fact
-			// in two places -- cannot come to disagree.
-			tracker.syncTypeGuardPoll = (isMet) => {
-				if (isMet) {
-					connectRemoving();
-				} else {
-					connectAdded();
-				}
-			};
-
-			tracker.cleanup.add(() => {
-				tracker.syncTypeGuardPoll = undefined;
-				addedConnection?.Disconnect();
-				removingConnection?.Disconnect();
 			});
 
-			tracker.syncTypeGuardPoll(!tracker.unmetCriteria.has("type guard"));
+			// Both directions, whatever the guard answers now. Nothing says which change can overturn
+			// a guard written by hand: `t.children` refuses two children of one name, so a child
+			// leaving can meet it and one arriving can break it. Listening only for the change the
+			// answer seemed to call for -- an addition while it fails, a removal while it passes --
+			// is what left such a guard, met by a removal, unbuilt until something unrelated arrived.
+			const addedConnection = instance.DescendantAdded.Connect(deferred.schedule);
+			const removingConnection = instance.DescendantRemoving.Connect(deferred.schedule);
+
+			tracker.cleanup.add(() => {
+				deferred.release();
+				addedConnection.Disconnect();
+				removingConnection.Disconnect();
+			});
 		}
 
 		const { checkAttributes, watchAttributes } = this.criteria;
@@ -475,13 +445,19 @@ export class ComponentTracker {
 				// a dependency's warning would be the same "wrong way round" report `observeOnly`
 				// exists to suppress -- said about a component nobody has asked for on an
 				// instance nothing is tagged with.
-				dependency.trackInstance(instance, listener, holder);
-				tracker.dependencyListeners.set(dependency, listener);
-
+				//
+				// The untrack is handed over first, as a link's is: registering runs code written by
+				// hand -- the dependency's guard as its entry is read, its links' guards as they are
+				// set up -- and a raise there leaves the dependency's entry created, with nothing but
+				// this entry's release to ever let go of it. Untracking an observer the raise kept
+				// from registering is harmless.
 				tracker.cleanup.add(() => {
 					tracker.dependencyListeners.delete(dependency);
 					dependency.untrackInstance(instance, listener);
 				});
+
+				dependency.trackInstance(instance, listener, holder);
+				tracker.dependencyListeners.set(dependency, listener);
 			}
 		}
 
@@ -661,26 +637,12 @@ export class ComponentTracker {
 		}
 	}
 
-	/**
-	 * Records what the instance guard says, moving its poll along with it.
-	 *
-	 * The criterion and the connection the poll holds are one fact kept in two places -- the
-	 * guard's answer, and the change that could overturn it -- so they are written together and
-	 * every path that learns the answer comes through here. Writing the criterion alone is what
-	 * would leave the poll listening for the change that has already happened: a guard recorded as
-	 * failing while the poll still waits for the tree to break can only ever be told that it broke
-	 * again, which it never does, and the component would never be built or never be dropped.
-	 */
+	/** Records what the instance guard says. */
 	private setTypeGuardMet(tracker: InstanceTracker, isMet: boolean) {
 		if (isMet) {
 			tracker.unmetCriteria.delete("type guard");
 		} else {
 			tracker.unmetCriteria.add("type guard");
-		}
-
-		const syncPoll = tracker.syncTypeGuardPoll;
-		if (syncPoll !== undefined) {
-			syncPoll(isMet);
 		}
 	}
 
@@ -812,10 +774,13 @@ export class ComponentTracker {
 	 * Whether the instance can have this component right now: it qualifies, and no invalid one --
 	 * built, its `onInit` raised -- holds the place. An invalid component is the tag path's to take
 	 * down, and its entry goes on qualifying; what is asked here is asked by a dependent, or by the
-	 * eager path, and neither can be handed a component that is not there.
+	 * eager path, and neither can be handed a component that is not there. Nor one that is missing
+	 * and that Flamework would not build (`isRefused`): a dependent counting it as met is built, and
+	 * raises asking for it.
 	 */
 	public checkInstance(instance: Instance) {
 		if (this.criteria.isInvalid?.(instance) === true) return false;
+		if (this.criteria.isRefused?.(instance) === true) return false;
 
 		const tracker = this.getInstanceTracker(instance, false);
 
@@ -891,13 +856,66 @@ export class ComponentTracker {
 		const tracker = this.getInstanceTracker(instance, false);
 		if (tracker === undefined) return;
 
+		const isAvailable = this.isAvailable(instance, tracker);
 		for (const listener of tracker.listeners) {
-			if (!tracker.owners.has(listener)) listener(tracker.isQualified, instance);
+			if (!tracker.owners.has(listener)) listener(isAvailable, instance);
 		}
+	}
+
+	/**
+	 * Notes that the component was built on this instance, or taken off it (`removed`).
+	 *
+	 * Neither is something the entry reads: it qualifies the same before and after, so the dependents
+	 * are answered again here, the way they are answered as they register. A dependent holds the
+	 * component that was taken off, so it is told the component is gone, whatever the entry says --
+	 * a removal by hand leaves the tag, and every criterion, as it was -- and it waits for the next
+	 * one, which the build that follows tells it of. A component that can be refused (`isRefused`),
+	 * one with no tag or with a predicate, counts only while it is there as well. Without it a
+	 * dependent waits on after the component was added by hand, and goes on holding one that was
+	 * taken away. A link hears the same change through the component's own announcements.
+	 */
+	public noteProvided(instance: Instance, removed = false) {
+		const tracker = this.getInstanceTracker(instance, false);
+		if (tracker === undefined) return;
+
+		const isAvailable = !removed && this.isAvailable(instance, tracker);
+		for (const [listener, holder] of [...tracker.holders]) {
+			// A dependent's own entry names the listener it registered here; a link's names none.
+			const dependent = holder.tracker.instances.get(holder.instance);
+			if (dependent?.dependencyListeners.get(this) === listener) listener(isAvailable, instance);
+		}
+	}
+
+	/**
+	 * What an observer is told about an entry: whether the component can be had here, as
+	 * `checkInstance` answers -- the entry qualifies, no invalid component holds the place, and the
+	 * component is here or Flamework would build it.
+	 */
+	private isAvailable(instance: Instance, tracker: InstanceTracker) {
+		return (
+			tracker.isQualified &&
+			this.criteria.isInvalid?.(instance) !== true &&
+			this.criteria.isRefused?.(instance) !== true
+		);
 	}
 
 	public isTracked(instance: Instance) {
 		return this.instances.has(instance);
+	}
+
+	/**
+	 * Whether the tag path holds this entry and it no longer qualifies: whatever component is on the
+	 * instance is on its way out, taken down by the tag path's listener as the loss is handed round.
+	 *
+	 * The listeners are called in no particular order, so an observer can be told of the loss before
+	 * that listener has run, with the component still attached. A link reading the component as
+	 * there reports itself met, and hears of the loss only from the removal's announcement -- which,
+	 * down a chain of links, is fired from inside that same announcement's handler, one level deeper
+	 * at every link, until the engine refuses to go on and leaves the rest of the chain attached.
+	 */
+	public isLosing(instance: Instance) {
+		const tracker = this.getInstanceTracker(instance, false);
+		return tracker !== undefined && !tracker.owners.isEmpty() && !tracker.isQualified;
 	}
 
 	/**
@@ -963,10 +981,9 @@ export class ComponentTracker {
 		}
 
 		// An observer is answered the way `checkInstance` answers, since that is what it asks: a
-		// component that is invalid here is not one a dependent can be handed. The tag path is
-		// answered whether the entry qualifies, which is its question.
-		const isInvalid = observeOnly && this.criteria.isInvalid?.(instance) === true;
-		listener(tracker.isQualified && !isInvalid, instance);
+		// component that is invalid here, or missing and never built here, is not one a dependent
+		// can be handed. The tag path is answered whether the entry qualifies, which is its question.
+		listener(observeOnly ? this.isAvailable(instance, tracker) : tracker.isQualified, instance);
 	}
 
 	/**

@@ -7,9 +7,10 @@
  * reads the tree -- `FindFirstChild` per required name, which is what `this.instance.Root`
  * resolves to -- and watches it one slot at a time, so a change deep in the tree re-resolves the
  * slot it belongs to and touches nothing else. A second child of a required name is neither a
- * mismatch nor the one that is read, so it can come and go without the component noticing. While
- * a slot is empty, every other child is followed for its name as well: a sibling renamed into the
- * required name is announced by nobody but the sibling.
+ * mismatch nor the one that is read, so it can come and go without the component noticing. With
+ * names followed, so is every other child that a rename could make the one read -- all of them
+ * while a slot is empty, and the ones ahead of a resolved child in child order otherwise: a sibling
+ * renamed into the required name is announced by nobody but the sibling.
  */
 export interface InstanceShape {
 	/** Class names the instance may be, any of them; absent, any Instance will do. */
@@ -157,11 +158,13 @@ interface Node {
 	connections: RBXScriptConnection[];
 
 	/**
-	 * The `Name` of every child no slot is following, followed while a slot is empty. A rename is
-	 * announced by the renamed child alone -- nothing fires on the parent, nothing on the siblings
-	 * -- so a child that was never resolved taking a required name can only be heard from that
-	 * child. Dropped as soon as every slot resolves, so a tree pays one connection per child only
-	 * while it is short of something.
+	 * The `Name` of every child no slot is following that a rename could make the one a slot reads:
+	 * every child while a slot is empty, and every child ahead of the last resolved one otherwise,
+	 * since `FindFirstChild` reads the first child of a name in child order. A rename is announced
+	 * by the renamed child alone -- nothing fires on the parent, nothing on the siblings -- so a
+	 * child that was never resolved taking a required name can only be heard from that child. A
+	 * child arriving goes last, so a whole tree pays one connection only for each child ahead of a
+	 * resolved one.
 	 */
 	candidates: Map<Instance, RBXScriptConnection>;
 
@@ -256,21 +259,38 @@ function dropCandidates(node: Node) {
 }
 
 /**
- * Brings the candidates in line with the slots: while one is empty, every child no slot follows is
- * followed for its name; once none is, no child is followed for anything but a rename back.
+ * Brings the candidates in line with the slots: every child no slot follows that a rename could
+ * make the one a name resolves to is followed for its name. `FindFirstChild` reads the first child
+ * of a name in child order, so that is every child ahead of the last one a slot resolves to, and
+ * while a slot is empty, every child at all. A child arriving goes last, behind all of them.
  */
 function syncCandidates(node: Node, changed: () => void) {
-	if (!node.watchRenames || !hasEmptySlot(node)) {
+	if (!node.watchRenames) {
 		dropCandidates(node);
 		return;
 	}
 
-	for (const [child] of node.candidates) {
-		if (isFollowedBySlot(node, child) || child.Parent !== node.instance) dropCandidate(node, child);
+	// The resolved children not passed yet; with a slot empty, the walk never ends early.
+	const ahead = new Set<Instance>();
+	for (const [, slot] of node.slots) {
+		if (slot.resolved !== undefined) ahead.add(slot.resolved);
 	}
 
+	const isEmpty = hasEmptySlot(node);
+	const wanted = new Set<Instance>();
 	for (const child of node.instance.GetChildren()) {
-		if (node.candidates.has(child) || isFollowedBySlot(node, child)) continue;
+		if (!isEmpty && ahead.isEmpty()) break;
+
+		ahead.delete(child);
+		if (!isFollowedBySlot(node, child)) wanted.add(child);
+	}
+
+	for (const [child] of node.candidates) {
+		if (!wanted.has(child)) dropCandidate(node, child);
+	}
+
+	for (const child of wanted) {
+		if (node.candidates.has(child)) continue;
 
 		node.candidates.set(
 			child,

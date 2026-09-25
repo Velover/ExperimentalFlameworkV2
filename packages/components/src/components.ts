@@ -110,6 +110,23 @@ export class Components {
 	private constructing = new Map<Instance, Set<Constructor>>();
 
 	/**
+	 * Constructions a removal reached while they were still running, per instance: the constructor
+	 * or `onInit` asked for the component to go -- by hand, or by taking its tag away under
+	 * immediate signal behaviour -- before there was anything in the lookups to take down.
+	 * `addComponent` undoes such a construction as it finishes, rather than attaching a component
+	 * the removal has already let go of.
+	 */
+	private cancelled = new Map<Instance, Set<Constructor>>();
+
+	/**
+	 * Components attached whose addition has not been announced yet: `setupComponent` is running
+	 * their `onStart` and resolving their waiters. One removed in that window -- by its own
+	 * `onStart` -- is announced as added by the removal, ahead of the removal itself, and nothing
+	 * more is attached to it once `onStart` returns.
+	 */
+	private unannounced = new Set<BaseComponent>();
+
+	/**
 	 * Components whose removal is running, per instance, so that nothing Flamework builds on its
 	 * own can take the place of one that is being taken apart.
 	 */
@@ -271,9 +288,21 @@ export class Components {
 
 				const listener = (isQualified: boolean, instance: Instance) => {
 					if (isQualified) {
-						this.addComponent(instance, ctor, true);
+						// Not while a construction by hand is under way, which attaches it: the entry
+						// can qualify under it -- a dependent whose dependency was removed by hand is
+						// told of the next one as that construction asks for it -- and building it
+						// here as well is the cyclic construction `addComponent` raises for.
+						if (!this.isConstructing(instance, ctor)) this.addComponent(instance, ctor, true);
 					} else {
-						this.removeComponent(instance, ctor);
+						// A `destroy` that raises is reported rather than raised, as it is at extinguish.
+						// This runs inside whatever handed the loss round -- a dependency's tag going,
+						// ahead of that dependency's own removal -- and a raise here abandoned that
+						// halfway: the listeners after this one were never told, and the dependency whose
+						// tag went stayed attached, with nothing left to announce it again.
+						const [ok, err] = pcall(() => this.removeComponent(instance, ctor));
+						if (!ok) {
+							warn(`[Flamework] Failed to remove '${ctor}' from ${instance.GetFullName()}: ${tostring(err)}`);
+						}
 					}
 				};
 
@@ -465,9 +494,21 @@ export class Components {
 					return () => connection.Disconnect();
 				};
 
+		// A component with no tag is only ever built by hand, and one with a predicate only where the
+		// predicate passes -- `getComponent` builds neither -- while its entry qualifies all the same.
+		// A dependent can only be handed one that is there.
+		const tag = componentInfo.config.tag;
+		const predicate = this.getConfigValue(component, "predicate");
+		const isRefused =
+			tag === undefined || predicate !== undefined
+				? (instance: Instance) =>
+						!this.hasComponent(instance, component) && (tag === undefined || !predicate!(instance))
+				: undefined;
+
 		const tracker = new ComponentTracker(componentInfo.identifier, {
 			checkAttributes,
 			watchAttributes,
+			isRefused,
 			checkLinks: hasLinks ? (instance) => this.areLinksMet(componentInfo, instance) : undefined,
 			watchLinks: hasLinks
 				? (instance, update, holder) =>
@@ -606,12 +647,16 @@ export class Components {
 		// It has to be read here rather than left to `getAttributes`, which only runs once the
 		// component is being built -- and a required link would hold that up forever.
 		//
-		// An optional one holds nothing up, so it needs no standing in: `getAttributes` writes its
-		// default to the instance like any other, and after that the attribute is the whole story.
-		// Answering with the default here as well is what would make clearing such an attribute
-		// impossible -- cleared and never written are the same nothing on an instance, so the
-		// default would simply be read back.
-		if (link.optional) return undefined;
+		// An optional one holds nothing up, so once the component is built it needs no standing in:
+		// `getAttributes` wrote its default to the instance like any other, and after that the
+		// attribute is the whole story. Answering with the default then as well is what would make
+		// clearing such an attribute impossible -- cleared and never written are the same nothing on
+		// an instance, so the default would simply be read back. Ahead of construction, though, the
+		// default is what construction writes and `resolveLinks` then reads, so the criterion reads
+		// it too: answering nothing there reports the link met and raises out of that construction.
+		if (link.optional && this.activeComponents.get(instance)?.get(componentInfo.ctor) !== undefined) {
+			return undefined;
+		}
 
 		const fallback = this.getConfigValue(componentInfo.ctor, "defaults")?.[link.name];
 		return typeIs(fallback, "Instance") ? fallback : undefined;
@@ -625,6 +670,15 @@ export class Components {
 		return (
 			this.activeComponents.get(instance)?.get(component) !== undefined && !this.isInvalid(instance, component)
 		);
+	}
+
+	/**
+	 * Whether a link can count on the component attached to its target: it is there, and its tag
+	 * path has not lost it. A component whose entry no longer qualifies is being taken down in the
+	 * very notification that asks, whichever listener happens to be told first (`isLosing`).
+	 */
+	private hasStandingComponent(instance: Instance, component: Constructor) {
+		return this.hasComponent(instance, component) && this.trackers.get(component)?.isLosing(instance) !== true;
 	}
 
 	private isInvalid(instance: Instance, component: Constructor) {
@@ -752,7 +806,7 @@ export class Components {
 
 		const linkedComponent = this.getLinkedComponent(link);
 		return (
-			this.hasComponent(target, linkedComponent) ||
+			this.hasStandingComponent(target, linkedComponent) ||
 			this.canCreateComponentEager(target, linkedComponent, true) === true
 		);
 	}
@@ -924,10 +978,12 @@ export class Components {
 		};
 
 		/**
-		 * The `Name` of every other child, followed while the name resolves to nothing. A rename is
-		 * announced by the renamed child alone, so a sibling taking the name can only be heard from
-		 * the sibling; the shape follows its empty slots the same way. Dropped once the name
-		 * resolves, so the link pays one connection per child only while it is short of one.
+		 * The `Name` of every other child a rename could make the one the name resolves to: every
+		 * child while it resolves to nothing, and every child ahead of the one it resolves to
+		 * otherwise, since `FindFirstChild` reads the first child of a name in child order. A rename
+		 * is announced by the renamed child alone, so a sibling taking the name can only be heard
+		 * from the sibling; the shape follows its slots the same way. A child arriving goes last, so
+		 * the link pays one connection only for each child ahead of the one it holds.
 		 */
 		const candidates = new Map<Instance, RBXScriptConnection>();
 
@@ -949,17 +1005,19 @@ export class Components {
 		const syncCandidates = () => {
 			if (!followsNames) return;
 
-			if (instance.FindFirstChild(link.name) !== undefined) {
-				dropCandidates();
-				return;
+			const resolved = instance.FindFirstChild(link.name);
+			const wanted = new Set<Instance>();
+			for (const child of instance.GetChildren()) {
+				if (child === resolved) break;
+				if (child !== named) wanted.add(child);
 			}
 
 			for (const [child] of candidates) {
-				if (child === named || child.Parent !== instance) dropCandidate(child);
+				if (!wanted.has(child)) dropCandidate(child);
 			}
 
-			for (const child of instance.GetChildren()) {
-				if (child === named || candidates.has(child)) continue;
+			for (const child of wanted) {
+				if (candidates.has(child)) continue;
 
 				candidates.set(child, child.GetPropertyChangedSignal("Name").Connect(renamed));
 			}
@@ -1040,6 +1098,31 @@ export class Components {
 					pending = this.waitForLinkAttribute(componentInfo, instance, link, resolve);
 				}
 
+				// Or it names nothing only because the component is built: an optional link's default
+				// stands in while it is not (`resolveLinkTarget`), so the component leaving moves the
+				// target back to the default with no attribute signal to say so. That is resolved
+				// again on, or the link goes on watching nothing while the gate reads the default,
+				// and a default that regains its component later is heard by nobody.
+				const fallback = this.getConfigValue(componentInfo.ctor, "defaults")?.[link.name];
+				if (
+					link.kind === "attribute" &&
+					pending === undefined &&
+					link.optional &&
+					typeIs(fallback, "Instance")
+				) {
+					let removedSignal = this.componentRemovedListeners.get(componentInfo.identifier);
+					if (!removedSignal) {
+						this.componentRemovedListeners.set(componentInfo.identifier, (removedSignal = new Signal()));
+					}
+
+					targetMaid = new Maid();
+					targetMaid.GiveTask(
+						removedSignal.Connect((removed: object, changed) => {
+							if (changed === instance && getmetatable(removed) === componentInfo.ctor) resolve();
+						}),
+					);
+				}
+
 				return;
 			}
 
@@ -1080,7 +1163,7 @@ export class Components {
 				update(
 					criterion,
 					linkedComponent === undefined ||
-						this.hasComponent(target, linkedComponent) ||
+						this.hasStandingComponent(target, linkedComponent) ||
 						this.canCreateComponentEager(target, linkedComponent, true) === true,
 				);
 			};
@@ -1175,6 +1258,12 @@ export class Components {
 					if (this.hasComponent(target, linkedComponent)) return;
 
 					update(criterion, false);
+
+					// The child left along with its component, and a replacement can already be in
+					// its place: the tree signals that would have told a link that does not follow
+					// the tree of it arrived while the component still stood. Not once the loss has
+					// released this watcher, or resolved it again, on the way.
+					if (watched === target) followWhileDown();
 				}),
 			);
 
@@ -1185,7 +1274,8 @@ export class Components {
 		 * Reads the link again, as it stands now, for an entry nothing waits on: the tag's
 		 * announcement reaching an entry a link created, or the eager path asking ahead of it.
 		 *
-		 * A link that does not follow the tree is not told when its child arrives or is replaced,
+		 * A link that does not follow the tree is told when its child arrives or is replaced only
+		 * while nothing is built (`followWhileDown`), and the eager path builds ahead of the tag,
 		 * so this is where it learns of it -- and the target it resolves to is the one it watches
 		 * from here on, the linked component's announcements and its entry included. A target it
 		 * already watches is reported as it stands and left as it is: re-pointing the same
@@ -1213,12 +1303,42 @@ export class Components {
 			resolve();
 		};
 
+		/**
+		 * Resolves a child link that does not follow the tree again, while the component is down.
+		 *
+		 * Reading the tree once is about the component that was built: it keeps the child it was
+		 * built with however the tree moves. Once that component is gone -- its child destroyed and
+		 * its linked component with it -- the build that follows reads the tree as it is then, and
+		 * nothing else would ever tell this link of a child that has since taken the name: it went
+		 * on watching the child that left, its entry on the linked component's tracker included,
+		 * and a replacement carrying the component never brought the owner back. A name that still
+		 * resolves to the child the link holds is left alone; that child's own subscriptions answer
+		 * for it.
+		 */
+		const followWhileDown = () => {
+			if (link.kind !== "child" || pollsTree) return;
+			if (this.activeComponents.get(instance)?.get(componentInfo.ctor) !== undefined) return;
+			if (this.isConstructing(instance, componentInfo.ctor)) return;
+			if (hasResolved && instance.FindFirstChild(link.name) === lastTarget) return;
+
+			resolve();
+		};
+
 		maid.GiveTask(release);
 
 		if (link.kind === "attribute") {
 			// An attribute is not part of the tree, so it is followed whatever the streaming mode.
 			maid.GiveTask(instance.GetAttributeChangedSignal(link.name).Connect(resolve));
-		} else if (pollsTree) {
+		} else if (!pollsTree) {
+			// Only while the component is down (`followWhileDown`); a component standing keeps the
+			// child it was built with. A child leaving needs no signal here: one that leaves the
+			// DataModel takes its component with it, which the removal above hears.
+			maid.GiveTask(
+				instance.ChildAdded.Connect((child) => {
+					if (child.Name === link.name) followWhileDown();
+				}),
+			);
+		} else {
 			maid.GiveTask(unwatchName);
 			maid.GiveTask(dropCandidates);
 			maid.GiveTask(
@@ -1239,7 +1359,9 @@ export class Components {
 					// A child that left under another name is no longer one a rename can bring back.
 					if (child === named) unwatchName();
 
-					if (child.Name === link.name) resolve();
+					// The child the link resolved to is weighed by identity: renamed away unfollowed,
+					// it leaves under a name that is no longer this one.
+					if (child === watched || child.Name === link.name) resolve();
 				}),
 			);
 		}
@@ -1661,6 +1783,11 @@ export class Components {
 	) {
 		const { ctor } = componentInfo;
 
+		// Before `onStart`, so that a removal from inside it has this to release: created after, it
+		// was stored for a component that had already gone, and never released.
+		const maid = new Maid();
+		this.componentCleanup.set(component, maid);
+
 		if (Flamework.implements<OnStart>(component)) {
 			// Not before ignition has finished: a component built from a provider's `onInit` starts
 			// once every provider has, as a provider would.
@@ -1671,8 +1798,10 @@ export class Components {
 			}
 		}
 
-		const maid = new Maid();
-		this.componentCleanup.set(component, maid);
+		// `onStart` runs synchronously and can remove the component it belongs to. That removal took
+		// it apart and announced it; nothing more is attached to it -- no attribute connections
+		// firing into it, no waiter handed it: they wait on for one that stays.
+		if (!this.unannounced.has(component)) return;
 
 		const refreshAttributes = this.getConfigValue(ctor, "refreshAttributes");
 		if (refreshAttributes === undefined || refreshAttributes) {
@@ -1704,17 +1833,29 @@ export class Components {
 			}
 		}
 
+		// Each waiter is taken off the set as it is handed the component, rather than the set being
+		// taken whole: a waiter's handler runs inside the resolve, and one that removes the component
+		// leaves the rest waiting on for one that stays, as a removal from `onStart` does -- they are
+		// not handed a component that has already been destroyed. A component built in its place
+		// from inside that handler is the one they are handed, from its own `setupComponent`.
 		const instanceWaiters = this.componentWaiters.get(instance);
 		const componentWaiters = instanceWaiters?.get(ctor);
 		if (componentWaiters) {
-			instanceWaiters!.delete(ctor);
+			for (const waiter of [...componentWaiters]) {
+				if (!this.unannounced.has(component)) break;
 
-			if (instanceWaiters!.size() === 0) {
-				this.componentWaiters.delete(instance);
+				// Cancelled, or handed the component built in place of this one, by an earlier handler.
+				if (!componentWaiters.delete(waiter)) continue;
+
+				waiter(component);
 			}
 
-			for (const waiter of componentWaiters) {
-				waiter(component);
+			if (componentWaiters.isEmpty() && instanceWaiters!.get(ctor) === componentWaiters) {
+				instanceWaiters!.delete(ctor);
+
+				if (instanceWaiters!.isEmpty() && this.componentWaiters.get(instance) === instanceWaiters) {
+					this.componentWaiters.delete(instance);
+				}
 			}
 		}
 	}
@@ -1771,6 +1912,11 @@ export class Components {
 	): boolean | undefined {
 		const componentInfo = this.components.get(component);
 		if (!componentInfo) return false;
+
+		// Nothing is built once the module has begun to extinguish, however qualified the instance
+		// still is: the tag outlives the module, and `addComponent` raises. Asked before the tracker
+		// is, which would otherwise be made afresh for a module whose trackers were released.
+		if (this.isStopped) return false;
 
 		// A component that is being removed is not one that can be built here, however qualified
 		// the instance still is: a hand removal leaves the tag and the tracker alone, so every
@@ -1846,9 +1992,16 @@ export class Components {
 			ids.push(parentId);
 		}
 
+		// Each once: the transformer writes every class's own heritage clause, so a subclass that
+		// re-declares an interface its parent implements carries the id twice up the chain, and every
+		// added and removed signal would fire twice for it.
+		const seen = new Set<string>();
 		const implementedList = Reflect.getMetadatas<string[]>(component, "flamework:implements");
 		for (const implemented of implementedList) {
 			for (const id of implemented) {
+				if (seen.has(id)) continue;
+
+				seen.add(id);
 				ids.push(id);
 			}
 		}
@@ -1994,20 +2147,6 @@ export class Components {
 		// with nothing to hear it, before this, is not one this component has to be rebuilt for.
 		this.trackers.get(component)?.noteBuilt(instance);
 
-		const attributeGuards = this.getAttributeGuards(component);
-		const attributes = this.getAttributes(instance, componentInfo, attributeGuards);
-
-		if (skipInstanceCheck !== true) {
-			// A shape says which child is wrong; a guard written by hand only that it failed.
-			const { guard, shape } = this.getInstanceCheck(component);
-			const reason = shape !== undefined ? describeShapeMismatch(shape, instance) : undefined;
-			const passes = shape !== undefined ? reason === undefined : guard === undefined || guard(instance);
-
-			if (!passes) {
-				throw `${instance.GetFullName()} did not pass instance guard check for '${componentInfo.identifier}'${reason !== undefined ? `: ${reason}` : ""}`;
-			}
-		}
-
 		let constructingSet = this.constructing.get(instance);
 		if (constructingSet?.has(component)) {
 			error(
@@ -2017,13 +2156,35 @@ export class Components {
 
 		if (!constructingSet) this.constructing.set(instance, (constructingSet = new Set()));
 
-		// Marked as constructing before the links resolve, so that a component linked back to this
-		// one fails to resolve rather than recursing through `getComponent`.
+		// Marked as constructing before anything is read off the instance, because reading it is
+		// already code written by hand: a default is written back with `SetAttribute`, and under
+		// immediate signal behaviour an attribute-changed handler runs inside that write. Asking
+		// for this component there is answered as asking during construction is -- nothing --
+		// where an empty slot built a second one, which this construction then overwrote, leaving
+		// the other attached to nothing and never removed. Before the links resolve as well, so
+		// that a component linked back to this one fails to resolve rather than recursing through
+		// `getComponent`.
 		constructingSet.add(component);
 
 		let componentInstance: BaseComponent;
+		let attributes: Map<string, unknown>;
 		let initError: string | undefined;
+		let isCancelled = false;
 		try {
+			const attributeGuards = this.getAttributeGuards(component);
+			attributes = this.getAttributes(instance, componentInfo, attributeGuards);
+
+			if (skipInstanceCheck !== true) {
+				// A shape says which child is wrong; a guard written by hand only that it failed.
+				const { guard, shape } = this.getInstanceCheck(component);
+				const reason = shape !== undefined ? describeShapeMismatch(shape, instance) : undefined;
+				const passes = shape !== undefined ? reason === undefined : guard === undefined || guard(instance);
+
+				if (!passes) {
+					throw `${instance.GetFullName()} did not pass instance guard check for '${componentInfo.identifier}'${reason !== undefined ? `: ${reason}` : ""}`;
+				}
+			}
+
 			const resolved = this.resolveLinks(instance, componentInfo, attributes, skipInstanceCheck === true);
 			if (resolved === undefined) {
 				// A component a link names is invalid: the link is lost, the owner waits.
@@ -2075,6 +2236,33 @@ export class Components {
 			if (constructingSet.isEmpty()) {
 				this.constructing.delete(instance);
 			}
+
+			const cancelledHere = this.cancelled.get(instance);
+			isCancelled = cancelledHere?.delete(component) === true;
+			if (cancelledHere?.isEmpty()) {
+				this.cancelled.delete(instance);
+			}
+		}
+
+		// Removed while it was being built: the constructor or `onInit` asked for it to go, and the
+		// removal found nothing to take down yet. Under immediate signal behaviour a tag taken away
+		// there has already been let go of by the tag path along with its tracker entry, so a
+		// component attached now would stay attached, untagged, with nothing left to remove it. It
+		// is undone instead -- never attached, started or announced -- the way a removal after
+		// the build would have taken it apart. Flamework's own paths answer that there is no
+		// component; a call by hand is handed the one it built.
+		if (isCancelled) {
+			const built = componentInstance;
+			if (initError === undefined) this.module.removeClassInstance(built);
+
+			const [ok, err] = pcall(() => built.destroy());
+			if (!ok) {
+				warn(
+					`[Flamework] Failed to destroy '${component}' on ${instance.GetFullName()}, removed while it was being built: ${tostring(err)}`,
+				);
+			}
+
+			return (skipInstanceCheck === true ? undefined : built) as never;
 		}
 
 		// The per-instance lookups are created here rather than before the construction: nothing
@@ -2126,16 +2314,32 @@ export class Components {
 			this.addIdMapping(componentInstance, id, inheritedComponents);
 		}
 
+		this.unannounced.add(componentInstance);
 		this.setupComponent(instance, attributes, componentInstance, componentInfo);
 
+		// Removed by its own `onStart`, which announced it as added and then as removed, in that
+		// order: it is not announced again, and it is not what Flamework's own paths hand back.
+		if (!this.unannounced.delete(componentInstance)) {
+			return (skipInstanceCheck === true ? undefined : componentInstance) as never;
+		}
+
+		this.announceAdded(componentInfo, componentInstance, instance);
+
+		// A dependent waiting for a component Flamework does not build on its own -- no tag, or a
+		// predicate that refuses -- is waiting for exactly this, as is one whose last was removed.
+		this.trackers.get(component)?.noteProvided(instance);
+
+		return componentInstance;
+	}
+
+	/** Announces a component as added, under every id it inherits. */
+	private announceAdded(componentInfo: ComponentInfo, component: BaseComponent, instance: Instance) {
 		for (const id of componentInfo.polymorphicIds) {
 			const signal = this.componentAddedListeners.get(id);
 			if (signal) {
-				signal.Fire(componentInstance as never, instance);
+				signal.Fire(component as never, instance);
 			}
 		}
-
-		return componentInstance;
 	}
 
 	/**
@@ -2153,6 +2357,17 @@ export class Components {
 		const componentInfo = this.components.get(component);
 		if (componentInfo === undefined) {
 			error(this.missingComponentMessage(component));
+		}
+
+		// Asked for while the component is still being built -- from its constructor or its
+		// `onInit`, by hand or through its tag going under immediate signal behaviour -- when there
+		// is nothing in the lookups to take down yet. The construction is marked instead, and undone
+		// as it finishes (`addComponent`).
+		if (this.isConstructing(instance, component)) {
+			let cancelledHere = this.cancelled.get(instance);
+			if (!cancelledHere) this.cancelled.set(instance, (cancelledHere = new Set()));
+			cancelledHere.add(component);
+			return;
 		}
 
 		const activeComponents = this.activeComponents.get(instance);
@@ -2197,7 +2412,17 @@ export class Components {
 
 		removingSet.add(component);
 
+		// Removed by its own `onStart`, before `addComponent` got to announce it: it is announced as
+		// added here, ahead of its removal, so that a listener hears the two in the order they
+		// happened -- and is handed a component that has not been destroyed yet, rather than hearing
+		// of an addition after the removal.
+		const wasUnannounced = this.unannounced.delete(existingComponent);
+
 		try {
+			if (wasUnannounced) {
+				this.announceAdded(componentInfo, existingComponent, instance);
+			}
+
 			if (!wasInvalid) {
 				for (const id of componentInfo.polymorphicIds) {
 					const signal = this.componentRemovedListeners.get(id);
@@ -2249,6 +2474,23 @@ export class Components {
 		// this lets try again finds nothing of it left. Not at extinguish, where nothing may be built.
 		if (wasInvalid && !this.isStopped) {
 			this.trackers.get(component)?.noteCleared(instance);
+		}
+
+		// A dependent holding it is taken down with it and waits for the next one, whether or not
+		// Flamework would build that one on its own: a removal by hand leaves the tag and the entry
+		// qualified, so nothing else tells the dependent the component it was built with has gone.
+		// An invalid one was never handed to a dependent, and what it frees is said above.
+		if (!this.isStopped) {
+			const tracker = this.trackers.get(component);
+			tracker?.noteProvided(instance, !wasInvalid);
+
+			// Added back while the removal ran -- by a handler of its announcement, which runs inside
+			// it under immediate signal behaviour, or by `destroy` -- the new one told the dependents
+			// it was there before this told them the one they hold had gone, and nothing tells them
+			// again: they would wait for good on a component that is already here.
+			if (!wasInvalid && this.activeComponents.get(instance)?.get(component) !== undefined) {
+				tracker?.noteProvided(instance);
+			}
 		}
 	}
 
@@ -2330,7 +2572,10 @@ export class Components {
 
 	/**
 	 * This function listens for the specified component type to be removed from any instance.
-	 * The callback is invoked before the component's `destroy` method is called.
+	 * The callback is handed the component once it has left every lookup. The announcement is a
+	 * BindableEvent: under immediate signal behaviour the callback runs inside the removal, before
+	 * the component's `destroy` method is called; under deferred signal behaviour it runs once the
+	 * thread yields, after `destroy` has run.
 	 *
 	 * This function also supports polymorphism, which means you can listen for specific interfaces or superclasses.
 	 *

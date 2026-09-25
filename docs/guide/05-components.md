@@ -69,12 +69,16 @@ even with `disableDefaultLifecycle()`. In order:
 | constructor | Dependencies injected; `this.instance`, `this.attributes` and every link already resolved. |
 | `onInit()` | Synchronously, right after construction, **before the component can be seen**: `getComponent` has not handed it back yet, no other component holds it in `childComponents` or `attributeComponents`, no `onComponentAdded` listener has heard of it. A Promise it returns is not awaited. A raise makes the component **invalid** (below). |
 | attached | `getComponent` answers, links resolve to it, added listeners fire. |
-| `onStart()` | On its own thread, after the component is attached -- and not before ignition has finished, so a component built from a provider's `onInit` starts once every provider has. |
+| `onStart()` | On its own thread, after the component is attached -- and not before ignition has finished, so a component built from a provider's `onInit` starts once every provider has. A component that removes itself here is announced as added and then as removed, and no `waitForComponent` is resolved with it. |
 | per-frame events | From the module's lifecycle plugin. |
 | `destroy()` | When the component is removed. |
 
 Do the setup that anything else may rely on in `onInit`: another component linking to this one
 receives it initialised, whichever of the two was tagged first.
+
+**Removing the component from its own constructor or `onInit`** -- `removeComponent`, or taking its
+tag away where the place delivers signals immediately -- undoes the construction as it finishes: the
+component is destroyed and never attached, started or announced.
 
 **An `onInit` that raises** does not take the component away, and does not build another. The
 component stays where it is, marked invalid: it gets no `onStart` and no per-frame events, it is
@@ -417,7 +421,10 @@ question at all: the owner goes with it whatever the mode.
 `Disabled` is about the component that was built, not about the next one. If something else takes
 that component down -- a link attribute re-pointed at an instance its guard refuses, say -- the
 build that follows reads the tree as it is then, so a child link the tree no longer holds keeps the
-component down until it does.
+component down until it does. While the component is down, a child link looks its child up again as
+children of that name arrive and as the child it holds loses its component, so a linked child that
+is destroyed and replaced by another carrying the component brings the component back around the new
+one -- under `Disabled`, and under `Contextual` on a server.
 
 ### Waiting and warnings
 
@@ -506,7 +513,9 @@ required name, changes nothing however often it moves. Renames are not followed 
 asks for it with `watchRenames: true` (or `components.watchRenames` in `flamework.config.json`): a
 child is rarely renamed, and a rename is announced by the renamed child alone, so following names
 costs a connection on each resolved child and, while a required child is missing, one on every other
-child -- the only way a sibling renamed to the required name can be heard. Left off, a child renamed
+child -- the only way a sibling renamed to the required name can be heard. Once it resolves, the
+children ahead of it in child order stay followed, since `FindFirstChild` reads the first child of a
+name and one of them renamed into it becomes the one read. Left off, a child renamed
 away or a sibling renamed into a required name is noticed the next time that slot is read: a child of
 that name arriving, the child it resolved to leaving, or the tag arriving. A guard written by hand
 with `instanceGuard` has no such structure: it is re-run whole on every descendant change, and hears
@@ -540,7 +549,10 @@ export class Car extends BaseComponent<{}, Model> {
 ```
 
 `Car` will not be constructed until `Engine` exists on the same instance, in either tag order. This
-is the same criteria mechanism that streaming uses.
+is the same criteria mechanism that streaming uses. An `Engine` Flamework never builds by itself --
+one with no tag, or one its predicate refuses on this instance -- counts once you add it with
+`addComponent`. Removing an `Engine` by hand takes `Car` down with it, tagged or not, and `Car` comes
+back with the next `Engine`: one you add, or one `getComponent` builds on the still-tagged instance.
 
 ## Working with components
 
@@ -560,9 +572,9 @@ export class VehicleService {
 | `getAllComponents<T>()` | The same, across every instance. |
 | `addComponent<T>(instance)` | Attaches by hand. Throws if the guards fail. |
 | `removeComponent<T>(instance)` | Detaches and destroys. |
-| `waitForComponent<T>(instance)` | Promise; resolves immediately if it already exists. |
+| `waitForComponent<T>(instance)` | Promise; resolves immediately if it already exists. A waiter whose handler removes the component leaves the others waiting for the next one. |
 | `onComponentAdded<T>(cb)` | Fires for every future component of that type. |
-| `onComponentRemoved<T>(cb)` | Fires **before** `destroy`, and after the component has left the lookups. |
+| `onComponentRemoved<T>(cb)` | Fires after the component has left the lookups: before `destroy` where the place delivers signals immediately, after it where they are deferred. |
 
 `getComponent` needs the exact class. The polymorphic ones -- `getComponents`, `getAllComponents`,
 and both listeners -- accept a superclass or an interface:
@@ -603,22 +615,34 @@ for.
   component still comes and goes with its tree on an instance a link found first. Use
   `getAllComponents` when you want to *observe* rather than ensure.
 - **`getComponent` returns nothing for a component that is still constructing**, so a constructor
-  asking for its own component sees `undefined`. Forcing the construction with `addComponent` from
-  inside the constructor raises `component '...' is cyclic`.
+  asking for its own component sees `undefined` -- and so does an attribute-changed handler that runs
+  inside the write of one of the component's `defaults`, where the place delivers signals
+  immediately. Forcing the construction with `addComponent` from inside the constructor raises
+  `component '...' is cyclic`.
 - **Extinguishing the module destroys every component** and stops watching the tags. `addComponent`
-  on the dead module raises; tagging an instance afterwards does nothing.
+  on the dead module raises; tagging an instance afterwards does nothing, and `getComponent` builds
+  nothing -- from the moment the extinguish begins -- answering `undefined` for a still-tagged one.
 - **A `destroy` that raises does not hold up the teardown.** Whatever Flamework attached for the
   component -- the attribute-changed connections behind `onAttributeChanged` -- is released either
   way, so nothing is left firing into a component that has gone. On extinguish the failure is
   warned about and the remaining components still come down, so one component cannot leave a module
-  half-extinguished. A hand `removeComponent` still re-raises it, since you asked for the removal.
+  half-extinguished. A removal Flamework makes on its own -- a tree, a link, an attribute or a
+  dependency lost -- warns the same way, and the change that caused it still finishes: a dependent
+  whose `destroy` raises no longer keeps its dependency attached after the dependency's tag has gone.
+  A hand `removeComponent` still re-raises it, since you asked for the removal.
 - **Per-frame events come from the module's lifecycle plugin.** `disableDefaultLifecycle()` on the
   module that includes `ComponentPlugin` stops components ticking; `onStart` still runs.
 - **An invalid attribute throws** unless a default is configured.
-- **`onComponentRemoved` runs before `destroy`**, so the component is still usable inside it -- but
-  it has already left `getComponent` and `getComponents` by then, and nothing builds a replacement
-  while the removal is running, so the value the callback is handed is the only way to reach it. A
-  hand removal leaves the tag alone, so asking a still-tagged instance for the component *after*
+- **`onComponentRemoved` runs when the engine delivers it.** The announcement is a BindableEvent.
+  Where the place delivers signals immediately, that is inside the removal and before `destroy`, so
+  the component is still usable inside it -- but it has already left `getComponent` and
+  `getComponents` by then, and nothing builds a replacement while the removal is running, so the
+  value the callback is handed is the only way to reach it. An `addComponent` of your own from the
+  callback still attaches a new one, and the dependents holding the old one are rebuilt around it
+  once the removal is over. Where signals are deferred, the callback
+  runs once the thread yields: the removal has finished and `destroy` has already run, and a
+  still-tagged instance asked for the component there builds a new one. A hand removal leaves the
+  tag alone, so asking a still-tagged instance for the component *after*
   `removeComponent` has returned builds a new one, the way it always has. That is also what keeps two
   components whose links name each other from removing one another twice: taking one down takes the
   other with it, once each. The announcement is delivered a resumption late, so a link weighs it
