@@ -323,6 +323,31 @@ function harness.create()
 		end
 	end
 
+	-- `instanceof`, copied from RuntimeLib.lua: a class's own `instanceof` if it has one, otherwise
+	-- the object's metatable chain.
+	function TS.instanceof(obj, class)
+		if type(class) == "table" and type(class.instanceof) == "function" then
+			return class.instanceof(obj)
+		end
+
+		if type(obj) == "table" then
+			obj = getmetatable(obj)
+			while obj ~= nil do
+				if obj == class then
+					return true
+				end
+				local mt = getmetatable(obj)
+				if mt then
+					obj = mt.__index
+				else
+					obj = nil
+				end
+			end
+		end
+
+		return false
+	end
+
 	-- roblox-ts emits try/catch/finally as `TS.try`. Copied from RuntimeLib.lua so that the exit
 	-- type protocol the emitted code relies on is exactly the one Roblox runs.
 	TS.TRY_RETURN = 1

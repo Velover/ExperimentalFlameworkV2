@@ -24,6 +24,10 @@ local collection = {}
 
 function collection.create()
 	local tagged: { [string]: { [any]: boolean } } = {}
+	--- Each instance's tags in the order they were added, which is the order the engine lists them
+	--- in and announces them in when the instance enters or leaves the DataModel (measured in
+	--- Studio, 2026-09-25); a tag removed and added again goes to the back.
+	local tagsOf: { [any]: { string } } = {}
 	local addedSignals: { [string]: any } = {}
 	local removedSignals: { [string]: any } = {}
 
@@ -49,6 +53,13 @@ function collection.create()
 
 		set[instance] = true
 
+		local list = tagsOf[instance]
+		if not list then
+			list = {}
+			tagsOf[instance] = list
+		end
+		table.insert(list, tag)
+
 		-- The tag lands either way; it is the DataModel that announces it. An instance outside it
 		-- -- a template being assembled, or a subtree that has been unparented -- is announced when
 		-- it, or an ancestor of it, is parented in.
@@ -64,6 +75,12 @@ function collection.create()
 		end
 
 		set[instance] = nil
+
+		local list = tagsOf[instance]
+		local index = list and table.find(list, tag)
+		if index then
+			table.remove(list, index)
+		end
 
 		-- Nothing was announced when it was tagged outside the DataModel, so nothing is announced
 		-- when the tag goes either.
@@ -96,8 +113,9 @@ function collection.create()
 		added again, which is what takes a component down with its instance and brings it back.
 	]]
 	function CollectionService.announceAncestry(instance: any, entered: boolean)
-		for tag, set in tagged do
-			if set[instance] then
+		for _, tag in table.clone(tagsOf[instance] or {}) do
+			-- One an earlier handler removed has already announced itself.
+			if tagged[tag][instance] then
 				fire(if entered then addedSignals[tag] else removedSignals[tag], instance)
 			end
 		end
@@ -105,33 +123,31 @@ function collection.create()
 
 	--- Carries an instance's tags onto a clone of it, which is what `Instance:Clone` does.
 	function CollectionService.announceClone(source: any, clone: any)
-		for _, set in tagged do
-			if set[source] then
-				set[clone] = true
-			end
+		local list = tagsOf[source]
+		if not list then
+			return
 		end
+
+		for _, tag in list do
+			tagged[tag][clone] = true
+		end
+		tagsOf[clone] = table.clone(list)
 	end
 
 	function CollectionService:GetTags(instance: any): { string }
-		local result = {}
-		for tag, set in tagged do
-			if set[instance] then
-				table.insert(result, tag)
-			end
-		end
-		return result
+		return table.clone(tagsOf[instance] or {})
 	end
 
 	function CollectionService:GetInstanceAddedSignal(tag: string)
 		if not addedSignals[tag] then
-			addedSignals[tag] = signals.create()
+			addedSignals[tag] = signals.create(`CollectionService.{tag}InstanceAdded`)
 		end
 		return addedSignals[tag]
 	end
 
 	function CollectionService:GetInstanceRemovedSignal(tag: string)
 		if not removedSignals[tag] then
-			removedSignals[tag] = signals.create()
+			removedSignals[tag] = signals.create(`CollectionService.{tag}InstanceRemoved`)
 		end
 		return removedSignals[tag]
 	end
@@ -139,6 +155,7 @@ function collection.create()
 	--- Clears all tag state so suites do not leak into each other.
 	function CollectionService.reset()
 		table.clear(tagged)
+		table.clear(tagsOf)
 	end
 
 	return CollectionService

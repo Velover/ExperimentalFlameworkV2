@@ -35,11 +35,13 @@ local serverEnv, serverContext = createGraph("Server")
 local clientEnv, clientContext = createGraph("Client")
 
 -- Both graphs need their own Heartbeat driven: roblox-ts's Promise schedules `Promise.delay` on it,
--- which is what a function request timeout is built from.
+-- which is what a function request timeout is built from. Before it, once for both, the threads whose
+-- `task.wait` or `task.delay` is up are resumed, as a frame does (see `roblox.luau`).
 local isRunning = true
 luneTask.spawn(function()
 	while isRunning do
 		luneTask.wait()
+		roblox.resumeWaiting()
 		serverEnv.heartbeat()
 		clientEnv.heartbeat()
 	end

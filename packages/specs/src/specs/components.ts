@@ -50,6 +50,14 @@ declare const __harness: {
 	warnings: () => string[];
 	clearWarnings: () => void;
 
+	/**
+	 * Every error a signal handler raised since the last `clearErrors`. The engine runs each
+	 * handler on a thread of its own and prints what it raises, so an `AddTag` whose handler
+	 * raises returns normally: this is where the raise shows.
+	 */
+	errors: () => string[];
+	clearErrors: () => void;
+
 	/** An `InstanceHandle` for an instance that has not streamed in, so `Get` is empty. */
 	pendingHandle: (instance: Instance) => InstanceHandle;
 
@@ -1127,21 +1135,37 @@ export = suite("components", [
 			collectionService().AddTag(instance, "Tagged");
 			const component = expectDefined(components.getComponent<Tagged>(instance), "component");
 
+			const added = new Array<Tagged>();
+			const removed = new Array<Tagged>();
+			const addedConnection = components.onComponentAdded<Tagged>((value, owner) => {
+				if (owner === instance) added.push(value);
+			});
+			const removedConnection = components.onComponentRemoved<Tagged>((value, owner) => {
+				if (owner === instance) removed.push(value);
+			});
+
 			// The removal reads the tag as still there and looks again a resumption later, so the
 			// added announcement reaches a component that is still attached -- and is handed it, as
-			// it would be without the attribute write. The attribute criterion takes it down on its
-			// own, a resumption later, as it does without the re-tag.
-			expectNoThrow(() => {
-				__harness.deferTags(() => {
-					instance.SetAttribute("speed", "bad");
-					collectionService().RemoveTag(instance, "Tagged");
-					collectionService().AddTag(instance, "Tagged");
-				});
-			}, "announcing the tag again");
-			expectEqual(components.getComponent<Tagged>(instance), component, "component in the same resumption");
+			// it would be without the attribute write, rather than raising out of the handler. The
+			// attribute criterion takes it down on its own, on the deferred read the attribute's
+			// change scheduled: a place runs that thread in the same queue as the announcements,
+			// after them, so the component is gone by the time the resumption's signals are all in.
+			__harness.clearErrors();
+			__harness.deferTags(() => {
+				instance.SetAttribute("speed", "bad");
+				collectionService().RemoveTag(instance, "Tagged");
+				collectionService().AddTag(instance, "Tagged");
+			});
+			expectEqual(__harness.errors().size(), 0, `errors announcing the tag again: ${__harness.errors().join(" | ")}`);
+			expectEqual(components.getComponent<Tagged>(instance), undefined, "component once the attribute was read");
 
 			__harness.flush();
-			expectEqual(components.getComponent<Tagged>(instance), undefined, "component once the attribute was read");
+			expectEqual(components.getComponent<Tagged>(instance), undefined, "component a resumption later");
+			expectEqual(removed.size(), 1, "removals");
+			expectEqual(removed[0], component, "the component taken down");
+			expectEqual(added.size(), 0, "components built again");
+			addedConnection.Disconnect();
+			removedConnection.Disconnect();
 
 			instance.Destroy();
 			module.extinguish();
@@ -1301,8 +1325,11 @@ export = suite("components", [
 			expectDefined(components.getComponents<Handler>(instance)[0], "component once it entered the DataModel");
 
 			// Leaving announces it as gone again, with the tag still in place: it is the
-			// announcement ancestry drives, not the tag itself.
+			// announcement ancestry drives, not the tag itself. The engine announces it before the
+			// move, while the instance still reads as parented and tagged, so the component comes
+			// down a resumption later, once the removal can be told apart from a stale one.
 			instance.Parent = undefined;
+			__harness.flush();
 			expectEqual(components.getComponents<Handler>(instance).size(), 0, "components after it left again");
 			expectTrue(collectionService().HasTag(instance, "Handler"), "the tag the instance kept");
 
@@ -1331,8 +1358,10 @@ export = suite("components", [
 
 			// Pooling by unparenting rather than destroying. The descendant left the DataModel with
 			// its ancestor, so its tag is announced as gone exactly as the ancestor's own is: what
-			// takes a component down is leaving the DataModel, not losing a parent.
+			// takes a component down is leaving the DataModel, not losing a parent. Announced
+			// before the move, as the engine does, it lands a resumption later.
 			pooled.Parent = undefined;
+			__harness.flush();
 
 			expectEqual(components.getComponents<Handler>(core).size(), 0, "components after the unparenting");
 			expectArrayEqual(removed, ["PooledCore"], "removal notifications");
@@ -1424,7 +1453,10 @@ export = suite("components", [
 			);
 
 			// Both components still go, because it is leaving the DataModel that announces their
-			// tags as gone: the owner's on the way out, and the child's with it.
+			// tags as gone: the owner's on the way out, and the child's with it. The engine announces
+			// both before the owner has left, while each still reads as in the tree and tagged, so
+			// they come down a resumption later.
+			__harness.flush();
 			expectArrayEqual(removed, ["Owner:DestroyOrder", "Handler:Core"], "removal notifications");
 			expectEqual(components.getComponents<Handler>(core).size(), 0, "components left on the child");
 			expectEqual(components.getComponents<Owner>(owner).size(), 0, "components left on the owner");
@@ -5144,9 +5176,12 @@ export = suite("components", [
 
 				// `linked` has no `X`, so the linked component raises the moment the second link
 				// asks about it -- partway through this entry's setup, with the first link already
-				// watching its own target -- and the tag's handler raises with it.
-				const [ok] = pcall(() => collectionService().AddTag(instance, "ThrowyPointer"));
-				expectEqual(ok, false, "the tag's handler raised");
+				// watching its own target -- and the tag's handler raises with it. The engine reports
+				// a handler's error rather than raising it out of `AddTag`.
+				__harness.clearErrors();
+				collectionService().AddTag(instance, "ThrowyPointer");
+				expectEqual(__harness.errors().size(), 1, "errors the tag's handler raised");
+				__harness.clearErrors();
 
 				// The tag leaving releases everything the failed setup had registered: the entry
 				// the link created on the linked component's tracker, and the subscriptions on
@@ -5185,9 +5220,12 @@ export = suite("components", [
 
 				// `linked` has no `X`, so the linked component raises the moment the second link
 				// asks about it -- partway through this entry's setup, with the first link already
-				// watching its own target -- and the tag's handler raises with it.
-				const [ok] = pcall(() => collectionService().AddTag(instance, "FussyPointer"));
-				expectEqual(ok, false, "the tag's handler raised");
+				// watching its own target -- and the tag's handler raises with it. The engine reports
+				// a handler's error rather than raising it out of `AddTag`.
+				__harness.clearErrors();
+				collectionService().AddTag(instance, "FussyPointer");
+				expectEqual(__harness.errors().size(), 1, "errors the tag's handler raised");
+				__harness.clearErrors();
 
 				// The tag leaving releases everything the failed setup had registered: the entry
 				// the link created on the linked component's tracker, and the subscriptions on

@@ -20,12 +20,105 @@ local roblox = {}
 
 roblox.instances = instances
 
+--[[
+	`task.wait` and `task.delay`, resumed the way the engine resumes them.
+
+	The engine keeps one list of waiting threads and, once a frame, resumes every one whose time is
+	up in the order of their deadlines: a `task.delay(0)` made before a `task.wait()` runs before
+	that wait returns (measured in Studio, 2026-09-25). Lune's own scheduler resumes a delay one
+	cycle after a wait made at the same time and orders simultaneous waits as it likes, so both go
+	through this list instead, and `roblox.resumeWaiting` resumes them. The runners call it once per
+	scheduler cycle -- once, however many realms the process holds -- before they pump Heartbeat,
+	which is where a frame resumes them as well.
+
+	A resumption waits for one whole cycle to pass after the one it was scheduled in, whatever its
+	duration: a frame resumes waiting threads only after everything `task.defer` queued in the
+	resumption that scheduled them has run, and Lune runs its deferred threads once per cycle, not
+	necessarily before this list is pumped.
+
+	A thread cancelled with `task.cancel` before its turn is closed, and a closed one is skipped.
+	What a delayed callback raises is Lune's to report, as it was when Lune ran the delay.
+]]
+local waiting: { any } = {}
+local waitSequence = 0
+local pumps = 0
+
+local function scheduleResumption(duration: number?, thread: thread, arguments: any?): any
+	waitSequence += 1
+	local now = os.clock()
+	local entry = {
+		deadline = now + math.max(tonumber(duration) or 0, 0),
+		sequence = waitSequence,
+		pump = pumps,
+		started = now,
+		thread = thread,
+		arguments = arguments,
+		done = false,
+	}
+	table.insert(waiting, entry)
+	return entry
+end
+
+local function taskWait(duration: number?): number
+	local entry = scheduleResumption(duration, coroutine.running())
+	local elapsed = coroutine.yield()
+	-- Resumed by something else first, the thread must not be resumed again by this entry.
+	entry.done = true
+	return elapsed
+end
+
+local function taskDelay(duration: number?, callback: any, ...: any): thread
+	local thread = if type(callback) == "thread" then callback else coroutine.create(callback)
+	scheduleResumption(duration, thread, table.pack(...))
+	return thread
+end
+
+--- Resumes every waiting thread whose time is up, earliest deadline first. Once per cycle.
+local function resumeWaiting()
+	pumps += 1
+	if #waiting == 0 then
+		return
+	end
+
+	local now = os.clock()
+	local due, rest = {}, {}
+	for _, entry in waiting do
+		table.insert(if entry.deadline <= now and entry.pump <= pumps - 2 then due else rest, entry)
+	end
+
+	if #due == 0 then
+		return
+	end
+
+	-- A thread that waits again once resumed joins `rest`, for a later cycle.
+	waiting = rest
+	table.sort(due, function(a, b)
+		if a.deadline ~= b.deadline then
+			return a.deadline < b.deadline
+		end
+		return a.sequence < b.sequence
+	end)
+
+	for _, entry in due do
+		if not entry.done and coroutine.status(entry.thread) == "suspended" then
+			entry.done = true
+			if entry.arguments then
+				luneTask.spawn(entry.thread, table.unpack(entry.arguments, 1, entry.arguments.n))
+			else
+				luneTask.spawn(entry.thread, os.clock() - entry.started)
+			end
+		end
+	end
+end
+
+roblox.resumeWaiting = resumeWaiting
+
 --- Builds an isolated Roblox environment for one realm.
 function roblox.create(initialRealm: "Server" | "Client")
 	local env = {}
 
-	local function createSignal()
-		return signals.create()
+	local function createSignal(name: string?)
+		return signals.create(name)
 	end
 
 	--- Which realm this environment reports as. `@Provider` used to gate its metadata on this, so
@@ -33,10 +126,10 @@ function roblox.create(initialRealm: "Server" | "Client")
 	local realm = initialRealm
 
 	local RunService = {
-		PostSimulation = createSignal(),
-		PreSimulation = createSignal(),
-		PreRender = createSignal(),
-		Heartbeat = createSignal(),
+		PostSimulation = createSignal("RunService.PostSimulation"),
+		PreSimulation = createSignal("RunService.PreSimulation"),
+		PreRender = createSignal("RunService.PreRender"),
+		Heartbeat = createSignal("RunService.Heartbeat"),
 	}
 
 	--- The RunService roblox-ts's Promise sees. `Promise.delay` schedules on `Heartbeat`, which the
@@ -54,8 +147,10 @@ function roblox.create(initialRealm: "Server" | "Client")
 		return realm == "Client"
 	end
 
+	--- The places the harness stands in for are run in Studio (`flamework-test`), where this is true;
+	--- it turns on the Studio-only defaults (profiling, `warnOnInvalidGuards`) as a place's run does.
 	function RunService:IsStudio()
-		return false
+		return true
 	end
 
 	function RunService:IsRunning()
@@ -67,8 +162,8 @@ function roblox.create(initialRealm: "Server" | "Client")
 
 	local Players = {
 		LocalPlayer = nil :: any,
-		PlayerAdded = createSignal(),
-		PlayerRemoving = createSignal(),
+		PlayerAdded = createSignal("Players.PlayerAdded"),
+		PlayerRemoving = createSignal("Players.PlayerRemoving"),
 	}
 
 	function Players:GetPlayers(): { any }
@@ -194,6 +289,8 @@ function roblox.create(initialRealm: "Server" | "Client")
 							Value = itemName,
 							EnumType = enumName,
 						}
+						-- An EnumItem to an attribute and a BindableEvent, not a table.
+						instances.markOpaque(items[itemName], "EnumItem")
 					end
 					return items[itemName]
 				end,
@@ -202,6 +299,7 @@ function roblox.create(initialRealm: "Server" | "Client")
 				end,
 			})
 
+			instances.markOpaque(enumType, "Enum")
 			enumCache[enumName] = enumType
 			return enumType
 		end,
@@ -209,12 +307,14 @@ function roblox.create(initialRealm: "Server" | "Client")
 
 	env.Enum = Enum
 
-	--- Roblox's `task` library. Lune's scheduler covers everything the specs need.
+	--- Roblox's `task` library. Lune's scheduler covers `spawn` and `cancel`; a `task.defer` made
+	--- while a deferred batch is open joins that batch in raise order, as it joins the engine's one
+	--- queue; `wait` and `delay` share the engine's list of waiting threads (see `resumeWaiting`).
 	env.task = {
 		spawn = luneTask.spawn,
-		defer = luneTask.defer,
-		delay = luneTask.delay,
-		wait = luneTask.wait,
+		defer = instances.defer,
+		delay = taskDelay,
+		wait = taskWait,
 		cancel = luneTask.cancel,
 	}
 
@@ -240,13 +340,22 @@ function roblox.create(initialRealm: "Server" | "Client")
 
 	env.remotes = remotes
 
-	--- Advances one frame, firing the signals the per-frame lifecycle events hang off, in Roblox's
-	--- order: PreSimulation, then PostSimulation and Heartbeat (the same point), then PreRender.
+	--[[
+		Advances one frame, firing the signals the per-frame lifecycle events hang off in the order
+		one engine frame fires them: PreRender, PreSimulation, PostSimulation, Heartbeat. Measured on
+		a Studio client under both signal behaviours (2026-09-25), the full cycle is RenderStepped,
+		PreRender, PreAnimation, Stepped, PreSimulation, PostSimulation, Heartbeat; the ones nothing
+		connects to are left out.
+
+		A frame is the engine's cut, not a waiting thread's: a thread resumed by `task.wait()` wakes
+		between PostSimulation and Heartbeat, so it sees Heartbeat first and the rest of the next frame
+		after it. `step` is called synchronously, so no thread wakes inside it.
+	]]
 	function env.step(delta: number)
+		RunService.PreRender:Fire(delta)
 		RunService.PreSimulation:Fire(delta)
 		RunService.PostSimulation:Fire(delta)
 		RunService.Heartbeat:Fire(delta)
-		RunService.PreRender:Fire(delta)
 	end
 
 	--- Pumps the Heartbeat roblox-ts's Promise schedules `Promise.delay` on. Not the graph's own
@@ -268,7 +377,14 @@ function roblox.create(initialRealm: "Server" | "Client")
 			end,
 		})
 		context.setGlobal("workspace", Workspace)
-		context.setGlobal("Instance", { new = instances.new })
+		-- Each instance learns which realm made it, for the members the engine allows on one side only.
+		context.setGlobal("Instance", {
+			new = function(className: string, parent: any?)
+				local instance = instances.new(className, parent)
+				instances.setRealm(instance, RunService)
+				return instance
+			end,
+		})
 		context.setGlobal("InstanceHandle", { new = function(instance: any)
 			return instances.newHandle(instance)
 		end })
@@ -347,16 +463,18 @@ function roblox.create(initialRealm: "Server" | "Client")
 			flush = function()
 				luneTask.wait()
 			end,
-			--- Runs the callback with CollectionService signals deferred, delivering them afterwards in
-			--- order, the way a place with deferred signal behaviour does at the end of a resumption.
+			--- Runs the callback the way a place with deferred signal behaviour runs a resumption: every
+			--- signal it raises -- CollectionService's, the tree's, attributes and properties,
+			--- BindableEvent dispatch -- and every `task.defer` is queued and delivered afterwards, in
+			--- order. The three are one control under three names, for what each spec is there to
+			--- show: a place cannot defer one kind of signal and not the rest.
 			deferTags = CollectionService.runDeferred,
-			--- The same for the tree signals -- ChildAdded, ChildRemoved and the descendant pair --
-			--- which the engine defers as well, so a handler sees a tree that has finished moving
-			--- while the signals for the rest of the move are still queued behind it.
+			--- A handler sees a tree that has finished moving while the signals for the rest of the
+			--- move are still queued behind it.
 			deferTree = instances.runDeferredTree,
-			--- And the same for BindableEvent dispatch, which is what `@rbxts/signal` fires
-			--- through: a component's added and removed announcements reach their handlers at the
-			--- end of the resumption, after everything the caller went on to do.
+			--- A component's added and removed announcements (BindableEvent dispatch, which is what
+			--- `@rbxts/signal` fires through) reach their handlers at the end of the resumption, after
+			--- everything the caller went on to do.
 			deferSignals = instances.runDeferredSignals,
 			--- Advances one frame, firing the per-frame lifecycle signals.
 			step = env.step,
@@ -382,6 +500,11 @@ function roblox.create(initialRealm: "Server" | "Client")
 			clearWarnings = function()
 				table.clear(warnings)
 			end,
+			--- Every error a signal handler or a deferred thread raised since the last `clearErrors`.
+			--- The engine prints these rather than raising them out of whatever fired the signal, so
+			--- this is the only place a spec can see them.
+			errors = signals.errors,
+			clearErrors = signals.clearErrors,
 			--- An `InstanceHandle` for an instance that has not streamed in, and the streaming of
 			--- it. Roblox resolves a handle the moment its instance replicates; here the spec says
 			--- when, so the waiting a component does is observable.

@@ -32,6 +32,12 @@ declare const __harness: {
 	connectionCount: (instance: Instance) => number;
 	warnings: () => string[];
 	clearWarnings: () => void;
+	/**
+	 * Every error a signal handler raised since the last `clearErrors`: the engine prints a
+	 * handler's error rather than raising it out of the `AddTag` that ran the handler.
+	 */
+	errors: () => string[];
+	clearErrors: () => void;
 };
 
 /**
@@ -438,12 +444,15 @@ export = suite("regressions", [
 		() => {
 			const module = Flamework.createModule().includePlugin(componentPlugin()).ignite();
 
-			const message = expectThrows(
-				() => collectionService().AddTag(folder("RgCyclicTarget"), "RgCyclic"),
-				"constructing a cyclic component",
-			);
+			// Raised in the tag's handler, which the engine reports rather than raising out of
+			// `AddTag`.
+			__harness.clearErrors();
+			collectionService().AddTag(folder("RgCyclicTarget"), "RgCyclic");
+			const reported = __harness.errors();
 
-			expectTrue(message.find("cyclic")[0] !== undefined, "error names the cycle");
+			expectEqual(reported.size(), 1, "errors constructing a cyclic component raised");
+			expectTrue(reported[0].find("cyclic")[0] !== undefined, `error names the cycle: ${reported[0]}`);
+			__harness.clearErrors();
 
 			module.extinguish();
 		},
@@ -559,8 +568,12 @@ export = suite("regressions", [
 				expectThrows(() => components.addComponent<RgFaulty>(byHand), "a constructor that raises");
 				byHand.Destroy();
 
+				// The tag's handler raises, which the engine reports rather than raising out of `AddTag`.
 				const byTag = folder("RgFaultyByTag");
-				expectThrows(() => collectionService().AddTag(byTag, "RgFaulty"), "a tagged constructor that raises");
+				__harness.clearErrors();
+				collectionService().AddTag(byTag, "RgFaulty");
+				expectEqual(__harness.errors().size(), 1, "errors a tagged constructor that raises reported");
+				__harness.clearErrors();
 				collectionService().RemoveTag(byTag, "RgFaulty");
 				byTag.Destroy();
 			}

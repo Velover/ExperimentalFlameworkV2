@@ -16,6 +16,11 @@
 	exits explicitly after the summary, because Lune holds a cancelled `task.delay` until its
 	deadline and does not always let go of a cancelled `task.wait` at all, and a run that has
 	printed its summary must not sit there for either.
+
+	A signal handler's error is reported rather than raised out of whatever fired the signal, as the
+	engine prints it (see `signals.luau`), so a case that finishes with an error reported while it
+	ran fails on it: the output of a place would have shown it in red. A case that means to make a
+	handler raise reads the error through `__harness.errors()` and clears it.
 ]]
 
 local luneTask = require("@lune/task")
@@ -23,6 +28,7 @@ local process = require("@lune/process")
 
 local harness = require("./harness")
 local roblox = require("./roblox")
+local signals = require("./signals")
 
 local realm = process.args[1] or "Server"
 if realm ~= "Server" and realm ~= "Client" then
@@ -38,10 +44,12 @@ env.install(context)
 context.loadPromise()
 
 -- roblox-ts's Promise schedules `Promise.delay` on `RunService.Heartbeat`, which is what networking
--- builds its request timeouts on, so the harness has to drive it.
+-- builds its request timeouts on, so the harness has to drive it -- after resuming the threads whose
+-- `task.wait` or `task.delay` is up, as a frame does (see `roblox.luau`).
 luneTask.spawn(function()
 	while true do
 		luneTask.wait()
+		roblox.resumeWaiting()
 		env.heartbeat()
 	end
 end)
@@ -58,6 +66,7 @@ local hanging: { string } = {}
 --- the exit at the end takes it with the process -- and reported as hanging.
 local function runCase(run: () -> ()): (boolean, string?, boolean)
 	local finished, ok, err = false, false, nil
+	signals.clearErrors()
 
 	luneTask.spawn(function()
 		ok, err = pcall(run)
@@ -73,7 +82,16 @@ local function runCase(run: () -> ()): (boolean, string?, boolean)
 		return false, string.format("still running after %ds: the case is hanging", CASE_TIMEOUT), true
 	end
 
-	return ok, if ok then nil else tostring(err), false
+	if not ok then
+		return false, tostring(err), false
+	end
+
+	local reported = signals.errors()
+	if #reported > 0 then
+		return false, string.format("a signal handler raised while the case ran (%d reported), first: %s", #reported, reported[1]), false
+	end
+
+	return true, nil, false
 end
 
 print(string.format("\n  Flamework runtime specs (%s)\n", realm))

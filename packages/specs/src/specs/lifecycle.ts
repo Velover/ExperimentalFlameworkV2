@@ -375,9 +375,10 @@ export = suite("lifecycle", [
 
 			__harness.step(0.25);
 
-			// PreRender never fires on the server, so the plugin only connects it on the client.
+			// One engine frame fires PreRender, then PreSimulation, then Heartbeat. PreRender never
+			// fires on the server, so the plugin only connects it on the client.
 			const expected = RunService.IsClient()
-				? ["physics:0.25", "tick:0.25", "render:0.25"]
+				? ["render:0.25", "physics:0.25", "tick:0.25"]
 				: ["physics:0.25", "tick:0.25"];
 			expectArrayEqual(frames, expected, "lifecycle events for one frame");
 

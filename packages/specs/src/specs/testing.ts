@@ -63,6 +63,14 @@ function outcome(result: RunResult, section: string, name: string) {
 	);
 }
 
+declare const __harness: {
+	/**
+	 * Runs the callback as the other realm would. A single-realm graph has no client, so this is how
+	 * a server spec reaches its own remote from the side the engine lets call it.
+	 */
+	asRealm: (realm: "Server" | "Client", callback: () => void) => void;
+};
+
 /** A run with a short timeout, for the cases about overrunning tests. */
 function runQuickly(filter?: testing.TestFilter) {
 	return runTests(filter, undefined, { timeout: 0.2 });
@@ -449,8 +457,15 @@ export = suite("testing", [
 			expectTrue(viaBindable.ok, "invoked through the bindable");
 			expectEqual(viaBindable.passed, 1, "one test");
 
-			const viaRemote = remote.InvokeServer(undefined, { list: true }) as RunResult;
-			expectTrue(viaRemote.listed === true, "listed through the remote");
+			// Only a client may invoke a RemoteFunction's server side: the server calling it on its
+			// own remote raises, as it does in a place.
+			expectThrows(() => remote.InvokeServer(undefined, { list: true }), "InvokeServer from the server");
+
+			let viaRemote: RunResult | undefined;
+			__harness.asRealm("Client", () => {
+				viaRemote = remote.InvokeServer(undefined, { list: true }) as RunResult;
+			});
+			expectTrue(viaRemote?.listed === true, "listed through the remote");
 
 			expectTrue(Testing.runOnServer("hosted").ok, "runOnServer on the server runs locally");
 
