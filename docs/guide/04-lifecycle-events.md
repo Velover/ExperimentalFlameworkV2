@@ -121,7 +121,16 @@ Detached means no further event, `onExtinguished` included: an instance that an 
 ignition; whoever created the instance owns its initialisation and its start.
 
 A **lazy provider** is different: it is a provider, so when it is first resolved after ignition the
-plugin runs its `onInit` and `onStart` for it, on the next resume point, in that order.
+plugin runs its `onInit` and `onStart` for it, on the next resume point, in that order. Several
+resolved together -- one, and the lazy providers its constructor takes -- go the way eager providers
+do: every `onInit` in the order they were resolved, a dependency first, each finished before the
+next begins, then every `onStart`. One whose `onInit` raises is reported, never ticks and is never
+started, and the ones after it carry on. One first
+resolved while the module is still igniting, by a plugin's `onPostIgnite` hook after the lifecycle
+plugin's, waits for ignition to finish, and hears neither if the ignition fails. Its
+per-frame events wait for that too: it does not tick before its `onInit` has finished. Once the
+module has begun to extinguish neither runs: one first resolved by an `onExtinguished` handler is
+told `onExtinguished`, and that is all it hears.
 
 ## Components
 
@@ -219,7 +228,8 @@ one provider iterating them over hundreds of `listen` calls.
 - **`listen` does not replay `onStart`.** It attaches from that moment on.
 - **Extinguishing disconnects everything.** The plugin disconnects its `RunService` connections and
   releases the providers, so a dead module stops ticking. This was a bug once; it is covered by a
-  spec now.
+  spec now. Nothing ticks or starts from the moment `extinguish()` is called, either: not while the
+  modules importing it go down first, whose `onExtinguished` handlers may yield.
 - **A failing `onExtinguished` does not abort extinguish.** It is warned about and the remaining
   handlers still run, so the module cannot get stuck half-extinguished. The same goes for a
   plugin's extinguished hook.

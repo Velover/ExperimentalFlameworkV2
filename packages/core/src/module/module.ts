@@ -12,6 +12,7 @@ import { convertConciseDependencyInfo } from "../utility/convertConciseDependenc
 import { getClassImplements } from "../utility/getClassImplements";
 import { getClassesInPath } from "../utility/getClassesInPath";
 import { getClassesInGlob } from "../utility/globs";
+import { threadWaits } from "../utility/threadWaits";
 import type { Destructor, ExtractSingleCallback } from "../utility/types";
 import type {
 	IgniteOptions,
@@ -70,6 +71,16 @@ interface InternalModule {
 
 	/** @internal */
 	removeImporter: (importer: Module) => void;
+
+	/**
+	 * Yields until an extinguish that is already running on another thread has finished. Returns at
+	 * once if the module is not extinguishing, if the extinguish is running on this thread or on
+	 * one that is waiting here, through any number of these waits, on this thread, or if its thread
+	 * has died; stops waiting if the thread dies meanwhile.
+	 *
+	 * @internal
+	 */
+	awaitExtinguished: () => void;
 }
 
 export interface Module extends InternalModule {
@@ -193,6 +204,13 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 
 	/** Objects handed over by `provideInstance`, attached to their interfaces once every plugin is set up. */
 	const providedInstances = new Array<object>();
+	/**
+	 * Provided objects that have not joined their interfaces: until the ignition reaches them, and
+	 * for good when an observer refuses one. `release` has nothing to take them out of, and a failed
+	 * ignition told every observer `onRemoved` for objects it had never been told of, and told the
+	 * observers that had just undone a refused one of it again.
+	 */
+	const unjoinedInstances = new Set<object>();
 	const observers = new Map<string, Array<InterfaceConfiguration<unknown>>>();
 	const hooks = new Array<RegisteredHook>();
 	const includedPlugins = new Set<PluginDefinition>();
@@ -200,6 +218,10 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 	const temporaryInstances = new Set<object>();
 
 	let moduleInitState = ModuleInitState.Created;
+
+	/** The thread `extinguish` runs on, and what wakes each thread waiting in `awaitExtinguished` for it to finish. */
+	let extinguishingThread: thread | undefined;
+	const extinguishWaiters = new Array<() => void>();
 
 	const switchInitState = (from: ModuleInitState, to: ModuleInitState) => {
 		if (moduleInitState !== from) {
@@ -393,10 +415,14 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 
 		if (!success) {
 			// Undone in reverse, each step guarded, so that one `onRemoved` raising does not leave
-			// the rest attached; the observer's error is what comes out.
+			// the rest attached; the observer's error is what comes out. Marked as refused, so that
+			// an observer owing a departing object a last event -- the lifecycle plugin's
+			// `onExtinguished` while the module extinguishes -- does not deliver it.
 			for (let i = added.size() - 1; i >= 0; i--) {
 				const [interfaceId, observer] = added[i];
-				guarded("undoing an attachment", () => observer.onRemoved?.(instance, { interfaceId, kind }));
+				guarded("undoing an attachment", () =>
+					observer.onRemoved?.(instance, { interfaceId, kind, refused: true }),
+				);
 			}
 
 			error(err, 0);
@@ -456,7 +482,15 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 			if (config.type === "class") {
 				const instantiatedProvider = instantiateClassWithDependencies(config.value as Constructor);
 				instantiatedProviders.set(info.id, instantiatedProvider);
-				registerClassInterfaces(instantiatedProvider, "provider");
+
+				// Held only if it is attached: one an observer refuses is attached nowhere, so it must
+				// not be cached either -- the next resolve handed it out with no lifecycle at all, and
+				// `release` told every observer, the refusing one included, it was removed again.
+				const [attached, err] = pcall(() => registerClassInterfaces(instantiatedProvider, "provider"));
+				if (!attached) {
+					instantiatedProviders.delete(info.id);
+					error(err, 0);
+				}
 
 				return instantiatedProvider;
 			} else if (config.type === "function") {
@@ -638,6 +672,7 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 			// every plugin's observers are in place.
 			for (const instance of providedInstances) {
 				registerClassInterfaces(instance, "provider");
+				unjoinedInstances.delete(instance);
 			}
 
 			for (const provider of providers) {
@@ -648,6 +683,18 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 			}
 
 			runHooks("postIgnite");
+
+			// Checked again once everything has run: an `onInit` that yields lets other threads run in
+			// the middle of ignition, and one that extinguished an import then did not see this module
+			// among its importers, since it joins them only below. Carrying on left it ignited onto a
+			// released import that would never take it down.
+			for (const imported of imports) {
+				if (!imported.isIgnited()) {
+					error(
+						`module '${state.debugName}': imported module '${imported.debugName}' was extinguished while this module was igniting`,
+					);
+				}
+			}
 		});
 
 		if (!success) {
@@ -663,17 +710,32 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 			imported.addImporter(module);
 		}
 
+		// Ignition has completed, so this is where the lifecycle plugin starts the providers: an
+		// `onStart` sees the module ignited, may extinguish it, and may ignite one that imports it.
+		// Nothing here can fail the ignition, so a hook that raises is warned about. One that
+		// extinguishes the module ends the phase: the hooks after it would set up a module gone.
+		for (const hook of sortedHooks("ignited")) {
+			if (moduleInitState !== ModuleInitState.Ignited) break;
+			guarded("an onIgnited hook", () => hook.callback(module));
+		}
+
 		return module;
 	};
 
 	const extinguish: Module["extinguish"] = () => {
 		switchInitState(ModuleInitState.Ignited, ModuleInitState.Extinguishing);
+		extinguishingThread = coroutine.running();
 
 		// Importers hold this module's instances, so they go first, and each takes its own importers
-		// down before it returns: the deepest goes first. Copied, since each removes itself.
+		// down before it returns: the deepest goes first. Copied, since each removes itself. One
+		// extinguishing already, on another thread suspended in a handler that yields, is still
+		// using this module's providers, so it is waited for: skipped, it had this module released
+		// under it.
 		for (const importer of [...importers]) {
 			if (!importer.isExtinguished()) {
 				importer.extinguish();
+			} else {
+				importer.awaitExtinguished();
 			}
 		}
 
@@ -705,8 +767,29 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		// Providers join their interfaces when they are instantiated, so they have to leave them
 		// too. Without this, a plugin such as the lifecycle plugin keeps holding (and ticking)
 		// providers that belong to an extinguished module.
-		for (const [, provider] of instantiatedProviders) {
-			guarded("removing a provider", () => unregisterClassInterfaces(provider, "provider"));
+		//
+		// Over a copy, taken again until nothing new turns up: a removal runs user code -- the
+		// lifecycle plugin tells a provider resolved since its walk `onExtinguished` as it leaves --
+		// which may resolve a lazy provider for the first time, and a table gaining keys while it
+		// is walked skipped providers, or had others unregistered twice. By object, not by id: an
+		// object provided under several ids joined its interfaces once, so it leaves them once.
+		const released = new Set<defined>();
+		while (true) {
+			const remaining = new Array<defined>();
+			for (const [, provider] of instantiatedProviders) {
+				if (!released.has(provider)) {
+					released.add(provider);
+					if (!unjoinedInstances.has(provider)) {
+						remaining.push(provider);
+					}
+				}
+			}
+
+			if (remaining.isEmpty()) break;
+
+			for (const provider of remaining) {
+				guarded("removing a provider", () => unregisterClassInterfaces(provider, "provider"));
+			}
 		}
 
 		// A removal that raised leaves its instance behind, and nothing can add one any more.
@@ -722,6 +805,85 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		// Released last, once nothing in here can resolve any more, so that the next root ignited
 		// becomes the default rather than `Dependency<T>()` answering from a dead module.
 		clearDefaultModule(module);
+
+		for (const wake of extinguishWaiters) {
+			wake();
+		}
+
+		extinguishWaiters.clear();
+	};
+
+	const awaitExtinguished: Module["awaitExtinguished"] = () => {
+		if (moduleInitState !== ModuleInitState.Extinguishing) {
+			return;
+		}
+
+		// On the extinguish's own thread -- one of its handlers extinguishing an import -- it cannot
+		// finish until this returns, so waiting would never end. Nor on a thread the extinguish's
+		// thread is itself waiting on here, however many waits away: two extinguishes, each waiting
+		// for a module the other is taking down, held each other -- and every module between them,
+		// still ticking -- for good. The wait that would close the circle is skipped, as the wait on
+		// the extinguish's own thread is. The chain runs through an ignition waiting for an `onInit`
+		// on its own thread too, which the lifecycle plugin records -- and through one waiting for the
+		// Promise an `onInit` returned, whose work runs on a thread nothing can name: an `async`
+		// method's body runs on one of its own. A chain that ends at one is taken to close the circle,
+		// since the thread that settles it may be this one.
+		const running = coroutine.running();
+		const thread = extinguishingThread!;
+		const closesCircle = () => {
+			let waitedOn: thread | Promise<unknown> | undefined = thread;
+			while (waitedOn !== undefined) {
+				if (waitedOn === running || !typeIs(waitedOn, "thread")) {
+					return true;
+				}
+
+				waitedOn = threadWaits.get(waitedOn);
+			}
+
+			return false;
+		};
+
+		if (closesCircle()) {
+			return;
+		}
+
+		// Nor on a thread that has died -- cancelled, as the testing runner cancels a body that
+		// overran, or closed: that extinguish never finishes, and waiting for it held this module,
+		// and everything in it, for good. One that dies while this waits is noticed within a frame.
+		if (coroutine.status(thread) === "dead") {
+			return;
+		}
+
+		let woken = false;
+		const wake = () => {
+			if (woken) return;
+			woken = true;
+
+			// Removed here rather than by this thread once it resumes: one cancelled while it waits
+			// never does, and left its entry behind for good.
+			threadWaits.delete(running);
+			if (coroutine.status(running) !== "dead") {
+				task.spawn(running);
+			}
+		};
+
+		threadWaits.set(running, thread);
+		extinguishWaiters.push(wake);
+
+		// Checked again every frame, as well as for a dead extinguish: this thread may be cancelled
+		// while it waits, and the chain may come to close the circle after the wait began -- an
+		// `async` `onInit`'s body waits here before the ignition that called it takes the Promise it
+		// returned and waits on that.
+		task.spawn(() => {
+			while (!woken) {
+				task.wait();
+				if (coroutine.status(thread) === "dead" || coroutine.status(running) === "dead" || closesCircle()) {
+					wake();
+				}
+			}
+		});
+
+		coroutine.yield();
 	};
 
 	const isExtinguished: Module["isExtinguished"] = () => moduleInitState >= ModuleInitState.Extinguishing;
@@ -741,6 +903,7 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		lookupProvider,
 		addImporter: (importer) => importers.add(importer),
 		removeImporter: (importer) => importers.delete(importer),
+		awaitExtinguished,
 	};
 
 	/** What a plugin's setup is handed. Everything registers into this instantiation. */
@@ -765,11 +928,18 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 			assert(injectionId !== undefined);
 			assertNotProvided(injectionId);
 			instantiatedProviders.set(injectionId, instance);
-			providedInstances.push(instance);
+
+			// Once, however many ids it is provided under: it joins its interfaces once per entry,
+			// and the same object twice was initialised, started and told `onAdded` twice.
+			if (!providedInstances.includes(instance)) {
+				providedInstances.push(instance);
+				unjoinedInstances.add(instance);
+			}
 		},
 		includePlugin,
 		onPreIgnite: (callback, hookOptions) => registerHook("preIgnite", callback, hookOptions?.priority),
 		onPostIgnite: (callback, hookOptions) => registerHook("postIgnite", callback, hookOptions?.priority),
+		onIgnited: (callback, hookOptions) => registerHook("ignited", callback, hookOptions?.priority),
 		onExtinguished: (callback, hookOptions) => registerHook("extinguished", callback, hookOptions?.priority),
 		observe: (config, interfaceId) => {
 			assert(interfaceId !== undefined);

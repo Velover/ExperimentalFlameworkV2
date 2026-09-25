@@ -43,6 +43,7 @@ Everything is a method on `target`, and everything registers into the module bei
 | `includePlugin(plugin, options?)` | Includes another plugin, set up now, before this one continues. |
 | `onPreIgnite(cb, options?)` | Runs `cb` before the module's providers are constructed. |
 | `onPostIgnite(cb, options?)` | Runs `cb` after every provider has been constructed. |
+| `onIgnited(cb, options?)` | Runs `cb` once ignition has completed; the lifecycle plugin starts the providers here. |
 | `onExtinguished(cb, options?)` | Runs `cb` when the module extinguishes. |
 | `observe<T>({ onAdded, onRemoved })` | Tells the plugin about every object implementing `T`. |
 | `isActive(...conditions)` | Whether something with these [scope conditions](11-scopes.md) is registered in this module, the module's own condition included. |
@@ -68,11 +69,13 @@ for (const component of registered) {
 | Hook | Runs |
 |---|---|
 | `onPreIgnite` | After every plugin has been set up, **before** the module's providers are constructed. |
-| `onPostIgnite` | After every provider has been constructed. |
+| `onPostIgnite` | After every provider has been constructed, and `onInit` has run. The module is still igniting: a raise fails the ignition. |
+| `onIgnited` | Once ignition has completed: the module is ignited. The lifecycle plugin calls `onStart` here. A raise is warned about; once the module is extinguished, by an `onStart` say, the hooks after it do not run. |
 | `onExtinguished` | When `extinguish()` runs, before the providers are released. |
 
 `onPreIgnite` is for registering state that providers will look at while being constructed.
-`onPostIgnite` is for anything that needs the providers to exist.
+`onPostIgnite` is for anything that needs the providers to exist. `onIgnited` is for anything that
+should only start once the module is up for good, after the providers.
 
 **Nothing can be resolved during setup or `onPreIgnite`** -- providers do not exist yet, and trying
 raises `module is in pre-ignite phase, dependency cannot be resolved`.

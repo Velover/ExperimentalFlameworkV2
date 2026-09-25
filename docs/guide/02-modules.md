@@ -64,8 +64,11 @@ In order:
    hooks and observers into it. A plugin reached twice is set up once.
 2. `onPreIgnite` hooks run.
 3. Every registered provider is constructed, resolving its constructor dependencies.
-4. `onPostIgnite` hooks run. `LifecyclePlugin` starts its `RunService` connections here, and calls
-   `onStart` on everything that implements it.
+4. `onPostIgnite` hooks run. `LifecyclePlugin` calls `onInit` on everything that implements it here.
+   A raise up to this point fails the ignition.
+5. The module is ignited, and `onIgnited` hooks run. `LifecyclePlugin` calls `onStart` on everything
+   that implements it here, then starts its `RunService` connections, so an `onStart` sees
+   `isIgnited()`, may `extinguish()` the module, and may ignite one that imports it.
 
 Providers are constructed lazily *within* step 3 -- resolving a dependency constructs it if it does
 not exist yet -- so a provider's constructor can safely use anything injected into it.

@@ -130,6 +130,14 @@ export interface PluginTarget {
 	/** Runs after every provider has been constructed. */
 	onPostIgnite: (callback: (module: Module) => void, options?: HookOptions) => void;
 
+	/**
+	 * Runs once ignition has completed: the module is ignited, and its imports count it among
+	 * their importers. The lifecycle plugin starts the providers here. Nothing can fail the
+	 * ignition any more, so a hook that raises is warned about and the ones after it still run;
+	 * once the module has been extinguished -- by an `onStart`, say -- the rest do not run.
+	 */
+	onIgnited: (callback: (module: Module) => void, options?: HookOptions) => void;
+
 	/** Runs when the module extinguishes, before its providers are released. */
 	onExtinguished: (callback: (module: Module) => void, options?: HookOptions) => void;
 
@@ -167,4 +175,12 @@ export interface InterfaceContext {
 
 	/** Whether the object is a provider of the module, or an instance attached to it. */
 	kind: InterfaceTargetKind;
+
+	/**
+	 * Set on the `onRemoved` that undoes an attachment another observer refused: the object never
+	 * joined the module, so it is not owed what one leaving it would be.
+	 *
+	 * @internal
+	 */
+	refused?: boolean;
 }

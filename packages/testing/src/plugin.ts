@@ -79,21 +79,31 @@ export function createTestingPlugin(options?: TestingOptions): PluginDefinition 
 		// The module is current from before its providers construct until after they have started,
 		// so a section defined in a constructor, `onInit` or `onStart` knows the module it belongs
 		// to. First and Last, so that the window holds whatever order the plugins were included in.
+		// Providers start once ignition has completed, so it closes then -- or as the module goes
+		// down short of that, which an `onStart` extinguishing it does.
 		let previous: Module | undefined;
+		let current = false;
+		const restore = () => {
+			if (current) {
+				current = false;
+				__setCurrentModule(previous);
+				previous = undefined;
+			}
+		};
+
 		target.onPreIgnite(
 			(module) => {
 				previous = __getCurrentModule();
 				__setCurrentModule(module);
+				current = true;
 			},
 			{ priority: HookPriority.First },
 		);
+		target.onIgnited(restore, { priority: HookPriority.Last });
 
 		let attached = false;
 		target.onPostIgnite(
 			() => {
-				__setCurrentModule(previous);
-				previous = undefined;
-
 				attach({ timeout: resolved.timeout });
 				attached = true;
 
@@ -107,6 +117,8 @@ export function createTestingPlugin(options?: TestingOptions): PluginDefinition 
 		);
 
 		target.onExtinguished(() => {
+			restore();
+
 			if (attached) {
 				attached = false;
 				detach();

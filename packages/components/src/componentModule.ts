@@ -172,8 +172,10 @@ export class ComponentPlugin {
 			target.provideInstance(components);
 
 			// Tags are only watched once the module has ignited, so that every provider a component
-			// might inject exists by the time one is constructed.
-			target.onPostIgnite(() => components.startCollectionService());
+			// might inject exists by the time one is constructed. At `onIgnited`, after the lifecycle
+			// plugin has started the providers there, so that the components built during ignition
+			// still start after every provider has.
+			target.onIgnited(() => components.startCollectionService());
 			target.onExtinguished(() => components.stopCollectionService());
 		});
 	}
