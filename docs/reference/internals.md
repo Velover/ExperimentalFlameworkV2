@@ -262,10 +262,16 @@ rather than half-working.
    `undefined`, because an array literal with an `undefined` in it compiles to a table with a hole,
    which Luau can neither measure nor walk.
 4. Objects the plugins provided join the interfaces they implement, now that every observer is in
-   place; then every kept provider is resolved, which constructs it.
-5. `onPostIgnite` hooks run, and the module records itself as an importer on each of its imports.
+   place -- each once, however many ids it was provided under, and it leaves them once on release;
+   then every kept provider is resolved, which constructs it.
+5. `onPostIgnite` hooks run -- the lifecycle plugin runs `onInit` in its own -- and the imports are
+   checked again, since a yielding `onInit` lets another thread extinguish one.
+6. The module is `Ignited` and records itself as an importer on each of its imports; then
+   `onIgnited` hooks run, each guarded, stopping if one extinguished the module. The lifecycle
+   plugin starts the providers and connects `RunService` in its own, so `onStart` runs on a module
+   that is whole: ignited, importable, extinguishable, and past everything that can fail it.
 
-A raise anywhere past step 0 -- a plugin's setup, a hook, a constructor, `onInit` -- is caught: the
+A raise in steps 1 to 5 -- a plugin's setup, a hook, a constructor, `onInit` -- is caught: the
 module goes `Extinguishing → Extinguished` through the same release as `extinguish` (below), so
 the hooks that ran before the raise are undone by the plugins' `onExtinguished` hooks, and the
 error comes out afterwards. Without this the lifecycle plugin's `RunService` connections outlived
@@ -336,7 +342,7 @@ there, with the `StarterPlayer` rewrite to `PlayerScripts` kept for the `game` c
 ## Components
 
 `ComponentPlugin` is a plugin whose setup constructs `Components` over the registered classes,
-provides it to the module, and hooks `onPostIgnite` to `startCollectionService` and `onExtinguished`
+provides it to the module, and hooks `onIgnited` to `startCollectionService` and `onExtinguished`
 to `stopCollectionService`. It brings no lifecycle plugin of its own: components are constructed
 through the module, so they take their per-frame events from that module's.
 
@@ -364,7 +370,23 @@ why, as one that never came up does.
 This is what makes dependencies and streaming work with one mechanism:
 
 - A component that depends on another registers a listener on the dependency's tracker, so it
-  qualifies only once the dependency does, in either tag order.
+  qualifies only once the dependency does, in either tag order. A dependency Flamework does not build
+  on its own -- one with no tag, or one whose predicate refuses the instance -- counts only while it
+  is there (`isRefused`, read by `checkInstance` and by what an observer is told). Its entry
+  qualifies either way, so `addComponent` and `removeComponent` tell the dependents themselves
+  (`noteProvided`). It used to count as met, and the dependent's construction raised asking for it.
+  A removal by hand leaves a tagged dependency's entry qualifying too, so the removal tells every
+  dependent the component has gone whatever its tag, and the next build tells it of the next one; a
+  dependent used to go on holding the destroyed one for good. The tag path's listener builds nothing
+  while a construction by hand of its component is under way, which that telling can qualify it under.
+  A component added back while its removal runs -- from a handler of the removal's announcement,
+  which runs inside it under immediate signal behaviour -- tells the dependents it is there before
+  the removal tells them the old one went, so the removal tells them of it again as it finishes;
+  told only in that order, they went down and stayed down.
+- The tag path's listener reports a `destroy` that raises rather than raising it into whatever
+  handed it the loss. A dependency's tag going hands the loss round to its dependents before the
+  dependency's own removal, and a dependent's raise there skipped that removal, leaving the
+  dependency attached to an instance without its tag for as long as the module lived.
 - Under `Watching` (or `Contextual` on a client), the tracker follows the instance tree and flips the
   criterion as it fills in or breaks apart. Atomic models are exempt under `Contextual` because they
   replicate whole.
@@ -383,36 +405,37 @@ outside the tree cost nothing while the tree is whole. Names are followed only u
 announced by the renamed child alone -- nothing fires on the parent or on the siblings -- so with it
 on, each resolved child's `Name` is followed and, while a slot is empty, so is the `Name` of every
 child no slot is following (the node's *candidates*, one connection per child, also taken up by a
-child arriving under another name), dropped the moment every slot resolves: a sibling renamed to the
-required name is heard from the sibling, and a tree pays per child only while it is short of
-something. A rename heard anywhere re-resolves every slot whose name no longer resolves to what it
-records, since a child followed for a rename back can take another slot's name instead. With it off,
+child arriving under another name); once every slot resolves, only the children ahead of the last
+resolved one in child order stay candidates, since `FindFirstChild` reads the first child of a name
+and one of them renamed into it becomes the one read: a sibling renamed to the required name is
+heard from the sibling, and a child arriving goes last, so a whole tree pays only for the children
+ahead of its resolved ones. A rename heard anywhere re-resolves every slot whose name no longer
+resolves to what it records, since a child followed for a rename back can take another slot's name
+instead. With it off,
 a rename is seen by the next `refresh`, or by the child signals of the slot it concerns. Each change re-resolves its own slot, and the tracker's poll, deferred once per burst,
 reads the watcher's answer rather than the tree. `testInstance` re-reads through the watcher's
 `refresh`, which resolves every slot again, so what the watcher holds and what the tracker recorded
 cannot drift. The child link in `watchLink` follows its name the same way: the child it resolved to
 (and, renamed away, still that one), plus every other child as a candidate while the name resolves
-to nothing. The same shape is what `describeShapeMismatch` names a failure by, in `addComponent`'s
-error and in the tracker's warning. `t.children`, which the guard used to be built from, refused two
+to nothing, and every child ahead of the one it resolves to otherwise. The same shape is what
+`describeShapeMismatch` names a failure by, in `addComponent`'s error and in the tracker's warning.
+`t.children`, which the guard used to be built from, refused two
 children of one name outright; with the poll re-running the guard whole, a stray second `Root` took
 the component down at the next unrelated removal, and the poll then listened only for additions, so
 removing the stray one was never seen.
 
 A guard written by hand (`instanceGuard`), or one the transformer fell back to because the type says
 more than classes and children (a union of trees), has no structure to follow, so the tracker
-watches the whole tree: it subscribes to the instance's descendant signals and re-runs the guard on
-a deferred task. Only one of those two signals is connected at a time: a guard that fails can only be met by the tree
-gaining something, and one that passes can only be broken by it losing something. Which of them is
-live is derived from the criterion rather than remembered beside it, so every path that writes the
-criterion re-points the poll with it -- the poll's own handler, and the re-read a tag performs when
-it arrives at an entry a link opened. They are one fact in two places, and writing only the criterion
-would leave the poll waiting for the change that has already happened: a guard recorded as failing
-while the tree is still watched for a removal can only ever be told that it broke again, so the
-component would never be built, and a guard recorded as passing while the tree is still watched for
-an addition would leave the component attached to a tree that stopped matching it. The handler is the
-same on both connections for the same reason -- it re-reads the guard rather than being told what
-moved, so a poll re-pointed while its deferred task was already queued still reports the tree that
-task finds.
+watches the whole tree: it subscribes to the instance's `DescendantAdded` and `DescendantRemoving`
+and re-runs the guard on a deferred task, once per burst. Both stay connected whatever the guard
+answers, because nothing says which change can overturn a guard written by hand: `t.children`
+refuses two children of one name, so a removal can meet it and an addition can break it. The poll
+used to connect only one of the two -- additions while the guard failed, removals while it passed,
+on the reasoning that a failing guard can only be met by the tree gaining something -- and a
+component whose duplicate child was removed stayed unbuilt until some unrelated descendant arrived,
+while one that gained a duplicate stayed attached. The handler is the same on both connections: it
+re-reads the guard rather than being told what moved, and reports the tree it finds, a reading that
+matches the record included.
 
 **Links** are the criteria that reach outside the instance. `BaseComponent` carries its type
 parameters on three `declare`d properties -- the attributes as declared, the tree as declared, and
@@ -433,7 +456,13 @@ with `checkAncestors` on top, because the ancestor lists gate construction Flame
 link is Flamework driving it. `getComponent` passes it without them, which is what keeps its answer
 the same for an instance whether or not a link is watching. Neither excludes a component that is
 already attached: the criterion is met by `hasComponent` first, and only asks whether one could be
-built when there is none.
+built when there is none. The one attached component that does not count is one whose tag path's
+entry has just stopped qualifying (`isLosing`, read by `hasStandingComponent`). An entry's listeners
+are called in no particular order, so a link can be told of the loss before the listener that takes
+the component down has run; reading the component as still there reported the link met, and the link
+then heard of the loss only from the removal announcement -- which, down a chain of links, is fired
+from inside its own handler, one level deeper per link, until the engine refuses (about 80 levels
+under deferred signal behaviour) and leaves the rest of the chain attached.
 
 `checkLinks` and `linksMet` are the same function, `areLinksMet`, for the same reason: whether
 something happens to be tracking an instance must not change the answer given for it. They used to
@@ -500,7 +529,26 @@ owner waits. A construction by hand raises with the reason; Flamework's own path
 that there is no component. The lifecycle plugin, for its part, runs `onInit` and `onStart` only
 for providers, before and after ignition alike; `Components` starts a component itself, once it is
 attached and -- for one built during ignition -- once `startCollectionService` has run at
-`postIgnite`, so it starts after every provider has.
+`onIgnited`, after the lifecycle plugin's own hook there, so it starts after every provider has.
+
+The constructing window opens before anything is read off the instance, because reading it already
+runs code written by hand: a default is written back with `SetAttribute`, and where signals are
+immediate an attribute-changed handler runs inside that write. A handler asking for the component
+there is answered as a constructor asking for its own is -- nothing -- where an empty slot used to
+build a second component, which the rest of the construction then overwrote in `activeComponents`,
+leaving the first mapped, announced and never removed. A removal that arrives inside the window --
+the constructor or `onInit` removing the component, by hand or by taking its tag away where signals
+are immediate, which releases the tag path's entry there and then -- has nothing in the lookups to
+take down. It marks the construction in `cancelled`, and `addComponent` undoes it as it finishes
+(`removeClassInstance`, `destroy` under `pcall`) rather than attaching a component nothing would ever
+remove. `onStart` runs after the component is attached and before it is announced, which
+`unannounced` records, and it can remove the component as well: `setupComponent` creates the maid
+ahead of `onStart` so that the removal has it to release, the removal announces the component as
+added and then as removed -- in that order, with a component not yet destroyed -- and
+`setupComponent` then attaches nothing more to it and resolves no waiter with it. A waiter's handler
+runs inside the resolve and can remove it just the same, so the waiters are taken off their set one
+at a time as each is handed the component: the ones after a removal wait on, and a component built in
+its place from inside that handler is the one they are handed, by its own `setupComponent`.
 
 Removal is announced once the component is out of both lookups, which mirrors an addition being
 announced only after it is in them. A link that names the departing component reacts to the
@@ -535,7 +583,12 @@ A child link re-resolves only when the component re-reads its tree at all, which
 `typeGuardPoll` the instance guard uses: a child is part of the tree, while an attribute is not and
 is followed regardless. Each link remembers the instance it resolved to and reports itself lost
 whenever that changes, undefined at either end included, which is what rebuilds a component around a
-swapped child.
+swapped child. While the component is down, a link that does not re-read its tree follows its name
+all the same (`followWhileDown`): a child of that name arriving, and the linked component's
+removal, resolve it again whenever the name now resolves to a different child. The build that
+follows reads the tree as it is then, and nothing else ever told the link: a linked child
+destroyed and replaced by another carrying the component left the owner down for good, still
+watching the child that left and holding its entry on the linked component's tracker.
 
 What it starts from is read out of the component, not out of the instance, because a component
 outlives the watcher that follows its tree. `getComponent` builds one the moment it is asked for,
@@ -557,9 +610,16 @@ A link attribute's `defaults` entry is read in two places, and only one of them 
 `resolveLinkTarget` falls back to it so that a **required** link resolves at all before the component
 exists -- `getAttributes` only runs once one is being built, and a required link would hold that up
 forever. `getAttributes` then writes it to the instance as a handle, which is what the component and
-every later read see. An optional link needs no standing in, because it holds nothing up, so the
-fallback is skipped for it: `nil` on an instance means both "never written" and "cleared", and
-answering with the default either way would make clearing an optional link impossible. The write in
+every later read see. An optional link needs no standing in once the component is built, so the
+fallback is skipped for it then: `nil` on an instance means both "never written" and "cleared", and
+answering with the default either way would make clearing an optional link impossible. Ahead of
+construction it is read for an optional link too, because it is what `getAttributes` writes and
+`resolveLinks` then reads: skipping it there reported the link met for a default that cannot carry
+the component the link names, and construction raised. Since the fallback turns on whether the
+component is built, the component leaving moves a cleared link back to its default with no attribute
+signal to say so: `watchLink`, resolved to nothing while the component was built, also listens for
+that component's removal and resolves again on it, so it watches the default -- and hears it regain
+the component it names -- once the component is down. The write in
 `getAttributes` is not conditional on the guard failing for the same reason -- an optional link's
 guard accepts a missing attribute, so nothing else would ever write it, and the component's view
 would hold a default the instance knew nothing about.
@@ -624,10 +684,11 @@ then, for the first time; an entry a link created must not answer differently. I
 instance guard that failed while the tree was still filling in from being frozen by whoever happened
 to look first, on a realm where nothing polls the tree, and therefore what keeps `getComponent`'s
 answer the same whether or not something is watching. On a realm that does poll it, the same re-read
-is also what re-points the poll: the entry has to keep answering for itself afterwards, not only for
-the moment the tag arrived. A tag reaching an entry whose guard started passing unannounced -- a
-child renamed rather than moved, which fires no signal at all -- would otherwise leave the poll still
-waiting for that child to arrive, and the component attached through every later break in its tree.
+is also what brings the tree's watcher back in step: the entry has to keep answering for itself
+afterwards, not only for the moment the tag arrived. A tag reaching an entry whose guard started
+passing unannounced -- a child renamed rather than moved, which fires no signal at all -- would
+otherwise leave a shape's watcher still waiting for that child to arrive, and the component attached
+through every later break in its tree.
 
 `setHasTag` is recorded before the predicate and the ancestor lists rather than after them: the
 criterion is a cache of `HasTag` that every entry is answered from, including one a link created for
@@ -676,14 +737,18 @@ of the arguments, bound to a local when it is more than a plain read; a target r
 function, which returns where the chain would short-circuit -- testing the operand ahead of each
 `?.` when those are references, so the narrowing the chain gave the arguments still holds, else
 the bound target. `setCallback` on a member with
-`_flamework_result` gets its callback wrapped so a successful result (a Promise's resolved value
-included) returns `[payload, blobs?]`, registered through `_setCallback`. Receiving is metadata:
+`_flamework_fn` is registered through `_setCallback(callback, pack)`: the callback as written, and a
+generated `pack` that turns a successful result into `[payload, blobs?]`. The runtime applies `pack`
+to what the middleware chain resolves with (a Promise already followed), so middleware sees plain
+results, a value a middleware returns is packed like the callback's own, and `predict` resolves
+with the value itself. Receiving is metadata:
 the `network-decoder` intrinsic resolves to a decoder function per event and function (arguments,
-results for `predict`, responses);
+responses);
 `createEvent` decodes under `pcall` before the middleware chain, so guards and middleware see plain
 values, and a decode failure is reported through `onMalformed`. Functions keep the request id and
-process result as plain arguments and pack only the payload after them. No encoder exists as a
-runtime value; only decoders do, and a decoder is useless for forging traffic.
+process result as plain arguments and pack only the payload after them. Apart from those result
+packers, no encoder exists as a runtime value; only decoders do, and a decoder is useless for
+forging traffic.
 
 The generator is `transformer/src/util/functions/buildSerializerFromType.ts`. It classifies a type
 into a kind (number with a width, string with a length prefix, object, union, ...), computes its
@@ -759,7 +824,10 @@ then answers `(requestId, processResult, value)` on the same channel in the oppo
 per player, resolves the matching promise, and races the whole thing against `Promise.delay` for the
 timeout. Return values are validated on the sender's side, which is what produces `InvalidResult`.
 
-When a player leaves, `Players.PlayerRemoving` cancels every request outstanding for them.
+When a player leaves, `Players.PlayerRemoving` cancels every request outstanding for them, and a
+request to a player no longer parented to `Players` is rejected at once, whenever its sender was
+made. A callback or middleware can return a promise that is then cancelled; cancellation reaches the
+receiver's chain, which answers `Cancelled`, since no `andThen` or `catch` handler runs for it.
 
 ## The test harness
 
