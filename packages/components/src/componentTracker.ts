@@ -26,27 +26,40 @@ export interface Holder {
 /** How far a warning follows links and dependencies for their reasons before it stops naming them. */
 const MAX_REASON_DEPTH = 2;
 
+/**
+ * The entry for one instance.
+ *
+ * Every set and map in it but `listeners` is made by the first thing it holds, and a missing one
+ * reads as empty: an entry is made for every instance the component is attached to, and for a
+ * component with no links, no dependencies and nothing polled, most of them never hold anything.
+ */
 interface InstanceTracker {
 	isQualified: boolean;
-	unmetCriteria: Set<unknown>;
+
+	/** The criteria that are not met. An entry that qualifies from the start never has one. */
+	unmetCriteria?: Set<unknown>;
+
 	listeners: Set<Listener>;
 
 	/**
-	 * The subset of `listeners` that is waiting rather than merely watching, which is what the
-	 * warning is about: it is armed while this is non-empty and cancelled once it empties, however
-	 * many observers are left holding the entry open.
+	 * The observers in `listeners` that are waiting rather than merely watching: a dependent's
+	 * listener, while its own entry waits (`armWarningChain`). Together with `owners`, which always
+	 * wait, this is what the warning is about: it is armed while either is non-empty and cancelled
+	 * once both are empty (`isWaiting`), however many observers are left holding the entry open.
+	 * The owners are not repeated here, which is what leaves it empty for an entry only its tag path
+	 * holds.
 	 */
-	waiting: Set<Listener>;
+	waiting?: Set<Listener>;
 
 	/**
-	 * The subset of `waiting` this entry is read for: the tag path's listener, which builds the
-	 * component out of the answer. Its arrival is what reads the criteria for keeps -- once, for a
-	 * component that reads its tree once, and from then on through the entry's own deferred tasks
-	 * -- so until it is here the entry answers the way no entry at all would, read afresh each
-	 * time it is asked. A dependent's listener waits here too, for the warning's sake, but like a
-	 * link's it reads nothing and keeps nothing current: the entry is held open, not owned.
+	 * The listeners this entry is read for: the tag path's listener, which builds the component out
+	 * of the answer. Its arrival is what reads the criteria for keeps -- once, for a component that
+	 * reads its tree once, and from then on through the entry's own deferred tasks -- so until it
+	 * is here the entry answers the way no entry at all would, read afresh each time it is asked. A
+	 * dependent's listener waits too, for the warning's sake, but like a link's it reads nothing and
+	 * keeps nothing current: the entry is held open, not owned.
 	 */
-	owners: Set<Listener>;
+	owners?: Set<Listener>;
 
 	/**
 	 * The entry each observer in `listeners` was registered from. An entry lives while something
@@ -55,15 +68,15 @@ interface InstanceTracker {
 	 * itself open after every tag had gone, each entry's observer keeping the other's set from
 	 * ever emptying.
 	 */
-	holders: Map<Listener, Holder>;
+	holders?: Map<Listener, Holder>;
 
 	/**
 	 * The listener this entry registered on each of its component's dependencies, so that a wait
 	 * starting or ending here can reach the same subscriptions down the chain.
 	 */
-	dependencyListeners: Map<ComponentTracker, Listener>;
+	dependencyListeners?: Map<ComponentTracker, Listener>;
 
-	cleanup: Set<Callback>;
+	cleanup?: Set<Callback>;
 	timeoutWarningThread?: thread;
 
 	/**
@@ -80,7 +93,10 @@ interface InstanceTracker {
 	 */
 	linkWatcher?: LinkWatcher;
 
-	/** The attribute criteria currently unmet, `invalid attribute '<name>'` each, so a re-read can clear the stale ones. */
+	/**
+	 * The attribute criteria currently unmet, `invalid attribute '<name>'` each, so a re-read can
+	 * clear the stale ones. None while every attribute passes.
+	 */
 	invalidAttributes?: Set<string>;
 
 	/**
@@ -106,6 +122,33 @@ interface InstanceTracker {
 	 * Cleared by a build (`noteBuilt`): a component built after the loss is that fresh one.
 	 */
 	unheardLoss?: boolean;
+}
+
+function addUnmet(tracker: InstanceTracker, criterion: unknown) {
+	let unmet = tracker.unmetCriteria;
+	if (unmet === undefined) tracker.unmetCriteria = unmet = new Set();
+
+	unmet.add(criterion);
+}
+
+function isAllMet(tracker: InstanceTracker) {
+	return tracker.unmetCriteria === undefined || tracker.unmetCriteria.isEmpty();
+}
+
+function addCleanup(tracker: InstanceTracker, cleanup: Callback) {
+	let cleanups = tracker.cleanup;
+	if (cleanups === undefined) tracker.cleanup = cleanups = new Set();
+
+	cleanups.add(cleanup);
+}
+
+function isOwned(tracker: InstanceTracker) {
+	return tracker.owners !== undefined && !tracker.owners.isEmpty();
+}
+
+/** Whether anything waits on the entry: an owner, or an observer that waits (`waiting`). */
+function isWaiting(tracker: InstanceTracker) {
+	return isOwned(tracker) || (tracker.waiting !== undefined && !tracker.waiting.isEmpty());
 }
 
 /** A watched instance guard: the tree's answer as it was last resolved, re-read on demand. */
@@ -154,7 +197,7 @@ export interface Criteria {
 	 * criterion each, so a component comes down when an attribute goes bad and up again when it is
 	 * valid, and the warning can name it.
 	 */
-	checkAttributes?: (instance: Instance) => string[];
+	checkAttributes?: (instance: Instance) => readonly string[];
 
 	/** Watches those attributes, calling `changed` whenever one of them was written. Returns the cleanup. */
 	watchAttributes?: (instance: Instance, changed: () => void) => () => void;
@@ -238,13 +281,7 @@ export class ComponentTracker {
 		let tracker = this.instances.get(instance);
 		if (!tracker && create) {
 			tracker = {
-				unmetCriteria: new Set(),
 				listeners: new Set(),
-				waiting: new Set(),
-				owners: new Set(),
-				holders: new Map(),
-				dependencyListeners: new Map(),
-				cleanup: new Set(),
 				isQualified: true,
 			};
 			this.instances.set(instance, tracker);
@@ -291,7 +328,7 @@ export class ComponentTracker {
 	}
 
 	private updateListeners(instance: Instance, tracker: InstanceTracker) {
-		const isQualified = tracker.unmetCriteria.isEmpty() && (tracker.isQualified || this.readsQualified(instance));
+		const isQualified = isAllMet(tracker) && (tracker.isQualified || this.readsQualified(instance));
 
 		if (isQualified !== tracker.isQualified) {
 			tracker.isQualified = isQualified;
@@ -303,7 +340,7 @@ export class ComponentTracker {
 			// down -- neither can take this one down, however much the dependent is waiting. A gain
 			// nobody heard needs nothing: the answer a listener is given as it registers already
 			// says it.
-			if (tracker.owners.isEmpty()) {
+			if (!isOwned(tracker)) {
 				if (!isQualified) tracker.unheardLoss = true;
 			} else {
 				tracker.unheardLoss = undefined;
@@ -322,7 +359,7 @@ export class ComponentTracker {
 			// Said again after every loss while something waits: a component that goes down -- its
 			// tree broke, a link was lost, an attribute went bad -- and stays down is as stuck as one
 			// that never came up, and says why the same way.
-			if (!isQualified && !tracker.waiting.isEmpty()) {
+			if (!isQualified && isWaiting(tracker)) {
 				this.armWarning(instance, tracker);
 			}
 		}
@@ -332,31 +369,43 @@ export class ComponentTracker {
 	 * Records which plain attributes fail their guards, one criterion each, clearing the ones that
 	 * have since been put right.
 	 */
-	private setInvalidAttributes(tracker: InstanceTracker, invalid: string[]) {
-		const criteria = new Set<string>();
-		for (const name of invalid) {
-			criteria.add(`invalid attribute '${name}'`);
+	private setInvalidAttributes(tracker: InstanceTracker, invalid: readonly string[]) {
+		// Every attribute passes, and passed before: nothing to record, nor anything to make.
+		if (invalid.isEmpty() && tracker.invalidAttributes === undefined) return;
+
+		let criteria: Set<string> | undefined;
+		if (!invalid.isEmpty()) {
+			criteria = new Set<string>();
+			for (const name of invalid) {
+				criteria.add(`invalid attribute '${name}'`);
+			}
 		}
 
 		if (tracker.invalidAttributes !== undefined) {
 			for (const previous of tracker.invalidAttributes) {
-				if (!criteria.has(previous)) tracker.unmetCriteria.delete(previous);
+				if (criteria === undefined || !criteria.has(previous)) tracker.unmetCriteria?.delete(previous);
 			}
 		}
 
-		for (const criterion of criteria) {
-			tracker.unmetCriteria.add(criterion);
+		if (criteria !== undefined) {
+			for (const criterion of criteria) {
+				addUnmet(tracker, criterion);
+			}
 		}
 
 		tracker.invalidAttributes = criteria;
 	}
 
 	private setupTracker(instance: Instance, tracker: InstanceTracker, observeOnly = false) {
-		const { typeGuard, typeGuardPoll, typeGuardPollAtomic, watchTypeGuard, dependencies } = this.criteria;
+		const { typeGuard, typeGuardPoll, typeGuardPollAtomic, watchTypeGuard, dependencies, watchLinks } =
+			this.criteria;
 
 		// What every observer this entry registers -- on a dependency, on a link's target -- is
-		// held by, and released along with.
-		const holder: Holder = { tracker: this, instance };
+		// held by, and released along with. Made only when there is such an observer.
+		const holder: Holder | undefined =
+			(dependencies !== undefined && !dependencies.isEmpty()) || watchLinks !== undefined
+				? { tracker: this, instance }
+				: undefined;
 
 		const pollsTree =
 			typeGuard !== undefined && typeGuardPoll === true && (typeGuardPollAtomic || !isAtomicModel(instance));
@@ -382,7 +431,7 @@ export class ComponentTracker {
 			const watcher = watchTypeGuard(instance, deferred.schedule);
 			tracker.typeGuardWatcher = watcher;
 
-			tracker.cleanup.add(() => {
+			addCleanup(tracker, () => {
 				tracker.typeGuardWatcher = undefined;
 				deferred.release();
 				watcher.release();
@@ -412,7 +461,7 @@ export class ComponentTracker {
 			const addedConnection = instance.DescendantAdded.Connect(deferred.schedule);
 			const removingConnection = instance.DescendantRemoving.Connect(deferred.schedule);
 
-			tracker.cleanup.add(() => {
+			addCleanup(tracker, () => {
 				deferred.release();
 				addedConnection.Disconnect();
 				removingConnection.Disconnect();
@@ -428,7 +477,7 @@ export class ComponentTracker {
 			});
 
 			const release = watchAttributes(instance, deferred.schedule);
-			tracker.cleanup.add(() => {
+			addCleanup(tracker, () => {
 				deferred.release();
 				release();
 			});
@@ -438,9 +487,9 @@ export class ComponentTracker {
 			for (const dependency of dependencies) {
 				const listener = (isQualified: boolean) => {
 					if (isQualified) {
-						tracker.unmetCriteria.delete(dependency);
+						tracker.unmetCriteria?.delete(dependency);
 					} else {
-						tracker.unmetCriteria.add(dependency);
+						addUnmet(tracker, dependency);
 					}
 
 					this.updateListeners(instance, tracker);
@@ -461,34 +510,36 @@ export class ComponentTracker {
 				// set up -- and a raise there leaves the dependency's entry created, with nothing but
 				// this entry's release to ever let go of it. Untracking an observer the raise kept
 				// from registering is harmless.
-				tracker.cleanup.add(() => {
-					tracker.dependencyListeners.delete(dependency);
+				addCleanup(tracker, () => {
+					tracker.dependencyListeners?.delete(dependency);
 					dependency.untrackInstance(instance, listener);
 				});
 
-				dependency.trackInstance(instance, listener, holder);
-				tracker.dependencyListeners.set(dependency, listener);
+				dependency.trackInstance(instance, listener, holder!);
+
+				let dependencyListeners = tracker.dependencyListeners;
+				if (dependencyListeners === undefined) tracker.dependencyListeners = dependencyListeners = new Map();
+				dependencyListeners.set(dependency, listener);
 			}
 		}
 
-		const { watchLinks } = this.criteria;
 		if (watchLinks) {
 			const watcher = watchLinks(
 				instance,
 				(criterion, isMet) => {
 					if (isMet) {
-						tracker.unmetCriteria.delete(criterion);
+						tracker.unmetCriteria?.delete(criterion);
 					} else {
-						tracker.unmetCriteria.add(criterion);
+						addUnmet(tracker, criterion);
 					}
 
 					this.updateListeners(instance, tracker);
 				},
-				holder,
+				holder!,
 			);
 			tracker.linkWatcher = watcher;
 
-			tracker.cleanup.add(() => {
+			addCleanup(tracker, () => {
 				tracker.linkWatcher = undefined;
 				watcher.release();
 			});
@@ -513,7 +564,7 @@ export class ComponentTracker {
 	public unmetCriteriaOf(instance: Instance): defined[] {
 		const tracker = this.getInstanceTracker(instance, false);
 		if (tracker !== undefined) {
-			const recorded = [...tracker.unmetCriteria] as defined[];
+			const recorded = (tracker.unmetCriteria !== undefined ? [...tracker.unmetCriteria] : []) as defined[];
 			return recorded.isEmpty() && !tracker.isQualified ? this.readUnmet(instance, false) : recorded;
 		}
 
@@ -611,11 +662,16 @@ export class ComponentTracker {
 	private armWarningChain(instance: Instance, tracker: InstanceTracker) {
 		this.armWarning(instance, tracker);
 
-		for (const [dependency, listener] of tracker.dependencyListeners) {
+		const dependencyListeners = tracker.dependencyListeners;
+		if (dependencyListeners === undefined) return;
+
+		for (const [dependency, listener] of dependencyListeners) {
 			const dependencyTracker = dependency.getInstanceTracker(instance, false);
 			if (dependencyTracker === undefined) continue;
 
-			dependencyTracker.waiting.add(listener);
+			let waiting = dependencyTracker.waiting;
+			if (waiting === undefined) dependencyTracker.waiting = waiting = new Set();
+			waiting.add(listener);
 			dependency.armWarningChain(instance, dependencyTracker);
 		}
 	}
@@ -635,13 +691,16 @@ export class ComponentTracker {
 			tracker.timeoutWarningThread = undefined;
 		}
 
-		for (const [dependency, listener] of tracker.dependencyListeners) {
+		const dependencyListeners = tracker.dependencyListeners;
+		if (dependencyListeners === undefined) return;
+
+		for (const [dependency, listener] of dependencyListeners) {
 			const dependencyTracker = dependency.getInstanceTracker(instance, false);
 			if (dependencyTracker === undefined) continue;
 
-			dependencyTracker.waiting.delete(listener);
+			dependencyTracker.waiting?.delete(listener);
 
-			if (dependencyTracker.waiting.isEmpty()) {
+			if (!isWaiting(dependencyTracker)) {
 				dependency.disarmWarningChain(instance, dependencyTracker);
 			}
 		}
@@ -650,9 +709,9 @@ export class ComponentTracker {
 	/** Records what the instance guard says. */
 	private setTypeGuardMet(tracker: InstanceTracker, isMet: boolean) {
 		if (isMet) {
-			tracker.unmetCriteria.delete("type guard");
+			tracker.unmetCriteria?.delete("type guard");
 		} else {
-			tracker.unmetCriteria.add("type guard");
+			addUnmet(tracker, "type guard");
 		}
 	}
 
@@ -674,12 +733,12 @@ export class ComponentTracker {
 		if (this.criteria.dependencies) {
 			for (const dependency of this.criteria.dependencies) {
 				if (dependency.checkInstance(instance)) {
-					tracker?.unmetCriteria.delete(dependency);
+					tracker?.unmetCriteria?.delete(dependency);
 				} else {
 					result = false;
 					if (!tracker) return result;
 
-					tracker.unmetCriteria.add(dependency);
+					addUnmet(tracker, dependency);
 				}
 			}
 		}
@@ -716,12 +775,12 @@ export class ComponentTracker {
 
 		if (this.criteria.tag !== undefined) {
 			if (CollectionService.HasTag(instance, this.criteria.tag)) {
-				tracker?.unmetCriteria.delete("CollectionService tag");
+				tracker?.unmetCriteria?.delete("CollectionService tag");
 			} else {
 				result = false;
 				if (!tracker) return result;
 
-				tracker.unmetCriteria.add("CollectionService tag");
+				addUnmet(tracker, "CollectionService tag");
 			}
 		}
 
@@ -740,9 +799,9 @@ export class ComponentTracker {
 		const tracker = this.getInstanceTracker(instance, false);
 		if (tracker) {
 			if (hasTag) {
-				tracker.unmetCriteria.delete("CollectionService tag");
+				tracker.unmetCriteria?.delete("CollectionService tag");
 			} else {
-				tracker.unmetCriteria.add("CollectionService tag");
+				addUnmet(tracker, "CollectionService tag");
 			}
 
 			this.updateListeners(instance, tracker);
@@ -774,7 +833,7 @@ export class ComponentTracker {
 	 */
 	public refreshInstance(instance: Instance) {
 		const tracker = this.getInstanceTracker(instance, false);
-		if (tracker === undefined || !tracker.owners.isEmpty()) return;
+		if (tracker === undefined || isOwned(tracker)) return;
 
 		tracker.linkWatcher?.refresh();
 		this.testInstance(instance, tracker);
@@ -802,7 +861,7 @@ export class ComponentTracker {
 			// and it answers the way no entry would: read now rather than frozen. Its tag
 			// criterion in particular is only ever written by the announcement, which arrives a
 			// resumption after the tag itself -- the very window the eager path builds in.
-			if (tracker.owners.isEmpty()) {
+			if (!isOwned(tracker)) {
 				this.refreshInstance(instance);
 
 				return tracker.isQualified;
@@ -849,7 +908,7 @@ export class ComponentTracker {
 		if (tracker === undefined) return;
 
 		for (const listener of tracker.listeners) {
-			if (!tracker.owners.has(listener)) listener(false, instance);
+			if (tracker.owners?.has(listener) !== true) listener(false, instance);
 		}
 	}
 
@@ -869,7 +928,7 @@ export class ComponentTracker {
 
 		const isAvailable = this.isAvailable(instance, tracker);
 		for (const listener of tracker.listeners) {
-			if (!tracker.owners.has(listener)) listener(isAvailable, instance);
+			if (tracker.owners?.has(listener) !== true) listener(isAvailable, instance);
 		}
 	}
 
@@ -889,11 +948,14 @@ export class ComponentTracker {
 		const tracker = this.getInstanceTracker(instance, false);
 		if (tracker === undefined) return;
 
+		// Nothing observes the entry: nothing to tell, and no copy to make.
+		if (tracker.holders === undefined || tracker.holders.isEmpty()) return;
+
 		const isAvailable = !removed && this.isAvailable(instance, tracker);
 		for (const [listener, holder] of [...tracker.holders]) {
 			// A dependent's own entry names the listener it registered here; a link's names none.
 			const dependent = holder.tracker.instances.get(holder.instance);
-			if (dependent?.dependencyListeners.get(this) === listener) listener(isAvailable, instance);
+			if (dependent?.dependencyListeners?.get(this) === listener) listener(isAvailable, instance);
 		}
 	}
 
@@ -927,7 +989,7 @@ export class ComponentTracker {
 	 */
 	public isLosing(instance: Instance) {
 		const tracker = this.getInstanceTracker(instance, false);
-		return tracker !== undefined && !tracker.owners.isEmpty() && !tracker.isQualified;
+		return tracker !== undefined && isOwned(tracker) && !tracker.isQualified;
 	}
 
 	/**
@@ -974,10 +1036,14 @@ export class ComponentTracker {
 
 		tracker.listeners.add(listener);
 		if (holder !== undefined) {
-			tracker.holders.set(listener, holder);
+			let holders = tracker.holders;
+			if (holders === undefined) tracker.holders = holders = new Map();
+			holders.set(listener, holder);
 		} else {
-			tracker.waiting.add(listener);
-			tracker.owners.add(listener);
+			// An owner waits by being one (`isWaiting`).
+			let owners = tracker.owners;
+			if (owners === undefined) tracker.owners = owners = new Set();
+			owners.add(listener);
 		}
 
 		// The entry was set up before this listener existed, so a criterion lost and met again
@@ -1023,8 +1089,10 @@ export class ComponentTracker {
 	private releaseTracker(instance: Instance, tracker: InstanceTracker) {
 		this.instances.delete(instance);
 
-		for (const cleanup of tracker.cleanup) {
-			cleanup();
+		if (tracker.cleanup !== undefined) {
+			for (const cleanup of tracker.cleanup) {
+				cleanup();
+			}
 		}
 
 		if (tracker.timeoutWarningThread) {
@@ -1041,12 +1109,12 @@ export class ComponentTracker {
 	 * names its own instance, each observer keeping an entry that is only there for its sake.
 	 */
 	private isHeldOpen(tracker: InstanceTracker, visited: Set<InstanceTracker>): boolean {
-		if (!tracker.owners.isEmpty()) return true;
+		if (isOwned(tracker)) return true;
 
 		visited.add(tracker);
 
 		for (const listener of tracker.listeners) {
-			const holder = tracker.holders.get(listener);
+			const holder = tracker.holders?.get(listener);
 			if (holder === undefined) continue;
 
 			const holding = holder.tracker.instances.get(holder.instance);
@@ -1062,16 +1130,16 @@ export class ComponentTracker {
 		const tracker = this.getInstanceTracker(instance, false);
 		if (tracker) {
 			tracker.listeners.delete(listener);
-			tracker.waiting.delete(listener);
-			tracker.owners.delete(listener);
-			tracker.holders.delete(listener);
+			tracker.waiting?.delete(listener);
+			tracker.owners?.delete(listener);
+			tracker.holders?.delete(listener);
 
 			// The warning outlives the listener that armed it otherwise. A link can create a
 			// tracker that the tag path later arms, so an observer left holding the entry open is
 			// not a reason to keep waiting: nobody is, and the instance is usually no longer even
 			// tagged by the time this runs. It reaches as far down the dependency chain as arming
 			// it did, because that is how far the wait itself reached.
-			if (tracker.waiting.isEmpty()) {
+			if (!isWaiting(tracker)) {
 				this.disarmWarningChain(instance, tracker);
 			}
 

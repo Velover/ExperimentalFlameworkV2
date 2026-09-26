@@ -17,6 +17,19 @@ export const SYMBOL_ATTRIBUTE_SETTER: unique symbol = {} as never;
 export const SYMBOL_ATTRIBUTE_WRITER: unique symbol = {} as never;
 
 /**
+ * @hidden @internal
+ */
+export const SYMBOL_ATTRIBUTE_REPLACED: unique symbol = {} as never;
+
+/**
+ * Stands for "no value" where a value has to be stored in a table: an attribute a component's own
+ * write gave a value to, having had none.
+ *
+ * @hidden @internal
+ */
+export const NO_ATTRIBUTE_VALUE: unique symbol = {} as never;
+
+/**
  * The brand every component carries. It is what tells a component type apart from an Instance type
  * inside `BaseComponent`'s type parameters, which is how links are discovered.
  */
@@ -176,6 +189,15 @@ export class BaseComponent<A = {}, I extends Instance = Instance> {
 		// `Components` holds the guards, so it is what checks the value and what stores an
 		// instance-valued attribute as a handle. Anything it did not store is a plain write.
 		if (write === undefined || !write(key as string, value)) {
+			// The value this write replaces, kept for the attribute-changed report that follows it
+			// -- which, with signals deferred, arrives after the write has already been stored. The
+			// first unreported write is the one that replaced what the report is about.
+			let replaced = this[SYMBOL_ATTRIBUTE_REPLACED];
+			if (replaced === undefined) this[SYMBOL_ATTRIBUTE_REPLACED] = replaced = new Map();
+			if (!replaced.has(key as string)) {
+				replaced.set(key as string, previousValue !== undefined ? previousValue : NO_ATTRIBUTE_VALUE);
+			}
+
 			// Through a local, because an assignment written against `this.attributes` is the very
 			// thing the transformer rewrites into this method.
 			const attributes = this.attributes as ResolvedAttributes<A>;
@@ -189,6 +211,14 @@ export class BaseComponent<A = {}, I extends Instance = Instance> {
 
 	/** @hidden @internal */
 	public [SYMBOL_ATTRIBUTE_WRITER]: ((key: string, value: unknown) => boolean) | undefined;
+
+	/**
+	 * The values this component's own writes replaced, by attribute, until the attribute-changed
+	 * report of each has gone out (`NO_ATTRIBUTE_VALUE` for none). Made by the first such write.
+	 *
+	 * @hidden @internal
+	 */
+	public [SYMBOL_ATTRIBUTE_REPLACED]: Map<string, unknown> | undefined;
 
 	/** @hidden @internal */
 	public [SYMBOL_ATTRIBUTE_HANDLERS] = new Map<string, Signal<(newValue: unknown, oldValue: unknown) => void>>();

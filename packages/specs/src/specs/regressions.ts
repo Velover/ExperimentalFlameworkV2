@@ -46,7 +46,6 @@ declare const __harness: {
  */
 interface ComponentsInternals {
 	activeComponents: Map<Instance, Map<unknown, unknown>>;
-	activeInheritedComponents: Map<Instance, Map<string, unknown>>;
 	componentCleanup: Map<object, unknown>;
 }
 
@@ -549,7 +548,7 @@ export = suite("regressions", [
 		},
 	],
 	[
-		// Both per-instance lookups were created before the component was, and nothing takes an
+		// The per-instance lookups were created before the component was, and nothing takes an
 		// empty one away again: `removeComponent` leaves before it reaches the map, and the module
 		// teardown only walks what is in it. So every construction that raised -- a constructor, a
 		// link that cannot resolve, the cyclic check -- left one behind keyed by the instance, a
@@ -558,10 +557,9 @@ export = suite("regressions", [
 		() => {
 			const module = Flamework.createModule().includePlugin(componentPlugin()).ignite();
 			const components = module.resolveDependency<Components>();
-			const { activeComponents, activeInheritedComponents } = internals(components);
+			const { activeComponents } = internals(components);
 
 			const active = activeComponents.size();
-			const inherited = activeInheritedComponents.size();
 
 			for (let i = 0; i < 200; i++) {
 				const byHand = folder("RgFaultyByHand");
@@ -579,7 +577,6 @@ export = suite("regressions", [
 			}
 
 			expectEqual(activeComponents.size(), active, "component lookups after 400 failed constructions");
-			expectEqual(activeInheritedComponents.size(), inherited, "inherited lookups after the same");
 
 			module.extinguish();
 		},

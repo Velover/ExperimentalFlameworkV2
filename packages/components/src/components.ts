@@ -17,7 +17,13 @@ import {
 	StarterPlayer,
 } from "@rbxts/services";
 import { t } from "@rbxts/t";
-import { BaseComponent, ComponentMetadata, SYMBOL_ATTRIBUTE_HANDLERS } from "./baseComponent";
+import {
+	BaseComponent,
+	ComponentMetadata,
+	NO_ATTRIBUTE_VALUE,
+	SYMBOL_ATTRIBUTE_HANDLERS,
+	SYMBOL_ATTRIBUTE_REPLACED,
+} from "./baseComponent";
 import { ComponentTracker, Holder, isAtomicModel, LinkWatcher } from "./componentTracker";
 import {
 	AbstractConstructor,
@@ -40,9 +46,69 @@ interface ComponentInfo {
 	componentDependencies: Constructor[];
 	identifier: string;
 	config: ComponentConfig;
+	/** Its own id, every superclass id and every interface it implements, each once. */
 	polymorphicIds: string[];
+	/** `polymorphicIds` as a set, which `getComponents` asks of each component on the instance. */
+	polymorphicIdSet: Set<string>;
 	links: ComponentLink[];
 	attributeLinks: Map<string, ComponentLink>;
+
+	/** Whether any link is a child link: only then does a component of the class hold `childComponents` of its own. */
+	hasChildLinks: boolean;
+
+	/** Whether any link is an attribute link: only then does a component hold `attributeComponents` of its own. */
+	hasAttributeLinks: boolean;
+
+	/** Whether the class implements `OnInit`, read once rather than on every construction. */
+	implementsOnInit: boolean;
+
+	/** Whether the class implements `OnStart`, read once rather than on every construction. */
+	implementsOnStart: boolean;
+
+	// Worked out once every class is registered, since each reads the classes above it; before, on
+	// every construction, each walked the hierarchy afresh.
+
+	/** Every attribute guard, the class's own and those of the registered classes above it (`getAttributeGuards`). */
+	attributeGuards: Map<string, t.check<unknown>>;
+
+	/** How the instance is checked (`getInstanceCheck`). */
+	instanceCheck: InstanceCheck;
+
+	/**
+	 * The config as the class reads it: each key from the nearest registered class in the hierarchy
+	 * that sets it, which is what `getConfigValue` answers from. `config` is the class's own.
+	 */
+	inheritedConfig: ComponentConfig;
+}
+
+/** How a component's instance is checked: see `getInstanceCheck`. */
+interface InstanceCheck {
+	guard?: (instance: Instance) => boolean;
+	shape?: InstanceShape;
+}
+
+/**
+ * What a component holds as its `childComponents` or `attributeComponents` when its class has no
+ * link of that kind: one empty table for all of them, frozen, since nothing ever writes to it.
+ */
+const NO_LINKED_COMPONENTS = table.freeze(new Map<string, unknown>());
+
+/** What `checkAttributes` answers when every attribute passes, shared and frozen. */
+const NO_INVALID_ATTRIBUTES: readonly string[] = table.freeze(new Array<string>());
+
+/** A component's `onStart`, as `startComponent` runs it: with the component passed in, rather than closed over. */
+function runOnStart(component: BaseComponent) {
+	(component as unknown as OnStart).onStart();
+}
+
+/** A component's `onInit`, as `addComponent` runs it, the same way. */
+function runOnInit(component: BaseComponent) {
+	(component as unknown as OnInit).onInit();
+}
+
+/** What a raise out of `onStart` is reported as, worked out only once there is one. */
+function describeStartFailure(_component: BaseComponent, ctor: Constructor<BaseComponent>, instance: Instance) {
+	return [`[Flamework] Component '${ctor}' failed to start for`, instance, `[${instance.GetFullName()}]`];
 }
 
 /**
@@ -103,7 +169,12 @@ export class Components {
 	private classParentCache = new Map<AbstractConstructor, readonly AbstractConstructor[]>();
 
 	private activeComponents = new Map<Instance, Map<unknown, BaseComponent>>();
-	private activeInheritedComponents = new Map<Instance, Map<string, Set<BaseComponent>>>();
+
+	/**
+	 * Every attached component, across all instances, under each id it answers to
+	 * (`polymorphicIds`): what `getAllComponents` reads. An invalid component is not in it.
+	 * `getComponents` needs no such lookup per instance: it asks the instance's own components.
+	 */
 	private reverseComponentsMapping = new Map<string, Set<BaseComponent>>();
 
 	/** Components whose constructor is currently running, per instance, to detect cycles. */
@@ -153,6 +224,22 @@ export class Components {
 	 * provider would.
 	 */
 	private pendingStarts?: Array<[BaseComponent, ComponentInfo, Instance]> = [];
+
+	/**
+	 * The construction whose constructor dependencies are being resolved: set by `addComponent` for
+	 * as long as it builds, and put back to the one it interrupted, if any, as it ends.
+	 */
+	private resolvingInfo?: ComponentInfo;
+	private resolvingInstance?: Instance;
+	private resolvingMetadata?: ComponentMetadata;
+
+	/**
+	 * What every construction hands the module to resolve its constructor's dependencies with,
+	 * made once rather than an object and a closure for each.
+	 */
+	private dependencyResolution = {
+		overrideDependency: (info: Modding.DependencyInfo) => this.resolveDependency(info),
+	};
 
 	private trackers = new Map<Constructor, ComponentTracker>();
 	private componentWaiters = new Map<Instance, Map<Constructor, Set<(value: unknown) => void>>>();
@@ -220,15 +307,34 @@ export class Components {
 				}
 			}
 
+			const polymorphicIds = this.getPolymorphicIds(ctor);
 			components.set(ctor, {
 				ctor: ctor as Constructor<BaseComponent>,
 				config: componentConfig || {},
-				polymorphicIds: this.getPolymorphicIds(ctor),
+				polymorphicIds,
+				polymorphicIdSet: new Set(polymorphicIds),
 				componentDependencies,
 				attributeLinks,
 				identifier,
 				links,
+				hasChildLinks: links.some((link) => link.kind === "child"),
+				hasAttributeLinks: links.some((link) => link.kind === "attribute"),
+				implementsOnInit: Flamework.implements<OnInit>(ctor),
+				implementsOnStart: Flamework.implements<OnStart>(ctor),
+
+				// Below, once every class is here.
+				attributeGuards: undefined!,
+				instanceCheck: undefined!,
+				inheritedConfig: undefined!,
 			});
+		}
+
+		// What a class inherits is read off the registered classes above it, which may come later in
+		// the list, so it is worked out once they are all here.
+		for (const [ctor, info] of components) {
+			info.attributeGuards = this.getAttributeGuards(ctor);
+			info.instanceCheck = this.getInstanceCheck(ctor);
+			info.inheritedConfig = this.getInheritedConfig(ctor);
 		}
 
 		// A link names a component by id, so the component it names has to be registered here too.
@@ -379,12 +485,14 @@ export class Components {
 					}),
 				);
 
+				const describeFailure = (instance: Instance) => [
+					`[Flamework] Failed to instantiate '${ctor}' for`,
+					instance,
+					`[${instance.GetFullName()}]`,
+				];
+
 				for (const instance of CollectionService.GetTagged(tag)) {
-					safeCall(
-						[`[Flamework] Failed to instantiate '${ctor}' for`, instance, `[${instance.GetFullName()}]`],
-						() => instanceAdded(instance),
-						false,
-					);
+					safeCall(describeFailure, instanceAdded, false, instance);
 				}
 			}
 		}
@@ -436,7 +544,7 @@ export class Components {
 			error(this.missingComponentMessage(component));
 		}
 
-		const { guard: instanceGuard, shape: instanceShape } = this.getInstanceCheck(component);
+		const { guard: instanceGuard, shape: instanceShape } = componentInfo.instanceCheck;
 		const dependencies = new Array<ComponentTracker>();
 
 		for (const dependency of componentInfo.componentDependencies) {
@@ -470,19 +578,22 @@ export class Components {
 		// names anything is its link's business, but a value that is not a handle at all is one the
 		// link cannot see: it resolves to nothing, which an optional link is content with, and
 		// `getAttributes` would then raise out of the very construction the link agreed to.
-		const guards = this.getAttributeGuards(component);
+		const guards = componentInfo.attributeGuards;
 		const defaults = this.getConfigValue(component, "defaults");
 		const checkAttributes = guards.isEmpty()
 			? undefined
-			: (instance: Instance) => {
-					const invalid = new Array<string>();
+			: (instance: Instance): readonly string[] => {
+					let invalid: string[] | undefined;
 					for (const [name, guard] of guards) {
 						const value = instance.GetAttribute(name);
 						if (value === undefined && componentInfo.attributeLinks.has(name)) continue;
-						if (!guard(value) && defaults?.[name] === undefined) invalid.push(name);
+						if (!guard(value) && defaults?.[name] === undefined) {
+							if (invalid === undefined) invalid = [];
+							invalid.push(name);
+						}
 					}
 
-					return invalid;
+					return invalid ?? NO_INVALID_ATTRIBUTES;
 				};
 		const watchAttributes = guards.isEmpty()
 			? undefined
@@ -1437,9 +1548,12 @@ export class Components {
 		componentInfo: ComponentInfo,
 		attributes: Map<string, unknown>,
 		quiet: boolean,
-	) {
-		const childComponents = new Map<string, unknown>();
-		const attributeComponents = new Map<string, unknown>();
+	): LuaTuple<[childComponents: object, attributeComponents: object] | [undefined, undefined]> {
+		// A class with no link of a kind holds the shared empty table for it, which nothing writes
+		// to: only a link of that kind is ever resolved again into it (`refreshLinkedComponent`,
+		// `refreshLinkAttribute`).
+		const childComponents = componentInfo.hasChildLinks ? new Map<string, unknown>() : NO_LINKED_COMPONENTS;
+		const attributeComponents = componentInfo.hasAttributeLinks ? new Map<string, unknown>() : NO_LINKED_COMPONENTS;
 
 		for (const link of componentInfo.links) {
 			const target = this.resolveLinkTarget(instance, componentInfo, link);
@@ -1464,7 +1578,7 @@ export class Components {
 				const linkedComponent = this.getLinkedComponent(link);
 				const linked = this.resolveLinkedComponent(target, linkedComponent);
 				if (linked === undefined) {
-					if (quiet && this.isHeldByInvalid(target, linkedComponent)) return undefined;
+					if (quiet && this.isHeldByInvalid(target, linkedComponent)) return $tuple(undefined, undefined);
 
 					const invalidReason = this.invalid.get(target)?.get(linkedComponent);
 					if (invalidReason !== undefined) {
@@ -1475,11 +1589,11 @@ export class Components {
 				}
 
 				const holder = link.kind === "attribute" ? attributeComponents : childComponents;
-				holder.set(link.name, linked);
+				(holder as Map<string, unknown>).set(link.name, linked);
 			}
 		}
 
-		return { childComponents, attributeComponents };
+		return $tuple(childComponents, attributeComponents);
 	}
 
 	/**
@@ -1580,7 +1694,7 @@ export class Components {
 		instance: Instance,
 		guards: Map<string, t.check<unknown>>,
 	) {
-		if (guards.isEmpty() && componentInfo.attributeLinks.size() === 0) return undefined;
+		if (guards.isEmpty() && componentInfo.attributeLinks.isEmpty()) return undefined;
 
 		// A link key is written here rather than by the component, so this is the only path that
 		// could still announce one with tracking off: the external re-point is already silent in
@@ -1670,6 +1784,7 @@ export class Components {
 		return classes;
 	}
 
+	/** Read once per class, into `attributeGuards`, as the classes are registered. */
 	private getAttributeGuards(ctor: AbstractConstructor) {
 		const attributes = new Map<string, t.check<unknown>>();
 		const metadata = this.components.get(ctor as Constructor);
@@ -1732,12 +1847,10 @@ export class Components {
 	/**
 	 * How a component's instance is checked: the shape the transformer wrote from its instance
 	 * type, or a guard written by hand, whichever the nearest class in the hierarchy declares. A
-	 * shape is what can be watched one child at a time and can say which child is wrong.
+	 * shape is what can be watched one child at a time and can say which child is wrong. Read once
+	 * per class, into `instanceCheck`, as the classes are registered.
 	 */
-	private getInstanceCheck(ctor: AbstractConstructor): {
-		guard?: (instance: Instance) => boolean;
-		shape?: InstanceShape;
-	} {
+	private getInstanceCheck(ctor: AbstractConstructor): InstanceCheck {
 		const metadata = this.components.get(ctor as Constructor);
 		if (metadata === undefined) return {};
 
@@ -1751,29 +1864,40 @@ export class Components {
 		return parentCtor.__index !== undefined ? this.getInstanceCheck(parentCtor.__index) : {};
 	}
 
+	/**
+	 * A config value as the class reads it: its own, or else the nearest registered class above it
+	 * that sets one. Nothing for a class that is not registered, and the walk up stops at the first
+	 * class that is not.
+	 */
 	private getConfigValue<T extends keyof ComponentConfig>(ctor: AbstractConstructor, key: T): ComponentConfig[T] {
-		const metadata = this.components.get(ctor as Constructor);
-		if (metadata) {
-			if (metadata.config[key] !== undefined) {
-				return metadata.config[key];
+		return this.components.get(ctor as Constructor)?.inheritedConfig[key];
+	}
+
+	/** Every config value as `getConfigValue` reads it, gathered once per class as the classes are registered. */
+	private getInheritedConfig(ctor: AbstractConstructor): ComponentConfig {
+		const inherited: { [key: string]: unknown } = {};
+
+		let current: AbstractConstructor | undefined = ctor;
+		while (current !== undefined) {
+			const metadata = this.components.get(current as Constructor);
+			if (metadata === undefined) break;
+
+			// The nearest class that sets a key is the one read.
+			for (const [key, value] of pairs(metadata.config)) {
+				if (inherited[key as string] === undefined) {
+					inherited[key as string] = value;
+				}
 			}
-			const parentCtor = getmetatable(ctor) as { __index?: AbstractConstructor };
-			if (parentCtor.__index !== undefined) {
-				return this.getConfigValue(parentCtor.__index, key);
-			}
+
+			current = (getmetatable(current) as { __index?: AbstractConstructor }).__index;
 		}
+
+		return inherited as ComponentConfig;
 	}
 
 	/** Runs a component's `onStart` on its own thread, reporting a raise against the instance. */
 	private startComponent(component: BaseComponent, componentInfo: ComponentInfo, instance: Instance) {
-		safeCall(
-			[
-				`[Flamework] Component '${componentInfo.ctor}' failed to start for`,
-				instance,
-				`[${instance.GetFullName()}]`,
-			],
-			() => (component as unknown as OnStart).onStart(),
-		);
+		safeCall(describeStartFailure, runOnStart, true, component, componentInfo.ctor, instance);
 	}
 
 	private setupComponent(
@@ -1789,7 +1913,7 @@ export class Components {
 		const maid = new Maid();
 		this.componentCleanup.set(component, maid);
 
-		if (Flamework.implements<OnStart>(component)) {
+		if (componentInfo.implementsOnStart) {
 			// Not before ignition has finished: a component built from a provider's `onInit` starts
 			// once every provider has, as a provider would.
 			if (this.pendingStarts !== undefined) {
@@ -1806,9 +1930,16 @@ export class Components {
 
 		const refreshAttributes = this.getConfigValue(ctor, "refreshAttributes");
 		if (refreshAttributes === undefined || refreshAttributes) {
-			const attributeCache = table.clone(attributes);
-			const attributeGuards = this.getAttributeGuards(ctor);
-			for (const [attribute, guard] of pairs(attributeGuards)) {
+			// The value a change is reported as replacing is the one the component held for the
+			// attribute, read before the change is stored -- except after a write the component made
+			// itself, which stores its value at once and is reported a resumption later, if signals
+			// are deferred: that write keeps the value it replaced (`SYMBOL_ATTRIBUTE_REPLACED`) for
+			// the report. Kept only once there is such a write, rather than a copy of every value
+			// for every component. One made before this point -- in the constructor, `onInit` or
+			// `onStart` -- is what the component holds from here, as a copy taken here would be.
+			component[SYMBOL_ATTRIBUTE_REPLACED] = undefined;
+
+			for (const [attribute, guard] of pairs(componentInfo.attributeGuards)) {
 				if (typeIs(attribute, "string")) {
 					const link = componentInfo.attributeLinks.get(attribute);
 
@@ -1824,9 +1955,16 @@ export class Components {
 							const value = instance.GetAttribute(attribute);
 							const attributes = component.attributes as Map<string, unknown>;
 							if (guard(value)) {
+								let previous = attributes.get(attribute);
+								const replaced = component[SYMBOL_ATTRIBUTE_REPLACED];
+								if (replaced?.has(attribute)) {
+									const held = replaced.get(attribute);
+									previous = held === NO_ATTRIBUTE_VALUE ? undefined : held;
+									replaced.delete(attribute);
+								}
+
 								attributes.set(attribute, value);
-								signal?.Fire(value, attributeCache.get(attribute));
-								attributeCache.set(attribute, value);
+								signal?.Fire(value, previous);
 							}
 						}),
 					);
@@ -1861,40 +1999,23 @@ export class Components {
 		}
 	}
 
-	private addIdMapping(value: BaseComponent, id: string, inheritedComponents: Map<string, Set<BaseComponent>>) {
-		let instances = inheritedComponents.get(id);
-		if (!instances) inheritedComponents.set(id, (instances = new Set()));
-
+	private addIdMapping(value: BaseComponent, id: string) {
 		let inheritedLookup = this.reverseComponentsMapping.get(id);
 		if (!inheritedLookup) this.reverseComponentsMapping.set(id, (inheritedLookup = new Set()));
 
-		instances.add(value);
 		inheritedLookup.add(value);
 	}
 
-	private removeIdMapping(instance: Instance, value: BaseComponent, id: string) {
-		const inheritedComponents = this.activeInheritedComponents.get(instance);
-		if (!inheritedComponents) return;
-
-		const instances = inheritedComponents.get(id);
-		if (!instances) return;
-
+	private removeIdMapping(value: BaseComponent, id: string) {
 		const inheritedLookup = this.reverseComponentsMapping.get(id);
 		if (!inheritedLookup) return;
 
-		instances.delete(value);
 		inheritedLookup.delete(value);
 
-		if (inheritedLookup.size() === 0) {
+		// `isEmpty` rather than `size() === 0`, which counts the whole set: one set per id across
+		// every instance, so each removal of a burst walked all that was left of it.
+		if (inheritedLookup.isEmpty()) {
 			this.reverseComponentsMapping.delete(id);
-		}
-
-		if (instances.size() === 0) {
-			inheritedComponents.delete(id);
-		}
-
-		if (inheritedComponents.size() === 0) {
-			this.activeInheritedComponents.delete(instance);
 		}
 	}
 
@@ -1958,29 +2079,31 @@ export class Components {
 		return this.removing.get(instance)?.has(component) === true;
 	}
 
-	private getDependencyResolutionOptions(
-		componentInfo: ComponentInfo,
-		instance: Instance,
-		metadata: ComponentMetadata,
-	) {
-		return {
-			overrideDependency: (info: Modding.DependencyInfo) => {
-				if (info.id === Flamework.id<ComponentMetadata>()) {
-					return metadata;
-				}
+	/**
+	 * One of a component's constructor dependencies, for the construction under way
+	 * (`resolvingInfo`, `resolvingInstance`, `resolvingMetadata`): its metadata, or a component on
+	 * the same instance. Anything else is left to the module.
+	 */
+	private resolveDependency(info: Modding.DependencyInfo) {
+		if (info.id === Flamework.id<ComponentMetadata>()) {
+			return this.resolvingMetadata;
+		}
 
-				const dependency = this.componentsIdMapping.get(info.id);
-				if (dependency !== undefined) {
-					const component = this.getComponent(instance, dependency);
-					if (component === undefined) {
-						const name = instance.GetFullName();
-						throw `Could not resolve component '${info.id}' while constructing '${componentInfo.identifier}' (${name})`;
-					}
+		const dependency = this.componentsIdMapping.get(info.id);
+		if (dependency !== undefined) {
+			// Read first: building the component can run a construction of its own, which puts
+			// them back once it is done, but not before.
+			const componentInfo = this.resolvingInfo!;
+			const instance = this.resolvingInstance!;
 
-					return component;
-				}
-			},
-		};
+			const component = this.getComponent(instance, dependency);
+			if (component === undefined) {
+				const name = instance.GetFullName();
+				throw `Could not resolve component '${info.id}' while constructing '${componentInfo.identifier}' (${name})`;
+			}
+
+			return component;
+		}
 	}
 
 	private getPolymorphicIds(component: AbstractConstructor) {
@@ -2087,13 +2210,23 @@ export class Components {
 		const componentIdentifier = getIdFromSpecifier(componentSpecifier);
 		if (componentIdentifier === undefined) return [];
 
-		const activeComponents = this.activeInheritedComponents.get(instance);
+		const activeComponents = this.activeComponents.get(instance);
 		if (!activeComponents) return [];
 
-		const componentsSet = activeComponents.get(componentIdentifier);
-		if (!componentsSet) return [];
+		// Read off the instance's own components -- rarely more than a few -- and the ids each class
+		// answers to, worked out once at registration, rather than kept in a lookup per instance.
+		// An invalid component holds its place in `activeComponents` and is left out, as it is from
+		// every other lookup.
+		const invalidHere = this.invalid.get(instance);
+		const found = new Array<T>();
+		for (const [component, value] of activeComponents) {
+			if (invalidHere?.has(component as Constructor) === true) continue;
+			if (!this.components.get(component as Constructor)!.polymorphicIdSet.has(componentIdentifier)) continue;
 
-		return [...componentsSet] as never;
+			found.push(value as never);
+		}
+
+		return found;
 	}
 
 	/** @internal */
@@ -2171,13 +2304,19 @@ export class Components {
 		let attributes: Map<string, unknown>;
 		let initError: string | undefined;
 		let isCancelled = false;
+
+		// The construction `resolveDependency` answers for, as it was before this one: a nested one
+		// -- a component a link or a dependency names, built on the way -- puts it back as it ends.
+		const outerInfo = this.resolvingInfo;
+		const outerInstance = this.resolvingInstance;
+		const outerMetadata = this.resolvingMetadata;
 		try {
-			const attributeGuards = this.getAttributeGuards(component);
+			const attributeGuards = componentInfo.attributeGuards;
 			attributes = this.getAttributes(instance, componentInfo, attributeGuards);
 
 			if (skipInstanceCheck !== true) {
 				// A shape says which child is wrong; a guard written by hand only that it failed.
-				const { guard, shape } = this.getInstanceCheck(component);
+				const { guard, shape } = componentInfo.instanceCheck;
 				const reason = shape !== undefined ? describeShapeMismatch(shape, instance) : undefined;
 				const passes = shape !== undefined ? reason === undefined : guard === undefined || guard(instance);
 
@@ -2186,13 +2325,16 @@ export class Components {
 				}
 			}
 
-			const resolved = this.resolveLinks(instance, componentInfo, attributes, skipInstanceCheck === true);
-			if (resolved === undefined) {
+			const [childComponents, attributeComponents] = this.resolveLinks(
+				instance,
+				componentInfo,
+				attributes,
+				skipInstanceCheck === true,
+			);
+			if (childComponents === undefined) {
 				// A component a link names is invalid: the link is lost, the owner waits.
 				return undefined as never;
 			}
-
-			const { childComponents, attributeComponents } = resolved;
 
 			// The constructor's component dependencies, resolved ahead of it for the reason the
 			// links are: one that turns out invalid -- built here, its `onInit` raised -- is a state
@@ -2213,10 +2355,12 @@ export class Components {
 				writeAttribute: this.createAttributeWriter(componentInfo, instance, attributeGuards),
 			});
 
-			componentInstance = this.module.createClassInstance(
-				component,
-				this.getDependencyResolutionOptions(componentInfo, instance, metadata),
-			);
+			// Answered by `resolveDependency` through one options object for every construction, set
+			// to this one for as long as its constructor's dependencies are being resolved.
+			this.resolvingInfo = componentInfo;
+			this.resolvingInstance = instance;
+			this.resolvingMetadata = metadata;
+			componentInstance = this.module.createClassInstance(component, this.dependencyResolution);
 
 			// `onInit` runs here, inside the constructing window and before the component is in
 			// any lookup: nothing can see it yet -- not `getComponent`, not a link's
@@ -2224,15 +2368,18 @@ export class Components {
 			// than building a second one. It is synchronous, so a Promise it returns is not waited
 			// for. A raise makes the component invalid, below; it is detached at once from the
 			// lifecycle events it was attached to as it was built, so it ticks no more than it starts.
-			if (Flamework.implements<OnInit>(componentInstance)) {
-				const initialising = componentInstance;
-				const [ok, err] = pcall(() => initialising.onInit());
+			if (componentInfo.implementsOnInit) {
+				const [ok, err] = pcall(runOnInit, componentInstance);
 				if (!ok) {
-					this.module.removeClassInstance(initialising);
+					this.module.removeClassInstance(componentInstance);
 					initError = tostring(err);
 				}
 			}
 		} finally {
+			this.resolvingInfo = outerInfo;
+			this.resolvingInstance = outerInstance;
+			this.resolvingMetadata = outerMetadata;
+
 			constructingSet.delete(component);
 			if (constructingSet.isEmpty()) {
 				this.constructing.delete(instance);
@@ -2277,11 +2424,11 @@ export class Components {
 
 		activeComponents.set(component, componentInstance);
 
-		// A component whose `onInit` raised keeps its place and nothing else: no id mapping, so no
-		// polymorphic lookup finds it; no `onStart`, no announcement, no waiter resolved. It stays
-		// until the tracker takes it down for a reason of its own -- the tag, the tree, a link --
-		// and builds a fresh one, rather than being built again on every lookup while whatever made
-		// `onInit` raise is still there.
+		// A component whose `onInit` raised keeps its place and nothing else: no id mapping, and
+		// `getComponents` passes over it, so no polymorphic lookup finds it; no `onStart`, no
+		// announcement, no waiter resolved. It stays until the tracker takes it down for a reason
+		// of its own -- the tag, the tree, a link -- and builds a fresh one, rather than being built
+		// again on every lookup while whatever made `onInit` raise is still there.
 		if (initError !== undefined) {
 			let invalidHere = this.invalid.get(instance);
 			if (!invalidHere) this.invalid.set(instance, (invalidHere = new Map()));
@@ -2308,11 +2455,8 @@ export class Components {
 			throw message;
 		}
 
-		let inheritedComponents = this.activeInheritedComponents.get(instance);
-		if (!inheritedComponents) this.activeInheritedComponents.set(instance, (inheritedComponents = new Map()));
-
 		for (const id of componentInfo.polymorphicIds) {
-			this.addIdMapping(componentInstance, id, inheritedComponents);
+			this.addIdMapping(componentInstance, id);
 		}
 
 		this.unannounced.add(componentInstance);
@@ -2394,12 +2538,15 @@ export class Components {
 		// ordering, said out loud.
 		activeComponents.delete(component);
 
-		if (activeComponents.size() === 0) {
+		if (activeComponents.isEmpty()) {
 			this.activeComponents.delete(instance);
 		}
 
-		for (const id of componentInfo.polymorphicIds) {
-			this.removeIdMapping(instance, existingComponent, id);
+		// An invalid one was never mapped.
+		if (!wasInvalid) {
+			for (const id of componentInfo.polymorphicIds) {
+				this.removeIdMapping(existingComponent, id);
+			}
 		}
 
 		// Marked as removing for as long as the removal runs. Leaving every lookup is only half of
