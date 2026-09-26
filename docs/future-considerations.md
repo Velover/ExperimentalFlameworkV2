@@ -1,7 +1,8 @@
 # Future considerations
 
 Possible directions for Flamework v2, collected after the September 2026 find-and-fix rounds. Nothing
-here is decided or scheduled; each item says what it would change and why it came up.
+here is scheduled. Section 2 records a decision (Immediate signal behaviour stays supported); the rest
+are open, and each item says what it would change and why it came up.
 
 The main concern behind all of them: **a game should not pay, in performance or memory, for a feature
 it does not use.** Runtime extinguishing, lazy providers, links and the like are rare in real games,
@@ -9,93 +10,116 @@ yet several fixes made the common path do a little more work so those rare cases
 
 ## 1. Performance and memory cost of each feature
 
-An estimate from reading the code (September 2026), not a measurement: nothing was run, and the
-microsecond and kilobyte figures are rough, order-of-magnitude numbers. It assumes a typical game with a
-few hundred providers, 1–5k tagged component instances with streaming bursts, a few dozen busy remotes
-and 20–50 players. It read core's lifecycle and module code as committed before the lazy-provider
-dependency waiting (rule A) was added. The first step before acting on any of it is a benchmark place
-that measures the per-frame loop at 1,000 listeners, the time per received event, add and remove time
-for a 1,000-instance burst, and Lua heap per tracked instance. Benchmark with `core.profiling: false`:
-Studio profiles by default, so Studio frame times overstate the loops.
+The table below started as an estimate from reading the code (September 2026). The rows this release
+worked on were then measured in Studio, before and after, with `core.profiling: false` (Studio
+profiles by default, so Studio frame times overstate the loops). The other figures are still rough,
+order-of-magnitude estimates. It assumes a typical game with a few hundred providers, 1–5k tagged
+component instances with streaming bursts, a few dozen busy remotes and 20–50 players.
 
 ### Ranked by impact, highest first
 
-| # | Feature | Estimated cost | Paid when the feature is unused? |
+| # | Feature | Cost | Paid when the feature is unused? |
 | --- | --- | --- | --- |
-| 1 | Per-frame events (`onTick` / `onPhysics` / `onRender`, ticking components included) | ~0.5–1.2 µs per listener per frame (~0.5–1.2 ms per frame at 1,000 listeners); ~70–100 B of garbage per listener per frame from the set copy and a closure | Partly: the set copy and the extinguish and late-provider checks (~15–25% of the loop) serve runtime extinguish and lazy providers |
-| 2 | Receiving an event (guard, middleware chain, dispatch) | 3 Promises, 5 coroutines and a BindableEvent dispatch before user code: ~15–40 µs and ~10–12 KB of garbage per event | Yes: mostly Promise plumbing, even with no user middleware |
-| 3 | Adding a component (tag, stream-in, eager `getComponent`) | ~10 engine calls and 50–70 tables, ~15–40 µs per add; ~3–6 KB of Lua heap per instance (~15–30 MB at 5k instances) | Partly (see the next table) |
+| 1 | Per-frame events (`onTick` / `onPhysics` / `onRender`, ticking components included) | **Measured.** At 1,000 listeners: about 530 µs per frame and no garbage (before this release: about 780 µs and 80 KB per frame; with profiling on, about 1,450 µs and none, before about 1,900 µs and 144 KB) | Barely: one extinguish check per frame, and the late-provider check only when there are late providers |
+| 2 | Receiving an event (guard, middleware chain, dispatch) | **Measured.** About 3 µs and 80 B per event, with or without one middleware (before: about 20 µs and 18.5 KB, or about 35 µs and 30 KB with one middleware) | No: plain calls, no Promise, no extra coroutine |
+| 3 | Adding a component (tag, stream-in, eager `getComponent`) | **Measured** for an instance with two components: about 4.0 KB of Lua heap kept per instance and 8.1 KB allocated per tag add (before: 6.4 KB and 14.6 KB); about 50 µs per tag add and 24 µs per hand add at 5k | Partly: see "Still paid" below |
 | 4 | Attribute tracking | One `AttributeChanged` connection per instance that fires for any attribute, plus one connection per declared attribute | Yes, even when every attribute has a default and can never go invalid |
-| 5 | Removing a component | ~8–20 µs, including scans of the lifecycle plugin's provider lists, which components are never in | Partly |
+| 5 | Removing a component | **Measured** at 5k instances: about 20 µs per tag removal and 10 µs by hand (before: about 300 µs, because each removal counted every id's global set) | Partly: the lifecycle plugin's provider-list scans remain |
 | 6 | Tree watching (`Watching`, or client `Contextual` for non-atomic models) | 2 connections and ~0.5–1 KB per watched node | No (off by default on the server) |
 | 7 | "Waiting for criteria" warning timers | One `task.delay` thread (~1–1.5 KB) per unqualified instance for up to 5 s; streaming bursts pay it for most instances | Yes: a diagnostic that runs in production |
-| 8 | Remote function round trip | ~14 Promises, ~50–150 µs and ~40 KB of garbage across both ends | Partly |
-| 9 | Polymorphic index (`getComponents` / `getAllComponents` by class or interface) | A Map and 2–4 Sets per instance (~0.3–0.5 KB) | Yes, if those APIs are never called |
+| 8 | Remote function round trip | **Measured.** The caller makes one Promise, about 7.6 µs and 6 KB per invoke; the server about 6 µs and 0.4 KB per request (before: about 33 µs and 20 KB, and about 50 µs and 46 KB). 2,000 concurrent calls settle in about 250 ms instead of 450–470 ms | No |
+| 9 | Polymorphic lookups (`getComponents` / `getAllComponents` by class or interface) | No per-instance index any more; `getComponents` walks the instance's own components (about 0.4–0.5 µs) | No |
 | 10 | Links | Every add or remove of class X runs the handler of every link that watches X, anywhere: O(links × adds); ~2–4 KB per link per owner | No |
-| 11 | Component constructor dependencies | An observer per dependency per instance (~0.3–0.5 KB) | Partly: every tracker entry carries the holder tables and every add/remove copies them |
-| 12 | Re-entrancy guards (Immediate signal behaviour, user re-entry) | About one Set and ~8 hash operations per add or remove (under 1 µs); under Immediate, a `task.defer` per destroyed or unparented tagged instance | Partly: Deferred games pay the table operations, no threads |
-| 13 | Observer attachment and refusal rollback | ~1–2 µs per attachment | Yes, for the rollback list |
+| 11 | Component constructor dependencies | An observer per dependency per instance (~0.3–0.5 KB); tracker tables are made on first use | No |
+| 12 | Re-entrancy guards (user re-entry under both modes, Immediate signal behaviour) | About one Set and ~10 hash operations per add or remove (under 1 µs); under Immediate, a `task.defer` per destroyed or unparented tagged instance, per component class | No: Deferred games need the table operations too (user re-entry), and never take the re-check (section 2) |
+| 13 | Observer attachment and refusal rollback | **Measured.** Attach plus detach allocates about 840 B (before about 2.25 KB); `Flamework.implements` allocates nothing | No: the rollback is a count |
 | 14 | Dependency resolution misses (function providers, imports) | An O(providers) walk per miss (~5–20 µs at 300 providers); function providers are never cached | No |
-| 15 | Provider `onInit` / `onStart` machinery | A thread and two wait-map operations per provider `onInit`, ~2–5 µs per provider, once at ignition | Partly: the thread and wait map serve extinguish cycle detection |
+| 15 | Provider `onInit` / `onStart` machinery | A thread and two wait-map operations per provider `onInit`, ~2–5 µs per provider, once at ignition; a provider whose constructor took nothing still initialising does not wait | Partly: the thread and wait map serve extinguish cycle detection |
 | 16 | Ignition | Dominated by requiring the registered ModuleScripts; provider construction is O(providers²) finds (~2–5 ms at 300) | Scopes and imports are nearly free |
 | 17 | Component signals (`onComponentAdded` / `onComponentRemoved` / `onAttributeChanged` / `waitForComponent`) | A dispatch per connection; `onAttributeChanged` creates one BindableEvent per component per attribute | No |
 | 18 | Sending an event | ~0.5–1 µs on top of the engine's fire; `except` is O(players²) | Argument trimming is ~0.1–0.3 µs |
 | 19 | Rename following (`watchRenames`) | O(children) per child added, O(n²) when a model's children stream in one at a time | No (off by default) |
-| 20 | Profiling | ~0.5–1 µs per listener per frame | No on live servers |
+| 20 | Profiling | See row 1 | No on live servers |
 
-Considered and negligible: runtime extinguish, imports and lazy providers when unused (only the per-frame
-checks in row 1); scopes (judged at ignition); `Dependency<T>()`; serialization off; obfuscation
-(compile time only); the testing plugin with its scope off; links, dependencies and rename following
-when unused; Immediate handling in a Deferred game (no threads); per-player bookkeeping; per-remote
-setup; `createClient`.
+Considered and negligible: runtime extinguish, imports and lazy providers when unused; scopes (judged
+at ignition); `Dependency<T>()`; serialization off; obfuscation (compile time only); the testing
+plugin with its scope off; links, dependencies and rename following when unused; Immediate handling
+in a Deferred game (no threads); per-player bookkeeping; per-remote setup; `createClient`.
 
-### Paid without using the feature, with the cheapest change
+### Still paid without using the feature, with the cheapest change
+
+Done in this release: Promise plumbing on received events and requests, the per-frame set copy and
+closures, error text and metadata walks on every add, eager tracker tables, the per-instance
+polymorphic index, the observer rollback list, and the quadratic removal. What is left:
 
 | # | Cost | Cheapest change |
 | --- | --- | --- |
-| 1 | Promise plumbing on every received event or request | When a remote has no user middleware, don't build a middleware processor: run the generated guard as a plain loop and call the final step directly. Removes 3 Promises and 5 coroutines per event. |
-| 2 | Set copy and checks in the per-frame loops | A cached array per event, rebuilt only when membership changes; check extinguishing once per frame; skip the late-provider check when there are none. |
-| 3 | The attribute criterion | Don't connect it when every guarded attribute has a default; otherwise check only the attribute that changed, synchronously. |
-| 4 | `GetFullName` and `GetAttributes` on every add | Build error text only inside the error handler; skip `GetAttributes` when the component declares no attribute guards. |
-| 5 | Link and dependency tables in every tracker entry (~0.5 KB per instance) | Allocate them on first use; skip the holders copy when there are none. |
-| 6 | The per-instance polymorphic index | Answer lookups from the instance's active components and each class's ids; build global entries lazily. |
-| 7 | Metadata walks on every add and remove | Cache attribute guards and implemented interfaces per class. |
-| 8 | Warning timers in production | Default `warningTimeout` to 0 outside Studio, or one shared sweeper thread. |
-| 9 | Provider-list scans when a component is removed | Return early for components in the lifecycle plugin's remove path. |
-| 10 | The observer rollback list | Count successful attachments instead of recording them. |
+| 1 | The attribute criterion | Don't connect it when every guarded attribute has a default; otherwise check only the attribute that changed, synchronously. |
+| 2 | Warning timers in production | Default `warningTimeout` to 0 outside Studio, or one shared sweeper thread. |
+| 3 | Provider-list scans when a component is removed | Return early for components in the lifecycle plugin's remove path. |
+| 4 | `addComponent`'s `try`/`finally` | It compiles to `TS.try` with two closures per add; a `pcall` of a static function would avoid them. |
+| 5 | A Maid per component | Created even when the component has no attribute connections; make it on first use. |
+| 6 | Each tracker entry's attribute watch | A `deferOnce` object and closures per entry; share one per class, or make them on first use. |
+| 7 | `GetAttributes` on every add | Skip it when the component declares no attribute guards. |
 
-## 2. Deferred signal behaviour only
+## 2. Immediate signal behaviour: kept
 
-Immediate signal behaviour runs every handler inside the write that fired it (`SetAttribute`, `AddTag`,
-`RemoveTag`, a `Parent` change), so Flamework's own code is re-entered in the middle of constructing,
-removing or announcing a component. Five of the components bugs found in Studio happened only under
-Immediate, and one contract (`onComponentRemoved` before or after `destroy`) differs between the modes.
-Roblox recommends Deferred.
+Decided in September 2026: Flamework keeps supporting Immediate signal behaviour.
 
-Its runtime cost is small (read from the code, not measured): a few table operations per component
-add or remove, no per-frame work, and no memory that outlives the call. Under Immediate, every real
-`Destroy` or unparent of a tagged instance also takes a `task.defer` re-check, one deferred thread per
-removal, which only matters in a burst of thousands. Dropping Immediate mainly buys simpler code and
-half the test matrix; most guards stay anyway, because user code re-entering from `onStart` or
-`destroy` needs them under both modes.
+Dropping it was considered because Immediate runs every handler inside the write that fired it
+(`SetAttribute`, `AddTag`, `RemoveTag`, a `Parent` change). Flamework's own code is then re-entered in
+the middle of constructing, removing or announcing a component. Five of the components bugs found in
+Studio happened only under Immediate, and one contract (`onComponentRemoved` before or after `destroy`)
+differs between the modes.
 
-What dropping Immediate could look like:
+Why it stays:
 
-- **Detect it at ignition.** A script cannot read `workspace.SignalBehavior`, and `Default` still
-  behaves as Immediate in existing places. Firing a private `BindableEvent` and checking whether its
-  handler has already run when `Fire` returns tells the two apart. Warn once: Flamework supports
-  Deferred only.
-- **Docs and tests become Deferred-only.** Remove the `immediate` project from the template's test
-  matrix and the Immediate model from the Lune harness.
-- **Keep the existing guards at first.** They are harmless under Deferred, and some also protect
-  against re-entry from user code (a component removing itself from `onStart` re-enters under both
-  modes). Remove one only once a measurement shows it costs something and a Studio run shows it is no
-  longer needed.
-- **One contract per API.** For example, `onComponentRemoved` runs after `destroy`.
+- **Many games run Immediate without choosing it.** Roblox documents `Default` as "currently
+  equivalent to `Immediate`", to switch to Deferred at some later point. Only places created from
+  Studio's templates are set to Deferred directly. A Rojo-built place whose project file does not set
+  `SignalBehavior` gets `Default`, and that is how most roblox-ts games are built. The template's own
+  `default` and `streaming` test projects are among them.
+- **A Deferred game pays almost nothing for it.** This comes from an analysis of the code; the figures
+  are estimates, not measurements.
+  - **Nearly all of the re-entrancy guards are needed under Deferred too.** They also protect against
+    user code calling back into Flamework synchronously, which happens under both modes: the
+    constructor, `onInit`, `onStart` (until it yields), `destroy` and `waitForComponent` callbacks all
+    run inside Flamework's own work. They cost about 10 table operations and one small Set per
+    component add or remove (0.5–1 µs per add and remove, nothing retained).
+  - **Only two pieces exist purely for Immediate:**
+    - the `task.defer` re-check when a tagged instance is destroyed or unparented, one thread per
+      component class on that instance, which is never taken under Deferred;
+    - networking's `departedPlayers` set, one insert per player leaving.
+  - **Removing the re-check would make components leak silently under Immediate:** `destroy` never
+    runs and the component keeps ticking.
+  - **Core has nothing Immediate-specific,** and networking's own signal behaves the same in both
+    modes.
+- **What dropping would buy is maintenance, not speed:**
+  - one contract per API (three differ today);
+  - about 60–80 lines of docs and 35 of the Lune harness;
+  - half the template's test matrix (8 realm runs down to 4).
 
-A further step, if Immediate must keep working: Flamework defers its own reactions (tag, attribute and
-tree handlers only record the change and schedule the work), so it behaves the same under both modes.
-That redesigns the components event flow and delays add and remove by one resumption under Immediate.
+  Against that, 118 of the 135 Lune component cases run on the harness's Immediate model and would
+  need rework.
+
+Worth doing anyway, and cheap: recommend Deferred in the getting-started guide, and set
+`SignalBehavior` to `Deferred` on `Workspace` in the Rojo project of new places. Games then start on
+the behaviour Roblox recommends.
+
+If this is reconsidered, for example once Roblox switches `Default` to Deferred:
+
+- **Detect Immediate at ignition.** A script cannot read `workspace.SignalBehavior`. Instead, fire a
+  private `BindableEvent` and check whether its handler has already run when `Fire` returns. This costs
+  about 10–30 µs, once.
+- **Warn rather than error.** An error would break existing Rojo places on upgrade.
+- **Keep the destroy re-check until then.**
+
+Not yet checked in Studio:
+
+- Roblox's docs give a deferred re-entrancy limit of 10, while the harness notes record 80 measured in
+  Studio.
+- Whether `PlayerRemoving` is deferred.
+- Whether `AncestryDeferred` would fool the detection above.
 
 ## 3. Simpler rules for rarely used features
 
@@ -132,21 +156,68 @@ Edge cases found and deliberately left alone, because the fix would cost more th
 - **core, per-player modules:** checked in Studio (September 2026). A *lazy* per-player data provider
   whose `async` `onInit` is still loading when the player leaves extinguishes cleanly: `extinguish()`
   returns at once, nothing starts or ticks, nothing is left behind (the async body itself still runs to
-  its end). With an *eager* provider there is no `Module` handle until `ignite()` returns;
+  its end). With an *eager* provider there is no `Module` handle until `ignite()` returns, and the
+  module also stays Igniting while an import's lazy `onInit` that provider takes is still loading;
   `extinguish()` through an injected `Module` mid-load raises "invalid state … got 'Igniting'" and the
-  module stays ignited, and `onStart` runs for a player who already left. Load per-player data from a
-  lazy provider, or make the load reject when the player leaves (then `ignite()` raises and the module
-  is released).
+  module stays ignited, and `onStart` can run for a player who already left. Load per-player data from
+  a lazy provider, or make the load reject when the player leaves (then `ignite()` raises and the
+  module is released).
 - **core:** a thread doing an unrelated Promise's work can join a lazy-provider batch: with two
   `async` lazy `onInit`s pending in separate turns, a provider one of them resolves can join the other's
   batch. A lazy provider resolved from any `async` function while another's `async` `onInit` is pending
   waits for that whole `onInit`, and hangs if that `onInit` waits for it.
+- **core:** dependency waiting is not transitive. A provider waits for the pending `onInit` of the
+  providers its constructor takes directly; a provider in between with no pending `onInit` of its own
+  is not followed (give it an `onInit`, even an empty one, or take the store directly). A transitive
+  wait was considered: the module would record every provider's constructor dependencies, including
+  providers that implement no lifecycle event, and the wait would follow them. Not done, to keep the
+  lifecycle's waiting simple.
+- **core:** an `onInit` that, after it has yielded (an `async` `onInit` after an `await`, or a Promise
+  callback), ignites a module taking the provider it initialises waits for itself until the import is
+  extinguished, because such a thread cannot be told apart from unrelated Promise work. After 5 s a
+  warning names both providers. An ordinary load that is ambiguous in the same way and lasts longer
+  than 5 s also warns once, then completes; a networking function's `predict` runs its callback as
+  Promise work, so a module it ignites falls in that case. Before any yield, or from a thread the
+  `onInit` resumed, it is exempt.
+- **core:** a thread that a provider's `onInit` `task.spawn`s synchronously and does not wait for is
+  treated as part of that `onInit`: an eager provider ignited on it does not wait and runs before that
+  `onInit` ends.
+- **core:** an ignition that an import's lazy `onInit` waits for through a path the wait cannot see
+  (for example a `task.defer`red ignition it then waits on) hangs. This is the lazy-dependent hang
+  above, now also for eager providers and for providers with only `onStart` or per-frame events.
+- **core:** a lazy provider with only per-frame events and a constructor dependency ticks one frame
+  later than it used to, because it gets a turn; resolved from Promise work while another lazy
+  provider's `async` `onInit` is pending, it joins that turn and does not tick until that load ends.
+- **core:** on the late path, a turn stops early when a dependency's own module begins to extinguish
+  while this one does not; this needs a dependency from a module that is not an import (a function
+  provider handing out another module's lazy provider).
+- **core:** the refusal rollback counts the observers it told; an `onAdded` that starts observing an
+  interface already walked makes the rollback tell the wrong observers.
+- **core:** per-frame callbacks are called with trailing `nil` arguments (`onTick(self, dt, nil, …)`);
+  only a vararg callback counting `select("#", ...)` sees them.
+- **core:** `postIgnite`'s pass over providers without `onInit` that have dependencies rescans its map
+  on each step, quadratic in their number; not measurable at normal sizes.
+- **core, components, networking:** per-frame callbacks, component `onStart`s and networking handlers
+  run on recycled threads. A thread cancelled or closed while parked is dropped, but code that keeps
+  the thread it ran on (`coroutine.running()`) and cancels it while it runs another job cuts that job
+  short (a networking function request is then never answered: `Timeout`, or never with
+  `math.huge`); a stray resume of a parked thread prints `attempt to call a nil value` and ends.
 - **components:** after a linked component is removed by hand, a child that moves elsewhere while its
   owner is down stays watched until a new child of that name arrives.
 - **components:** the removal of an invalid component (its `onInit` raised) is not announced, so an
   owner that cleared its own optional link from its constructor is not covered.
+- **components:** constructions on different threads share one dependency resolver; if one's
+  dependency resolution yields (a lazy provider whose constructor yields), the other can resolve its
+  later parameters with the first one's instance and metadata.
+- **components:** a class with no links of a kind shares one frozen empty `childComponents` /
+  `attributeComponents`; a cast write into it raises.
+- **components:** a component that keeps its finished `onStart`'s thread and `task.cancel`s it in
+  `destroy`, removed synchronously from inside another component's `onStart` running on that recycled
+  thread, raises `cannot cancel thread` from `destroy`.
 - **networking:** a sender created inside the leaving player's own `PlayerRemoving` handler never
   settles an infinite-timeout invoke of that player under Default or Immediate signal behaviour.
+- **networking:** a function or middleware result that is a table with a callable `andThen` but no
+  Promise metatable is treated as a Promise; the call raises and the caller gets `Unprocessed`.
 - **testing:** with obfuscation on, the template's own tests that look events up by their plain names
   fail. The tests are at fault, not the packages.
 - **harness:** `ValueBase.Value` and its `Changed` are not modelled; `typeof` of an enum item is

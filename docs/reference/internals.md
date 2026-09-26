@@ -265,7 +265,9 @@ rather than half-working.
    place -- each once, however many ids it was provided under, and it leaves them once on release;
    then every kept provider is resolved, which constructs it.
 5. `onPostIgnite` hooks run -- the lifecycle plugin runs `onInit` in its own -- and the imports are
-   checked again, since a yielding `onInit` lets another thread extinguish one.
+   checked again, since a yielding `onInit` lets another thread extinguish one. Before a provider's
+   `onInit`, and before a provider without one is started, the plugin waits for the pending
+   `onInit`s of any lazy providers of an import that its constructor took directly.
 6. The module is `Ignited` and records itself as an importer on each of its imports; then
    `onIgnited` hooks run, each guarded, stopping if one extinguished the module. The lifecycle
    plugin starts the providers and connects `RunService` in its own, so `onStart` runs on a module
@@ -303,7 +305,11 @@ what its parent implements -- against the interfaces plugins observe and calls e
 `onAdded`. `createClassInstance` and `listen` go through the same path, which is why a lifecycle
 listener does not have to be a provider. The attachment is all or nothing: an observer that raises
 from `onAdded` has the ones before it told `onRemoved`, and the error comes out of the call, so
-`createClassInstance` and `listen` that raise have attached nothing and hold nothing.
+`createClassInstance` and `listen` that raise have attached nothing and hold nothing. The list is
+walked once per class and kept (`utility/getClassImplements.ts`, cache in
+`utility/implementsCache.ts`); an object with metadata of its own, such as a `listen` proxy, is
+walked on every call. A refusal is undone from a count of the observers told, found again by the
+same walk, so an attachment that goes through builds nothing.
 
 ### Extinguishing
 
@@ -322,7 +328,8 @@ held, with everything in it, as the module `Dependency<T>()` answers from.
 value, with a `NO_PROP_MARKER` for unscoped metadata. `getOwn*` reads one object; the unprefixed
 functions walk the prototype chain via `getmetatable(obj).__index`. `getMetadatas` collects every
 value up the chain, nearest first, which is what makes `flamework:implements` aggregate across a
-class hierarchy.
+class hierarchy. Writing or deleting `flamework:implements` on a class whose list is cached, or
+resetting it, drops the cached lists.
 
 The transformer writes this metadata from a decorator's `@metadata reflect ...` list. Which keys a
 decorator reflects matters: `Components` reads `flamework:parameters` to discover component
@@ -521,7 +528,8 @@ been told. Asking for the component from inside its own `onInit` raises as cycli
 building a second one. It is synchronous (a Promise is not waited for). A raise does not fail the
 construction so much as freeze it: the component keeps its `activeComponents` slot -- so nothing is
 built on top of it, by the tracker, by `getComponent` or by a link -- and gets nothing else: no id
-mapping (so no polymorphic lookup finds it), no `onStart`, no announcement, and it is detached at
+mapping and passed over by `getComponents` (so no polymorphic lookup finds it), no `onStart`, no
+announcement, and it is detached at
 once from the lifecycle events `createClassInstance` attached it to. `invalid` records it with the
 error; `hasComponent`, `getComponent`, `canCreateComponentEager`, `resolveLinkedComponent` and
 `refreshLinkedComponent` all read it as absent. It leaves only when the tracker takes it down (or
@@ -710,17 +718,44 @@ return. That is what keeps a link watching an instance under a blocked ancestor 
 component built on a blocked instance by a `getComponent` of your own satisfies the link that the
 lists refused to build one for.
 
-Polymorphic lookup is a pair of maps from id to component set -- one keyed by instance, one global.
-The ids come from `getPolymorphicIds`, which walks the class's parents plus its
-`flamework:implements` list, so a component is registered under its own id, every superclass id and
-every interface it implements.
+Polymorphic lookup starts from the ids a class answers to. They come from `getPolymorphicIds`, which
+walks the class's parents plus its `flamework:implements` list, so a component answers to its own
+id, every superclass id and every interface it implements; they are worked out once, as the class is
+registered, into `polymorphicIds` and a set of the same, `polymorphicIdSet`. `getAllComponents`
+reads one global map from id to component set, which an attached component joins under each of its
+ids. `getComponents` keeps no such map per instance: it walks the instance's own components in
+`activeComponents` -- rarely more than a few -- and keeps those whose class's set has the id,
+leaving out an invalid one. Neither answers in any particular order.
+
+What a component's class decides is read once per class rather than on every construction: the
+attribute guards (its own and those of the registered classes above it), the instance check,
+whether it implements `OnInit` and `OnStart`, whether it has child or attribute links, and the
+config as the class reads it -- each key from the nearest registered class that sets it
+(`inheritedConfig`, which `getConfigValue` answers from). A class with no link of a kind holds one
+shared, frozen empty table as its `childComponents` or `attributeComponents`. Every construction
+hands the module the same `overrideDependency` resolver, which answers for the construction in
+`resolvingInfo`/`resolvingInstance`/`resolvingMetadata`: `addComponent` sets them before
+`createClassInstance` and puts back the ones it found as it ends, so a component built on the way --
+a dependency the constructor asks for -- leaves them as they were. `onStart` runs through
+`safeCall` on a recycled thread, which a yielding `onStart` keeps while the next start gets another,
+and the message a raise is reported with is only built once there is one. The value an
+`onAttributeChanged` handler is told an attribute replaced is the one the component held, read
+before the change is stored, except after a write the component made itself: that write stores its
+value at once and is reported a resumption later where signals are deferred, so it records the
+value it replaced (`SYMBOL_ATTRIBUTE_REPLACED`, made by the first such write) for the report.
+
+A tracker entry makes its sets and maps as it first needs them, and reads a missing one as empty:
+for a tagged component with no links, dependencies or polled tree, an entry holds its listener set,
+its owner set and whatever cleanup its attribute watch needs. The owners wait by being owners, so
+`waiting` holds only the observers that wait -- a dependent's listener while its own entry waits --
+and the warning is armed while either is non-empty (`isWaiting`).
 
 ## Networking
 
 Networking is two layers, and the split is deliberate:
 
 - `event/` and `function/` are the **primitives**. `createEvent` owns exactly one remote plus its
-  middleware processor; `createFunctionSender` and `createFunctionReceiver` implement the
+  receive pipeline and signal; `createFunctionSender` and `createFunctionReceiver` implement the
   request/response protocol over two of those events.
 - `events/` and `functions/` are the **namespace API** built on top: they take the generated
   metadata, walk it, and build a handler object whose members are the methods you actually call.
@@ -744,13 +779,13 @@ function, which returns where the chain would short-circuit -- testing the opera
 the bound target. `setCallback` on a member with
 `_flamework_fn` is registered through `_setCallback(callback, pack)`: the callback as written, and a
 generated `pack` that turns a successful result into `[payload, blobs?]`. The runtime applies `pack`
-to what the middleware chain resolves with (a Promise already followed), so middleware sees plain
+to what the middleware chain returns (a Promise already followed), so middleware sees plain
 results, a value a middleware returns is packed like the callback's own, and `predict` resolves
 with the value itself. Receiving is metadata:
 the `network-decoder` intrinsic resolves to a decoder function per event and function (arguments,
 responses);
-`createEvent` decodes under `pcall` before the middleware chain, so guards and middleware see plain
-values, and a decode failure is reported through `onMalformed`. Functions keep the request id and
+the receive pipeline decodes under `pcall` before the guards and the middleware chain, so they see
+plain values, and a decode failure is reported through `onMalformed`. Functions keep the request id and
 process result as plain arguments and pack only the payload after them. Apart from those result
 packers, no encoder exists as a runtime value; only decoders do, and a decoder is useless for
 forging traffic.
@@ -810,29 +845,60 @@ their own `unreliable:` channel on an `UnreliableRemoteEvent`.
 
 The server creates the tree; the client waits for it to replicate, matching by attribute.
 
-### Middleware
+### The receive pipeline
 
-`createMiddlewareProcessor` folds a list of factories into a chain, from the back, ending in a
-finalize step that fires the handler's BindableEvent. Each factory receives the next processor and
-the event's `NetworkInfo` and returns the handler for its link.
+What runs between a remote delivering a message and the handler is plain Luau,
+`middleware/processor.luau` and `util/signal.luau` (each with a `.d.ts`), so that an argument list
+travels as varargs and keeps its count: roblox-ts builds a table from every `...args` and spreads it
+with `unpack`, which stops at `#list`. There is no Promise and no thread of its own in it.
 
-Generated argument validation is itself middleware, `unshift`ed to the front of the list, so user
-middleware never observes a payload that failed its guards. On an event a rejected payload is simply
-dropped; on a function the guard middleware returns `SkipBadRequest`, a distinct sentinel that
-`getProcessResult` maps to a `BadRequest` rejection. `Networking.Skip` maps to `Cancelled`.
+- **Receiving.** `createReceiver` is connected to `OnServerEvent`/`OnClientEvent` directly, so a
+  message is processed in the thread the engine runs the handler on, one per message. It decodes the
+  payload (under `pcall`; `onMalformed` and a drop on failure) and unpacks the decoded list up to
+  its last value (`table.maxn`). `predict` runs the same processor, minus the decoding, on a
+  recycled thread (`spawn`), so that a middleware that yields does not hold up the caller.
+- **The processor.** `createProcessor` folds the guards, the middleware factories (from the back)
+  and a final step into one function. The generated guards run first, ahead of all user middleware,
+  so user middleware never observes a payload that failed them; the first failure is reported with
+  its 0-based index (`onBadRequest`, a warning with `warnOnInvalidGuards`) and the processor
+  returns `rejected`: nothing for an event, which drops it, and `SkipBadRequest` for a function,
+  a distinct sentinel that `getProcessResult` maps to a `BadRequest` rejection.
+  `Networking.Skip` maps to `Cancelled`. Each factory is handed `processNext`, which calls the next
+  link with the list cut after its last value (a middleware that names its parameters hands on a
+  list ending in nil) and returns its result, **following a Promise the link returned** in the same
+  thread (`awaitStatus`): the value, `cancelled` for a cancelled one (`Networking.Skip` on a
+  function), a raise for a rejected one. So a middleware may yield or return a Promise; the thread
+  handling the message waits, nothing else does.
+- **The signal.** An event's final step fires networking's own signal, which passes its arguments by
+  reference (a BindableEvent would copy a decoded `Map<Instance, ...>` into one keyed by strings and
+  raise on a `Set<boolean>`). Each handler runs through `spawn`, a recycled thread per handler
+  (at most 16 idle threads are kept), so one that yields holds up nothing and one that raises has its
+  error printed while the others run; the newest connection runs first, like an engine signal's.
+  Connections are copy-on-write, so a fire under way is unaffected by a connect and skips a
+  disconnect. `connect` returns this signal's connection, a table with `Connected`, `Disconnect` and
+  `Destroy`, not an engine `RBXScriptConnection`; `registerHandler` likewise.
+
+A message with no user middleware therefore costs the decode and the guard calls, a signal fire, and
+one resumption of a parked thread per handler.
 
 ### The function protocol
 
-A request is `(requestId, ...args)` on the sender's channel. The receiver runs the middleware chain,
-then answers `(requestId, processResult, value)` on the same channel in the opposite direction --
-`processResult` is `true`, or the error to reject with. The sender keeps a map of pending request ids
-per player, resolves the matching promise, and races the whole thing against `Promise.delay` for the
-timeout. Return values are validated on the sender's side, which is what produces `InvalidResult`.
+A request is `(requestId, ...args)` on the sender's channel. The receiver runs its processor
+(guards, middleware, callback) as plain calls in the thread the channel's signal gives the request,
+a Promise the callback or a middleware returned waited for there, then answers
+`(requestId, processResult, value)` on the same channel in the opposite direction -- `processResult`
+is `true`, or the error to reject with; a raise anywhere, the result's packing included, answers
+`false`. The sender makes exactly one Promise per request, the one `invoke` returns: its executor
+registers the request in the map of pending ids (per player on the server) and sends it; the
+timeout is a `task.delay` that rejects with `Timeout` if the request is still pending, cancelled
+with `task.cancel` when the answer arrives, and not made at all for `math.huge`; cancelling the
+Promise drops the request and the timer. A send that raises raises to the caller and leaves nothing
+pending. Return values are validated on the sender's side, which is what produces `InvalidResult`.
 
 When a player leaves, `Players.PlayerRemoving` cancels every request outstanding for them, and a
 request to a player no longer parented to `Players` is rejected at once, whenever its sender was
-made. A callback or middleware can return a promise that is then cancelled; cancellation reaches the
-receiver's chain, which answers `Cancelled`, since no `andThen` or `catch` handler runs for it.
+made. A callback or middleware can return a promise that is then cancelled; the processor reads it as
+`Networking.Skip`, and the request is answered `Cancelled`.
 
 ## The test harness
 

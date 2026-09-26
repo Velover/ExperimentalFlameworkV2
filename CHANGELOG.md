@@ -14,6 +14,15 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `_setCallback(callback, pack)` shape for receiving functions.
 - **Deploy server and client from the same build.** Function remote ids changed for one-way
   functions (see networking below).
+- **Networking middleware: `processNext` returns the next link's result, not a Promise.** A
+  middleware that only returns `processNext(...)`, or `await`s it, needs no change. One that chains
+  on it, `processNext(...).andThen(f)` (or `.then`/`.catch`/`.finally`), becomes
+  `f(processNext(...))`. For an event `processNext` returns nothing; for a function it returns the
+  value or `Networking.Skip`.
+- **Disconnect networking handlers yourself.** `connect` and `registerHandler` no longer go through
+  a BindableEvent, so a handler is not disconnected when the script that connected it is destroyed.
+  A script that is destroyed and recreated (a reset-on-spawn `LocalScript`, say) must disconnect its
+  handlers, or they pile up and keep running.
 
 ### core
 
@@ -21,6 +30,9 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 - `PluginTarget.onIgnited(callback, options?)`: runs once the module is fully ignited, after every
   `onPostIgnite` hook and after its imports know about it. Providers' `onStart` now runs here.
+- A warning when a provider has waited 5 seconds for an `onInit` that may be waiting on that very
+  ignition (an `onInit` that, after it has yielded, ignites a module taking what it initialises),
+  naming both providers.
 
 #### Changed
 
@@ -38,6 +50,14 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   nothing else. A lazy provider whose `onInit` raises never ticks or starts.
 - An import that is extinguished while an importer is still igniting now fails that importer's
   ignition (`imported module '…' was extinguished while this module was igniting`).
+- Per-frame events (`onTick`/`onPhysics`/`onRender`) walk their listener sets in place and call each
+  listener without creating a closure. At 1,000 listeners a frame takes about 30% less time in Studio
+  (about 780 → 530 µs, profiling off) and allocates nothing (about 80 KB per frame before, about
+  140 KB with profiling on). Delivery rules are unchanged: a listener attached during a frame starts
+  on the next, and one detached before its turn is not called.
+- What a class implements is computed once per class and cached; this is used on every attach and
+  detach and by `Flamework.implements`. Attaching an object no longer records an undo list. Attach
+  plus detach allocates about 60% less, and `Flamework.implements` on an instance allocates nothing.
 
 #### Fixed
 
@@ -56,6 +76,19 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - An object provided under two ids got every event twice.
 - A failed ignition sent `onRemoved` for provided instances that never joined.
 - Cancelled threads left entries behind in the module-level wait map.
+- An eager provider whose constructor takes an import's lazy provider that is not initialised yet
+  (resolved for the first time by that constructor, or still loading) ran `onInit` and `onStart`
+  before that provider's `onInit` had finished, including when its module was ignited from Promise
+  work (an `andThen` callback or an `async` function). Its `onInit` now waits for it, and ignition
+  waits with it; if the import begins to extinguish meanwhile, the ignition fails without running
+  that `onInit` (`'…' takes a provider of a module that was extinguished while this module was
+  igniting`).
+- A provider without an `onInit` (eager or lazy) got `onStart` and per-frame events before the
+  pending `onInit` of a provider its constructor takes had finished; they now wait for it, as an
+  `onInit` does.
+- A per-frame callback that kept its thread (`coroutine.running()`) and cancelled it after returning
+  broke `onTick`/`onPhysics`/`onRender` for every module for good (`cannot spawn non-suspended
+  coroutine with arguments`). The recycled thread is now reused only while it is parked.
 
 ### components
 
@@ -73,6 +106,16 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   fired by its default-attribute write) returns `undefined`.
 - With `watchRenames` on, children ahead of a resolved required child are followed too (one `Name`
   connection each), because a rename there changes which child the name resolves to.
+- `getComponents` no longer keeps a lookup per instance: it reads the instance's own components
+  against each class's ids, worked out once at registration. Results are the same, in no particular
+  order, as before.
+- Adding a component allocates and keeps less: attribute guards, the instance check, inherited
+  config and whether a class implements `OnInit`/`OnStart` are read once per class; tracker entries
+  make their sets on first use; a class with no links of a kind shares one frozen empty
+  `childComponents`/`attributeComponents`; `onStart` runs on a recycled thread and its failure
+  message is only built on a raise; constructor dependencies resolve through one shared resolver;
+  attributes keep no per-component copy of old values. For an instance with two components:
+  6.4 → 4.0 KB kept, 14.6 → 8.1 KB allocated per add, adds about 25–35% faster.
 
 #### Fixed
 
@@ -99,6 +142,10 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   instance tagged with no component; dependents now see a dependency as missing while its removal
   runs, and are rebuilt around the new one when it ends.
 - A hand `removeComponent` of a dependency whose own `destroy` raises left its dependent holding it.
+- Removing components was quadratic in the number attached (each removal counted every id's global
+  set): at 5,000 instances a removal cost about 300 µs, now about 10–20 µs.
+- Under Immediate signal behaviour, an `onAttributeChanged` handler that wrote the same attribute
+  was told a stale old value for that change and the next.
 
 ### networking
 
@@ -108,6 +155,22 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - `Cancelled` also answers a request whose callback or middleware promise was cancelled.
 - Invoking a player who has left rejects with `Cancelled` at once, with any timeout.
 - A timeout of `math.huge` never fires.
+- **Breaking:** middleware `processNext` returns the next link's result instead of a Promise (see
+  the upgrade notes). A middleware may still yield or return a Promise; it is waited for in the
+  thread handling the message. For a function, a cancelled one reads as `Networking.Skip`.
+- Receiving no longer uses Promises: decoding, guards, middleware and the handler or callback run as
+  plain calls in the thread that received the message. An event with no middleware costs about 3 µs
+  and 80 bytes instead of about 20 µs and 18 KB; a function request costs the server about 6 µs and
+  0.4 KB instead of about 50 µs and 46 KB.
+- A function call makes a single Promise, the one `invoke`/`invokeWithTimeout` returns. Its timeout
+  is a `task.delay`, cancelled when the answer arrives.
+- Event handlers run on networking's own signal instead of `@rbxts/signal`:
+  - each handler runs at once on a thread of its own, newest connection first, rather than through
+    a BindableEvent (which the engine defers under `SignalBehavior.Deferred`);
+  - an event's `predict` has called its handlers by the time it returns, unless a middleware yields;
+  - `@rbxts/signal` is no longer a dependency of `networking`.
+- `connect` and `registerHandler` return networking's own connection (`Connected`, `Disconnect()`,
+  `Destroy()`), not an engine `RBXScriptConnection`; the types still name `RBXScriptConnection`.
 
 #### Fixed
 
@@ -123,6 +186,7 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `createClient` blocked every later one.
 - A one-way function named `$name` shared a remote with a two-way `name`, so both callbacks ran and
   callers got each other's answers.
+- A predicted function whose callback Promise was cancelled never settled.
 
 ### transformer
 
@@ -142,11 +206,21 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ### Known issues
 
+- core: dependency waiting is not transitive. A provider waits for the pending `onInit` of the
+  providers its constructor takes directly; a provider in between with no pending `onInit` of its
+  own (e.g. a lazy service without `onInit` that takes a lazy store still loading) is not followed.
+  Give that service an `onInit` (an empty one is enough) or take the store directly.
+- core: an `onInit` that, after it has yielded, ignites a module taking the provider it initialises
+  makes that ignition wait for itself until the import is extinguished (the warning above names
+  it). Ignite such modules from `onStart` or a `PlayerAdded` handler.
 - core: the `async` `onInit` deadlock fix lets an unrelated thread's `extinguish()` of an import skip
   waiting for an importer that is waiting on a pending `onInit` Promise.
 - core: while a lazy provider's `onInit` Promise is pending, a lazy provider resolved on any thread
   running Promise work joins its batch, an unrelated Promise's too; one resolved by a thread the
   `onInit`'s executor spawned, after that thread yielded, gets its own turn.
+- core, components, networking: per-frame callbacks, component `onStart`s and networking handlers
+  run on recycled threads. Code that keeps the thread it ran on (`coroutine.running()`) and cancels
+  or resumes it later can cut short or wake another callback that is reusing that thread.
 - networking: a sender created inside the leaving player's own `PlayerRemoving` handler never settles
   an infinite-timeout invoke of that player under Default or Immediate signal behaviour.
 - docs: the harness sections of `docs/reference/internals.md` still describe the old harness.
