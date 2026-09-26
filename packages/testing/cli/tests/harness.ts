@@ -1,9 +1,9 @@
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { main, type CliDeps } from "../src/cli.ts";
 import type { CloudSettings } from "../src/config.ts";
 import type { FetchLike } from "../src/openCloud.ts";
-import type { StudioClient, StudioEntry } from "../src/studio.ts";
+import type { ClosedWindow, CloseTarget, StudioClient, StudioEntry } from "../src/studio.ts";
 
 export const SECRET = "secret-key-that-must-never-be-printed";
 export const UNIVERSE = "10765968722";
@@ -14,6 +14,18 @@ export const ENV = {
 	TESTING_UNIVERSE_ID: UNIVERSE,
 	TESTING_PLACE_ID: PLACE,
 };
+
+/** The directory every run's relative paths resolve against. */
+export const FIXTURE_CWD = join(import.meta.dir, "..", "fixture-cwd");
+
+/** A Roblox Studio process on the fake machine: what the real close script would see of it. */
+export interface FakeWindow {
+	pid: number;
+	/** A local file's window is titled with the file's full path: `<file> - Roblox Studio`. */
+	title: string;
+	/** The place file on the command line it was started with, if any; it may have another open since. */
+	startedWith?: string;
+}
 
 export const TASK_PATH = `universes/${UNIVERSE}/places/${PLACE}/versions/4/luau-execution-sessions/s/tasks/t`;
 
@@ -35,12 +47,20 @@ export interface Harness {
 	launched: string[][];
 	/** Every MCP tool call, in order. */
 	studioCalls: Array<{ name: string; args: Record<string, unknown> }>;
+	/** What each close asked for: `pid <n> <file name>`, `file <file name>` or `title <title>`. */
+	closeTargets: string[];
+	/** The windows the closes ended, by name (the file name, or the title before " - Roblox Studio"), in order. */
 	closedWindows: string[];
+	/** The Studio windows still open when the run returned. */
+	windows: FakeWindow[];
+	/** Every window-name claim and release, with how many programs had been launched at that point. */
+	claims: string[];
 }
 
 /** A canned Studio: what the proxy lists, and what each tool answers. */
 export interface FakeStudio {
-	studios?: StudioEntry[];
+	/** What the proxy lists; a function is asked on every listing, so windows can register mid-run. */
+	studios?: StudioEntry[] | (() => StudioEntry[]);
 	/** Answers by tool name; a function sees the arguments and may change state between calls. */
 	answers?: Record<string, string | ((args: Record<string, unknown>) => string)>;
 }
@@ -65,7 +85,12 @@ export async function runCli(
 		studio?: FakeStudio;
 		/** Where Roblox Studio is; undefined means not installed. */
 		studioExe?: string | undefined;
-		closeOutcome?: "closed" | "forced" | "none";
+		/** Studio windows already open when the run starts; each one the CLI launches is added (PIDs from 4001). */
+		windows?: FakeWindow[];
+		/** What becomes of each window a close acts on; default "closed". "open": it survives even the forced close. */
+		closeOutcome?: "closed" | "forced" | "open";
+		/** Another run's PID holding the window name when this run claims it; by default nobody. */
+		claimHolder?: number;
 		/** Runs when the CLI launches a program, with the command, so a fake Studio can start listing the window it opened. */
 		onLaunch?: (command: string[]) => void;
 	} = {},
@@ -77,7 +102,11 @@ export async function runCli(
 	const spawned: string[][] = [];
 	const launched: string[][] = [];
 	const studioCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+	const closeTargets: string[] = [];
 	const closedWindows: string[] = [];
+	const claims: string[] = [];
+	// The caller's own array, so a test can open or retitle a window mid-run.
+	const windows: FakeWindow[] = options.windows ?? [];
 	let clock = new Date("2026-09-11T12:00:00.000Z").getTime();
 	const queue = [...(options.responses ?? [])];
 	const files = options.files ?? {};
@@ -122,10 +151,22 @@ export async function runCli(
 		launch: async (command) => {
 			launched.push(command);
 			options.onLaunch?.(command);
+			// A file is launched as [exe, file]; a cloud place with -task EditPlace and its ids.
+			const pid = 4000 + launched.length;
+			const file = command.length === 2 ? command[1]! : undefined;
+			windows.push(
+				file !== undefined
+					? { pid, title: `${file} - Roblox Studio`, startedWith: file }
+					: { pid, title: "TestingExperience - Roblox Studio" },
+			);
+			return pid;
 		},
-		closeWindow: async (titlePrefix) => {
-			closedWindows.push(titlePrefix);
-			return options.closeOutcome ?? "closed";
+		closeWindow: async (target) => closeFakeWindows(target),
+		studioWindows: async () => windows.map((window) => ({ pid: window.pid, title: window.title })),
+		claimWindowName: async (name, onWait) => {
+			if (options.claimHolder !== undefined) onWait(options.claimHolder);
+			claims.push(`claim ${name} (launched ${launched.length}, closed ${closedWindows.length})`);
+			return () => claims.push(`release ${name} (launched ${launched.length}, closed ${closedWindows.length})`);
 		},
 		connectStudio: async (): Promise<StudioClient> => {
 			const fake = options.studio ?? {};
@@ -136,7 +177,7 @@ export async function runCli(
 					if (answer === undefined) throw new Error(`no canned answer for ${name}`);
 					return typeof answer === "function" ? answer(args) : answer;
 				},
-				studios: async () => fake.studios ?? [],
+				studios: async () => (typeof fake.studios === "function" ? fake.studios() : (fake.studios ?? [])),
 				close: () => {},
 			};
 		},
@@ -144,10 +185,56 @@ export async function runCli(
 		log: (message) => out.push(message),
 		error: (message) => err.push(message),
 		env: options.env ?? ENV,
-		cwd: join(import.meta.dir, "..", "fixture-cwd"),
+		cwd: FIXTURE_CWD,
 		now: () => new Date(clock),
 		loadSettings: () => ({ env: {}, ...options.settings }),
 	};
+
+	/** What the real close script does, over the fake machine's windows. */
+	function closeFakeWindows(target: CloseTarget): ClosedWindow[] {
+		const same = (a: string | undefined, b: string) => a !== undefined && a.toLowerCase() === b.toLowerCase();
+		const titled = (window: FakeWindow, file: string) => same(window.title, `${file} - Roblox Studio`);
+		let act: FakeWindow[] = [];
+		let leave: FakeWindow[] = [];
+		if ("pid" in target) {
+			// The process the run started: by its title or the command line it was started with.
+			closeTargets.push(`pid ${target.pid} ${basename(target.file)}`);
+			act = windows.filter(
+				(window) =>
+					window.pid === target.pid && (titled(window, target.file) || same(window.startedWith, target.file)),
+			);
+			leave = windows.filter((window) => window.pid !== target.pid && titled(window, target.file));
+		} else if ("file" in target) {
+			// A window the run did not open: by its title only.
+			closeTargets.push(`file ${basename(target.file)}`);
+			act = windows.filter((window) => titled(window, target.file));
+		} else {
+			closeTargets.push(`title ${target.title}`);
+			const title = target.title.toLowerCase();
+			act = windows.filter(
+				(window) => same(window.title, title) || window.title.toLowerCase().endsWith(`\\${title}`),
+			);
+			if (act.length > 1) [leave, act] = [act, []];
+		}
+
+		const outcome = options.closeOutcome ?? "closed";
+		const report: ClosedWindow[] = act.map((window) => ({
+			pid: window.pid,
+			title: window.title,
+			outcome,
+			...(outcome === "open" ? { error: "Access is denied" } : {}),
+		}));
+		if (outcome !== "open") {
+			for (const window of act) {
+				windows.splice(windows.indexOf(window), 1);
+				closedWindows.push(basename(window.startedWith ?? window.title.replace(/ - Roblox Studio$/, "")));
+			}
+		}
+		return [
+			...report,
+			...leave.map((window) => ({ pid: window.pid, title: window.title, outcome: "untouched" as const })),
+		];
+	}
 
 	const code = await main(argv, deps);
 	return {
@@ -160,7 +247,10 @@ export async function runCli(
 		spawned,
 		launched,
 		studioCalls,
+		closeTargets,
 		closedWindows,
+		windows,
+		claims,
 	};
 }
 

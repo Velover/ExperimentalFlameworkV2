@@ -10,9 +10,10 @@
  * Everything is injectable (`CliDeps`) so `bun test` can drive the whole CLI without a network,
  * a file system, a Studio or a real API key.
  */
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { basename, dirname, relative, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, relative, resolve } from "node:path";
 
 import {
 	API_BASE,
@@ -43,19 +44,26 @@ import PROBE_TASK from "../tasks/probe.lune" with { type: "text" };
 import RUN_TESTS_TASK from "../tasks/run-tests.lune" with { type: "text" };
 import { formatList, formatSummary, parseRunResult, ResultParseError } from "./results.ts";
 import {
+	claimWindowName,
 	connectStudio,
 	findStudioExe,
 	findStudio,
 	findStudioForPlace,
 	findStudioMcp,
 	isPlaying,
+	listStudioWindows,
 	placeNameOf,
 	renderStudioRun,
+	runCloseScript,
 	studioOpenArguments,
+	titleShowsFile,
 	unquoteLuauResult,
+	type CloseTarget,
+	type ClosedWindow,
 	type DataModelType,
 	type StudioClient,
 	type StudioEntry,
+	type StudioWindow,
 } from "./studio.ts";
 
 /** Where `cloud publish` records the version it made, for `cloud run` to pin. */
@@ -65,6 +73,8 @@ export const DEFAULT_TIMEOUT = "120s";
 export const PROBE_TIMEOUT = "60s";
 /** How long a Studio window is waited for after launching it. */
 export const STUDIO_OPEN_TIMEOUT = "180s";
+/** How long a run waits for another to finish opening a window of the same name. */
+export const CLAIM_TIMEOUT_MS = 600_000;
 /** How long a play session is waited for once started. */
 export const PLAY_START_TIMEOUT_MS = 90_000;
 export const POLL_INTERVAL_MS = 2500;
@@ -378,10 +388,20 @@ export interface CliDeps {
 	exists?: (path: string) => Promise<boolean>;
 	/** Runs a child process with inherited output; resolves with its exit code, or throws when it cannot start. */
 	spawn?: (command: string[], cwd: string) => Promise<number>;
-	/** Starts a program and returns at once, leaving it running. */
-	launch?: (command: string[]) => Promise<void>;
-	/** Closes the window whose title ends with the suffix; what it did, or nothing found. */
-	closeWindow?: (titleSuffix: string) => Promise<"closed" | "forced" | "none">;
+	/** Starts a program and returns at once, leaving it running; resolves with its process id when known. */
+	launch?: (command: string[]) => Promise<number | undefined>;
+	/**
+	 * Closes the Studio windows the target matches, and only those, checking each is gone
+	 * afterwards; what became of every one of them (none matched: an empty list).
+	 */
+	closeWindow?: (target: CloseTarget) => Promise<ClosedWindow[]>;
+	/**
+	 * Holds a window name on this machine until the release is called, waiting while another run
+	 * holds it (`onWait` hears which, once).
+	 */
+	claimWindowName?: (name: string, onWait: (holder: number) => void) => Promise<() => void>;
+	/** Every Roblox Studio process on this machine, with its window's title. */
+	studioWindows?: () => Promise<StudioWindow[]>;
 	/** Connects to Studio's MCP proxy. */
 	connectStudio?: () => Promise<StudioClient>;
 	/** Where Roblox Studio is; `undefined` when it cannot be found. */
@@ -397,22 +417,6 @@ export interface CliDeps {
 
 interface Io extends Required<Omit<CliDeps, "fetch">> {
 	fetch: FetchLike | undefined;
-}
-
-/**
- * A PowerShell one-liner that closes a window by the end of its title, politely first. The end,
- * because a local file's window is titled with the file's full path while the proxy lists only
- * its name; a cloud place's title is the place name alone, which the same pattern matches.
- */
-function closeWindowScript(titleSuffix: string): string {
-	const escaped = titleSuffix.replaceAll("'", "''");
-	return [
-		`$p = Get-Process RobloxStudioBeta -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like '*${escaped}' } | Select-Object -First 1`,
-		"if (-not $p) { 'none'; exit 0 }",
-		"$null = $p.CloseMainWindow()",
-		"for ($i = 0; $i -lt 20; $i++) { Start-Sleep -Milliseconds 500; $p.Refresh(); if ($p.HasExited) { 'closed'; exit 0 } }",
-		"Stop-Process -Id $p.Id -Force; 'forced'",
-	].join("; ");
 }
 
 function resolveDeps(deps: CliDeps): Io {
@@ -439,17 +443,22 @@ function resolveDeps(deps: CliDeps): Io {
 			deps.launch ??
 			(async ([exe, ...args]) => {
 				// Detached, or Windows takes Studio down with this process when it exits.
-				spawn(exe!, args, { detached: true, stdio: "ignore", windowsHide: false }).unref();
+				const child = spawn(exe!, args, { detached: true, stdio: "ignore", windowsHide: false });
+				child.unref();
+				// Studio opens the file in the process started here, so this is the window's process.
+				return child.pid;
 			}),
-		closeWindow:
-			deps.closeWindow ??
-			(async (titleSuffix) => {
-				const result = spawnSync("powershell", ["-NoProfile", "-Command", closeWindowScript(titleSuffix)], {
-					encoding: "utf8",
-				});
-				const answer = (result.stdout ?? "").trim();
-				return answer === "closed" || answer === "forced" ? answer : "none";
-			}),
+		closeWindow: deps.closeWindow ?? (async (target) => runCloseScript(target)),
+		claimWindowName:
+			deps.claimWindowName ??
+			((name, onWait) =>
+				claimWindowName(name, {
+					dir: join(tmpdir(), "flamework-test"),
+					timeoutMs: CLAIM_TIMEOUT_MS,
+					sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+					onWait,
+				})),
+		studioWindows: deps.studioWindows ?? (async () => listStudioWindows()),
 		connectStudio:
 			deps.connectStudio ??
 			(async () => {
@@ -1055,23 +1064,45 @@ function requireStudioExe(io: Io): string {
 /** Polls the proxy until a window matches, or the deadline passes. */
 async function waitForStudio(
 	client: StudioClient,
-	find: (studios: StudioEntry[]) => StudioEntry | undefined,
+	find: (studios: StudioEntry[]) => StudioEntry | undefined | Promise<StudioEntry | undefined>,
 	flags: Flags,
 	io: Io,
 ): Promise<StudioEntry | undefined> {
 	const deadline = io.now().getTime() + parseDurationMs(flags.timeout ?? STUDIO_OPEN_TIMEOUT, 180_000);
 	while (io.now().getTime() < deadline) {
-		const studio = find(await client.studios());
+		const studio = await find(await client.studios());
 		if (studio !== undefined) return studio;
 		await io.sleep(5000);
 	}
 	return undefined;
 }
 
-function neverConnected(what: string): CliError {
+/**
+ * A run that cannot tell its own window from another of the same name: the proxy lists a local
+ * file's window by its file name alone and says nothing of the process behind it.
+ */
+function cannotTell(name: string, why: string, others: StudioWindow[]): CliError {
+	const listed = others.map((window) => `PID ${window.pid}, "${window.title}"`).join("; ");
+	return new CliError(
+		`cannot tell which ${name} window on the MCP proxy is the one this run opened: ${why}${listed ? ` (${listed})` : ""}, and the proxy lists a local file's window by its file name alone`,
+		"close that window, or let it finish opening, and run again",
+	);
+}
+
+/**
+ * What the hint says of the window: left `open` (`studio open`, `--keep`), `closed` again by
+ * `test`, or nothing (`unstated`) when that close failed and has said so itself.
+ */
+function neverConnected(what: string, window: "open" | "closed" | "unstated" = "open"): CliError {
+	const advice =
+		'enable "MCP server" in Studio\'s Assistant settings (a window that has it disabled is never listed) and run again';
 	return new CliError(
 		`Studio started but ${what} never showed up on the MCP proxy`,
-		'the window is open; if it stays unlisted, enable "MCP server" in Studio\'s Assistant settings and run `flamework-test studio status` again',
+		window === "open"
+			? 'the window is open; if it stays unlisted, enable "MCP server" in Studio\'s Assistant settings and run `flamework-test studio status` again'
+			: window === "closed"
+				? `${advice}; the window this run opened is closed again`
+				: advice,
 	);
 }
 
@@ -1109,22 +1140,90 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 	}
 }
 
-/** Closes a window by the name the proxy lists it under; what happened, for the log. */
-async function closeStudioWindow(name: string, io: Io): Promise<void> {
-	const outcome = await io.closeWindow(`${name} - Roblox Studio`);
-	if (outcome === "none") {
-		throw new CliError(`no window titled "${name} - Roblox Studio" was found to close`);
-	}
-	io.log(
-		outcome === "closed"
-			? `closed ${name}`
-			: `closed ${name}, which asked before going (a save prompt, usually; nothing a run makes is kept)`,
-	);
+/** How a window is named in what the CLI prints: `PID 30020, "…\place.rbxl - Roblox Studio"`. */
+function describeWindow(window: ClosedWindow): string {
+	return `PID ${window.pid}, "${window.title}"`;
 }
 
+/**
+ * Closes the windows a target matches and logs what became of each. The close only reports a
+ * window closed once its process is gone, asking first and ending the process when asking is not
+ * enough; a window still running after both throws, naming it. Returns everything matched,
+ * `untouched` windows included, for the caller to judge.
+ */
+async function closeWindows(target: CloseTarget, label: string, io: Io): Promise<ClosedWindow[]> {
+	const windows = await io.closeWindow(target);
+	for (const window of windows) {
+		if (window.outcome === "closed") {
+			io.log(`closed ${label} (PID ${window.pid})`);
+		} else if (window.outcome === "forced") {
+			io.log(
+				`closed ${label} (PID ${window.pid}) by ending its process: it did not close when asked (a save prompt, usually; nothing a run makes is kept)`,
+			);
+		}
+	}
+
+	const open = windows.filter((window) => window.outcome === "open");
+	if (open.length > 0) {
+		const why = open.find((window) => window.error)?.error;
+		throw new CliError(
+			`${label} is still open (${open.map(describeWindow).join("; ")}): it did not close when asked, and ending its process failed${why ? `: ${why}` : ""}`,
+			"close it by hand; no other window was touched",
+		);
+	}
+	return windows;
+}
+
+/**
+ * Closes the window a run opened, by the process it started (the file alone when the launch could
+ * not tell), and nothing else: another window with the same file open is named, not closed.
+ */
+async function closeOwnWindow(pid: number | undefined, file: string, io: Io): Promise<void> {
+	const name = basename(file);
+	const windows = await closeWindows(pid !== undefined ? { pid, file } : { file }, name, io);
+	if (!windows.some((window) => window.outcome === "closed" || window.outcome === "forced")) {
+		io.log(
+			pid !== undefined
+				? `${name} had already closed: the Studio this run started (PID ${pid}) no longer has it open`
+				: `${name} had already closed: no Studio window has it open`,
+		);
+	}
+	for (const other of windows.filter((window) => window.outcome === "untouched")) {
+		io.error(
+			`note: another Studio window has ${name} open (${describeWindow(other)}); this run did not open it, so it was left open`,
+		);
+	}
+}
+
+/** Prints an error the way `main` does, for one a run reports and carries on past. */
+function printError(error: unknown, io: Io): void {
+	io.error(`error: ${error instanceof Error ? error.message : String(error)}`);
+	if (error instanceof CliError && error.hint) io.error(error.hint);
+}
+
+/**
+ * `studio close`: the window the proxy lists, by its title, which is all that is known of a window
+ * this invocation did not open. Several windows with that title are ambiguous and none is closed.
+ */
 async function cmdStudioClose(flags: Flags, io: Io): Promise<number> {
 	return await withStudio(flags, io, async (_client, studio) => {
-		await closeStudioWindow(placeNameOf(studio.name), io);
+		const name = placeNameOf(studio.name);
+		const title = `${name} - Roblox Studio`;
+		const windows = await closeWindows({ title }, name, io);
+
+		const untouched = windows.filter((window) => window.outcome === "untouched");
+		if (untouched.length > 0) {
+			throw new CliError(
+				`${untouched.length} windows are titled like "${title}", so none was closed: ${untouched.map(describeWindow).join("; ")}`,
+				"close the one you mean by hand",
+			);
+		}
+		if (windows.length === 0) {
+			throw new CliError(
+				`no window titled "${title}" was found to close`,
+				"its title may have changed; close it by hand",
+			);
+		}
 		return 0;
 	});
 }
@@ -1309,37 +1408,117 @@ async function testProject(flags: Flags, io: Io, project: ProjectChoice): Promis
 
 /**
  * The default way to run the tests: the place Rojo built, opened in Studio on this machine, run
- * on both realms in a play session, and closed again. A window that already has a file of that
- * name open is from an earlier build and would test stale code, so it is closed first and the
- * file opened afresh.
+ * on both realms in a play session, and closed again. A window that already has that very file
+ * open is from an earlier build and would test stale code, so it is closed first and the file
+ * opened afresh; windows of other files are never touched, whatever their names. The window this
+ * run opens is known by the process it started, which is what closes it, whether the run finished
+ * or gave up on it (unless `--keep`); a window that will not close fails the run, naming it.
  */
 async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice): Promise<number> {
 	const realms = realmsOf(flags.realm, "both");
 	const { absolute: file, label } = await placeToRun(flags, io, "test", project);
 	const name = basename(file);
 	const exe = requireStudioExe(io);
+	const keep = flags.keep === true;
 
 	const client = await io.connectStudio();
 	try {
-		const stale = findStudio(await client.studios(), undefined, name);
-		if (stale !== undefined) {
-			io.log(`${name} is already open in Studio, from an earlier build; closing it`);
-			await closeStudioWindow(name, io);
-			await io.sleep(2000);
+		const stale = await closeWindows({ file }, `the window left from an earlier build of ${name}`, io);
+		if (stale.length > 0) await io.sleep(2000);
+
+		let launched = false;
+		let pid: number | undefined;
+		let gaveUp = false;
+		// The run gives up on the window it opened; left open, it would only trip the next one.
+		// Whether it is closed now, which is only known once the close has run.
+		const giveUp = async (): Promise<boolean> => {
+			gaveUp = true;
+			if (keep) return false;
+			try {
+				await closeOwnWindow(pid, file, io);
+				return true;
+			} catch (closeError) {
+				printError(closeError, io);
+				return false;
+			}
+		};
+
+		let code: number;
+		// The name is held from before the proxy is looked at until this run's window is listed, or
+		// until the window it gave up on is closed: another run of a same-named file waits meanwhile.
+		let release: (() => void) | undefined;
+		try {
+			release = await io.claimWindowName(name, (holder) =>
+				io.log(
+					`waiting for another flamework-test run (PID ${holder}) to finish opening its ${name} window...`,
+				),
+			);
+			// Whatever the proxy lists now is not this run's window, even when it has the same name.
+			const before = new Set((await client.studios()).map((entry) => entry.id));
+			pid = await io.launch([exe, ...studioOpenArguments({ file })]);
+			launched = true;
+			io.log(`opening ${label} in Studio; waiting for it to connect...`);
+
+			// The proxy says nothing of the process behind an entry, so a new entry of this name is
+			// this run's only when every other window showing a file of this name is accounted for by
+			// an entry listed before the launch. One that has not registered yet could own the new
+			// entry, so it is waited for; two new entries cannot be told apart, so they are refused.
+			let others: StudioWindow[] = [];
+			let unaccounted = false;
+			const studio = await waitForStudio(
+				client,
+				async (studios) => {
+					const named = studios.filter((entry) => entry.name === name || placeNameOf(entry.name) === name);
+					const fresh = named.filter((entry) => !before.has(entry.id));
+					if (fresh.length === 0) return undefined;
+					others = (await io.studioWindows()).filter(
+						(window) => window.pid !== pid && titleShowsFile(window.title, name),
+					);
+					if (fresh.length > 1) {
+						throw cannotTell(
+							name,
+							"another window of that name registered with it at the same time",
+							others,
+						);
+					}
+					unaccounted = named.length < others.length + (pid !== undefined ? 1 : 0);
+					return unaccounted ? undefined : fresh[0];
+				},
+				flags,
+				io,
+			);
+			if (studio === undefined) {
+				const closed = await giveUp();
+				throw unaccounted
+					? cannotTell(
+							name,
+							"another Studio window showing a file of that name has not registered with it",
+							others,
+						)
+					: neverConnected(label, keep ? "open" : closed ? "closed" : "unstated");
+			}
+			release();
+			release = undefined;
+			io.log(`connected: ${studio.name} (${studio.id})`);
+
+			code = await runRealms(client, studio, realms, flags, io);
+		} catch (error) {
+			if (launched && !gaveUp) await giveUp();
+			throw error;
+		} finally {
+			release?.();
 		}
 
-		await io.launch([exe, ...studioOpenArguments({ file })]);
-		io.log(`opening ${label} in Studio; waiting for it to connect...`);
-		const studio = await waitForStudio(client, (studios) => findStudio(studios, undefined, name), flags, io);
-		if (studio === undefined) throw neverConnected(label);
-		io.log(`connected: ${studio.name} (${studio.id})`);
-
-		const code = await runRealms(client, studio, realms, flags, io);
-
-		if (flags.keep === true) {
+		if (keep) {
 			io.log("Studio left open (--keep)");
-		} else {
-			await closeStudioWindow(name, io);
+			return code;
+		}
+		try {
+			await closeOwnWindow(pid, file, io);
+		} catch (error) {
+			// The results stand, but the run did not clean up after itself, and fails saying so.
+			printError(error, io);
+			return 1;
 		}
 		return code;
 	} finally {

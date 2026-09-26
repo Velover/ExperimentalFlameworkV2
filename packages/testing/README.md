@@ -36,9 +36,16 @@ It needs Roblox Studio installed with "MCP server" enabled in its Assistant sett
 what lets the CLI drive a window. `test` launches Studio on the file, waits for the window to
 connect, starts a play session, invokes `Workspace.FlameworkTests` in the server's data model and
 then the client's, prints each realm's summary, stops the session and closes the window. Every
-realm runs even when one fails; the exit code is the worst of them. A window that already has a
-file of the same name open is from an earlier build and would test stale code, so it is closed
-first.
+realm runs even when one fails; the exit code is the worst of them. A window whose title shows
+that very file is from an earlier build and would test stale code, so it is closed first. The
+title alone decides, so a window since saved elsewhere or retitled is left open, like every window
+of another file, whatever its name. The window `test` opens is closed by the process it started,
+politely and then by ending the process (a save prompt holds up the polite close), and only
+reported closed once that process is gone; one still running fails the run, named by its PID and
+title. A window the run gives up on, one that never connected, say, is closed too, unless
+`--keep`. Runs of same-named files started at once take turns to open their windows, since the
+proxy lists a window by its file name alone; a run that finds another window of a file of that
+name opening alongside its own cannot tell the two apart, so it refuses and closes its own.
 
 | Command | Does |
 |---|---|
@@ -58,7 +65,7 @@ open.
 | Command | Does |
 |---|---|
 | `studio open [file]` | Opens the testing place from the cloud in a new Studio window and waits for it to connect; with a file, opens that local place instead. |
-| `studio close` | Closes that window. |
+| `studio close` | Closes that window, found by its title, and checks it is gone. When several windows have that title, none is closed. A window still running after the forced close is reported with its PID, and the command fails. |
 | `studio status` | Edit or play, and which data models exist. |
 | `studio play` / `studio stop` | Starts or ends a play session. |
 | `studio exec --code "<luau>"` / `--script <file>` `[--realm edit\|server\|client]` | Runs Luau in the chosen data model and prints what it returned. |

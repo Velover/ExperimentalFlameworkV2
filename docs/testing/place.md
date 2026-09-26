@@ -38,9 +38,22 @@ the CLI drive a window; a window with it disabled is invisible to it. The place 
 with the `testing` scope active (`FLAMEWORK_SCOPES=testing` in `.env`), or the test providers are
 not registered and `Workspace.FlameworkTests` never appears.
 
-A window that already has a file of the same name open is from an earlier build and would test
-stale code, so `test` closes it before opening the fresh file. `--keep` leaves the window and the
-session for a look around; the next `test` closes it.
+A window whose title shows that very file (Studio titles a local file's window with its full
+path) is from an earlier build and would test stale code, so `test` closes it before opening the
+fresh file. The title alone decides: a window started on the file and since saved elsewhere or
+published shows its new name, and one whose title has changed is not certainly that file, so both
+are left open, as is every window of another file, whatever its name. The window `test` opens is
+known by the process it started, and that process is what it closes: politely first, then by
+ending the process when a save prompt holds it up, and a window is only reported closed once its
+process is gone. One that is still running after both fails the run, named by its PID and title.
+A window the run gives up on, one that never connected to the proxy, say, is closed the same way.
+`--keep` leaves the window and the session for a look around; the next `test` closes it. The
+proxy lists a local file's window by its file name alone, so runs of same-named files started at
+once take turns to open theirs: a run waits, saying so, until the other's window is listed or the
+other has given up on it (closing it, unless `--keep`). Any other window showing a file of that name must be
+on the proxy before the run looks; one that is still opening (a double-click, `studio open`) could
+own the entry the run is waiting for, so the run waits for it, and refuses, closing its own window,
+when it cannot tell the two apart.
 
 Both realms share the one play session, so the client's sections run against a server whose own
 tests have already run. A RemoteEvent message fired at a client before it connected

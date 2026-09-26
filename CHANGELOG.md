@@ -201,6 +201,23 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   callers got each other's answers.
 - A predicted function whose callback Promise was cancelled never settled.
 
+### testing
+
+#### Fixed
+
+- `flamework-test` no longer reports a Studio window closed while it is still open, or closes a
+  window it did not open. `test` closes the window it opened by the process it started, not by a
+  title suffix, which could also match another directory's same-named file and end that window
+  instead. It checks the process is gone after the polite and the forced close, and fails with the
+  window's PID and title when it is not. It drives only the window it launched: a same-named window
+  already listed by the MCP proxy is ignored, and runs of same-named files take turns to open
+  theirs. A run that cannot tell its window from another of the same name that is still opening
+  refuses and closes its own. A window the run gave up on (e.g. one that never connected) is closed
+  unless `--keep`. The earlier-build close only matches a window whose title shows that very file,
+  compared ordinally ignoring case, so "Straße" is not "Strasse". Paths and titles reach PowerShell
+  as data, so any character in them, including ‘ ’, is taken literally. `studio close` closes
+  nothing when several windows share the title.
+
 ### transformer
 
 #### Changed

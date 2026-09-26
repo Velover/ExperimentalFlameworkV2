@@ -1,13 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 
 import { parseArgs } from "../src/cli.ts";
 import {
+	claimWindowName,
+	closeWindowScript,
 	findStudio,
 	findStudioForPlace,
 	isLocalFileWindow,
 	isPlaying,
+	parseClosedWindows,
 	placeNameOf,
 	renderStudioRun,
+	runCloseScript,
 	studioOpenArguments,
 	unquoteLuauResult,
 } from "../src/studio.ts";
@@ -71,6 +78,218 @@ describe("studio helpers", () => {
 		expect(unquoteLuauResult('"{\\"ok\\":true}"')).toBe('{"ok":true}');
 		expect(unquoteLuauResult("2")).toBe("2");
 	});
+});
+
+describe("closing a window", () => {
+	test("the script matches by PID, by the exact file or by title, never by a wildcard, and reports each window", () => {
+		const base64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
+		const file = "C:\\Bob\u2019s it's\\place.rbxl";
+		const byPid = closeWindowScript({ pid: 4242, file });
+		// Values travel as base64, never as text PowerShell could read as a quote.
+		expect(byPid).toContain(`FromBase64String('${base64("RobloxStudioBeta")}')`);
+		expect(byPid).toContain(
+			`$file = ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${base64(file)}')))`,
+		);
+		expect(byPid).not.toContain("Bob");
+		expect(byPid).toContain("$wantPid = 4242");
+		expect(byPid).not.toContain("-like");
+		// The run's own process may be confirmed by the command line it was started with; any other
+		// window only by its title.
+		expect(byPid).toContain("$_.Id -eq $wantPid -and (HasFile $_ $true)");
+		expect(byPid).toContain("$_.Id -ne $wantPid -and (HasFile $_ $false)");
+		expect(byPid).toContain("$act = @($procs | Where-Object { HasFile $_ $false })");
+		// A failed Stop-Process is caught and reported, and a window is only reported gone once it is.
+		expect(byPid).toContain("Stop-Process -Id $p.Id -Force -ErrorAction Stop");
+		expect(byPid).toContain("return Report $p $seen 'open' $err");
+		expect(closeWindowScript({ file: "C:\\x\\place.rbxl" })).toContain("$wantPid = 0");
+		expect(closeWindowScript({ title: "Place1 - Roblox Studio" })).toContain(base64("Place1 - Roblox Studio"));
+	});
+
+	test("the answer is read off its marked line, and no answer is an error rather than nothing closed", () => {
+		const stdout = [
+			"WARNING: something PowerShell said",
+			'FWCLOSE [{"pid":30020,"title":"C:\\\\p\\\\place.rbxl - Roblox Studio","outcome":"open","error":"Access is denied"},{"pid":1,"title":"","outcome":"forced","error":""}]',
+		].join("\r\n");
+		expect(parseClosedWindows(stdout)).toEqual([
+			{ pid: 30020, title: "C:\\p\\place.rbxl - Roblox Studio", outcome: "open", error: "Access is denied" },
+			{ pid: 1, title: "", outcome: "forced" },
+		]);
+		expect(parseClosedWindows("FWCLOSE []")).toEqual([]);
+		expect(() => parseClosedWindows("")).toThrow(/no answer/);
+		expect(() => parseClosedWindows("forced")).toThrow(/no answer/);
+	});
+});
+
+// The script run for real, on processes these tests start themselves (never Studio). They have no
+// window and so no title: only the PID close, which may go by the command line, matches them.
+describe.skipIf(process.platform !== "win32")("the close script, on real processes", () => {
+	const processName = basename(process.execPath).replace(/\.exe$/i, "");
+	const spawnIdle = (file: string) =>
+		Bun.spawn([process.execPath, "-e", "setTimeout(() => {}, 120000)", file], {
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+	const exits = (child: ReturnType<typeof spawnIdle>) =>
+		Promise.race([child.exited.then(() => true), Bun.sleep(5000).then(() => false)]);
+
+	test("any quote in a path or title is taken literally, and nothing in one runs", () => {
+		const files = [
+			"C:\\Bob\u2019s Projects\\place.rbxl",
+			"C:\\\u2018quoted\u2019\\place.rbxl",
+			"C:\\a\u201Ab\u201Bc\\place.rbxl",
+			"C:\\it's \u201Cq\u201D\\place.rbxl",
+		];
+		for (const file of files) expect(runCloseScript({ file }, "fwclose-no-such-process")).toEqual([]);
+
+		// Were the value spliced in as text, this would print an answer of its own and stop the script.
+		const injected = 'C:\\a\u2019+$([Console]::WriteLine("FWCLOSE [{}]"); exit)+\u2019b\\place.rbxl';
+		expect(runCloseScript({ file: injected }, "fwclose-no-such-process")).toEqual([]);
+		expect(runCloseScript({ title: `${injected} - Roblox Studio` }, "fwclose-no-such-process")).toEqual([]);
+	}, 60_000);
+
+	test("titles are compared as the file system compares paths: ordinally, ignoring case only", () => {
+		// The script's own comparison, run on pairs of a title and a file: only the spacing of
+		// Studio's " - Roblox Studio" is forgiven, never a letter that a culture takes for others.
+		const script = closeWindowScript({ file: "C:\\unused.rbxl" }, "fwclose-no-such-process");
+		const functions = script.slice(0, script.indexOf("$procs = @(Get-Process"));
+		const cases: Array<[string, string, boolean]> = [
+			["E:\\Projects\\Place.RBXL - Roblox Studio", "e:\\projects\\place.rbxl", true],
+			["C:\\x\\place.rbxl  -  Roblox Studio", "C:\\x\\place.rbxl", true],
+			["C:\\Stra\u00DFe\\place.rbxl - Roblox Studio", "C:\\Strasse\\place.rbxl", false],
+			["C:\\sp  x\\place.rbxl - Roblox Studio", "C:\\sp x\\place.rbxl", false],
+			["C:\\a\u00A0b\\place.rbxl - Roblox Studio", "C:\\a b\\place.rbxl", false],
+			["C:\\a\u3000b\\place.rbxl - Roblox Studio", "C:\\a b\\place.rbxl", false],
+			["C:\\\u00E6ther\\place.rbxl - Roblox Studio", "C:\\aether\\place.rbxl", false],
+			["C:\\\uFB01le\\place.rbxl - Roblox Studio", "C:\\file\\place.rbxl", false],
+			["C:\\pro\u00ADject\\place.rbxl - Roblox Studio", "C:\\project\\place.rbxl", false],
+			["C:\\caf\u00E9\\place.rbxl - Roblox Studio", "C:\\cafe\u0301\\place.rbxl", false],
+		];
+		const json = Buffer.from(JSON.stringify(cases.map(([title, file]) => ({ title, file }))), "utf8").toString(
+			"base64",
+		);
+		const probe = `${functions}
+$cases = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${json}')) | ConvertFrom-Json
+'FWCMP ' + (ConvertTo-Json -InputObject @($cases | ForEach-Object { [bool](Same (Shown $_.title) $_.file) }) -Compress)
+`;
+		const result = Bun.spawnSync([
+			"powershell",
+			"-NoProfile",
+			"-NonInteractive",
+			"-EncodedCommand",
+			Buffer.from(probe, "utf16le").toString("base64"),
+		]);
+		const line = result.stdout
+			.toString()
+			.split(/\r?\n/)
+			.find((entry) => entry.startsWith("FWCMP "));
+		expect(JSON.parse(line!.slice("FWCMP ".length))).toEqual(cases.map(([, , same]) => same));
+	}, 60_000);
+
+	test("closes the process it was given, only while it has the file, checks it is gone, and leaves the rest", async () => {
+		const file = `C:\\fwclose-${process.pid}-${Date.now()}\\Bob\u2019s it's place.rbxl`;
+		const own = spawnIdle(file);
+		const other = spawnIdle(file);
+		const similar = spawnIdle(`${file}.bak`);
+		try {
+			await Bun.sleep(300);
+			expect(runCloseScript({ pid: own.pid, file: "C:\\nowhere\\place.rbxl" }, processName)).toEqual([]);
+			// Started on "<file>.bak": the file's name is only part of it.
+			expect(runCloseScript({ pid: similar.pid, file }, processName)).toEqual([]);
+
+			// The process given, by the file on its command line: no window to ask, so it is ended at once.
+			const closed = runCloseScript({ pid: own.pid, file }, processName);
+			expect(closed).toEqual([{ pid: own.pid, title: "", outcome: "forced" }]);
+			expect(await exits(own)).toBe(true);
+			expect(other.exitCode).toBeNull();
+
+			// A process this close was not given is matched by its title only, and these have none.
+			expect(runCloseScript({ file }, processName)).toEqual([]);
+			expect(other.exitCode).toBeNull();
+			expect(similar.exitCode).toBeNull();
+		} finally {
+			for (const child of [own, other, similar]) child.kill();
+		}
+	}, 60_000);
+});
+
+describe("claiming a window name", () => {
+	const dirOf = () => mkdtempSync(join(tmpdir(), "fwclaim-"));
+	const quick = { timeoutMs: 60_000, sleep: async () => {} };
+
+	test("a second claim waits for the first to be released, and hears who holds it", async () => {
+		const dir = dirOf();
+		try {
+			const first = await claimWindowName("Place.RBXL", { dir, ...quick, onWait: () => {} });
+			const heard: number[] = [];
+			let sleeps = 0;
+			const second = await claimWindowName("place.rbxl", {
+				dir,
+				timeoutMs: 60_000,
+				// The first run's window is listed after a while, and it lets go.
+				sleep: async () => {
+					sleeps += 1;
+					if (sleeps === 3) first();
+				},
+				onWait: (holder) => heard.push(holder),
+			});
+			expect(sleeps).toBe(3);
+			expect(heard).toEqual([process.pid]);
+			second();
+			expect(readdirSync(dir)).toEqual([]);
+			// Other names are never held up.
+			(await claimWindowName("other.rbxl", { dir, ...quick, onWait: () => {} }))();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a claim whose run has gone is taken over, and a live one held too long is refused", async () => {
+		const dir = dirOf();
+		try {
+			// A claim left by a run that has gone (this one, as far as `isAlive` says) is taken over.
+			await claimWindowName("place.rbxl", { dir, ...quick, onWait: () => {} });
+			const taken = await claimWindowName("place.rbxl", {
+				dir,
+				...quick,
+				onWait: () => {},
+				isAlive: (pid) => pid !== process.pid,
+			});
+			taken();
+			expect(readdirSync(dir)).toEqual([]);
+
+			await claimWindowName("place.rbxl", { dir, ...quick, onWait: () => {} });
+			await expect(
+				claimWindowName("place.rbxl", {
+					dir,
+					timeoutMs: 3000,
+					sleep: async () => {},
+					onWait: () => {},
+					isAlive: () => true,
+				}),
+			).rejects.toThrow(
+				`another flamework-test run (PID ${process.pid}) has been opening a place.rbxl window for 3s`,
+			);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+test("any window name can be claimed, however long or wherever its letters are from", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "fwclaim-"));
+	try {
+		for (const name of [
+			"\u0442".repeat(41) + ".rbxl",
+			"\u65E5".repeat(28) + ".rbxl",
+			"a".repeat(245) + ".rbxl",
+			"a:b*?.rbxl",
+		]) {
+			(await claimWindowName(name, { dir, timeoutMs: 1000, sleep: async () => {}, onWait: () => {} }))();
+		}
+		expect(readdirSync(dir)).toEqual([]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 describe("studio commands", () => {
@@ -167,13 +386,60 @@ describe("studio commands", () => {
 		});
 		expect(stop.studioCalls[0]!.args.is_start).toBe(false);
 
-		const close = await runCli(["studio", "close"], { studio: { studios: [TESTING_STUDIO] } });
+		const place1 = { pid: 3001, title: "Place1 - Roblox Studio" };
+		const close = await runCli(["studio", "close"], {
+			studio: { studios: [TESTING_STUDIO] },
+			windows: [{ pid: 3000, title: "TestingExperience - Roblox Studio" }, place1],
+		});
 		expect(close.code).toBe(0);
-		expect(close.closedWindows).toEqual(["TestingExperience - Roblox Studio"]);
-		expect(close.out).toContain("closed TestingExperience");
+		expect(close.closeTargets).toEqual(["title TestingExperience - Roblox Studio"]);
+		expect(close.closedWindows).toEqual(["TestingExperience"]);
+		expect(close.out).toContain("closed TestingExperience (PID 3000)");
+		expect(close.windows).toEqual([place1]);
 
-		const gone = await runCli(["studio", "close"], { studio: { studios: [TESTING_STUDIO] }, closeOutcome: "none" });
+		const gone = await runCli(["studio", "close"], { studio: { studios: [TESTING_STUDIO] }, windows: [place1] });
 		expect(gone.code).toBe(1);
+		expect(gone.err).toContain('no window titled "TestingExperience - Roblox Studio" was found to close');
+	});
+
+	test("close checks the window is gone, and says so when it is not or when the title is ambiguous", async () => {
+		const forced = await runCli(["studio", "close"], {
+			studio: { studios: [TESTING_STUDIO] },
+			windows: [{ pid: 3000, title: "TestingExperience - Roblox Studio" }],
+			closeOutcome: "forced",
+		});
+		expect(forced.code).toBe(0);
+		expect(forced.out).toContain(
+			"closed TestingExperience (PID 3000) by ending its process: it did not close when asked",
+		);
+
+		const open = await runCli(["studio", "close"], {
+			studio: { studios: [TESTING_STUDIO] },
+			windows: [{ pid: 3000, title: "TestingExperience - Roblox Studio" }],
+			closeOutcome: "open",
+		});
+		expect(open.code).toBe(1);
+		expect(open.out).not.toContain("closed");
+		expect(open.err).toContain(
+			'TestingExperience is still open (PID 3000, "TestingExperience - Roblox Studio"): it did not close when asked, and ending its process failed: Access is denied',
+		);
+
+		// A local file is listed by name and titled by path: two such paths are two candidates, and neither is closed.
+		const twins = [
+			{ pid: 3000, title: "C:\\a\\place.patched.rbxl - Roblox Studio", startedWith: "C:\\a\\place.patched.rbxl" },
+			{ pid: 3001, title: "D:\\b\\place.patched.rbxl - Roblox Studio", startedWith: "D:\\b\\place.patched.rbxl" },
+		];
+		const ambiguous = await runCli(["studio", "close"], {
+			studio: { studios: [OTHER_STUDIO, LOCAL_STUDIO] },
+			windows: [...twins],
+		});
+		expect(ambiguous.code).toBe(1);
+		expect(ambiguous.err).toContain(
+			'2 windows are titled like "place.patched.rbxl - Roblox Studio", so none was closed',
+		);
+		expect(ambiguous.err).toContain("PID 3000");
+		expect(ambiguous.err).toContain("PID 3001");
+		expect(ambiguous.windows).toEqual(twins);
 	});
 
 	test("exec runs Luau in the chosen data model", async () => {

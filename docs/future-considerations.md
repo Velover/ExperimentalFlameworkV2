@@ -220,6 +220,20 @@ Edge cases found and deliberately left alone, because the fix would cost more th
   Promise metatable is treated as a Promise; the call raises and the caller gets `Unprocessed`.
 - **testing:** with obfuscation on, the tests in `tests/place` that look events up by their plain names
   fail. The tests are at fault, not the packages.
+- **testing, `flamework-test` windows:** the MCP proxy names a window by its file name only and
+  reports no process, so telling a run's own window apart rests on titles and timing:
+  - a registered window of the same file name in another case (`Place.Default.rbxl`) makes a run
+    wait out the open timeout and then refuse with "has not registered", which is not true; the
+    refusal also lists registered same-named windows as unregistered;
+  - a titled same-named window that never registers holds a run for the open timeout before it
+    refuses; a stale entry of a window that just exited, at the same moment as another same-named
+    window opening, could still be mistaken for the run's own;
+  - `studio open` takes no claim, so its "connected:" line can name another same-named window (it
+    drives nothing);
+  - the claim that makes same-named runs take turns lives in the TEMP folder, so runs with another
+    TEMP (another user, CI) do not take turns; a claim holding a reused PID or an empty file makes
+    the run wait, naming the wrong process, until the 10-minute refusal; two runs taking over one
+    stale claim at nearly the same instant can both fail or both hold it.
 - **harness:** `ValueBase.Value` and its `Changed` are not modelled; `typeof` of an enum item is
   `"table"`; `GetAttribute` returns the same handle each read; a `task.defer` chain outside a deferred
   batch is not capped at 80.

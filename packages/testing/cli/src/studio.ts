@@ -7,8 +7,9 @@
  * enabled in Studio's Assistant settings a terminal can execute Luau, start and stop a play
  * session and read Studio's state exactly as an assistant would.
  */
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -137,6 +138,274 @@ export function unquoteLuauResult(text: string): string {
 		}
 	}
 	return trimmed;
+}
+
+// --------------------------------------------------------------- closing
+
+/**
+ * Which Studio windows a close may touch.
+ *
+ * - `pid` and `file`: the process a run started on that file, and only while its title or the
+ *   command line it was started with names that file, so a PID Windows has since reused is never
+ *   touched. Other windows titled with the file are reported `untouched`.
+ * - `file` alone: every window whose title shows that very file (Studio titles a local file's window
+ *   with its full path). By the title only: a window started on the file and since saved elsewhere
+ *   or published shows its new name and is left alone, and so is one whose title has changed.
+ * - `title`: the window titled exactly so, or whose title is a path ending in it. Several are
+ *   ambiguous, and all of them are left `untouched`.
+ */
+export type CloseTarget = { pid: number; file: string } | { file: string } | { title: string };
+
+/** What became of one Studio window a close matched. */
+export interface ClosedWindow {
+	pid: number;
+	/** Its title when the close found it. */
+	title: string;
+	/**
+	 * `closed`: it exited when asked. `forced`: it did not (a save prompt, usually) and its process
+	 * was ended. `open`: it is still running after both; `error` says why, when Windows said.
+	 * `untouched`: it matched, but is not certainly the window meant, so it was left alone.
+	 */
+	outcome: "closed" | "forced" | "open" | "untouched";
+	error?: string;
+}
+
+/** The line the close script's answer is on, whatever else PowerShell printed. */
+const CLOSE_MARKER = "FWCLOSE ";
+
+/**
+ * A string as a PowerShell expression that yields it exactly. PowerShell ends a quoted string at
+ * ‘ ’ ‚ ‛ as well as at ', so a path is never spliced into the script as text: it travels as the
+ * base64 of its UTF-8, which has no character PowerShell reads as syntax.
+ */
+function powershellString(value: string): string {
+	return `([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${Buffer.from(value, "utf8").toString("base64")}')))`;
+}
+
+/**
+ * The PowerShell that closes the windows a target matches and reports each as JSON. It asks first
+ * (`CloseMainWindow`), waits up to ten seconds, then ends the process, and then checks the process
+ * is really gone: a window is only reported closed once it is. `processName` is for the tests,
+ * which close processes of their own; the CLI only ever closes Roblox Studio.
+ */
+export function closeWindowScript(target: CloseTarget, processName = "RobloxStudioBeta"): string {
+	const pid = "pid" in target ? target.pid : 0;
+	const file = "file" in target ? target.file : "";
+	const title = "title" in target ? target.title : "";
+	return `
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$name = ${powershellString(processName)}
+$wantPid = ${Math.trunc(pid)}
+$file = ${powershellString(file)}
+$title = ${powershellString(title)}
+# What a title shows, without Studio's own " - Roblox Studio" (whose spacing varies); and an
+# ordinal comparison, ignoring case only, as the file system does: -ieq compares by culture and
+# would take "Straße" for "Strasse".
+function Shown([string]$t) { return ($t -replace '\\s+-\\s+Roblox Studio$', '') }
+function Same([string]$a, [string]$b) { return [string]::Equals($a, $b, [System.StringComparison]::OrdinalIgnoreCase) }
+$lines = @{}
+Get-CimInstance Win32_Process -Filter ("Name='" + $name + ".exe'") -ErrorAction SilentlyContinue | ForEach-Object { $lines[[int]$_.ProcessId] = [string]$_.CommandLine }
+function HasFile($p, [bool]$started) {
+	if ($file -eq '') { return $false }
+	if (Same (Shown $p.MainWindowTitle) $file) { return $true }
+	if (-not $started) { return $false }
+	$line = $lines[[int]$p.Id]
+	if (-not $line) { return $false }
+	return [regex]::IsMatch($line, '(^|[\\s"])' + [regex]::Escape($file) + '($|[\\s"])', [System.Text.RegularExpressions.RegexOptions]'IgnoreCase, CultureInvariant')
+}
+function Gone($p) {
+	try { $p.Refresh(); if ($p.HasExited) { return $true } } catch { }
+	return -not (Get-Process -Id $p.Id -ErrorAction SilentlyContinue)
+}
+function Report($p, [string]$seen, [string]$outcome, [string]$err) {
+	return [pscustomobject]@{ pid = [int]$p.Id; title = $seen; outcome = $outcome; error = $err }
+}
+function CloseOne($p) {
+	$seen = [string]$p.MainWindowTitle
+	$asked = $false
+	try { $asked = $p.CloseMainWindow() } catch { }
+	if ($asked) { for ($i = 0; $i -lt 20; $i++) { if (Gone $p) { break }; Start-Sleep -Milliseconds 500 } }
+	if (Gone $p) { return Report $p $seen 'closed' '' }
+	$err = ''
+	try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { $err = $_.Exception.Message }
+	for ($i = 0; $i -lt 30; $i++) { if (Gone $p) { break }; Start-Sleep -Milliseconds 500 }
+	if (Gone $p) { return Report $p $seen 'forced' $err }
+	return Report $p $seen 'open' $err
+}
+$procs = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+$act = @()
+$leave = @()
+if ($wantPid -gt 0) {
+	$act = @($procs | Where-Object { $_.Id -eq $wantPid -and (HasFile $_ $true) })
+	$leave = @($procs | Where-Object { $_.Id -ne $wantPid -and (HasFile $_ $false) })
+} elseif ($file -ne '') {
+	$act = @($procs | Where-Object { HasFile $_ $false })
+} else {
+	$want = Shown $title
+	$act = @($procs | Where-Object { $t = Shown $_.MainWindowTitle; (Same $t $want) -or $t.EndsWith('\\' + $want, [System.StringComparison]::OrdinalIgnoreCase) })
+	if ($act.Count -gt 1) { $leave = $act; $act = @() }
+}
+$out = @()
+foreach ($p in $act) { $out += CloseOne $p }
+foreach ($p in $leave) { $out += Report $p ([string]$p.MainWindowTitle) 'untouched' '' }
+${powershellString(CLOSE_MARKER)} + (ConvertTo-Json -InputObject @($out) -Compress)
+`;
+}
+
+/** Reads the close script's answer; throws when there is none, since then nothing is known about the windows. */
+export function parseClosedWindows(stdout: string): ClosedWindow[] {
+	const line = stdout
+		.split(/\r?\n/)
+		.reverse()
+		.find((entry) => entry.startsWith(CLOSE_MARKER));
+	if (line === undefined) throw new Error("the close script gave no answer");
+	const parsed = JSON.parse(line.slice(CLOSE_MARKER.length)) as unknown;
+	if (!Array.isArray(parsed)) throw new Error(`the close script answered ${line}`);
+	return parsed.map((entry: { pid: number; title: string; outcome: ClosedWindow["outcome"]; error?: string }) => ({
+		pid: entry.pid,
+		title: entry.title ?? "",
+		outcome: entry.outcome,
+		...(entry.error ? { error: entry.error } : {}),
+	}));
+}
+
+/** Runs the close script in Windows PowerShell and returns what became of each window it matched. */
+export function runCloseScript(target: CloseTarget, processName?: string): ClosedWindow[] {
+	// Encoded, so no quote or path in the script depends on how the command line is quoted.
+	const encoded = Buffer.from(closeWindowScript(target, processName), "utf16le").toString("base64");
+	const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
+		encoding: "utf8",
+		timeout: 90_000,
+		windowsHide: true,
+	});
+	try {
+		return parseClosedWindows(result.stdout ?? "");
+	} catch (error) {
+		const why = result.error?.message ?? (result.stderr ?? "").trim();
+		throw new Error(
+			`could not tell whether the Studio window closed (${error instanceof Error ? error.message : String(error)})${why ? `: ${why}` : ""}`,
+		);
+	}
+}
+
+/** A Roblox Studio process and the title of its window. */
+export interface StudioWindow {
+	pid: number;
+	title: string;
+}
+
+/** Every Roblox Studio process on this machine, with its window's title; read-only. */
+export function listStudioWindows(processName = "RobloxStudioBeta"): StudioWindow[] {
+	const script = `
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$out = @(Get-Process -Name ${powershellString(processName)} -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ pid = [int]$_.Id; title = [string]$_.MainWindowTitle } })
+${powershellString(CLOSE_MARKER)} + (ConvertTo-Json -InputObject @($out) -Compress)
+`;
+	const encoded = Buffer.from(script, "utf16le").toString("base64");
+	const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
+		encoding: "utf8",
+		timeout: 60_000,
+		windowsHide: true,
+	});
+	const line = (result.stdout ?? "")
+		.split(/\r?\n/)
+		.reverse()
+		.find((entry) => entry.startsWith(CLOSE_MARKER));
+	if (line === undefined) {
+		throw new Error(
+			`could not list the Studio windows${result.error ? `: ${result.error.message}` : result.stderr ? `: ${result.stderr.trim()}` : ""}`,
+		);
+	}
+	return (JSON.parse(line.slice(CLOSE_MARKER.length)) as StudioWindow[]).map((window) => ({
+		pid: window.pid,
+		title: window.title ?? "",
+	}));
+}
+
+/**
+ * Whether a Studio window's title shows a local file of this name: Studio titles such a window
+ * `<full path> - Roblox Studio`, and the proxy lists it by the file name alone.
+ */
+export function titleShowsFile(title: string, name: string): boolean {
+	const shown = title.replace(/\s+-\s+Roblox Studio$/, "").toLowerCase();
+	const wanted = name.toLowerCase();
+	return shown === wanted || shown.endsWith(`\\${wanted}`) || shown.endsWith(`/${wanted}`);
+}
+
+// ------------------------------------------------------- claiming a window name
+
+/** Whether a process is running; signal 0 only asks. */
+function isRunning(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/**
+ * Claims a window name on this machine while a run opens a window of that name and waits for the
+ * proxy to list it, and resolves with the release. The proxy names a local file's window by its
+ * file name alone and says nothing of the process behind it, so two runs of same-named files
+ * waiting at once would each take the first new entry, which is only one of their windows. Under a
+ * claim, a second run looks at the proxy only once the first run's window is listed, and so finds
+ * its own. A claim is a file in `dir` holding the claimant's PID; one whose process has ended is
+ * taken over, and a wait longer than `timeoutMs` is refused, naming the holder.
+ */
+export async function claimWindowName(
+	name: string,
+	options: {
+		dir: string;
+		timeoutMs: number;
+		sleep: (ms: number) => Promise<void>;
+		/** Called once when the name is held by another run, with that run's PID. */
+		onWait: (holder: number) => void;
+		isAlive?: (pid: number) => boolean;
+	},
+): Promise<() => void> {
+	const alive = options.isAlive ?? isRunning;
+	// Named by a hash: the name itself can be too long for a file name once escaped, or not allowed in one.
+	const path = join(
+		options.dir,
+		`${createHash("sha256").update(name.toLowerCase()).digest("hex").slice(0, 32)}.claim`,
+	);
+	mkdirSync(options.dir, { recursive: true });
+
+	let waited = 0;
+	let told = false;
+	for (;;) {
+		try {
+			writeFileSync(path, String(process.pid), { flag: "wx" });
+			return () => rmSync(path, { force: true });
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		}
+
+		let holder = Number.NaN;
+		try {
+			holder = Number(readFileSync(path, "utf8"));
+		} catch {
+			// Released between the two calls: try again at once.
+			continue;
+		}
+		// A holder that has gone, or a file too new to hold its PID yet (retried below), is not a claim.
+		if (Number.isInteger(holder) && holder > 0 && !alive(holder)) {
+			rmSync(path, { force: true });
+			continue;
+		}
+		if (waited >= options.timeoutMs) {
+			throw new Error(
+				`another flamework-test run (PID ${holder}) has been opening a ${name} window for ${Math.round(waited / 1000)}s; if it is gone, delete ${path}`,
+			);
+		}
+		if (!told && Number.isInteger(holder) && holder > 0) {
+			told = true;
+			options.onWait(holder);
+		}
+		await options.sleep(1000);
+		waited += 1000;
+	}
 }
 
 // ----------------------------------------------------------------- the proxy
