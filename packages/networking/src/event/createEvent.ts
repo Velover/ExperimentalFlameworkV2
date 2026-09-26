@@ -1,10 +1,10 @@
 import { Serialization } from "@flamework-experimental/core";
 import { RunService } from "@rbxts/services";
-import Signal from "@rbxts/signal";
-import { MiddlewareFactory, MiddlewareProcessor } from "../middleware/types";
+import { MiddlewareFactory } from "../middleware/types";
 import { createRemoteInstance } from "./createRemoteInstance";
 import { NetworkInfo } from "../types";
-import { createMiddlewareProcessor } from "../middleware/createMiddlewareProcessor";
+import { Guards, createProcessor, createReceiver, decode, deliverTo } from "../middleware/processor";
+import { SignalConnection, createSignal, spawn } from "../util/signal";
 import { trimArguments } from "../util/trimArguments";
 
 export interface CreateEventOptions {
@@ -43,6 +43,12 @@ export interface CreateEventOptions {
 	incomingMiddleware?: MiddlewareFactory<any[], void>[];
 
 	/**
+	 * The generated argument checks, run on what arrives before any middleware. A message that fails
+	 * them is dropped.
+	 */
+	incomingGuards?: Guards;
+
+	/**
 	 * Unpacks the argument list of incoming events. Absent when the project does not enable
 	 * serialization. Outgoing lists reach `fire*` already packed: the transformer generates the
 	 * encoding inline at each call site.
@@ -60,13 +66,15 @@ export interface EventInterface {
 	fireServer(...args: unknown[]): void;
 	fireClient(player: Player, ...args: unknown[]): void;
 	fireAllClients(...args: unknown[]): void;
-	connectServer(callback: (player: Player, ...args: unknown[]) => void): RBXScriptConnection;
-	connectClient(callback: (...args: unknown[]) => void): RBXScriptConnection;
-	invoke: MiddlewareProcessor<any[], void>;
-}
+	connectServer(callback: (player: Player, ...args: unknown[]) => void): SignalConnection;
+	connectClient(callback: (...args: unknown[]) => void): SignalConnection;
 
-/** A sender whose type has blob slots always sends a table; one without never does. */
-const NO_BLOBS = new Array<defined>();
+	/**
+	 * Runs the receiving half as if the remote had delivered `args` (plain values, never a payload), on
+	 * a recycled thread of its own, so that a middleware that yields does not hold up the caller.
+	 */
+	predict(player: Player | undefined, ...args: unknown[]): void;
+}
 
 /**
  * The argument list a remote delivered: `args` as they are without a decoder, otherwise the buffer
@@ -76,6 +84,9 @@ const NO_BLOBS = new Array<defined>();
  * Either way the list is trimmed after its last value, so that no hop after it loses the values
  * that follow a nil (see `trimArguments`). A decoded list keeps one slot per declared parameter,
  * so an absent trailing optional would otherwise end it in nil.
+ *
+ * An event's own messages are decoded in the receive pipeline (`processor.luau`); this is for a
+ * function's requests and responses, which carry a plain request id ahead of the payload.
  */
 export function decodeArguments(
 	decoder: Serialization.Decoder | undefined,
@@ -85,19 +96,13 @@ export function decodeArguments(
 ): unknown[] | undefined {
 	if (!decoder) return trimArguments(args);
 
-	const [payload, blobs] = args;
-	if (!typeIs(payload, "buffer") || (blobs !== undefined && !typeIs(blobs, "table"))) {
-		onMalformed?.(player, "payload is not a buffer with an optional blob list");
-		return undefined;
-	}
-
-	const [ok, result] = pcall(decoder, payload, (blobs ?? NO_BLOBS) as Array<defined>);
+	const [ok, result] = decode(decoder, args[0], args[1]);
 	if (!ok) {
-		onMalformed?.(player, tostring(result));
+		onMalformed?.(player, result);
 		return undefined;
 	}
 
-	return trimArguments(result as unknown[]);
+	return trimArguments(result);
 }
 
 export function createEvent(options: CreateEventOptions): EventInterface {
@@ -108,43 +113,40 @@ export function createEvent(options: CreateEventOptions): EventInterface {
 		options.id,
 	) as RemoteEvent;
 
-	// Passes the arguments by reference. A plain BindableEvent would copy them, turning a decoded
+	// Which half this event is, fixed when it is made: the server's handlers are given the sender.
+	const isServer = RunService.IsServer();
+
+	// Passes the arguments by reference. A BindableEvent would copy them, turning a decoded
 	// `Map<Instance, ...>` into one keyed by strings and raising on a `Set<boolean>`.
-	let signal: Signal<(...args: never[]) => void> | undefined;
+	const signal = createSignal();
 
-	// Nothing to deliver to until something connects (a `predict` may come first).
-	const invoke = createMiddlewareProcessor(options.incomingMiddleware, options.networkInfo, (player, ...args) => {
-		if (RunService.IsServer()) {
-			signal?.Fire(player as never, ...(args as never[]));
-		} else {
-			signal?.Fire(...(args as never[]));
-		}
-	});
+	// Guards, then middleware, then the signal: plain calls in the thread that received the message.
+	const process = createProcessor(
+		options.incomingMiddleware,
+		options.networkInfo,
+		deliverTo(signal, isServer),
+		options.incomingGuards,
+		undefined,
+		undefined,
+	);
 
-	const receive = (player: Player | undefined, args: unknown[]) => {
-		const decoded = decodeArguments(options.incomingDecoder, player, args, options.onMalformed);
-		if (decoded) {
-			invoke(player, ...decoded);
-		}
-	};
-
-	const createConnection = (callback: (...args: never[]) => void) => {
-		if (signal) {
-			return signal.Connect(callback);
-		}
-
-		signal = new Signal();
+	// Nothing to deliver to until something connects (a `predict` may come first), so the remote is
+	// only listened to from the first connection on.
+	let listening = false;
+	const listen = () => {
+		if (listening) return;
+		listening = true;
 
 		// We defer to allow any other immediate connections to take place before unloading Roblox's queue.
 		task.defer(() => {
-			if (RunService.IsServer()) {
-				remote.OnServerEvent.Connect((player, ...args) => receive(player, args));
+			// Runs in the thread the engine gives the handler, one per message.
+			const receive = createReceiver(options.incomingDecoder, options.onMalformed, process, isServer);
+			if (isServer) {
+				remote.OnServerEvent.Connect(receive);
 			} else {
-				remote.OnClientEvent.Connect((...args: unknown[]) => receive(undefined, args));
+				remote.OnClientEvent.Connect(receive);
 			}
 		});
-
-		return signal.Connect(callback);
 	};
 
 	return {
@@ -171,15 +173,19 @@ export function createEvent(options: CreateEventOptions): EventInterface {
 		connectServer(callback) {
 			assert(RunService.IsServer());
 
-			return createConnection(callback);
+			listen();
+			return signal.Connect(callback);
 		},
 
 		connectClient(callback) {
 			assert(RunService.IsClient());
 
-			return createConnection(callback);
+			listen();
+			return signal.Connect(callback);
 		},
 
-		invoke,
+		predict(player, ...args) {
+			spawn(process, player, ...args);
+		},
 	};
 }

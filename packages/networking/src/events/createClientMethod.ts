@@ -23,7 +23,7 @@ export function createClientMethod(receiver: EventInterface, sender: EventInterf
 		},
 
 		predict(...args) {
-			return receiver.invoke(undefined, ...trimArguments(args));
+			receiver.predict(undefined, ...trimArguments(args));
 		},
 	};
 

@@ -1,7 +1,5 @@
 import { FunctionReceiverInterface } from "../function/createFunctionReceiver";
 import { FunctionSenderInterface } from "../function/createFunctionSender";
-import { NetworkingFunctionError } from "../function/errors";
-import { timeoutPromise } from "../util/timeoutPromise";
 import { trimArguments } from "../util/trimArguments";
 import { ClientReceiver, ClientSender, FunctionCreateConfiguration } from "./types";
 
@@ -22,10 +20,7 @@ export function createClientMethod(
 		invokeWithTimeout(timeout: number, ...args: unknown[]) {
 			assert(sender, "This is not a sender remote.");
 
-			return Promise.race([
-				timeoutPromise(timeout, NetworkingFunctionError.Timeout),
-				sender.invokeServer(...trimArguments(args)),
-			]);
+			return sender.invokeServer(timeout, ...trimArguments(args));
 		},
 
 		// With serialization on, the transformer rewrites the methods above into these with the packed

@@ -1,12 +1,12 @@
 import { NetworkingFunctionError } from "../function/errors";
 import { NetworkInfo } from "../types";
-import { SkipBadRequest } from "../middleware/skip";
 import { FunctionNetworkingEvents } from "../handlers";
 import { ClientHandler, FunctionCreateConfiguration, Functions, NamespaceMetadata, ServerHandler } from "./types";
 import { SignalContainer } from "../util/createSignalContainer";
 import { createFunctionReceiver, FunctionReceiverInterface } from "../function/createFunctionReceiver";
 import { createFunctionSender, FunctionSenderInterface } from "../function/createFunctionSender";
-import { createGuardMiddleware } from "../middleware/createGuardMiddleware";
+import { createGuards } from "../middleware/createGuards";
+import { Guards } from "../middleware/processor";
 import { Players } from "@rbxts/services";
 import { getNamespaceConfig } from "../util/getNamespaceConfig";
 
@@ -42,21 +42,14 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 			globalName,
 		};
 
+		// The generated guards run ahead of all user middleware; a request that fails them is answered
+		// `BadRequest`.
+		let incomingGuards: Guards | undefined;
 		if (!config.disableIncomingGuards && isReceiver) {
 			const guards = metadata.incoming[name];
 			assert(guards);
 
-			incomingMiddleware.unshift(
-				createGuardMiddleware(
-					name,
-					guards[0],
-					guards[1],
-					networkInfo,
-					config.warnOnInvalidGuards,
-					signals,
-					SkipBadRequest as unknown,
-				),
-			);
+			incomingGuards = createGuards(name, guards[0], guards[1], networkInfo, config.warnOnInvalidGuards, signals);
 		}
 
 		// A malformed serialized payload is reported like a failed guard, with no argument index.
@@ -82,6 +75,7 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 					id: `${receiverPrefix}${effectiveName}`,
 					networkInfo,
 					incomingMiddleware,
+					incomingGuards,
 					argsDecoder: metadata.incomingSerializers?.[name] as never,
 					onMalformed,
 				})

@@ -2,7 +2,8 @@ import { EventNetworkingEvents } from "../handlers";
 import { NetworkInfo } from "../types";
 import { ClientHandler, EventCreateConfiguration, Events, NamespaceMetadata, ServerHandler } from "./types";
 import { SignalContainer } from "../util/createSignalContainer";
-import { createGuardMiddleware } from "../middleware/createGuardMiddleware";
+import { createGuards } from "../middleware/createGuards";
+import { Guards } from "../middleware/processor";
 import { EventInterface, createEvent } from "../event/createEvent";
 import { getNamespaceConfig } from "../util/getNamespaceConfig";
 import { Players } from "@rbxts/services";
@@ -36,13 +37,14 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 			globalName,
 		};
 
+		// The generated guards run ahead of all user middleware, so middleware never sees a payload that
+		// failed them.
+		let incomingGuards: Guards | undefined;
 		if (!config.disableIncomingGuards && isIncoming) {
 			const guards = metadata.incoming[name];
 			assert(guards);
 
-			incomingMiddleware.unshift(
-				createGuardMiddleware(name, guards[0], guards[1], networkInfo, config.warnOnInvalidGuards, signals),
-			);
+			incomingGuards = createGuards(name, guards[0], guards[1], networkInfo, config.warnOnInvalidGuards, signals);
 		}
 
 		// A malformed serialized payload is reported like a failed guard, with no argument index.
@@ -67,6 +69,7 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 				debugName: name,
 				networkInfo,
 				incomingMiddleware,
+				incomingGuards,
 				incomingDecoder: receives ? (metadata.incomingSerializers?.[name] as never) : undefined,
 				onMalformed,
 			});

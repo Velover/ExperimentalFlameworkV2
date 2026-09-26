@@ -1,7 +1,16 @@
 import { Flamework, Modding, Serialization } from "@flamework-experimental/core";
 import { Networking, NetworkingFunctionError } from "@flamework-experimental/networking";
 import { RunService } from "@rbxts/services";
-import { expectDefined, expectEqual, expectRejects, expectResolves, expectTrue, suite } from "../testkit";
+import {
+	eventually,
+	expectDefined,
+	expectEqual,
+	expectNoThrow,
+	expectRejects,
+	expectResolves,
+	expectTrue,
+	suite,
+} from "../testkit";
 
 /**
  * Both directions declare the same functions so that one spec body covers both realms: every method
@@ -19,6 +28,12 @@ interface Bidirectional {
 
 	/** Has middleware that returns `Networking.Skip`. */
 	cancelled(value: string): string;
+
+	/** Its callback returns a Promise; its middleware reads what `processNext` hands back. */
+	promised(value: string): string;
+
+	/** Its callback raises. */
+	raising(value: string): string;
 }
 
 const GlobalFunctions = Networking.createFunction<Bidirectional, Bidirectional>();
@@ -86,6 +101,17 @@ const cancelRequest: Networking.FunctionMiddleware<[value: string], string> = ()
 	return () => Networking.Skip;
 };
 
+/** What `processNext` returned to `readValue`, by type. */
+const processNextResults = new Array<string>();
+
+const readValue: Networking.FunctionMiddleware<[value: string], string> = (processNext) => {
+	return (player, value) => {
+		const result = processNext(player, value);
+		processNextResults.push(typeOf(result));
+		return result;
+	};
+};
+
 type Name = keyof Bidirectional;
 type ServerFunctions = ReturnType<typeof GlobalFunctions.createServer>;
 type ClientFunctions = ReturnType<typeof GlobalFunctions.createClient>;
@@ -105,7 +131,7 @@ function getHandlers() {
 	if (isServer) {
 		handlers = {
 			server: GlobalFunctions.createServer({
-				middleware: { transformed: [rewriteArgument], cancelled: [cancelRequest] },
+				middleware: { transformed: [rewriteArgument], cancelled: [cancelRequest], promised: [readValue] },
 			}),
 		};
 	} else {
@@ -114,14 +140,14 @@ function getHandlers() {
 		// deferred connections to resolve against the client realm.
 		__harness.asRealm("Server", () => {
 			GlobalFunctions.createServer({
-				middleware: { transformed: [rewriteArgument], cancelled: [cancelRequest] },
+				middleware: { transformed: [rewriteArgument], cancelled: [cancelRequest], promised: [readValue] },
 			});
 			__harness.flush();
 		});
 
 		handlers = {
 			client: GlobalFunctions.createClient({
-				middleware: { transformed: [rewriteArgument], cancelled: [cancelRequest] },
+				middleware: { transformed: [rewriteArgument], cancelled: [cancelRequest], promised: [readValue] },
 			}),
 		};
 	}
@@ -144,6 +170,10 @@ function serverMember(server: ServerFunctions, name: Name) {
 			return server.transformed;
 		case "cancelled":
 			return server.cancelled;
+		case "promised":
+			return server.promised;
+		case "raising":
+			return server.raising;
 	}
 }
 
@@ -157,6 +187,10 @@ function clientMember(client: ClientFunctions, name: Name) {
 			return client.transformed;
 		case "cancelled":
 			return client.cancelled;
+		case "promised":
+			return client.promised;
+		case "raising":
+			return client.raising;
 	}
 }
 
@@ -397,6 +431,86 @@ export = suite("networking functions", [
 
 			expectEqual(reason, NetworkingFunctionError.Cancelled, "rejection");
 			expectEqual(called, false, "callback ran");
+		},
+	],
+	[
+		// processNext returns the next link's result, a Promise the callback returned already
+		// followed in the thread handling the request.
+		"hands a middleware the callback's value, its Promise already followed",
+		() => {
+			processNextResults.clear();
+			setCallback("promised", (value) => Promise.resolve(`${value}!`));
+
+			expectEqual(expectResolves(predict("promised", "hi")), "hi!", "resolved value");
+			expectEqual(processNextResults.size(), 1, "middleware calls");
+			expectEqual(processNextResults[0], "string", "what processNext returned");
+		},
+	],
+	[
+		"answers Cancelled when the callback's Promise is cancelled",
+		() => {
+			setCallback("promised", () => {
+				const pending = new Promise<string>(() => {});
+				task.delay(0, () => pending.cancel());
+				return pending;
+			});
+
+			expectEqual(
+				expectRejects(predict("promised", "x"), "a request whose Promise was cancelled"),
+				NetworkingFunctionError.Cancelled,
+				"predicted rejection",
+			);
+
+			const channel = remoteById(`${RECEIVE_PREFIX}promised`, "promised receive channel");
+			__harness.clearSent(channel);
+			deliver(channel, 11, ...onWireArgs(wire.textArgs, ["x"] as [string]));
+
+			eventually(() => __harness.sent(channel).size() > 0, "the answer");
+			const sent = __harness.sent(channel);
+			expectEqual(sent[0].args[0], 11, "request id echoed back");
+			expectEqual(sent[0].args[1], NetworkingFunctionError.Cancelled, "process result");
+		},
+	],
+	[
+		"answers false when the callback raises",
+		() => {
+			setCallback("raising", () => error("the callback raised on purpose (expected in this log)"));
+
+			const channel = remoteById(`${RECEIVE_PREFIX}raising`, "raising receive channel");
+			__harness.clearSent(channel);
+			deliver(channel, 12, ...onWireArgs(wire.textArgs, ["x"] as [string]));
+
+			const sent = __harness.sent(channel);
+			expectEqual(sent.size(), 1, "responses");
+			expectEqual(sent[0].args[0], 12, "request id echoed back");
+			expectEqual(sent[0].args[1], false, "process result");
+
+			expectRejects(predict("raising", "x"), "a predicted request whose callback raised");
+		},
+	],
+	[
+		// No timer at all for math.huge; cancelling the Promise drops the request, so a late answer
+		// finds nothing to settle.
+		"keeps an infinite request pending until it is cancelled",
+		() => {
+			const channel = remoteById(`${SEND_PREFIX}pending`, "pending send channel");
+			__harness.clearSent(channel);
+
+			const request = invokeWithTimeout("pending", math.huge, "ping");
+			task.wait();
+			task.wait();
+			expectEqual(request.getStatus(), Promise.Status.Started, "status after two frames");
+
+			request.cancel();
+			expectEqual(request.getStatus(), Promise.Status.Cancelled, "status once cancelled");
+
+			const sent = __harness.sent(channel);
+			expectEqual(sent.size(), 1, "requests");
+			expectNoThrow(
+				() => deliver(channel, sent[0].args[0], true, ...onWire(wire.textResult, "late")),
+				"a late answer",
+			);
+			expectEqual(request.getStatus(), Promise.Status.Cancelled, "status after the late answer");
 		},
 	],
 	[

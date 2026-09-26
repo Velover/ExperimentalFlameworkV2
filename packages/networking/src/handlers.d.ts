@@ -1,4 +1,3 @@
-import Signal from "@rbxts/signal";
 import { NetworkInfo } from "./types";
 
 interface BaseEvent {

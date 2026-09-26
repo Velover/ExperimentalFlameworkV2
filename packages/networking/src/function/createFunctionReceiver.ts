@@ -3,9 +3,9 @@ import { RunService } from "@rbxts/services";
 import { createEvent, decodeArguments } from "../event/createEvent";
 import { NetworkInfo } from "../types";
 import { NetworkingFunctionError } from "./errors";
-import { createMiddlewareProcessor } from "../middleware/createMiddlewareProcessor";
-import { MiddlewareFactory, MiddlewareProcessor } from "../middleware/types";
+import { MiddlewareFactory } from "../middleware/types";
 import { Skip, SkipBadRequest } from "../middleware/skip";
+import { Guards, Processor, createProcessor, withoutPlayer } from "../middleware/processor";
 
 export interface CreateFunctionReceiverOptions {
 	/**
@@ -31,9 +31,15 @@ export interface CreateFunctionReceiverOptions {
 	networkInfo: NetworkInfo;
 
 	/**
-	 * This function will be called when we receive a response, and can be used to resolve or reject values.
+	 * The middleware a request goes through before it reaches the callback.
 	 */
 	incomingMiddleware?: MiddlewareFactory<any[], any>[];
+
+	/**
+	 * The generated argument checks, run on a request before any middleware. A request that fails
+	 * them is rejected with `BadRequest`.
+	 */
+	incomingGuards?: Guards;
 
 	/**
 	 * Unpacks the request's argument list. Absent when the project does not enable serialization.
@@ -69,7 +75,12 @@ export function createFunctionReceiver(options: CreateFunctionReceiverOptions): 
 		networkInfo: options.networkInfo,
 	});
 
-	let callback: MiddlewareProcessor<unknown[], unknown>;
+	// Which half this function is, fixed when it is made: the server's callback is given the sender.
+	const isServer = RunService.IsServer();
+
+	// Guards, then middleware, then the callback: plain calls in the thread handling the request, a
+	// Promise any of them returns waited for in place and a cancelled one read as `Networking.Skip`.
+	let process: Processor | undefined;
 	let packResult: ((value: unknown) => unknown) | undefined;
 
 	const setCallback = (
@@ -77,13 +88,14 @@ export function createFunctionReceiver(options: CreateFunctionReceiverOptions): 
 		pack: ((value: unknown) => unknown) | undefined,
 	) => {
 		packResult = pack;
-		callback = createMiddlewareProcessor(options.incomingMiddleware, options.networkInfo, (player, ...args) => {
-			if (RunService.IsServer()) {
-				return newCallback(player as never, ...(args as never[]));
-			} else {
-				return newCallback(...(args as never[]));
-			}
-		});
+		process = createProcessor(
+			options.incomingMiddleware,
+			options.networkInfo,
+			isServer ? (newCallback as Processor) : withoutPlayer(newCallback),
+			options.incomingGuards,
+			SkipBadRequest,
+			Skip,
+		);
 	};
 
 	/**
@@ -104,8 +116,18 @@ export function createFunctionReceiver(options: CreateFunctionReceiverOptions): 
 		}
 	};
 
+	/** A request that raised -- in a guard, a middleware, the callback, its Promise or the packing -- is answered `false`. */
+	const fail = (player: Player | undefined, id: unknown, reason: unknown) => {
+		warn(`Failed to process request to '${options.debugName}'`);
+		warn(reason);
+
+		event.fireEither(player, id, false);
+	};
+
+	// Runs on the thread the event's signal gives this handler, one per request.
 	const processRequest = (player: Player | undefined, id: unknown, ...args: unknown[]) => {
-		if (!callback) {
+		const current = process;
+		if (!current) {
 			return event.fireEither(player, id, NetworkingFunctionError.Unprocessed);
 		}
 
@@ -114,26 +136,19 @@ export function createFunctionReceiver(options: CreateFunctionReceiverOptions): 
 			return event.fireEither(player, id, NetworkingFunctionError.BadRequest);
 		}
 
-		const processing = callback(player, ...decoded)
-			.then((value) => respond(player, id, getProcessResult(value), value))
-			.catch((reason) => {
-				warn(`Failed to process request to '${options.debugName}'`);
-				warn(reason);
+		const [ok, value] = pcall(current, player, ...decoded);
+		if (!ok) {
+			return fail(player, id, value);
+		}
 
-				event.fireEither(player, id, false);
-			});
-
-		// A callback or middleware can return a promise that is then cancelled, and cancellation
-		// reaches this chain, where neither handler above runs: the request would go unanswered.
-		processing.finally(() => {
-			if (processing.getStatus() === Promise.Status.Cancelled) {
-				event.fireEither(player, id, NetworkingFunctionError.Cancelled);
-			}
-		});
+		const [sent, reason] = pcall(respond, player, id, getProcessResult(value), value);
+		if (!sent) {
+			fail(player, id, reason);
+		}
 	};
 
-	if (RunService.IsServer()) {
-		event.connectServer((player, id, ...args) => processRequest(player, id, ...args));
+	if (isServer) {
+		event.connectServer(processRequest);
 	} else {
 		event.connectClient((id, ...args) => processRequest(undefined, id, ...args));
 	}
@@ -148,15 +163,20 @@ export function createFunctionReceiver(options: CreateFunctionReceiverOptions): 
 		},
 
 		invoke(player, ...args) {
-			if (!callback) {
+			const current = process;
+			if (!current) {
 				return Promise.reject(NetworkingFunctionError.Unprocessed);
 			}
 
-			return callback(player, ...args).then((value) => {
+			// The Promise `predict` returns is the only one: the chain runs in its executor's thread.
+			return new Promise<unknown>((resolve, reject) => {
+				const value = current(player, ...args);
 				const processResult = getProcessResult(value);
-				if (processResult !== true) return Promise.reject(processResult);
-
-				return value;
+				if (processResult !== true) {
+					reject(processResult);
+				} else {
+					resolve(value);
+				}
 			});
 		},
 	};

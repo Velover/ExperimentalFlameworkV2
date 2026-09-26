@@ -1,4 +1,4 @@
-import Signal from "@rbxts/signal";
+import { Signal, createSignal } from "./signal";
 
 export interface SignalContainer<T> {
 	fire<K extends keyof T>(name: K, ...args: Parameters<T[K]>): void;
@@ -6,7 +6,7 @@ export interface SignalContainer<T> {
 }
 
 export function createSignalContainer<T>(): SignalContainer<T> {
-	const signals = new Map<keyof T, Signal<Callback>>();
+	const signals = new Map<keyof T, Signal>();
 
 	return {
 		fire(name, ...args) {
@@ -16,11 +16,12 @@ export function createSignalContainer<T>(): SignalContainer<T> {
 			}
 		},
 
+		// The connection is networking's own (see `signal.luau`), shaped like an RBXScriptConnection.
 		connect(name, callback) {
 			let signal = signals.get(name);
-			if (!signal) signals.set(name, (signal = new Signal()));
+			if (!signal) signals.set(name, (signal = createSignal()));
 
-			return signal.Connect(callback as Callback);
+			return signal.Connect(callback as Callback) as unknown as RBXScriptConnection;
 		},
 	};
 }

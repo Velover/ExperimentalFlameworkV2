@@ -56,7 +56,7 @@ export function createServerMethod(receiver: EventInterface, sender: EventInterf
 		},
 
 		predict(player, ...args) {
-			receiver.invoke(player, ...trimArguments(args));
+			receiver.predict(player, ...trimArguments(args));
 		},
 	};
 

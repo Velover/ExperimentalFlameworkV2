@@ -52,6 +52,13 @@ Call `createServer` on the server and `createClient` on the client. Calling the 
 nothing** rather than raising, so a stray `createServer()` on the client gives you a `nil` you will
 trip over later.
 
+Each handler passed to `connect` runs on a thread of its own as soon as a message has passed the
+guards and middleware, the newest connection first: one that yields holds up nothing, and one that
+raises has its error printed while the others still run. Every handler gets the same argument
+values, not copies, so a decoded `Map` or `Set` arrives intact. `connect` returns a connection with
+`Connected`, `Disconnect()` and `Destroy()` (for maids and janitors); it is networking's own, not an
+engine `RBXScriptConnection`.
+
 The idiomatic shape is a provider per realm holding the handler:
 
 ```ts
@@ -76,10 +83,11 @@ export class MatchService implements OnStart {
 | `fire(...)` | client | The server. |
 
 `predict(...)` runs the *receiving* half locally, middleware and guards included, without touching a
-remote. It is meant for client prediction, and it is also the easiest way to test a handler.
-When the handler answers back with `fire(player, ...)`, predict with a stand-in rather than a real
-player in a test: the engine queues a message fired at a client that has not connected yet and
-delivers it once it does, so the reply would surface in that client's own tests later. See
+remote. It is meant for client prediction, and it is also the easiest way to test a handler: the
+handlers have been called by the time it returns, unless a middleware yields. When the handler
+answers back with `fire(player, ...)`, predict with a stand-in rather than a real player in a test:
+the engine queues a message fired at a client that has not connected yet and delivers it once it
+does, so the reply would surface in that client's own tests later. See
 [both realms in one session](12-testing.md#both-realms-in-one-session).
 
 ## Functions
@@ -267,8 +275,8 @@ The same generator is available on its own as `Flamework.createSerializer<T>()`;
 
 ## Middleware
 
-A middleware is a factory: it receives the next processor and the event's info, and returns the
-handler for its link in the chain.
+A middleware is a factory: it receives `processNext`, which calls the next link, and the event's
+info, and returns the handler for its link in the chain.
 
 ```ts
 const rateLimit = (perSecond: number): Networking.EventMiddleware<[ready: boolean]> => {
@@ -284,12 +292,19 @@ const rateLimit = (perSecond: number): Networking.EventMiddleware<[ready: boolea
 };
 ```
 
-Three things to know:
+Things to know:
 
 - **Order is registration order.** The first factory in the array is the outermost link.
 - **Generated guards always run first**, ahead of all user middleware, so your middleware never sees
   a payload that failed validation.
 - **You can rewrite arguments** by passing different ones to `processNext`.
+- **`processNext` returns the next link's result**, not a Promise: nothing for an event, the value
+  (or `Networking.Skip`) for a function. The chain is plain calls in the thread that received the
+  message, so a middleware can read what the handler answered, time the call, or wrap it in `pcall`.
+- **A middleware may yield or return a Promise.** A yield holds up only the message it is
+  processing. A returned Promise is waited for before the link ahead of it continues: its value is
+  what `processNext` returns there; a cancelled one reads as `Networking.Skip` in a function's chain
+  (and as nothing in an event's), and a rejected one raises.
 
 Function middleware can additionally return `Networking.Skip` to cancel the request, which rejects
 the caller with `Cancelled`:
@@ -299,6 +314,23 @@ const requireAdmin: Networking.FunctionMiddleware<[itemId: string], boolean> = (
     return (player, itemId) => (isAdmin(player) ? processNext(player, itemId) : Networking.Skip);
 };
 ```
+
+The value `processNext` returns is the one the caller will receive, so a middleware can inspect or
+replace it:
+
+```ts
+const logPurchases: Networking.FunctionMiddleware<[itemId: string], boolean> = (processNext, fn) => {
+    return (player, itemId) => {
+        const bought = processNext(player, itemId);
+        print(`${player} ${fn.name} ${itemId}:`, bought);
+        return bought;
+    };
+};
+```
+
+A middleware written against the earlier API, where `processNext` returned a Promise, used
+`processNext(...).andThen(f)`; it becomes `f(processNext(...))`. One that only returns
+`processNext(...)` needs no change.
 
 `event` (the second factory argument) carries the event's `name`, `globalName` and `eventType`, which
 is what makes generic logging or metrics middleware possible.

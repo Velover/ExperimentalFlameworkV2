@@ -1,6 +1,7 @@
 import { Serialization } from "@flamework-experimental/core";
 import { Players, RunService } from "@rbxts/services";
-import { createEvent, decodeArguments } from "../event/createEvent";
+import { createEvent } from "../event/createEvent";
+import { decode } from "../middleware/processor";
 import { NetworkInfo } from "../types";
 import { NetworkingFunctionError, getFunctionError } from "./errors";
 import { t } from "@rbxts/t";
@@ -56,8 +57,9 @@ export interface RequestInfo {
 }
 
 export interface FunctionSenderInterface {
-	invokeServer(...args: unknown[]): Promise<unknown>;
-	invokeClient(player: Player, ...args: unknown[]): Promise<unknown>;
+	/** `timeout` in seconds; `math.huge` waits for good. */
+	invokeServer(timeout: number, ...args: unknown[]): Promise<unknown>;
+	invokeClient(player: Player, timeout: number, ...args: unknown[]): Promise<unknown>;
 }
 
 export function createFunctionSender(options: CreateFunctionSenderOptions): FunctionSenderInterface {
@@ -68,12 +70,14 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 		networkInfo: options.networkInfo,
 	});
 
+	/** A response is `(id, processResult, value)`, or `(id, true, payload, blobs?)` with a result decoder. */
 	const processResponse = (
 		player: Player | undefined,
 		requestInfo: RequestInfo,
 		id: unknown,
 		processResult: unknown,
-		...response: unknown[]
+		value: unknown,
+		blobs: unknown,
 	) => {
 		if (!t.number(id)) {
 			return;
@@ -87,13 +91,14 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 
 		const rejection = getFunctionError(processResult);
 		if (rejection !== undefined || !options.resultDecoder) {
-			request(response[0], rejection);
+			request(value, rejection);
 			return;
 		}
 
 		// A successful response carries the packed value: `(buffer, blobs?)`.
-		const decoded = decodeArguments(options.resultDecoder, player, response, options.onMalformed);
-		if (!decoded) {
+		const [ok, decoded] = decode(options.resultDecoder, value, blobs);
+		if (!ok) {
+			options.onMalformed?.(player, decoded);
 			request(undefined, NetworkingFunctionError.InvalidResult);
 			return;
 		}
@@ -110,13 +115,13 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 	const departedPlayers = setmetatable(new Set<Player>(), { __mode: "k" });
 
 	if (RunService.IsServer()) {
-		event.connectServer((player, id, processResult, ...response) => {
+		event.connectServer((player, id, processResult, value, blobs) => {
 			const requestInfo = requestInfoServer.get(player);
 			if (!requestInfo) {
 				return;
 			}
 
-			processResponse(player, requestInfo, id, processResult, ...response);
+			processResponse(player, requestInfo, id, processResult, value, blobs);
 		});
 
 		Players.PlayerRemoving.Connect((player) => {
@@ -133,22 +138,47 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 			}
 		});
 	} else {
-		event.connectClient((id, processResult, ...response) => {
-			processResponse(undefined, requestInfoClient, id, processResult, ...response);
+		event.connectClient((id, processResult, value, blobs) => {
+			processResponse(undefined, requestInfoClient, id, processResult, value, blobs);
 		});
 	}
 
-	const createInvocation = (player: Player | undefined, id: number, requestInfo: RequestInfo) => {
-		// A player's entry lives only while requests to them are in flight, so a request that is
-		// never answered holds the Player only until it times out or is cancelled.
-		const settle = () => {
-			requestInfo.requests.delete(id);
-			if (player && requestInfo.requests.isEmpty() && requestInfoServer.get(player) === requestInfo) {
-				requestInfoServer.delete(player);
-			}
-		};
+	/**
+	 * The one Promise of a request, which its executor registers and sends; nothing else is made for
+	 * it. The timeout is a `task.delay`, cancelled when the answer arrives (none at all for
+	 * `math.huge`), and cancelling the Promise drops both the request and the timer.
+	 *
+	 * A send that raises (an argument the engine cannot carry) raises to the caller, as it did when
+	 * the request was sent ahead of its Promise, and leaves nothing pending.
+	 */
+	const createInvocation = (
+		player: Player | undefined,
+		requestInfo: RequestInfo,
+		timeout: number,
+		send: (id: number) => void,
+	) => {
+		const id = requestInfoClient.nextId++;
 
-		return new Promise((resolve, reject, onCancel) => {
+		let failed = false;
+		let failure: unknown;
+
+		const invocation = new Promise<unknown>((resolve, reject, onCancel) => {
+			let timer: thread | undefined;
+
+			// A player's entry lives only while requests to them are in flight, so a request that is
+			// never answered holds the Player only until it times out or is cancelled.
+			const settle = () => {
+				requestInfo.requests.delete(id);
+				if (player && requestInfo.requests.isEmpty() && requestInfoServer.get(player) === requestInfo) {
+					requestInfoServer.delete(player);
+				}
+
+				if (timer !== undefined) {
+					task.cancel(timer);
+					timer = undefined;
+				}
+			};
+
 			requestInfo.requests.set(id, (value, rejection) => {
 				settle();
 
@@ -163,19 +193,40 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 				}
 			});
 
+			if (timeout !== math.huge) {
+				timer = task.delay(timeout, () => {
+					// Running now: the timer is spent, and a thread cannot cancel itself.
+					timer = undefined;
+					settle();
+					reject(NetworkingFunctionError.Timeout);
+				});
+			}
+
 			onCancel(settle);
+
+			const [sent, reason] = pcall(send, id);
+			if (!sent) {
+				settle();
+				failed = true;
+				failure = reason;
+			}
 		});
+
+		if (failed) {
+			// Never settled, so cancelling it is silent; the raise is the caller's.
+			invocation.cancel();
+			error(failure, 0);
+		}
+
+		return invocation;
 	};
 
 	return {
-		invokeServer(...args) {
-			const id = requestInfoClient.nextId++;
-			event.fireServer(id, ...args);
-
-			return createInvocation(undefined, id, requestInfoClient);
+		invokeServer(timeout, ...args) {
+			return createInvocation(undefined, requestInfoClient, timeout, (id) => event.fireServer(id, ...args));
 		},
 
-		invokeClient(player, ...args) {
+		invokeClient(player, timeout, ...args) {
 			if (departedPlayers.has(player) || hasLeft(player)) {
 				return Promise.reject(NetworkingFunctionError.Cancelled);
 			}
@@ -183,10 +234,7 @@ export function createFunctionSender(options: CreateFunctionSenderOptions): Func
 			let requestInfo = requestInfoServer.get(player);
 			if (!requestInfo) requestInfoServer.set(player, (requestInfo = createRequestInfo()));
 
-			const id = requestInfoClient.nextId++;
-			event.fireClient(player, id, ...args);
-
-			return createInvocation(player, id, requestInfo);
+			return createInvocation(player, requestInfo, timeout, (id) => event.fireClient(player, id, ...args));
 		},
 	};
 }
