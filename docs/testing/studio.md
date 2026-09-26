@@ -10,13 +10,16 @@ own `node_modules` and a stub Roblox. Three classes of bug only show up in a rea
 - **Consumer experience**: does a real roblox-ts game compile, sync through Rojo and start.
 
 This page describes the battletest that covers them. It was first run on 2026-09-05 against the
-`TestingPlace` project and found three bugs the Lune suites could not (recorded at the end).
+game template this repository's test place was later cut from, and found three bugs the Lune
+suites could not (recorded at the end).
 
 ## What the battletest consists of
 
-The template project (`E:/Projects/TS/Flamework/TestingPlace`) carries a set of **test
-providers and components** under `src/{server,client,shared}/Features/Testing`. They run once on
-start and print one line per check:
+The test place, [`tests/place`](../../tests/place/README.md), is a small roblox-ts game in this
+repository whose `@flamework-experimental/*` packages are workspace links to `packages/*`. Besides
+the in-place suite (see [Running the generalized tests](#running-the-generalized-tests)) it carries
+a set of **test providers and components** under `src/{server,client,shared}/Features/Testing`.
+They run once on start and print one line per check:
 
 ```
 [FWTEST] <server|client> <group>: <name>: PASS|FAIL (detail)
@@ -30,7 +33,6 @@ start and print one line per check:
 | `di` | both | Injecting `Module`, function providers resolving per request, `@Provider({ lazy: true })` constructed on first resolve and cached, `createClassInstance`. |
 | `networking` | client | Event round-trip (`Ping`/`Pong`) and function round-trip (`Echo`) through the generated guards, plus `Bump` which asks the server to change an attribute. |
 | `components` | both | Tagged part gets a component, defaults, attributes and `onAttributeChanged`, component DI, ticking through the parent `LifecyclePlugin`, `getComponent`/`getAllComponents`, clones, tag removal destroying exactly one component, replication to the client. |
-| `ui` | client | The React tree renders with the module supplied through `FlameworkModuleContext`. |
 | `streaming` | client | Reports `StreamingEnabled`, how many `FwTestStreamPart` parts are visible and how many got components; asserts the expectation for the current mode (see the matrix). |
 | `links` | both | Server: what the real `InstanceHandle` does, a child and an attribute naming a component, writing an attribute back as a handle, and a linked component going away taking its owner with it. Client: a link attribute naming a part 6000 studs out, which is only built once that part streams in and survives it streaming back out. |
 
@@ -43,72 +45,58 @@ the place.
    Assistant settings. The MCP proxy is `%LOCALAPPDATA%\Roblox\Versions\version-*\StudioMCP.exe`;
    the first proxy becomes a hub on a local port and every later proxy joins it, so any number of
    clients can talk to the same Studio.
-2. **Rojo** serving the template (`rojo serve` in `TestingPlace`, default port 34872) and the
+2. **Rojo** serving the place (`rojo serve` in `tests/place`, default port 34872) and the
    Rojo plugin connected in that Studio window.
-3. **The template built against the packages under test.** From this repository:
+3. **The place built against the packages under test.** Its `@flamework-experimental/*`
+   dependencies are `workspace:*` links to `packages/*`, so what `bun run build` last wrote to a
+   package's `out` is what the place compiles against and what Rojo syncs; nothing is packed or
+   copied. From the repository root:
 
    ```console
-   bun run build
-   cd packages/core       && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
-   cd ../components       && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
-   cd ../networking       && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
-   cd ../testing          && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
-   cd ../transformer      && bun pm pack --destination ../../../TestingPlace/vendor/flamework-v2
-   cd ../../../TestingPlace
-   bun remove @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking @flamework-experimental/testing @flamework-experimental/transformer
-   bun add ./vendor/flamework-v2/flamework-experimental-core-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-components-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-networking-2.0.0-alpha.0.tgz ./vendor/flamework-v2/flamework-experimental-testing-2.0.0-alpha.0.tgz
-   bun add -d ./vendor/flamework-v2/flamework-experimental-transformer-2.0.0-alpha.0.tgz
-   bun run build
+   bun install                         # once: links the place into the workspace
+   bun run build                       # the packages
+   cd tests/place && bun run build     # the place (rbxtsc); `bun run watch` keeps it compiling
    ```
 
-   Tarballs rather than `bun link`: symlinked packages drag this repository's `node_modules` layout
-   into the template. The `remove`/`add` pair is only needed the first time. The template's
-   `package.json` also carries an `overrides` entry pointing `@flamework-experimental/core` and
-   `/transformer` at the same tarballs: the packages name each other as peers, and without it bun
-   looks the scoped names up on npm, where they are not published. After **every later repack**
-   run
+   Rojo reads each package's `out` folder through its link (the place's Rojo project maps them by
+   name). After a `bun install` that recreates `node_modules`, restart `rojo serve` and reconnect
+   the plugin: **Rojo stops watching a folder that was deleted and recreated.** `bun run test`
+   builds with `rojo build` and needs no server. How the links are made to work with roblox-ts and
+   Rojo (the `paths` pins, the per-package mapping, the packages' runtime dependencies) is in the
+   place's [README](../../tests/place/README.md#how-the-packages-reach-the-place).
 
-   ```console
-   bun update @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking @flamework-experimental/testing @flamework-experimental/transformer
-   ```
-
-   which re-extracts the changed tarballs and refreshes their integrity in the lockfile. Skipping it
-   leaves a plain `bun install` failing with `IntegrityCheckFailed`, and bun's cache (keyed by name
-   and version) can otherwise hand back the previous contents. Then check one shipped file actually
-   changed, for example
-   `grep -c "HasTag(instance, tag)" node_modules/@flamework-experimental/components/out/components.luau`.
-
-   `bun update` refreshes a package's files but not what the lockfile knows about its `bin`: after a
-   repack that adds or renames a binary (the `flamework-test` CLI lives in the `testing` package), the
-   shim under `node_modules/.bin` stays stale until the package is `bun remove`d and `bun add`ed again.
-
-   **Reinstalling replaces `node_modules/@flamework-experimental`, and Rojo stops watching a folder that was
-   deleted and recreated.** Restart `rojo serve` and reconnect the plugin after every reinstall, or
-   copy the rebuilt `packages/*/out` over the installed `out` folders in place, which keeps the
-   watch alive:
-
-   ```console
-   cp -r packages/components/out/. ../TestingPlace/node_modules/@flamework-experimental/components/out/
-   ```
-
-4. The template's `flamework.config.json` enables `networking.serialization`, so every `[FWTEST]`
+4. The place's `flamework.config.json` enables `networking.serialization`, so every `[FWTEST]`
    networking check runs over serialized payloads; flip it to `false` and rebuild to test the plain
    path. The runtime sections it declares reach the packages through `include/flamework/config.json`.
-5. The place needs `ReplicatedStorage.Assets` and `SoundService.Sounds`, which the template's
-   project file deliberately does not declare: they stand for assets that exist only in the
+5. The `assets` section expects `ReplicatedStorage.Assets` and `SoundService.Sounds`, which the
+   place's project file deliberately does not declare: they stand for assets that exist only in the
    original place, and come from `original.rbxl` laid over the build (`bun run original` makes
-   one; `ORIGINAL_PLACE` in `.env` names it). Without them two shared modules `WaitForChild`
-   forever at require time and ignition never finishes -- the symptom is an "Infinite yield
-   possible" warning and no `[FWTEST]` lines at all. A Rojo-served session needs them added by
-   hand, or the patched place opened instead: `flamework-test studio open place.patched.rbxl`.
+   one, `bun run test` makes it when it is missing; `ORIGINAL_PLACE` in `.env` names it). Nothing
+   in the place waits for them any more (the game template it was cut from had two shared modules
+   that did, and stalled ignition without them), so without them only the `assets` cases fail. A
+   Rojo-served session needs them added by hand, or a patched place opened instead. A run writes
+   one per project in `ROJO_PROJECT`, named after it (`place.default.rbxl`, `place.deferred.rbxl`,
+   ...), and `flamework-test patch place.rbxl --project default.project.json` writes one without
+   running anything; then `flamework-test studio open place.default.rbxl`. Only with `ROJO_PROJECT`
+   empty is the patched file `place.patched.rbxl`.
 
 ## Running the generalized tests
 
 For the in-place specs (`defineTests` sections) the CLI does this itself: `rojo build -o place.rbxl
 && flamework-test test place.rbxl` opens the build in Studio, runs both realms in a play session
 and closes it again (`studio open` + `studio run [--realm client]` do the same by hand); see
-[Running the tests](place.md). What follows is the older battletest of
-`[FWTEST]` lines the template's providers print on start, which the same proxy drives.
+[Running the tests](place.md). For this repository's place that is one command from the root,
+
+```console
+bun run test:place                                          # build the packages, then the place's `bun run test`
+bun run test:place --project tests/deferred.project.json    # arguments go to flamework-test test, paths relative to tests/place
+```
+
+which builds the packages and runs the whole suite in Studio under each of the four Rojo projects in
+the place's `ROJO_PROJECT` (default, immediate, deferred, streaming; see the place's
+[README](../../tests/place/README.md#one-suite-four-rojo-projects)). The root `bun run test` leaves
+it out, since it needs Studio. What follows is the older battletest of `[FWTEST]` lines the place's
+providers print on start, which the same proxy drives.
 
 `scripts/studio/run-studio-tests.mjs` drives Studio through the MCP proxy: it starts a play session,
 waits for the providers, prints every `[FWTEST]` line, stops the session and exits non-zero on a
@@ -248,7 +236,8 @@ Add `FwTest.check(name, condition, detail?)` calls to `FwTestService` (server) o
 `FwTestController` (client), or new components under the `Testing/Components` folders (they are
 registered by `ComponentPlugin.fromPath` in the two entry points). Keep names as
 `group: what it proves`, and put anything that may legitimately differ between scenarios in an
-`INFO` line rather than a check. Rebuild the template; Rojo syncs `out/` on its own.
+`INFO` line rather than a check. Rebuild the place (`bun run build` in `tests/place`, or keep
+`bun run watch` running); Rojo syncs `out/` on its own.
 
 ## Reading a failure
 
@@ -283,5 +272,7 @@ All three were invisible to the Lune suites and are fixed, each with a test that
    Reproduced in Lune with `__harness.deferTags`, which queues tag signals and delivers them in order.
 
 Not bugs, but worth knowing: `PreRender` starts a few seconds after the LocalScripts in Play Solo,
-so render checks need a longer window; and the template's shared modules yield at require time for
-`Assets`/`Sounds`, which is why the Rojo project now creates those folders.
+so render checks need a longer window; and the game template the place was cut from had shared
+modules that yielded at require time for `Assets`/`Sounds`, which stalled ignition in a place without
+them. The place carries none of them now, and the two folders come from the original place (see
+Prerequisites).

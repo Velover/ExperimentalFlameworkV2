@@ -38,13 +38,15 @@ export default tseslint.config(
 			"packages/testing/cli/**/*",
 			"tests/**/*.ts",
 		],
+		// The Studio test place is a roblox-ts game, linted as one below.
+		ignores: ["tests/place/**/*"],
 		rules: {
 			"@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "file", caughtErrors: "none" }],
 			"@typescript-eslint/no-namespace": ["off"],
 		},
 	},
 
-	// roblox-ts packages
+	// roblox-ts packages, and tests/place, the Studio test place (typed by its own tsconfig.json)
 	{
 		ignores: [
 			"packages/transformer/**/*",
@@ -53,6 +55,7 @@ export default tseslint.config(
 			"eslint.config.mjs",
 			"scripts/**/*",
 			"tests/**/*",
+			"!tests/place/**/*",
 		],
 		plugins: {
 			"roblox-ts": fixupPluginRules(eslintPluginRobloxTs),

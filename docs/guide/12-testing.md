@@ -81,7 +81,8 @@ Everything a project needs, in the order it is needed:
    ```
 
    A shared folder registered by both modules gives sections that run in both realms, one copy
-   each; the component specs of the template live there.
+   each; the component specs of this repository's test place, [`tests/place`](../../tests/place/README.md),
+   live there.
 4. A script that builds and runs, with `*.rbxl` in `.gitignore`:
 
    ```jsonc
@@ -216,7 +217,8 @@ test("accepts a message through its guards", () => {
 });
 ```
 
-The template's `networking` sections are written this way.
+The `networking` sections of this repository's test place ([`tests/place`](../../tests/place/README.md))
+are written this way.
 
 ## Configuration
 

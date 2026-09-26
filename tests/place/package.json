@@ -1,0 +1,32 @@
+{
+  "name": "flamework-test-place",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The Roblox place Flamework's in-place test suite runs in, against this repository's own package builds.",
+  "scripts": {
+    "build": "rbxtsc --verbose",
+    "watch": "rbxtsc -w --verbose",
+    "original": "lune run scripts/fabricate-original.luau",
+    "test": "rbxtsc && rojo build -o place.rbxl && lune run scripts/fabricate-original.luau --if-missing && flamework-test test place.rbxl",
+    "test:cloud": "rbxtsc && rojo build -o place.rbxl && lune run scripts/fabricate-original.luau --if-missing && flamework-test test place.rbxl --cloud",
+    "test:studio": "flamework-test studio run",
+    "studio": "flamework-test studio open"
+  },
+  "devDependencies": {
+    "@flamework-experimental/transformer": "workspace:*",
+    "@rbxts/compiler-types": "^3.0.0-types.0",
+    "@rbxts/types": "^1.0.948",
+    "roblox-ts": "^3.0.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@flamework-experimental/components": "workspace:*",
+    "@flamework-experimental/core": "workspace:*",
+    "@flamework-experimental/networking": "workspace:*",
+    "@flamework-experimental/testing": "workspace:*",
+    "@rbxts/maid": "^1.0.0-ts.1",
+    "@rbxts/services": "^1.6.0",
+    "@rbxts/signal": "^1.0.3",
+    "@rbxts/t": "^3.1.0"
+  }
+}

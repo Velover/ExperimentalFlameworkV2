@@ -242,7 +242,10 @@ tasks per place, 300 seconds per task. One task per run.
 ## Development
 
 `bun test cli/tests` runs the CLI suite with a mocked `fetch`, a fake Studio proxy and fake processes;
-nothing reaches the network, Studio or Lune. `bun run typecheck` runs `tsc -p cli --noEmit`; `bun run build` is
+nothing reaches the network, Studio or Lune. The real thing runs in [`tests/place`](../../tests/place/README.md),
+the repository's test place, whose dependencies are workspace links to this package and the others:
+`bun run test:place` from the repository root builds the packages and runs its suite in Studio
+under four Rojo projects, with no packing or copying. `bun run typecheck` runs `tsc -p cli --noEmit`; `bun run build` is
 the roblox-ts side. The CLI runs under Bun. The Luau it submits or runs lives in `cli/tasks/*.lune`, imported
 as text: a game's Rojo project syncs `node_modules/@flamework-experimental` into the place, and Rojo would
 make ModuleScripts of `.luau` files.

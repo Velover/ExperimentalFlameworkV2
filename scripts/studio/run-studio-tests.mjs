@@ -1,6 +1,6 @@
 // Runs the Studio battletest: starts a play session in the given Studio instance, collects the
-// `[FWTEST]` lines the template's test providers print, stops the session and exits non-zero on
-// any failure. See docs/testing/studio.md for the setup this expects.
+// `[FWTEST]` lines the test providers of tests/place print, stops the session and exits non-zero
+// on any failure. See docs/testing/studio.md for the setup this expects.
 //
 //   node scripts/studio/run-studio-tests.mjs [--studio <name|id>] [--streaming on|off|keep] [--wait 30]
 //

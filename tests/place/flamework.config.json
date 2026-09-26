@@ -1,0 +1,27 @@
+{
+	"$schema": "./node_modules/@flamework-experimental/transformer/flamework.config.schema.json",
+	"transformer": {
+		"obfuscation": false
+	},
+	"core": {
+		"profiling": true
+	},
+	"networking": {
+		"serialization": true
+	},
+	"components": {
+		"warningTimeout": 3
+	},
+	"scopes": {
+		"active": "${FLAMEWORK_SCOPES:-}"
+	},
+	"testing": {
+		"entry": "src/server/Core/main"
+	},
+	"cloud": {
+		"testingUniverseId": "${TESTING_UNIVERSE_ID:-10765968722}",
+		"testingPlaceId": "${TESTING_PLACE_ID:-108973151455286}",
+		"apiKey": "${ROBLOX_API_KEY:-}",
+		"originalPlace": "${ORIGINAL_PLACE:-}"
+	}
+}

@@ -27,6 +27,7 @@ bun install
 bun run build          # builds every package in dependency order
 bun run test           # build + transformer tests + runtime specs
 bun run lint
+bun run test:place     # the in-place suite in Roblox Studio (tests/place); needs Studio, Rojo and Lune
 ```
 
 ### Packages
@@ -64,3 +65,8 @@ Two suites, both run by `bun run test`:
 
 Specs live in [`packages/specs`](packages/specs) and are compiled by `rbxtsc` like any other
 Flamework consumer, so they exercise the transformer and the runtime together.
+
+A third suite runs against the real engine and is left out of `bun run test`: the
+[test place](tests/place/README.md), a small game linked to the packages' builds, whose
+`@flamework-experimental/testing` sections `bun run test:place` runs in Roblox Studio, both realms,
+under four Rojo projects (see [Testing in Roblox Studio](docs/testing/studio.md)).

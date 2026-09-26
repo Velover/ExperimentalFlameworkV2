@@ -77,8 +77,8 @@ Why it stays:
 - **Many games run Immediate without choosing it.** Roblox documents `Default` as "currently
   equivalent to `Immediate`", to switch to Deferred at some later point. Only places created from
   Studio's templates are set to Deferred directly. A Rojo-built place whose project file does not set
-  `SignalBehavior` gets `Default`, and that is how most roblox-ts games are built. The template's own
-  `default` and `streaming` test projects are among them.
+  `SignalBehavior` gets `Default`, and that is how most roblox-ts games are built. The `default` and
+  `streaming` projects of this repository's test place (`tests/place`) are among them.
 - **A Deferred game pays almost nothing for it.** This comes from an analysis of the code; the figures
   are estimates, not measurements.
   - **Nearly all of the re-entrancy guards are needed under Deferred too.** They also protect against
@@ -97,7 +97,7 @@ Why it stays:
 - **What dropping would buy is maintenance, not speed:**
   - one contract per API (three differ today);
   - about 60–80 lines of docs and 35 of the Lune harness;
-  - half the template's test matrix (8 realm runs down to 4).
+  - half the test place's matrix in `tests/place` (8 realm runs down to 4).
 
   Against that, 118 of the 135 Lune component cases run on the harness's Immediate model and would
   need rework.
@@ -218,7 +218,7 @@ Edge cases found and deliberately left alone, because the fix would cost more th
   settles an infinite-timeout invoke of that player under Default or Immediate signal behaviour.
 - **networking:** a function or middleware result that is a table with a callable `andThen` but no
   Promise metatable is treated as a Promise; the call raises and the caller gets `Unprocessed`.
-- **testing:** with obfuscation on, the template's own tests that look events up by their plain names
+- **testing:** with obfuscation on, the tests in `tests/place` that look events up by their plain names
   fail. The tests are at fault, not the packages.
 - **harness:** `ValueBase.Value` and its `Changed` are not modelled; `typeof` of an enum item is
   `"table"`; `GetAttribute` returns the same handle each read; a `task.defer` chain outside a deferred

@@ -25,7 +25,7 @@
     },
     "packages/components": {
       "name": "@flamework-experimental/components",
-      "version": "2.0.0-alpha.1",
+      "version": "2.0.0-alpha.2",
       "dependencies": {
         "@rbxts/maid": "^1.0.0-ts.1",
         "@rbxts/services": "^1.1.5",
@@ -44,7 +44,7 @@
     },
     "packages/core": {
       "name": "@flamework-experimental/core",
-      "version": "2.0.0-alpha.1",
+      "version": "2.0.0-alpha.2",
       "dependencies": {
         "@rbxts/maid": "^1.0.0-ts.1",
         "@rbxts/object-utils": "^1.0.4",
@@ -60,7 +60,7 @@
     },
     "packages/networking": {
       "name": "@flamework-experimental/networking",
-      "version": "2.0.0-alpha.1",
+      "version": "2.0.0-alpha.2",
       "dependencies": {
         "@rbxts/object-utils": "^1.0.4",
         "@rbxts/services": "^1.1.5",
@@ -78,7 +78,7 @@
     },
     "packages/specs": {
       "name": "@flamework-experimental/specs",
-      "version": "2.0.0-alpha.1",
+      "version": "2.0.0-alpha.2",
       "dependencies": {
         "@flamework-experimental/components": "workspace:*",
         "@flamework-experimental/core": "workspace:*",
@@ -95,7 +95,7 @@
     },
     "packages/testing": {
       "name": "@flamework-experimental/testing",
-      "version": "2.0.0-alpha.1",
+      "version": "2.0.0-alpha.2",
       "bin": {
         "flamework-test": "./cli/src/cli.ts",
       },
@@ -119,7 +119,7 @@
     },
     "packages/transformer": {
       "name": "@flamework-experimental/transformer",
-      "version": "2.0.0-alpha.1",
+      "version": "2.0.0-alpha.3",
       "dependencies": {
         "@roblox-ts/path-translator": "^1.1.0",
         "@roblox-ts/rojo-resolver": "^1.1.0",
@@ -164,6 +164,27 @@
         "@rbxts/compiler-types": "^3.0.0-types.0",
         "@rbxts/types": "^1.0.948",
         "roblox-ts": "^3.0.0",
+      },
+    },
+    "tests/place": {
+      "name": "flamework-test-place",
+      "version": "0.0.0",
+      "dependencies": {
+        "@flamework-experimental/components": "workspace:*",
+        "@flamework-experimental/core": "workspace:*",
+        "@flamework-experimental/networking": "workspace:*",
+        "@flamework-experimental/testing": "workspace:*",
+        "@rbxts/maid": "^1.0.0-ts.1",
+        "@rbxts/services": "^1.6.0",
+        "@rbxts/signal": "^1.0.3",
+        "@rbxts/t": "^3.1.0",
+      },
+      "devDependencies": {
+        "@flamework-experimental/transformer": "workspace:*",
+        "@rbxts/compiler-types": "^3.0.0-types.0",
+        "@rbxts/types": "^1.0.948",
+        "roblox-ts": "^3.0.0",
+        "typescript": "^5.9.3",
       },
     },
   },
@@ -379,6 +400,8 @@
     "fill-range": ["fill-range@7.1.1", "", { "dependencies": { "to-regex-range": "^5.0.1" } }, "sha512-YsGpe3WHLK8ZYi4tWDg2Jy3ebRz2rXowDxnld4bkQB00cc/1Zw9AWnC0i9ztDJitivtQvaI9KaLyKrc+hBW0yg=="],
 
     "find-up": ["find-up@5.0.0", "", { "dependencies": { "locate-path": "^6.0.0", "path-exists": "^4.0.0" } }, "sha512-78/PXT1wlLLDgTzDs7sjq9hzz0vXD+zn+7wypEe4fXQxCmdmqfGsEPQxmiCSQI3ajFV91bVSsvNtrJRiW6nGng=="],
+
+    "flamework-test-place": ["flamework-test-place@workspace:tests/place"],
 
     "flat-cache": ["flat-cache@4.0.1", "", { "dependencies": { "flatted": "^3.2.9", "keyv": "^4.5.4" } }, "sha512-f7ccFPK3SXFHpx15UIGyRJ/FJQctuKZ0zVuN3frBo4HnK3cay9VEW0R6yPYFHC0AgqhukPzKjq22t5DmAyqGyw=="],
 

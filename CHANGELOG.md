@@ -3,6 +3,14 @@
 Notable changes to the `@flamework-experimental` packages. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Tests
+
+- The Studio test place lives in the repository (`tests/place`), linked to the packages' own builds:
+  `bun run test:place` builds the packages and runs its suite in Studio under the default,
+  immediate, deferred and streaming projects.
+
 ## 2026-09-26: core, components, networking and testing 2.0.0-alpha.2; transformer 2.0.0-alpha.3
 
 ### Upgrade notes

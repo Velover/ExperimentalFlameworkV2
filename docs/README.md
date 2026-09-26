@@ -43,6 +43,9 @@ Read in order the first time. Each page ends with the caveats for that topic.
   packages: setup, the automated matrix, the manual scenarios, and what the first run found.
 - [Running the tests](testing/place.md) -- `flamework-test`: the build opened in Roblox Studio and run
   on both realms from a terminal, or published and run in a real server through Open Cloud.
+- [The test place](../tests/place/README.md) -- the place this repository's in-place suite runs in,
+  linked to the packages' own builds: `bun run test:place` builds the packages and runs it in Studio
+  under four Rojo projects (default, immediate, deferred, streaming).
 
 ## I just want to…
 

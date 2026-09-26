@@ -11,6 +11,12 @@ rojo build -o place.rbxl && bunx flamework-test test place.rbxl            # Stu
 rojo build -o place.rbxl && bunx flamework-test test place.rbxl --cloud    # a real server, server realm
 ```
 
+Any Roblox place built from a roblox-ts project with `@flamework-experimental/testing` installed
+works this way. This repository runs its own suite in [`tests/place`](../../tests/place/README.md),
+a workspace member linked to the packages' builds: `bun run test:place` from the root builds the
+packages and runs the place under its four Rojo projects, and `bun run test:place --cloud` takes
+the cloud route below.
+
 ## In Studio, on this machine
 
 `test <file>` launches Roblox Studio on the file, waits for the window to connect, starts a play

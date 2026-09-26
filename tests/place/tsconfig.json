@@ -1,0 +1,42 @@
+{
+	"compilerOptions": {
+		// required
+		"allowSyntheticDefaultImports": true,
+		"downlevelIteration": true,
+		"noImplicitOverride": true,
+		"module": "commonjs",
+		"moduleResolution": "Node",
+		"noLib": true,
+		"resolveJsonModule": true,
+		"forceConsistentCasingInFileNames": true,
+		"moduleDetection": "force",
+		"strict": true,
+		"target": "ESNext",
+		"typeRoots": ["node_modules/@rbxts", "node_modules/@flamework-experimental"],
+
+		// configurable
+		"rootDir": "src",
+		"outDir": "out",
+		"baseUrl": "src",
+		// The @flamework-experimental packages are workspace links to packages/*, and each of them has
+		// its own node_modules with links to the same packages. roblox-ts turns an imported file's real
+		// path back into a node_modules path through the first link TypeScript met, which may be the
+		// one inside another package; pinning every import the place compiles to the place's own
+		// node_modules keeps that link the place's. packages/specs does the same.
+		"paths": {
+			"@rbxts/t": ["../node_modules/@rbxts/t"],
+			"@rbxts/services": ["../node_modules/@rbxts/services"],
+			"@flamework-experimental/core": ["../node_modules/@flamework-experimental/core"],
+			"@flamework-experimental/components": ["../node_modules/@flamework-experimental/components"],
+			"@flamework-experimental/networking": ["../node_modules/@flamework-experimental/networking"],
+			"@flamework-experimental/testing": ["../node_modules/@flamework-experimental/testing"]
+		},
+
+		"experimentalDecorators": true,
+		"plugins": [
+			// Options live in flamework.config.json next to this file.
+			{ "transform": "@flamework-experimental/transformer" }
+		]
+	},
+	"include": ["src"]
+}

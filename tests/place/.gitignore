@@ -1,0 +1,12 @@
+# Build output: rbxtsc, the transformer, Rojo and flamework-test.
+/out
+/include
+/build
+/probe
+flamework.build
+sourcemap.json
+*.tsbuildinfo
+*.rbxl
+*.rbxl.lock
+# .env holds only build settings (FLAMEWORK_SCOPES, ORIGINAL_PLACE, ROJO_PROJECT) and is tracked; secrets go in .env.local.
+.env.local
