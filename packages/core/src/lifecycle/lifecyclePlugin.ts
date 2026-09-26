@@ -4,7 +4,7 @@ import type { Module } from "../module/module";
 import { Provider } from "../provider";
 import type { OnExtinguished, OnInit, OnPhysics, OnRender, OnStart, OnTick } from "./lifecycleInterfaces";
 import { recycleThread } from "../utility/recycleThread";
-import { runsPromiseWork, threadWaits } from "../utility/threadWaits";
+import { extinguishesBegun, runsPromiseWork, threadWaits } from "../utility/threadWaits";
 import { Reflect } from "../reflect";
 import {
 	LIFECYCLE_SLOT,
@@ -15,11 +15,88 @@ import {
 } from "../plugin/pluginDefinition";
 
 /**
- * Late providers whose `onInit` has yet to finish, or to raise: what a dependent's waits for. Shared
- * by every module's plugin, since a provider's constructor may take a lazy provider of an import,
- * which the import's plugin initialises.
+ * Late providers whose `onInit` has yet to finish, or to raise, to the plugin that runs it: what a
+ * dependent's waits for. Shared by every module's plugin, since a provider's constructor may take a
+ * lazy provider of an import, which the import's plugin initialises.
  */
-const pendingInits = new Set<object>();
+const pendingInits = new Map<object, LifecycleProvider>();
+
+/**
+ * How many seconds a dependency wait that may be on itself (see `mayWaitForRunningThread`) lasts
+ * before it is warned about.
+ */
+const SELF_WAIT_WARNING = 5;
+
+/**
+ * A per-frame method read off its object as a plain function, and called with the object as `self`:
+ * roblox-ts refuses a reference to a method that does not call it, and calling it through the object
+ * took a closure per listener per frame to hand to the thread that runs it.
+ */
+type FrameCallback = (object: unknown, dt: number, now?: number) => void;
+
+/** The per-frame methods, by name, as `FrameCallback`s. */
+type FrameMethods = Record<"onTick" | "onPhysics" | "onRender", FrameCallback | undefined>;
+
+/**
+ * Runs a per-frame callback under the MicroProfiler label and the memory category of its object's
+ * identifier. A function of its own, handed its arguments, rather than a closure per call.
+ */
+function runProfiled(id: string, callback: FrameCallback, object: unknown, dt: number, now?: number) {
+	// `profilebegin` ends when the thread yields or dies.
+	debug.profilebegin(id);
+	debug.setmemorycategory(id);
+	callback(object, dt, now);
+	debug.resetmemorycategory();
+}
+
+/**
+ * The listeners of one per-frame event, walked in place every frame rather than over a copy.
+ *
+ * Luau lets a walk clear keys of the table it walks, ones it has yet to reach included -- which it
+ * then passes over -- but not add them: a key added while a table is walked can make the walk visit
+ * others twice, or not at all, once the table grows. So what is detached leaves `members` at once,
+ * and is not called if its turn this frame has yet to come, while what is attached during the
+ * event's walk -- by a callback: `createClassInstance`, `listen`, a lazy provider resolved -- waits
+ * in `added` and joins once the walk is over, for its first call on the next frame.
+ */
+class FrameListeners<T extends object> {
+	/** Whether the event's walk is running. */
+	public walking = false;
+
+	/** What was attached while the walk ran, for `members` once it is over. */
+	private added = new Set<T>();
+
+	constructor(public readonly members: Set<T>) {}
+
+	public has(value: T) {
+		return this.members.has(value) || this.added.has(value);
+	}
+
+	public add(value: T) {
+		if (this.walking) {
+			this.added.add(value);
+		} else {
+			this.members.add(value);
+		}
+	}
+
+	public delete(value: T) {
+		this.members.delete(value);
+		this.added.delete(value);
+	}
+
+	/** Ends a walk: what was attached meanwhile joins. */
+	public endWalk() {
+		this.walking = false;
+		if (this.added.isEmpty()) return;
+
+		for (const value of this.added) {
+			this.members.add(value);
+		}
+
+		this.added.clear();
+	}
+}
 
 export interface LifecyclePluginOptions {
 	/**
@@ -53,6 +130,10 @@ export class LifecycleProvider {
 	public onRender = new Set<OnRender>();
 	public onExtinguished = new Set<OnExtinguished>();
 
+	private tickListeners = new FrameListeners(this.onTick);
+	private physicsListeners = new FrameListeners(this.onPhysics);
+	private renderListeners = new FrameListeners(this.onRender);
+
 	private identifiers = new Map<object, string>();
 	private moduleConnections = new Map<Module, RBXScriptConnection[]>();
 	private lateProviders = new Set<object>();
@@ -62,9 +143,11 @@ export class LifecycleProvider {
 	private hasLateTurn = false;
 	/** The turns still running `onInit`, by their thread, to the providers each walks. */
 	private lateTurns = new Map<thread, Array<object>>();
+	/** The provider whose `onInit` each turn is running, by the turn's thread. */
+	private lateTurnInits = new Map<thread, object>();
 	/** Late providers whose turn came while the module was still igniting, for `start` to schedule again. */
 	private heldLateProviders = new Array<object>();
-	/** What each late provider's constructor was given, until its turn has waited for their `onInit`s. */
+	/** What each provider's constructor was given, until its `onInit` has waited for theirs. */
 	private initDependencies = new Map<object, ReadonlyArray<defined>>();
 
 	/**
@@ -112,13 +195,15 @@ export class LifecycleProvider {
 		const attached =
 			this.initMembers.has(object as OnInit) ||
 			this.onStart.has(object as OnStart) ||
-			this.onTick.has(object as OnTick) ||
-			this.onPhysics.has(object as OnPhysics) ||
-			this.onRender.has(object as OnRender) ||
+			this.tickListeners.has(object as OnTick) ||
+			this.physicsListeners.has(object as OnPhysics) ||
+			this.renderListeners.has(object as OnRender) ||
 			this.onExtinguished.has(object as OnExtinguished);
 
 		if (!attached) {
 			this.identifiers.delete(object);
+			this.lateProviders.delete(object);
+			this.initDependencies.delete(object);
 		}
 	}
 
@@ -132,20 +217,89 @@ export class LifecycleProvider {
 		this.forget(value as object);
 	}
 
-	private profile(callback: () => void, object: object) {
-		if (this.isProfiling) {
-			const id = this.getIdentifier(object);
+	/**
+	 * Attaches the observers that keep the per-frame events in step with the module.
+	 *
+	 * @internal
+	 */
+	public observeFrameEvents(target: PluginTarget) {
+		target.observe<OnTick>(this.observeFrameEvent(this.tickListeners));
+		target.observe<OnRender>(this.observeFrameEvent(this.renderListeners));
+		target.observe<OnPhysics>(this.observeFrameEvent(this.physicsListeners));
+	}
 
-			return recycleThread(() => {
-				// `profilebegin` ends when the thread yields or dies.
-				debug.profilebegin(id);
-				debug.setmemorycategory(id);
-				callback();
-				debug.resetmemorycategory();
-			});
+	private observeFrameEvent<T extends object>(listeners: FrameListeners<T>): InterfaceConfiguration<T> {
+		return {
+			onAdded: (value, context) => {
+				listeners.add(value);
+				if (context.kind === "provider") this.addFrameProvider(value, context);
+			},
+			onRemoved: (value) => {
+				listeners.delete(value);
+				this.forget(value);
+			},
+		};
+	}
+
+	/**
+	 * A provider on a per-frame event does not tick before the pending `onInit`s of what its
+	 * constructor took have finished, as its `onStart` does not start before them: during ignition
+	 * the ignition waits for them (see `postIgnite`), and afterwards one without an `onInit` or
+	 * `onStart` of its own gets a turn for it, which keeps it out of the per-frame events until then.
+	 */
+	private addFrameProvider(object: object, context: InterfaceContext) {
+		if (this.recordDependencies(object, context) && this.hasStarted) {
+			this.scheduleLateProvider(object);
+		}
+	}
+
+	/**
+	 * Calls a per-frame event's method on every listener attached to it, each on a recycled thread.
+	 *
+	 * Walked in place (see `FrameListeners`): one attached during the walk gets its first call on the
+	 * next frame, and one detached before its turn is passed over. A late provider still waiting on
+	 * its `onInit` is passed over too, as an eager provider does not tick before every `onInit` has
+	 * run; with none, nothing is looked up.
+	 *
+	 * Nothing once the module has begun to extinguish, and the walk stops when a callback begins it:
+	 * that callback returns here as soon as a later step of the extinguish yields, and by then
+	 * everything may have been told `onExtinguished` while still in the sets, which only `release`
+	 * empties. Checked once before the walk, and then only when an extinguish has begun somewhere
+	 * since (`extinguishesBegun`), so that a frame costs no call per listener.
+	 *
+	 * The callback is read off the listener and called with it as `self`, and its arguments are
+	 * handed to the thread rather than closed over, so that a frame creates nothing per listener.
+	 */
+	private walkFrame<T extends object>(
+		listeners: FrameListeners<T>,
+		method: keyof FrameMethods,
+		dt: number,
+		now?: number,
+	) {
+		if (this.hasBegunExtinguishing()) return;
+
+		const late = this.lateProviders.isEmpty() ? undefined : this.lateProviders;
+		const profiling = this.isProfiling;
+		let extinguishes = extinguishesBegun.count;
+
+		listeners.walking = true;
+		for (const listener of listeners.members) {
+			if (late !== undefined && late.has(listener)) continue;
+
+			const callback = (listener as unknown as FrameMethods)[method]!;
+			if (profiling) {
+				recycleThread(runProfiled, this.getIdentifier(listener), callback, listener, dt, now);
+			} else {
+				recycleThread(callback, listener, dt, now);
+			}
+
+			if (extinguishesBegun.count !== extinguishes) {
+				extinguishes = extinguishesBegun.count;
+				if (this.hasBegunExtinguishing()) break;
+			}
 		}
 
-		return recycleThread(callback);
+		listeners.endWalk();
 	}
 
 	/**
@@ -278,7 +432,7 @@ export class LifecycleProvider {
 	private deferLateProvider(object: object) {
 		const turn = this.findRunningTurn();
 		if (turn !== undefined) {
-			turn.push(object);
+			this.lateTurns.get(turn)!.push(object);
 			return;
 		}
 
@@ -292,7 +446,7 @@ export class LifecycleProvider {
 	}
 
 	/**
-	 * The providers of the turn whose `onInit` the running thread is part of, if any: the `onInit`'s
+	 * The thread of the turn whose `onInit` the running thread is part of, if any: the `onInit`'s
 	 * own thread, which `callInit` records the turn waiting on; one it resumed and has not got back
 	 * from -- a thread it spawned, an `async` body before its first yield, a Promise's executor --
 	 * which leaves the turn's thread `normal`; or, while the turn waits on the Promise an `onInit`
@@ -301,15 +455,15 @@ export class LifecycleProvider {
 	 */
 	private findRunningTurn() {
 		const running = coroutine.running();
-		let waitingOnPromise: Array<object> | undefined;
-		for (const [turn, providers] of this.lateTurns) {
+		let waitingOnPromise: thread | undefined;
+		for (const [turn] of this.lateTurns) {
 			const waitedOn = threadWaits.get(turn);
 			if (waitedOn === running || coroutine.status(turn) === "normal") {
-				return providers;
+				return turn;
 			}
 
 			if (waitedOn !== undefined && !typeIs(waitedOn, "thread")) {
-				waitingOnPromise ??= providers;
+				waitingOnPromise ??= turn;
 			}
 		}
 
@@ -321,24 +475,112 @@ export class LifecycleProvider {
 	}
 
 	/**
-	 * Waits until no provider a late provider's constructor took has an `onInit` still to finish, as
-	 * an eager provider's `onInit` comes after its dependencies' -- one resolved in a turn of its own
-	 * had the provider using it initialised, and started, against a dependency not yet initialised.
+	 * Whether a late provider's `onInit` can only run once the running thread is done with the turn
+	 * it is part of: the turn that initialises the provider is that turn, and is running the provider's
+	 * own `onInit` or one ahead of it. An `onInit` of that turn that ignites a module importing this
+	 * one, whose eager provider takes the provider -- resolving it for the first time there, which
+	 * has it join the turn -- holds up the very `onInit` the eager one would wait for.
+	 *
+	 * Only where the running thread is known to be part of the turn: the `onInit`'s own thread, or
+	 * one it resumed and has not got back from. Not merely because the turn waits on a Promise and
+	 * the running thread does Promise work, the guess `findRunningTurn` makes to join a turn: any
+	 * Promise's thread passes it, and an ignition started from an unrelated Promise's work -- a
+	 * profile load's `andThen`, an `async` handler -- then went ahead of the very `onInit` it takes.
+	 * Nor for what that guess joined to the turn from the running thread: a lazy provider the
+	 * ignition resolved for the first time while another's `async` `onInit` was loading joined that
+	 * turn, and its dependent went ahead of its `onInit`. Where the guess is all there is, the wait
+	 * goes on, and warns if it lasts (see `mayWaitForRunningThread`).
+	 */
+	private initWaitsForRunningThread(object: object) {
+		const running = coroutine.running();
+		for (const [turn, providers] of this.lateTurns) {
+			if (threadWaits.get(turn) === running || coroutine.status(turn) === "normal") {
+				return this.lateTurnInits.get(turn) === object || providers.includes(object);
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Whether a late provider's `onInit` may be waiting for the running thread after all, where
+	 * `initWaitsForRunningThread` cannot tell: the turn that initialises it waits on the Promise an
+	 * `onInit` returned, and the running thread does Promise work, which may be that Promise's -- an
+	 * `async` `onInit` that ignites, after an `await`, a module taking what its turn initialises.
+	 */
+	private mayWaitForRunningThread(object: object) {
+		for (const [turn, providers] of this.lateTurns) {
+			if (this.lateTurnInits.get(turn) !== object && !providers.includes(object)) continue;
+
+			const waitedOn = threadWaits.get(turn);
+			return waitedOn !== undefined && !typeIs(waitedOn, "thread") && runsPromiseWork(coroutine.running());
+		}
+
+		return false;
+	}
+
+	/**
+	 * Waits until no provider a provider's constructor took has an `onInit` still to finish, as an
+	 * eager provider's `onInit` comes after the eager providers' it takes. Run before the `onInit` of
+	 * a late provider in its turn, and of an eager one during ignition -- or, for one without an
+	 * `onInit`, before its `onStart` and per-frame events, which saw the same. A late provider resolved in a
+	 * turn of its own, or a lazy provider of an import that an eager provider's constructor resolved
+	 * for the first time -- which the import's plugin initialises on a turn of its own -- had the
+	 * provider taking it initialised, and started, against a dependency not yet initialised.
 	 * Resolved together, a dependency comes first in the same turn, so this finds nothing to wait for.
 	 *
 	 * Polled, since a dependency's `onInit` ends in several ways -- it finishes, it raises, its turn
-	 * drops it as the module extinguishes -- and a wait nothing ended would hold this turn for good.
-	 * Stops once the module has begun to extinguish.
+	 * drops it as the module extinguishes -- and a wait nothing ended would hold this turn, or the
+	 * ignition, for good. Does not wait for one whose `onInit` waits for the running thread (see
+	 * `initWaitsForRunningThread`), which would never end; one that may, as far as can be told, is
+	 * waited for, and warned about once the wait has lasted `SELF_WAIT_WARNING` seconds.
+	 *
+	 * Answers whether the provider's `onInit` may run: not once its own module has begun to
+	 * extinguish, nor once the module of a dependency it waited for has, which dropped that
+	 * dependency uninitialised or is releasing it. A late provider's module goes down then too, as
+	 * an importer of that module; an igniting module is no importer yet, so its ignition fails.
 	 */
 	private awaitDependencies(object: object) {
 		const dependencies = this.initDependencies.get(object);
-		if (dependencies === undefined) return;
+		if (dependencies === undefined) return !this.hasBegunExtinguishing();
 		this.initDependencies.delete(object);
 
-		const pending = () => dependencies.some((dependency) => pendingInits.has(dependency as object));
-		while (!this.hasBegunExtinguishing() && pending()) {
+		let waitedFor: Array<LifecycleProvider> | undefined;
+		let since: number | undefined;
+		let warned = false;
+		while (!this.hasBegunExtinguishing()) {
+			let pending = false;
+			for (const dependency of dependencies) {
+				const owner = pendingInits.get(dependency as object);
+				if (owner === undefined || owner.initWaitsForRunningThread(dependency as object)) continue;
+
+				pending = true;
+				waitedFor ??= [];
+				if (!waitedFor.includes(owner)) {
+					waitedFor.push(owner);
+				}
+
+				// Once, and only for a wait that has lasted and may be on itself.
+				if (
+					!warned &&
+					since !== undefined &&
+					os.clock() - since >= SELF_WAIT_WARNING &&
+					owner.mayWaitForRunningThread(dependency as object)
+				) {
+					warned = true;
+					warn(
+						`[Flamework] '${this.getIdentifier(object)}' has waited ${SELF_WAIT_WARNING}s for the onInit of '${owner.getIdentifier(dependency as object)}', which waits on Promise work that may be this very ignition: an onInit that ignites a module taking it after it has yielded waits for itself. Ignite such a module from onStart or a PlayerAdded handler instead.`,
+					);
+				}
+			}
+
+			if (!pending) break;
+			since ??= os.clock();
 			task.wait();
 		}
+
+		if (this.hasBegunExtinguishing()) return false;
+		return waitedFor === undefined || !waitedFor.some((owner) => owner.hasBegunExtinguishing());
 	}
 
 	private runLateProviders() {
@@ -381,16 +623,18 @@ export class LifecycleProvider {
 				continue;
 			}
 
-			if (this.initMembers.has(object as OnInit)) {
-				this.awaitDependencies(object);
-				if (this.hasBegunExtinguishing()) {
-					providers.clear();
-					break;
-				}
+			// In front of its `onInit`, or of its `onStart` and per-frame events when it has none.
+			if (!this.awaitDependencies(object)) {
+				providers.clear();
+				break;
+			}
 
+			if (this.initMembers.has(object as OnInit)) {
 				// One that raises is reported and left out -- never ticking, never started, as on a
 				// thread of its own -- and does not hold back the ones after it.
+				this.lateTurnInits.set(turn, object);
 				const [success, err] = pcall(() => this.runInit(object as OnInit));
+				this.lateTurnInits.delete(turn);
 				pendingInits.delete(object);
 				if (!success) {
 					task.spawn(error, err, 0);
@@ -416,6 +660,18 @@ export class LifecycleProvider {
 		}
 	}
 
+	/**
+	 * Records what a provider's constructor took, whose pending `onInit`s its own `onInit` waits
+	 * for -- or its `onStart` and per-frame events, when it has no `onInit` -- in its turn, or
+	 * during ignition (see `awaitDependencies`). Answers whether it took anything.
+	 */
+	private recordDependencies(object: object, context: InterfaceContext) {
+		if (context.dependencies === undefined || context.dependencies.isEmpty()) return false;
+
+		this.initDependencies.set(object, context.dependencies);
+		return true;
+	}
+
 	public addInit(object: OnInit, context: InterfaceContext) {
 		this.initMembers.add(object);
 
@@ -425,14 +681,12 @@ export class LifecycleProvider {
 		// be initialised a second time here.
 		if (context.kind !== "provider") return;
 
+		this.recordDependencies(object, context);
+
 		if (!this.hasStarted) {
 			this.onInit.push(object);
 		} else {
-			pendingInits.add(object);
-			if (context.dependencies !== undefined && !context.dependencies.isEmpty()) {
-				this.initDependencies.set(object, context.dependencies);
-			}
-
+			pendingInits.set(object, this);
 			this.scheduleLateProvider(object);
 		}
 	}
@@ -458,6 +712,8 @@ export class LifecycleProvider {
 		// `listen` or `createClassInstance` is owned by whoever created it. `Components` starts a
 		// component itself, once the component is attached and ignition has finished.
 		if (context.kind !== "provider") return;
+
+		this.recordDependencies(object, context);
 
 		if (!this.hasStarted) {
 			this.startOrder.push(object);
@@ -486,10 +742,41 @@ export class LifecycleProvider {
 		// skipped, and then started with the rest, never initialised. Nothing leaves the list
 		// during ignition, so the index stays true. A `while`, since a `for` compiles to a numeric
 		// loop that reads the length once.
+		//
+		// Then the providers without an `onInit` whose `onStart` or per-frame events wait for what
+		// their constructor took: what is left in `initDependencies` once every `onInit` has waited.
 		let index = 0;
-		while (index < this.onInit.size()) {
-			this.runInit(this.onInit[index]);
-			index += 1;
+		while (true) {
+			let object: object | undefined;
+			const initialises = index < this.onInit.size();
+			if (initialises) {
+				object = this.onInit[index];
+			} else {
+				for (const [waiting] of this.initDependencies) {
+					object = waiting;
+					break;
+				}
+
+				if (object === undefined) break;
+			}
+
+			// After the `onInit`s still pending of what its constructor took, as in a late turn: a
+			// lazy provider of an import that nothing had resolved yet is constructed for it here and
+			// initialised by the import's plugin, on a turn of its own, which came after this one's
+			// `onInit` and `onStart` both. The ignition waits, as for an `onInit` that yields, and
+			// fails if that module extinguishes meanwhile, as it does when an import extinguishes
+			// while an `onInit` yields -- here before this `onInit` runs against what it released.
+			if (!this.awaitDependencies(object)) {
+				error(
+					`module '${module.debugName}': '${this.getIdentifier(object)}' takes a provider of a module that was extinguished while this module was igniting`,
+					0,
+				);
+			}
+
+			if (initialises) {
+				this.runInit(object as OnInit);
+				index += 1;
+			}
 		}
 
 		this.hasStarted = true;
@@ -523,60 +810,23 @@ export class LifecycleProvider {
 
 		this.heldLateProviders.clear();
 
-		const onTick = this.onTick;
-		const onPhysics = this.onPhysics;
-		const onRender = this.onRender;
-		const lateProviders = this.lateProviders;
+		const tickListeners = this.tickListeners;
+		const physicsListeners = this.physicsListeners;
+		const renderListeners = this.renderListeners;
 		const connections = new Array<RBXScriptConnection>();
-
-		// Each frame walks a copy of its set: a callback runs synchronously and may attach an object
-		// -- `createClassInstance`, `listen`, a lazy provider resolved -- and a key added to a table
-		// while it is walked can make the walk visit others twice or not at all once the table
-		// grows. One attached during the frame gets its first call on the next; one detached before
-		// its turn, or a late provider still waiting on its `onInit`, is passed over.
-		//
-		// And the walk stops once the module has begun to extinguish: a callback that extinguishes
-		// it returns here as soon as a later step of the extinguish yields, and by then everything
-		// has been told `onExtinguished` while still in the sets, which only `release` empties.
 
 		// Heartbeat rather than PostSimulation: the same point of the frame in a running game, but
 		// Heartbeat also fires where no simulation runs (an edit-mode plugin, an Open Cloud Luau
 		// task), so onTick works there too. PreSimulation has no such alias; onPhysics stays silent.
-		connections.push(
-			RunService.Heartbeat.Connect((dt) => {
-				for (const provider of [...onTick]) {
-					if (this.hasBegunExtinguishing()) break;
-					if (onTick.has(provider) && !lateProviders.has(provider)) {
-						this.profile(() => provider.onTick(dt), provider);
-					}
-				}
-			}),
-		);
+		connections.push(RunService.Heartbeat.Connect((dt) => this.walkFrame(tickListeners, "onTick", dt)));
 
 		connections.push(
-			RunService.PreSimulation.Connect((dt) => {
-				const now = time();
-				for (const provider of [...onPhysics]) {
-					if (this.hasBegunExtinguishing()) break;
-					if (onPhysics.has(provider) && !lateProviders.has(provider)) {
-						this.profile(() => provider.onPhysics(dt, now), provider);
-					}
-				}
-			}),
+			RunService.PreSimulation.Connect((dt) => this.walkFrame(physicsListeners, "onPhysics", dt, time())),
 		);
 
 		// PreRender never fires on the server, so there is nothing to connect there.
 		if (RunService.IsClient()) {
-			connections.push(
-				RunService.PreRender.Connect((dt) => {
-					for (const provider of [...onRender]) {
-						if (this.hasBegunExtinguishing()) break;
-						if (onRender.has(provider) && !lateProviders.has(provider)) {
-							this.profile(() => provider.onRender(dt), provider);
-						}
-					}
-				}),
-			);
+			connections.push(RunService.PreRender.Connect((dt) => this.walkFrame(renderListeners, "onRender", dt)));
 		}
 
 		this.moduleConnections.set(module, connections);
@@ -650,14 +900,6 @@ export class LifecycleProvider {
 	}
 }
 
-/** An observer that keeps one of the provider's plain event sets in step with the module. */
-function observeSet<T>(provider: LifecycleProvider, set: Set<T>): InterfaceConfiguration<T> {
-	return {
-		onAdded: (value) => set.add(value),
-		onRemoved: (value) => provider.removeFrom(set, value),
-	};
-}
-
 /**
  * Creates a lifecycle plugin with the specified options.
  *
@@ -683,9 +925,7 @@ export function createLifecyclePlugin(options: LifecyclePluginOptions = {}): Plu
 			onAdded: (value, context) => lifecycle.addStart(value, context),
 			onRemoved: (value) => lifecycle.removeStart(value),
 		});
-		target.observe<OnTick>(observeSet(lifecycle, lifecycle.onTick));
-		target.observe<OnRender>(observeSet(lifecycle, lifecycle.onRender));
-		target.observe<OnPhysics>(observeSet(lifecycle, lifecycle.onPhysics));
+		lifecycle.observeFrameEvents(target);
 		target.observe<OnExtinguished>({
 			onAdded: (value) => lifecycle.addExtinguished(value),
 			onRemoved: (value, context) => lifecycle.removeExtinguished(value, context.refused === true),

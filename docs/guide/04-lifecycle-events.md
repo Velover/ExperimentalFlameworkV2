@@ -67,6 +67,62 @@ class Database implements OnInit {
 A rejected Promise fails ignition with `onInit failed for '<id>': <reason>`. Because it blocks, keep
 it to setup that other providers genuinely depend on; anything else belongs in `onStart`.
 
+Across an import, the order is kept for what a constructor takes **directly**. A provider can take
+a lazy provider of a module it imports that is still running its `onInit` -- one that nothing had
+resolved until this provider's constructor did, which the import initialises on a turn of its own,
+or one resolved earlier that is still loading. Its `onInit` then waits for that one's to finish,
+and the ignition waits with it, as for an `onInit` that yields; a provider without an `onInit`
+waits the same way, before its `onStart` and per-frame events. Providers that take nothing still
+initialising do not wait. If the import begins to extinguish meanwhile, the ignition fails without
+running that `onInit` (`'<id>' takes a provider of a module that was extinguished while this module
+was igniting`). This
+holds wherever the ignition runs, Promise work included (a profile load's `andThen`, an `async`
+handler). The one exception is an import's own `onInit` that ignites this module before it yields,
+or from a thread it started and has not got back from: what it is itself initialising is not
+waited for, since that `onInit` cannot finish before the ignition does, nor a lazy provider of the
+import first resolved there, which joins its turn. After it yields -- an `async` `onInit` after an
+`await`, a Promise callback -- such an ignition cannot be told apart from one started by unrelated
+Promise work, so it waits, and a module that takes a provider whose `onInit` ignites it, or one
+that joins that `onInit`'s turn, waits for itself. Such a wait that lasts more than a few seconds
+is warned about, once, naming the provider that waits and the one it waits for; the warning can
+also come for an ordinary wait on a load that takes that long. Ignite such a module from `onStart`
+or a `PlayerAdded` handler instead.
+
+```ts
+// in the game module
+@Provider({ lazy: true })
+class GameStore implements OnInit {
+    public async onInit() {
+        await this.load();
+    }
+}
+
+// in a module ignited per player, importing the game module
+@Provider()
+class PlayerData implements OnInit {
+    constructor(private store: GameStore) {}
+
+    public onInit() {
+        // GameStore's onInit has finished
+    }
+}
+```
+
+The wait is not transitive: a provider in between that has no pending `onInit` of its own is not
+followed. If `PlayerInventory` takes `InventoryService`, which has no `onInit` and takes the
+loading `DataStore`, `PlayerInventory` does not wait for `DataStore`. Give the service in between
+an `onInit` -- an empty one will do: it waits for `DataStore`, and `PlayerInventory` waits for it --
+or have `PlayerInventory` take `DataStore` directly.
+
+```ts
+@Provider({ lazy: true })
+class InventoryService implements OnInit {
+    constructor(private data: DataStore) {}
+
+    public onInit() {} // makes whatever takes this service wait for DataStore too
+}
+```
+
 ## `onStart` in detail
 
 `onStart` runs once per provider, at the end of ignition, **on its own thread**. Two consequences:
@@ -129,10 +185,12 @@ or after it yields, joins them: one resolved on the `onInit`'s own thread, on a 
 has not yet got back from, or, while a Promise the `onInit` returned is pending, on a thread running
 Promise work (an `async` body, a Promise executor, an `andThen` callback -- any Promise's, since
 which one a thread works for cannot be told). One resolved anywhere else meanwhile -- a thread an
-`onInit` spawned counts, once it has yielded -- gets its own turn, and its `onInit` waits for
-nothing but the `onInit`s still running of the providers its constructor takes: one taking a
+`onInit` spawned counts, once it has yielded -- gets its own turn, and its `onInit` (or, without
+one, its `onStart` and per-frame events) waits for
+nothing but the `onInit`s still running of the providers its constructor takes directly: one taking a
 dependency that another turn is still initialising is initialised once that dependency's `onInit`
-has finished, so it never sees it half-initialised. A dependency waiting in turn for what depends on
+has finished, so it never sees that dependency half-initialised (the wait is not transitive; see
+`onInit` in detail above). A dependency waiting in turn for what depends on
 it hangs both, as with eager providers. One whose `onInit` raises is reported, never ticks and is
 never started, and the ones after it, or waiting for it, carry on. One first
 resolved while the module is still igniting, by a plugin's `onPostIgnite` hook after the lifecycle

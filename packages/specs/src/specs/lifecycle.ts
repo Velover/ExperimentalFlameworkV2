@@ -21,6 +21,8 @@ import { expectArrayEqual, expectEqual, expectThrows, expectTrue, suite } from "
 declare const __harness: {
 	/** Fires the RunService signals the per-frame lifecycle events hang off. */
 	step: (delta: number) => void;
+	/** Yields once, letting deferred work run. */
+	flush: () => void;
 };
 
 const started = new Array<string>();
@@ -172,6 +174,189 @@ class Detaching implements OnExtinguished {
 				this.module.removeClassInstance(other);
 			}
 		}
+	}
+}
+
+/** Counts its per-frame calls; `Walker.onCall` runs inside each, for the specs that change the sets mid-walk. */
+@Injectable()
+class Walker implements OnTick, OnPhysics, OnRender {
+	public static onCall?: (walker: Walker, event: "tick" | "physics" | "render") => void;
+
+	public ticks = 0;
+	public physics = 0;
+	public renders = 0;
+
+	public onTick() {
+		this.ticks += 1;
+		Walker.onCall?.(this, "tick");
+	}
+
+	public onPhysics() {
+		this.physics += 1;
+		Walker.onCall?.(this, "physics");
+	}
+
+	public onRender() {
+		this.renders += 1;
+		Walker.onCall?.(this, "render");
+	}
+}
+
+function totalTicks(walkers: Array<Walker>) {
+	return walkers.reduce((total, walker) => total + walker.ticks, 0);
+}
+
+/** Holds up the extinguish it hears of, on the thread running it, until a spec resumes `held`. */
+@Provider()
+class HoldingCloser implements OnExtinguished {
+	public static held?: thread;
+
+	public onExtinguished() {
+		HoldingCloser.held = coroutine.running();
+		coroutine.yield();
+	}
+}
+
+const storeLog = new Array<string>();
+
+/** A lazy provider whose `onInit` holds until a spec resumes `held`: a store still loading. */
+@Provider({ lazy: true })
+class HeldStore implements OnInit, OnStart {
+	public static held?: thread;
+	public initialised = false;
+
+	public onInit() {
+		HeldStore.held = coroutine.running();
+		coroutine.yield();
+		this.initialised = true;
+		storeLog.push("store:init ends");
+	}
+
+	public onStart() {
+		storeLog.push("store:start");
+	}
+}
+
+/** An eager provider taking `HeldStore`, for a module that imports the one registering it. */
+@Provider()
+class StoreUser implements OnInit, OnStart {
+	constructor(private readonly store: HeldStore) {}
+
+	public onInit() {
+		storeLog.push(`user:init store=${this.store.initialised}`);
+	}
+
+	public onStart() {
+		storeLog.push(`user:start store=${this.store.initialised}`);
+	}
+}
+
+/** A lazy provider whose `onInit` returns a Promise that a spec settles with `release`: a store loading. */
+@Provider({ lazy: true })
+class PromisedStore implements OnInit {
+	public static release?: () => void;
+	public initialised = false;
+
+	public onInit() {
+		return new Promise<void>((resolve) => {
+			PromisedStore.release = () => {
+				this.initialised = true;
+				storeLog.push("store:init ends");
+				resolve();
+			};
+		});
+	}
+}
+
+/** An eager provider taking `PromisedStore`, for a module that imports the one registering it. */
+@Provider()
+class PromisedStoreUser implements OnInit, OnStart {
+	constructor(private readonly store: PromisedStore) {}
+
+	public onInit() {
+		storeLog.push(`user:init store=${this.store.initialised}`);
+	}
+
+	public onStart() {
+		storeLog.push(`user:start store=${this.store.initialised}`);
+	}
+}
+
+/** A lazy provider nothing has resolved, with a sync `onInit`. */
+@Provider({ lazy: true })
+class QuietStore implements OnInit {
+	public initialised = false;
+
+	public onInit() {
+		this.initialised = true;
+		storeLog.push("quiet:init");
+	}
+}
+
+/** An eager provider taking `QuietStore`, for a module that imports the one registering it. */
+@Provider()
+class QuietStoreUser implements OnInit, OnStart {
+	constructor(private readonly store: QuietStore) {}
+
+	public onInit() {
+		storeLog.push(`user:init quiet=${this.store.initialised}`);
+	}
+
+	public onStart() {
+		storeLog.push(`user:start quiet=${this.store.initialised}`);
+	}
+}
+
+/** An eager provider taking `HeldStore` with an `onStart` and an `onTick`, and no `onInit`. */
+@Provider()
+class StartOnlyStoreUser implements OnStart, OnTick {
+	private ticked = false;
+
+	constructor(private readonly store: HeldStore) {}
+
+	public onStart() {
+		storeLog.push(`user:start store=${this.store.initialised}`);
+	}
+
+	public onTick() {
+		if (this.ticked) return;
+		this.ticked = true;
+		storeLog.push(`user:tick store=${this.store.initialised}`);
+	}
+}
+
+/** A lazy provider taking `HeldStore` with an `onStart` and no `onInit`, in the same module. */
+@Provider({ lazy: true })
+class LazyStartOnlyStoreUser implements OnStart {
+	constructor(private readonly store: HeldStore) {}
+
+	public onStart() {
+		storeLog.push(`lazy:start store=${this.store.initialised}`);
+	}
+}
+
+/** Yields until `done` answers true, a few rounds at most; answers whether it did. */
+function flushUntil(done: () => boolean) {
+	for (let round = 0; round < 20 && !done(); round++) {
+		__harness.flush();
+	}
+
+	return done();
+}
+
+/** A lazy provider that ticks, whose `onInit` holds until a spec resumes `held`. */
+@Provider({ lazy: true })
+class HeldLazyTicker implements OnInit, OnTick {
+	public static held?: thread;
+	public static ticks = 0;
+
+	public onInit() {
+		HeldLazyTicker.held = coroutine.running();
+		coroutine.yield();
+	}
+
+	public onTick() {
+		HeldLazyTicker.ticks += 1;
 	}
 }
 
@@ -667,6 +852,523 @@ export = suite("lifecycle", [
 			Detaching.instances.clear();
 
 			expectEqual(Detaching.calls, 1, "onExtinguished calls, with each one detaching the rest");
+		},
+	],
+	[
+		// The per-frame sets are walked in place, and a key added to a table while it is walked can
+		// make the walk visit others twice, or not at all, once the table grows.
+		"a per-frame listener attached during a frame is first called on the next, and each once a frame",
+		() => {
+			const module = Flamework.createModule().ignite();
+			const walkers = new Array<Walker>();
+			const attached = new Array<Walker>();
+			for (let i = 0; i < 8; i++) {
+				walkers.push(module.createClassInstance(Walker));
+			}
+
+			// Enough of them to grow the set several times over.
+			Walker.onCall = (_, event) => {
+				if (event !== "tick" || !attached.isEmpty()) return;
+				for (let i = 0; i < 40; i++) {
+					attached.push(module.createClassInstance(Walker));
+				}
+			};
+
+			try {
+				__harness.step(0.25);
+				Walker.onCall = undefined;
+				expectEqual(walkers.filter((w) => w.ticks !== 1).size(), 0, "listeners not ticked exactly once");
+				expectEqual(totalTicks(attached), 0, "ticks of the listeners attached during the frame");
+
+				__harness.step(0.25);
+				expectEqual(walkers.filter((w) => w.ticks !== 2).size(), 0, "listeners not ticked once more");
+				expectEqual(
+					attached.filter((w) => w.ticks !== 1 || w.physics !== 1).size(),
+					0,
+					"listeners attached during the last frame not called exactly once in this one",
+				);
+			} finally {
+				Walker.onCall = undefined;
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"a per-frame listener detached during a frame before its turn is not called, nor one attached and detached in it",
+		() => {
+			const module = Flamework.createModule().ignite();
+			const walkers = new Array<Walker>();
+			for (let i = 0; i < 10; i++) {
+				walkers.push(module.createClassInstance(Walker));
+			}
+
+			// The first one called detaches every other one, whichever it is: those whose turn has yet
+			// to come must not be called.
+			let passing: Walker | undefined;
+			Walker.onCall = (walker, event) => {
+				if (event !== "tick") return;
+				Walker.onCall = undefined;
+				for (const other of walkers) {
+					if (other !== walker) module.removeClassInstance(other);
+				}
+
+				passing = module.createClassInstance(Walker);
+				module.removeClassInstance(passing);
+			};
+
+			try {
+				__harness.step(0.25);
+				expectEqual(totalTicks(walkers), 1, "ticks in the frame the others were detached in");
+
+				__harness.step(0.25);
+				expectEqual(totalTicks(walkers), 2, "ticks after the next frame");
+				expectTrue(passing !== undefined, "the listener was attached");
+				expectEqual(passing!.ticks + passing!.physics + passing!.renders, 0, "calls to it");
+			} finally {
+				Walker.onCall = undefined;
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"a per-frame callback that extinguishes its module ends the frame's walk",
+		() => {
+			const module = Flamework.createModule().ignite();
+			const walkers = new Array<Walker>();
+			for (let i = 0; i < 10; i++) {
+				walkers.push(module.createClassInstance(Walker));
+			}
+
+			Walker.onCall = (_, event) => {
+				if (event !== "tick") return;
+				Walker.onCall = undefined;
+				module.extinguish();
+			};
+
+			try {
+				__harness.step(0.25);
+				expectTrue(module.isExtinguished(), "the module extinguished");
+				expectEqual(totalTicks(walkers), 1, "ticks in the frame the module extinguished in");
+			} finally {
+				Walker.onCall = undefined;
+				if (!module.isExtinguished()) module.extinguish();
+			}
+		},
+	],
+	[
+		// The extinguish begins on a thread the callback starts and yields -- in an importer's
+		// `onExtinguished` -- before the module's lifecycle plugin hears of it: the callback has
+		// returned by then, so the walk has to notice by itself.
+		"a per-frame callback that starts an extinguish which yields ends the frame's walk",
+		() => {
+			HoldingCloser.held = undefined;
+
+			const module = Flamework.createModule().ignite();
+			const importer = Flamework.createModule()
+				.registerClassProvider(HoldingCloser)
+				.ignite({ imports: [module] });
+
+			const walkers = new Array<Walker>();
+			for (let i = 0; i < 10; i++) {
+				walkers.push(module.createClassInstance(Walker));
+			}
+
+			Walker.onCall = (_, event) => {
+				if (event !== "tick") return;
+				Walker.onCall = undefined;
+				task.spawn(() => module.extinguish());
+			};
+
+			try {
+				__harness.step(0.25);
+				expectTrue(HoldingCloser.held !== undefined, "the importer's onExtinguished holds the extinguish");
+				expectEqual(totalTicks(walkers), 1, "ticks in the frame the extinguish began in");
+			} finally {
+				Walker.onCall = undefined;
+				const held = HoldingCloser.held;
+				HoldingCloser.held = undefined;
+				if (held !== undefined) task.spawn(held);
+			}
+
+			expectTrue(module.isExtinguished() && importer.isExtinguished(), "both modules extinguished");
+			__harness.step(0.25);
+			expectEqual(totalTicks(walkers), 1, "ticks after the extinguish");
+		},
+	],
+	[
+		"a lazy provider resolved during a frame does not tick before its onInit has finished",
+		() => {
+			HeldLazyTicker.held = undefined;
+			HeldLazyTicker.ticks = 0;
+
+			const module = Flamework.createModule().registerClassProvider(HeldLazyTicker).ignite();
+			const walker = module.createClassInstance(Walker);
+
+			// Resolved inside a tick, so that it joins the event while the walk runs.
+			Walker.onCall = (_, event) => {
+				if (event !== "tick") return;
+				Walker.onCall = undefined;
+				module.resolveDependency<HeldLazyTicker>();
+			};
+
+			try {
+				__harness.step(0.25);
+				__harness.flush();
+				expectTrue(HeldLazyTicker.held !== undefined, "its onInit is running");
+
+				__harness.step(0.25);
+				__harness.step(0.25);
+				expectEqual(HeldLazyTicker.ticks, 0, "ticks before its onInit finished");
+				expectEqual(walker.ticks, 3, "ticks of the other listener meanwhile");
+
+				const held = HeldLazyTicker.held!;
+				HeldLazyTicker.held = undefined;
+				task.spawn(held);
+
+				__harness.step(0.25);
+				expectEqual(HeldLazyTicker.ticks, 1, "ticks once its onInit finished");
+			} finally {
+				Walker.onCall = undefined;
+				const held = HeldLazyTicker.held;
+				HeldLazyTicker.held = undefined;
+				if (held !== undefined) task.spawn(held);
+				module.extinguish();
+			}
+		},
+	],
+	[
+		// The store is constructed for the user's constructor, in a module whose plugin has started,
+		// so its `onInit` gets a turn of that module's own -- which came after the user's `onInit`
+		// and `onStart` both, as the user was on the importing module's ignition list.
+		"an eager provider's onInit waits for the pending onInit of an import's lazy provider it takes",
+		() => {
+			storeLog.clear();
+			HeldStore.held = undefined;
+
+			const gameModule = Flamework.createModule().registerClassProvider(HeldStore).ignite();
+			let player: Module | undefined;
+			task.spawn(() => {
+				player = Flamework.createModule().registerClassProvider(StoreUser).ignite({ imports: [gameModule] });
+				storeLog.push("ignited");
+			});
+
+			try {
+				expectTrue(
+					flushUntil(() => HeldStore.held !== undefined),
+					"the store's onInit is running",
+				);
+				flushUntil(() => false);
+				expectArrayEqual(storeLog, [], "events while the store's onInit runs");
+
+				const held = HeldStore.held!;
+				HeldStore.held = undefined;
+				task.spawn(held);
+
+				expectTrue(
+					flushUntil(() => player !== undefined),
+					"the importing module ignited",
+				);
+				expectArrayEqual(
+					storeLog,
+					["store:init ends", "store:start", "user:init store=true", "user:start store=true", "ignited"],
+					"events",
+				);
+			} finally {
+				const held = HeldStore.held;
+				HeldStore.held = undefined;
+				if (held !== undefined) task.spawn(held);
+				flushUntil(() => player !== undefined);
+				if (player !== undefined && !player.isExtinguished()) player.extinguish();
+				if (!gameModule.isExtinguished()) gameModule.extinguish();
+			}
+		},
+	],
+	[
+		// The import releases the store unfinished: the user's `onInit` would run against it, and
+		// the module ignite onto an import gone, so the ignition fails instead, as it does when an
+		// import extinguishes while an `onInit` yields.
+		"an eager provider waiting on an import's lazy onInit fails the ignition when the import extinguishes",
+		() => {
+			storeLog.clear();
+			HeldStore.held = undefined;
+
+			const gameModule = Flamework.createModule().registerClassProvider(HeldStore).ignite();
+			let outcome: string | undefined;
+			task.spawn(() => {
+				const [ignited, err] = pcall(() =>
+					Flamework.createModule().registerClassProvider(StoreUser).ignite({ imports: [gameModule] }),
+				);
+				outcome = ignited ? "ignited" : tostring(err);
+			});
+
+			try {
+				expectTrue(
+					flushUntil(() => HeldStore.held !== undefined),
+					"the store's onInit is running",
+				);
+
+				gameModule.extinguish();
+				expectTrue(
+					flushUntil(() => outcome !== undefined),
+					"the ignition ended",
+				);
+				expectTrue(
+					outcome!.find("extinguished while this module was igniting", 1, true)[0] !== undefined,
+					`the ignition failed: ${outcome}`,
+				);
+				expectArrayEqual(storeLog, [], "the user's events");
+			} finally {
+				const held = HeldStore.held;
+				HeldStore.held = undefined;
+				if (held !== undefined) task.spawn(held);
+				if (!gameModule.isExtinguished()) gameModule.extinguish();
+			}
+		},
+	],
+	[
+		// Promise work -- a profile load's `andThen`, an `async` handler -- is a thread the store's
+		// turn, waiting on the Promise its `onInit` returned, could have been running: taking it for
+		// that turn's own work had the user skip the wait, and initialise and start against a store
+		// still loading.
+		"an eager provider ignited from Promise work waits for an import's lazy onInit that returned a Promise",
+		() => {
+			for (const how of ["andThen", "async"]) {
+				storeLog.clear();
+				PromisedStore.release = undefined;
+
+				const gameModule = Flamework.createModule().registerClassProvider(PromisedStore).ignite();
+				let player: Module | undefined;
+				const ignitePlayer = () => {
+					player = Flamework.createModule()
+						.registerClassProvider(PromisedStoreUser)
+						.ignite({ imports: [gameModule] });
+					storeLog.push("ignited");
+				};
+
+				if (how === "andThen") {
+					Promise.resolve().andThen(ignitePlayer);
+				} else {
+					(async () => {
+						await Promise.resolve();
+						ignitePlayer();
+					})();
+				}
+
+				try {
+					expectTrue(
+						flushUntil(() => PromisedStore.release !== undefined),
+						`${how}: the store's onInit is running`,
+					);
+					flushUntil(() => false);
+					expectArrayEqual(storeLog, [], `${how}: events while the store's onInit runs`);
+
+					PromisedStore.release!();
+					expectTrue(
+						flushUntil(() => player !== undefined),
+						`${how}: the importing module ignited`,
+					);
+					expectArrayEqual(
+						storeLog,
+						["store:init ends", "user:init store=true", "user:start store=true", "ignited"],
+						`${how}: events`,
+					);
+				} finally {
+					// Read through a cast: the flow analysis still takes it for the `undefined` assigned above.
+					const release = PromisedStore.release as (() => void) | undefined;
+					PromisedStore.release = undefined;
+					if (release !== undefined) release();
+					flushUntil(() => player !== undefined);
+					if (player !== undefined && !player.isExtinguished()) player.extinguish();
+					if (!gameModule.isExtinguished()) gameModule.extinguish();
+				}
+			}
+		},
+	],
+	[
+		// Resolved for the first time from Promise work while another lazy provider's Promise was
+		// pending, the store joins that provider's turn: it is initialised after that one's `onInit`,
+		// and the user waits for it all the same.
+		"an eager provider ignited from Promise work waits for a lazy provider that joined another's loading turn",
+		() => {
+			for (const how of ["andThen", "async"]) {
+				storeLog.clear();
+				PromisedStore.release = undefined;
+
+				const gameModule = Flamework.createModule()
+					.registerClassProvider(PromisedStore)
+					.registerClassProvider(QuietStore)
+					.ignite();
+				gameModule.resolveDependency<PromisedStore>();
+
+				let player: Module | undefined;
+				try {
+					expectTrue(
+						flushUntil(() => PromisedStore.release !== undefined),
+						`${how}: the loading store's onInit is running`,
+					);
+
+					const ignitePlayer = () => {
+						player = Flamework.createModule()
+							.registerClassProvider(QuietStoreUser)
+							.ignite({ imports: [gameModule] });
+						storeLog.push("ignited");
+					};
+
+					if (how === "andThen") {
+						Promise.resolve().andThen(ignitePlayer);
+					} else {
+						(async () => {
+							await Promise.resolve();
+							ignitePlayer();
+						})();
+					}
+
+					flushUntil(() => false);
+					expectArrayEqual(storeLog, [], `${how}: events while the other store loads`);
+
+					PromisedStore.release!();
+					expectTrue(
+						flushUntil(() => player !== undefined),
+						`${how}: the importing module ignited`,
+					);
+					expectArrayEqual(
+						storeLog,
+						["store:init ends", "quiet:init", "user:init quiet=true", "user:start quiet=true", "ignited"],
+						`${how}: events`,
+					);
+				} finally {
+					// Read through a cast: the flow analysis still takes it for the `undefined` assigned above.
+					const release = PromisedStore.release as (() => void) | undefined;
+					PromisedStore.release = undefined;
+					if (release !== undefined) release();
+					flushUntil(() => player !== undefined);
+					if (player !== undefined && !player.isExtinguished()) player.extinguish();
+					if (!gameModule.isExtinguished()) gameModule.extinguish();
+				}
+			}
+		},
+	],
+	[
+		// Its `onStart` and per-frame events are what would see the store half-initialised.
+		"an eager provider without an onInit starts and ticks after the pending onInit of an import's lazy provider it takes",
+		() => {
+			storeLog.clear();
+			HeldStore.held = undefined;
+
+			const gameModule = Flamework.createModule().registerClassProvider(HeldStore).ignite();
+			let player: Module | undefined;
+			task.spawn(() => {
+				player = Flamework.createModule().registerClassProvider(StartOnlyStoreUser).ignite({ imports: [gameModule] });
+				storeLog.push("ignited");
+			});
+
+			try {
+				expectTrue(
+					flushUntil(() => HeldStore.held !== undefined),
+					"the store's onInit is running",
+				);
+				flushUntil(() => false);
+				__harness.step(0.25);
+				expectArrayEqual(storeLog, [], "events while the store's onInit runs");
+
+				const held = HeldStore.held!;
+				HeldStore.held = undefined;
+				task.spawn(held);
+
+				expectTrue(
+					flushUntil(() => player !== undefined),
+					"the importing module ignited",
+				);
+				__harness.step(0.25);
+				expectArrayEqual(
+					storeLog,
+					["store:init ends", "store:start", "user:start store=true", "ignited", "user:tick store=true"],
+					"events",
+				);
+			} finally {
+				const held = HeldStore.held;
+				HeldStore.held = undefined;
+				if (held !== undefined) task.spawn(held);
+				flushUntil(() => player !== undefined);
+				if (player !== undefined && !player.isExtinguished()) player.extinguish();
+				if (!gameModule.isExtinguished()) gameModule.extinguish();
+			}
+		},
+	],
+	[
+		"a lazy provider without an onInit starts after the pending onInit of a provider it takes",
+		() => {
+			storeLog.clear();
+			HeldStore.held = undefined;
+
+			const module = Flamework.createModule()
+				.registerClassProvider(HeldStore)
+				.registerClassProvider(LazyStartOnlyStoreUser)
+				.ignite();
+			module.resolveDependency<HeldStore>();
+
+			try {
+				expectTrue(
+					flushUntil(() => HeldStore.held !== undefined),
+					"the store's onInit is running",
+				);
+
+				// On a thread of its own, so that it gets a turn of its own.
+				task.spawn(() => module.resolveDependency<LazyStartOnlyStoreUser>());
+				flushUntil(() => false);
+				expectArrayEqual(storeLog, [], "events while the store's onInit runs");
+
+				const held = HeldStore.held!;
+				HeldStore.held = undefined;
+				task.spawn(held);
+
+				expectTrue(
+					flushUntil(() => storeLog.includes("lazy:start store=true")),
+					"the lazy provider started",
+				);
+				expectArrayEqual(storeLog, ["store:init ends", "store:start", "lazy:start store=true"], "events");
+			} finally {
+				const held = HeldStore.held;
+				HeldStore.held = undefined;
+				if (held !== undefined) task.spawn(held);
+				module.extinguish();
+			}
+		},
+	],
+	[
+		// The recycled thread a per-frame callback runs on is parked between callbacks: one that
+		// kept `coroutine.running()` and cancels it later leaves a dead thread in the pool, which
+		// every later callback, of every module, was then handed to.
+		"a per-frame callback's thread cancelled while parked does not stop later callbacks",
+		() => {
+			const module = Flamework.createModule().ignite();
+			let kept: thread | undefined;
+			let first = 0;
+			let second = 0;
+			const stopFirst = module.listen<OnTick>(() => {
+				first += 1;
+				kept ??= coroutine.running();
+			});
+
+			try {
+				__harness.step(0.25);
+				expectTrue(kept !== undefined, "the callback ran");
+				expectEqual(coroutine.status(kept!), "suspended", "its thread, parked");
+				task.cancel(kept!);
+
+				const stopSecond = module.listen<OnTick>(() => {
+					second += 1;
+				});
+				__harness.step(0.25);
+				__harness.step(0.25);
+				stopSecond();
+
+				expectEqual(first, 3, "calls to the callback that kept its thread");
+				expectEqual(second, 2, "calls to one attached after the cancel");
+			} finally {
+				stopFirst();
+				module.extinguish();
+			}
 		},
 	],
 ]);

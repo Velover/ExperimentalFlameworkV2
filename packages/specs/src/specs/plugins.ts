@@ -1,4 +1,4 @@
-import { Flamework, OnStart, Provider } from "@flamework-experimental/core";
+import { Flamework, Injectable, OnStart, OnTick, Provider, type InterfaceContext } from "@flamework-experimental/core";
 import { expectArrayEqual, expectEqual, expectThrows, expectTrue, suite } from "../testkit";
 
 /** Undecorated on purpose: a plugin provides one, and nothing about that needs metadata. */
@@ -14,6 +14,12 @@ class Reporter {
 @Provider()
 class Starter implements OnStart {
 	public onStart() {}
+}
+
+@Injectable()
+class StartTicker implements OnStart, OnTick {
+	public onStart() {}
+	public onTick() {}
 }
 
 export = suite("plugins", [
@@ -234,6 +240,51 @@ export = suite("plugins", [
 
 			module.extinguish();
 			expectEqual(removed.size(), 1, "removals after extinguish");
+		},
+	],
+	[
+		// An observer that raises from its `onAdded` has the ones told before it undone, last first,
+		// each marked refused; it and those after it hear nothing more.
+		"undoes a refused attachment in reverse, as far as it got",
+		() => {
+			const log = new Array<string>();
+			const observer = (name: string, refuse = false) => ({
+				onAdded: () => {
+					log.push(`added ${name}`);
+					if (refuse) error(`refused by ${name}`);
+				},
+				onRemoved: (_: unknown, context: InterfaceContext) =>
+					log.push(`removed ${name} refused=${(context as { refused?: boolean }).refused === true}`),
+			});
+
+			const plugin = Flamework.createPlugin("Refusing", (target) => {
+				target.observe<OnStart>(observer("start a"));
+				target.observe<OnTick>(observer("tick a"));
+				target.observe<OnStart>(observer("start b"));
+				target.observe<OnTick>(observer("tick b", true));
+				target.observe<OnTick>(observer("tick c"));
+			});
+
+			const module = Flamework.createModule().disableDefaultLifecycle().includePlugin(plugin).ignite();
+			try {
+				const message = expectThrows(() => module.createClassInstance(StartTicker), "the refused attachment");
+				expectTrue(message.find("refused by tick b", 1, true)[0] !== undefined, `the error: ${message}`);
+				expectArrayEqual(
+					log,
+					[
+						"added start a",
+						"added start b",
+						"added tick a",
+						"added tick b",
+						"removed tick a refused=true",
+						"removed start b refused=true",
+						"removed start a refused=true",
+					],
+					"observer calls",
+				);
+			} finally {
+				module.extinguish();
+			}
 		},
 	],
 ]);

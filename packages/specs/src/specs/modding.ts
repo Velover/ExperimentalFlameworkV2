@@ -63,6 +63,17 @@ class Speaker implements Greeter {
 	}
 }
 
+/** Declares nothing of its own, so what it implements is all inherited. */
+@Injectable()
+class LoudSpeaker extends Speaker {}
+
+/** Implements nothing, until a spec gives it the metadata. */
+@Injectable()
+class Mute {}
+
+@Injectable()
+class MuteChild extends Mute {}
+
 export = suite("modding", [
 	[
 		"emits a runtime equivalent of a type",
@@ -168,6 +179,40 @@ export = suite("modding", [
 		() => {
 			expectTrue(Flamework.implements<Greeter>(new Speaker()), "class implementing the interface");
 			expectFalse(Flamework.implements<Greeter>(new Base()), "class not implementing the interface");
+		},
+	],
+	[
+		// What a class implements is walked once and kept: asked again, through a subclass, of the
+		// class itself or of a plain object, the answers are what the metadata says -- including
+		// after the metadata of a class already asked about changes.
+		"identifies implemented interfaces through subclasses, classes and later metadata changes",
+		() => {
+			expectTrue(Flamework.implements<Greeter>(new LoudSpeaker()), "subclass instance");
+			expectTrue(Flamework.implements<Greeter>(new LoudSpeaker()), "subclass instance, asked again");
+			expectTrue(Flamework.implements<Greeter>(LoudSpeaker), "the subclass itself");
+			expectTrue(Flamework.implements<Greeter>(Speaker), "the class itself");
+			expectFalse(Flamework.implements<Greeter>(Base), "a class not implementing it");
+
+			const greeterId = Flamework.id<Greeter>();
+			const plain = {};
+			expectFalse(Flamework.implements<Greeter>(plain), "a plain object");
+			Reflect.defineMetadata(plain, "flamework:implements", [greeterId]);
+			expectTrue(Flamework.implements<Greeter>(plain), "a plain object given the metadata");
+
+			const mute = new Mute();
+			const child = new MuteChild();
+			expectFalse(Flamework.implements<Greeter>(mute), "before the class has the metadata");
+			expectFalse(Flamework.implements<Greeter>(child), "a subclass, before its parent has it");
+			try {
+				Reflect.defineMetadata(Mute, "flamework:implements", [greeterId]);
+				expectTrue(Flamework.implements<Greeter>(mute), "once the class has it");
+				expectTrue(Flamework.implements<Greeter>(child), "a subclass, once its parent has it");
+			} finally {
+				Reflect.defineMetadata(Mute, "flamework:implements", []);
+			}
+
+			expectFalse(Flamework.implements<Greeter>(mute), "once the class no longer has it");
+			expectFalse(Flamework.implements<Greeter>(child), "a subclass, once its parent no longer has it");
 		},
 	],
 	[

@@ -2,6 +2,7 @@ import { t } from "@rbxts/t";
 import { Modding } from "./modding";
 import { Reflect } from "./reflect";
 import { AbstractConstructor } from "./utility/constructors";
+import { getClassImplements } from "./utility/getClassImplements";
 import { ModuleBuilder } from "./module/moduleBuilder";
 import { PluginDefinition, type PluginTarget } from "./plugin/pluginDefinition";
 import { LifecyclePlugin } from "./lifecycle/lifecyclePlugin";
@@ -46,6 +47,11 @@ export namespace Flamework {
 
 	/** @hidden */
 	export function _implements<T>(object: unknown, id: string): object is T {
+		// A table -- an instance, a class -- through the list kept per class.
+		if (typeIs(object, "table")) {
+			return getClassImplements(object).includes(id);
+		}
+
 		return Reflect.getMetadatas<string[]>(object as object, "flamework:implements").some((impl) =>
 			impl.includes(id),
 		);

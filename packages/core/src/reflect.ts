@@ -1,3 +1,5 @@
+import { forgetImplements } from "./utility/implementsCache";
+
 /**
  * Reflection/metadata API
  */
@@ -37,6 +39,9 @@ export namespace Reflect {
 	export function defineMetadata(obj: object, key: string, value: unknown, property?: string) {
 		const metadata = getObjMetadata(obj, property, true);
 		metadata.set(key, value);
+
+		// What `getClassImplements` keeps per class is built from this key.
+		if (key === "flamework:implements") forgetImplements(obj);
 	}
 
 	/**
@@ -48,6 +53,8 @@ export namespace Reflect {
 		for (const [key, value] of pairs(list)) {
 			metadata.set(key as string, value);
 		}
+
+		forgetImplements(obj);
 	}
 
 	/**
@@ -56,6 +63,8 @@ export namespace Reflect {
 	export function deleteMetadata(obj: object, key: string, property?: string) {
 		const metadata = getObjMetadata(obj, property);
 		metadata?.delete(key);
+
+		if (key === "flamework:implements") forgetImplements(obj);
 	}
 
 	/**
@@ -186,5 +195,6 @@ export namespace Reflect {
 	/** @hidden Internal use, do not use */
 	export function resetObject(object: object) {
 		metadata.delete(object);
+		forgetImplements(object);
 	}
 }

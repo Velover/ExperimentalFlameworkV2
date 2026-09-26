@@ -12,7 +12,7 @@ import { convertConciseDependencyInfo } from "../utility/convertConciseDependenc
 import { getClassImplements } from "../utility/getClassImplements";
 import { getClassesInPath } from "../utility/getClassesInPath";
 import { getClassesInGlob } from "../utility/globs";
-import { threadWaits } from "../utility/threadWaits";
+import { extinguishesBegun, threadWaits } from "../utility/threadWaits";
 import type { Destructor, ExtractSingleCallback } from "../utility/types";
 import type {
 	IgniteOptions,
@@ -403,10 +403,15 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		kind: InterfaceTargetKind,
 		dependencies?: ReadonlyArray<defined>,
 	) => {
-		const added = new Array<[string, InterfaceConfiguration<unknown>]>();
+		const interfaces = getClassImplements(instance);
+
+		// How many observers have been told `onAdded`, in the order they were told: what a refusal
+		// undoes. Counted rather than recorded, since an attachment that goes through -- every one,
+		// in a game -- then builds nothing to throw away.
+		let attached = 0;
 
 		const [success, err] = pcall(() => {
-			for (const interfaceId of getClassImplements(instance)) {
+			for (const interfaceId of interfaces) {
 				const interested = observers.get(interfaceId);
 				if (!interested) {
 					continue;
@@ -414,18 +419,32 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 
 				for (const observer of interested) {
 					observer.onAdded?.(instance, { interfaceId, kind, dependencies });
-					added.push([interfaceId, observer]);
+					attached += 1;
 				}
 			}
 		});
 
 		if (!success) {
+			// The observers told, found again by walking the same way as far as the count goes.
+			const told = new Array<[string, InterfaceConfiguration<unknown>]>();
+			for (const interfaceId of interfaces) {
+				const interested = observers.get(interfaceId);
+				if (!interested) {
+					continue;
+				}
+
+				for (const observer of interested) {
+					if (told.size() === attached) break;
+					told.push([interfaceId, observer]);
+				}
+			}
+
 			// Undone in reverse, each step guarded, so that one `onRemoved` raising does not leave
 			// the rest attached; the observer's error is what comes out. Marked as refused, so that
 			// an observer owing a departing object a last event -- the lifecycle plugin's
 			// `onExtinguished` while the module extinguishes -- does not deliver it.
-			for (let i = added.size() - 1; i >= 0; i--) {
-				const [interfaceId, observer] = added[i];
+			for (let i = told.size() - 1; i >= 0; i--) {
+				const [interfaceId, observer] = told[i];
 				guarded("undoing an attachment", () =>
 					observer.onRemoved?.(instance, { interfaceId, kind, refused: true }),
 				);
@@ -739,6 +758,7 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 	const extinguish: Module["extinguish"] = () => {
 		switchInitState(ModuleInitState.Ignited, ModuleInitState.Extinguishing);
 		extinguishingThread = coroutine.running();
+		extinguishesBegun.count += 1;
 
 		// Importers hold this module's instances, so they go first, and each takes its own importers
 		// down before it returns: the deepest goes first. Copied, since each removes itself. One

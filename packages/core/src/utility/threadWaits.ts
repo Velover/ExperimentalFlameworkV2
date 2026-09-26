@@ -15,6 +15,15 @@
  */
 export const threadWaits = new Map<thread, thread | Promise<unknown>>();
 
+/**
+ * How many extinguishes have begun, in any module, counted from the first line of `extinguish()`.
+ * The lifecycle plugin's per-frame walks read it after every callback and ask their module whether
+ * it has begun to extinguish only when it has changed, so that a callback that extinguishes the
+ * module -- itself, on a thread it starts, through a signal it fires -- stops the walk without a
+ * call per listener.
+ */
+export const extinguishesBegun = { count: 0 };
+
 const asyncFunction = async () => {};
 
 /**
