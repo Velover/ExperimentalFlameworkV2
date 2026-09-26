@@ -876,7 +876,8 @@ with `unpack`, which stops at `#list`. There is no Promise and no thread of its 
   error printed while the others run; the newest connection runs first, like an engine signal's.
   Connections are copy-on-write, so a fire under way is unaffected by a connect and skips a
   disconnect. `connect` returns this signal's connection, a table with `Connected`, `Disconnect` and
-  `Destroy`, not an engine `RBXScriptConnection`; `registerHandler` likewise.
+  `Destroy`, not an engine `RBXScriptConnection`; `registerHandler` likewise. Its type,
+  `SignalConnection` in `util/signal.d.ts`, is public as `Networking.Connection`.
 
 A message with no user middleware therefore costs the decode and the guard calls, a signal fire, and
 one resumption of a parked thread per handler.

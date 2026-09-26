@@ -1,6 +1,7 @@
 /**
- * A handler's connection. Shaped like an `RBXScriptConnection` (`Connected`, `Disconnect`), plus
- * `Destroy` for maids and janitors; it is a table, not an engine connection.
+ * A handler's connection, public as `Networking.Connection`. Shaped like an `RBXScriptConnection`
+ * (`Connected`, `Disconnect`), plus `Destroy` for maids and janitors; it is a table, not an engine
+ * connection.
  */
 export interface SignalConnection {
 	readonly Connected: boolean;

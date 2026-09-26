@@ -55,9 +55,9 @@ trip over later.
 Each handler passed to `connect` runs on a thread of its own as soon as a message has passed the
 guards and middleware, the newest connection first: one that yields holds up nothing, and one that
 raises has its error printed while the others still run. Every handler gets the same argument
-values, not copies, so a decoded `Map` or `Set` arrives intact. `connect` returns a connection with
-`Connected`, `Disconnect()` and `Destroy()` (for maids and janitors); it is networking's own, not an
-engine `RBXScriptConnection`.
+values, not copies, so a decoded `Map` or `Set` arrives intact. `connect` returns a
+`Networking.Connection`, with `Connected`, `Disconnect()` and `Destroy()` (for maids and janitors);
+it is networking's own, not an engine `RBXScriptConnection`.
 
 The idiomatic shape is a provider per realm holding the handler:
 
@@ -126,7 +126,7 @@ A rejection is always a `NetworkingFunctionError`:
 ```ts
 GlobalFunctions.createClient({})
     .buy.invoke("sword")
-    .catch((reason) => {
+    .catch((reason: unknown) => {
         if (reason === NetworkingFunctionError.Timeout) warn("server did not answer");
     });
 ```

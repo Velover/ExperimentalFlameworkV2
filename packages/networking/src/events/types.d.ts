@@ -10,6 +10,7 @@ import {
 } from "../types";
 import { EventNetworkingEvents } from "../handlers";
 import { EventMiddleware } from "../middleware/types";
+import { SignalConnection } from "../util/signal";
 import { Modding } from "@flamework-experimental/core";
 
 /**
@@ -56,7 +57,7 @@ export interface RawServerReceiver<I extends unknown[]> {
 	 * Connect to this networking event.
 	 * @param callback The callback that will be fired
 	 */
-	connect(cb: (player: Player, ...args: I) => void): RBXScriptConnection;
+	connect(cb: (player: Player, ...args: I) => void): SignalConnection;
 
 	/**
 	 * Fires a server event using player as the sender.
@@ -91,7 +92,7 @@ export interface RawClientReceiver<I extends unknown[]> {
 	 * Connect to this networking event.
 	 * @param callback The callback that will be fired
 	 */
-	connect(cb: (...args: I) => void): RBXScriptConnection;
+	connect(cb: (...args: I) => void): SignalConnection;
 
 	/**
 	 * Fires a client event.
@@ -174,7 +175,7 @@ export interface GlobalEvent<S, C> {
 	registerHandler<K extends keyof EventNetworkingEvents>(
 		key: K,
 		callback: EventNetworkingEvents[K],
-	): RBXScriptConnection;
+	): SignalConnection;
 }
 
 export type EventNamespaces<T> = ExcludeMembers<T, Callback>;

@@ -12,6 +12,7 @@ import {
 } from "../types";
 import { FunctionNetworkingEvents } from "../handlers";
 import { FunctionMiddleware } from "../middleware/types";
+import { SignalConnection } from "../util/signal";
 import { Modding } from "@flamework-experimental/core";
 
 /**
@@ -199,7 +200,7 @@ export interface GlobalFunction<S, C> {
 	registerHandler<K extends keyof FunctionNetworkingEvents>(
 		key: K,
 		callback: FunctionNetworkingEvents[K],
-	): RBXScriptConnection;
+	): SignalConnection;
 }
 
 export interface FunctionConfiguration {

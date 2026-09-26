@@ -7,6 +7,7 @@ import {
 	EventMiddleware as _EventMiddleware,
 	FunctionMiddleware as _FunctionMiddleware,
 } from "./middleware/types";
+import { SignalConnection as _SignalConnection } from "./util/signal";
 import { createNetworkingEvent } from "./events/createNetworkingEvent";
 import { createNetworkingFunction } from "./functions/createNetworkingFunction";
 import { NetworkRaw, NetworkUnreliable } from "./types";
@@ -70,6 +71,12 @@ export namespace Networking {
 	 * A function that generates an event middleware.
 	 */
 	export type FunctionMiddleware<I extends readonly unknown[] = unknown[], O = void> = _FunctionMiddleware<I, O>;
+
+	/**
+	 * What `connect` and `registerHandler` return: `Connected`, `Disconnect()`, and `Destroy()` for
+	 * maids and janitors. It is networking's own, not an engine `RBXScriptConnection`.
+	 */
+	export type Connection = _SignalConnection;
 }
 
 export { NetworkingFunctionError };

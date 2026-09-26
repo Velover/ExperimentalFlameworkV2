@@ -23,6 +23,11 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   a BindableEvent, so a handler is not disconnected when the script that connected it is destroyed.
   A script that is destroyed and recreated (a reset-on-spawn `LocalScript`, say) must disconnect its
   handlers, or they pile up and keep running.
+- **Networking connections have their own type, `Networking.Connection`.** Code that stores what
+  `connect` or `registerHandler` returns as `RBXScriptConnection` still compiles, because the shape
+  matches, but it should name `Networking.Connection`, which also offers `Destroy()`. A runtime check
+  such as `typeIs(connection, "RBXScriptConnection")` is false for these connections; `typeOf` gives
+  `"table"`.
 
 ### core
 
@@ -169,8 +174,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
     a BindableEvent (which the engine defers under `SignalBehavior.Deferred`);
   - an event's `predict` has called its handlers by the time it returns, unless a middleware yields;
   - `@rbxts/signal` is no longer a dependency of `networking`.
-- `connect` and `registerHandler` return networking's own connection (`Connected`, `Disconnect()`,
-  `Destroy()`), not an engine `RBXScriptConnection`; the types still name `RBXScriptConnection`.
+- `connect` and `registerHandler` return `Networking.Connection` (`Connected`, `Disconnect()`,
+  `Destroy()`), networking's own connection, not an engine `RBXScriptConnection`.
 
 #### Fixed
 
