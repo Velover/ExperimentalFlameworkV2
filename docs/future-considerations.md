@@ -214,6 +214,10 @@ Edge cases found and deliberately left alone, because the fix would cost more th
 - **components:** a component that keeps its finished `onStart`'s thread and `task.cancel`s it in
   `destroy`, removed synchronously from inside another component's `onStart` running on that recycled
   thread, raises `cannot cancel thread` from `destroy`.
+- **networking, destroyed scripts:** the first `connect` of an event in a realm starts listening to
+  its remote in a `task.defer` from the connecting thread, so the listener belongs to that script. If
+  that script is destroyed, the event stops for every handler on that side, and connecting again
+  does not restart it. roblox-ts projects never destroy their scripts, so this is not pursued.
 - **networking:** a sender created inside the leaving player's own `PlayerRemoving` handler never
   settles an infinite-timeout invoke of that player under Default or Immediate signal behaviour.
 - **networking:** a function or middleware result that is a table with a callable `andThen` but no

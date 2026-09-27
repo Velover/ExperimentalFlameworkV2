@@ -73,7 +73,7 @@ Ordinary parameters come first, generated ones after. A caller passes only the o
 | `Character` | The column, from 1. |
 | `Width` | The width of the call expression. |
 | `Text` | The source text of the call. |
-| `Uuid` | A string, unique between callsites and identical across compilations of the same source. |
+| `Uuid` | A string, unique between callsites and identical across compilations of the same source -- unless obfuscation is on, which makes it different in every clean build ([Obfuscation](09-project-structure.md#obfuscation)). |
 
 `Uuid` is what `Networking.createEvent` uses to give each network object a distinct name without you
 naming it.
@@ -126,6 +126,64 @@ export function keysOf<T>(keys?: Modding.Emit<Array<keyof T>>) {
 
 keysOf<{ a: 1; b: 2 }>(); // { "a", "b" }
 ```
+
+### Paths
+
+A macro can take a source path the way `registerProviders` does. A parameter typed
+`Modding.Intrinsic<"path", [T], string[]>` receives the folder the caller's string literal `T`
+names, as its Rojo path: an array of instance names from the root of the tree. To use it with, core
+exports what `registerProviders` is built on: `requireModulesInPath(path)` requires every
+ModuleScript at and under the path and returns what they export, and `getClassesInPath(path)`
+returns the Flamework classes they define.
+
+```ts
+import { getClassesInGlob, Modding, requireModulesInPath } from "@flamework-experimental/core";
+
+/**
+ * Requires every ModuleScript under a source folder, for what they do as they load.
+ *
+ * @metadata macro
+ */
+export function loadFolder<T extends string>(_path: T, path?: Modding.Intrinsic<"path", [T], string[]>) {
+    return requireModulesInPath(path!);
+}
+
+loadFolder("src/server/commands");
+```
+
+```lua
+loadFolder("src/server/commands", { "ServerScriptService", "TS", "commands" })
+```
+
+`Modding.Intrinsic<"pathglob", [T], string>` does the same for a glob. The glob is matched against
+your source when you compile, and the parameter receives the glob string (obfuscated when
+obfuscation is on), which `getGlobPaths(glob)` turns into the Rojo paths it matched and
+`getClassesInGlob(glob)` into the classes found under them:
+
+```ts
+/**
+ * Every Flamework class the modules under the folders a glob matches define.
+ *
+ * @metadata macro
+ */
+export function classesIn<T extends string>(_glob: T, glob?: Modding.Intrinsic<"pathglob", [T], string>) {
+    return getClassesInGlob(glob!);
+}
+
+classesIn("src/*/commands");
+```
+
+```lua
+classesIn("src/*/commands", "src/*/commands")
+```
+
+The rules are `registerProviders`'s: the argument must be a string literal naming a source path,
+not a Rojo one, and a `path` folder must be in your Rojo project (`Could not find Rojo data for
+'...'` otherwise). What a glob matched is written to `include/flamework/globs.json`, which only a
+game project gets, so a glob macro called from a published package raises `Flamework has no paths
+for the glob '...'` when it runs. `Modding.Intrinsic` is marked `@hidden` in core's declarations;
+that is a tag for documentation generators, which TypeScript ignores, and the type is the one
+`registerProviders`, `ComponentPlugin.fromPath` and a plugin target's `registerProviders` declare.
 
 ### Serializers
 

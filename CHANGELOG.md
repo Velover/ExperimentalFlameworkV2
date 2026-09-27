@@ -81,6 +81,27 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `@flamework-experimental/transformer`) was `*`, which matches no prerelease, so every install of an
   alpha warned about an incorrect peer dependency. It is `^2.0.0-alpha.0` now.
 
+### Docs
+
+- Getting started: the Rojo section maps each runtime package under `@flamework-experimental` by
+  name and says why not the whole folder -- the transformer is installed there too, and its folders
+  and three JSON schemas would be copied into ReplicatedStorage -- with the `globIgnorePaths` line
+  that leaves it out instead; the components, networking and testing pages point to it from their
+  install steps.
+- Migrating from v1: a first step for the packages, `tsconfig.json`, `flamework.json` →
+  `flamework.config.json`, the Rojo mapping and clearing v1's `out/`; `Flamework.resolveDependency(id)`'s
+  replacement, and rows for the other v1 `Modding` functions (`createDependency`,
+  `createDeferredDependency`, `resolveSingleton`, `addListener`); that components now attach after
+  every provider's `onStart` and that an attribute its guard rejects removes the component;
+  subscribing to implementers after ignition (a plugin for providers, `Components` for components);
+  the macro type renames (`Generic` → `Target.*`, `Many` → `Emit`, `Caller<M>` → `Caller.*`, ...)
+  and what else changed with them (the `path` intrinsic's value, `Caller.Uuid`), which the guide had
+  listed as unchanged; and the networking changes (`processNext`, `Networking.Connection`, handlers
+  no longer tied to the connecting script), which it had called unchanged. Step 12 no longer names
+  `Flamework.registerExternalClass` and `Flamework.createDependency`, which v1 1.3.2 does not have.
+- Macros: writing a path or glob macro of your own with `Modding.Intrinsic<"path">` /
+  `Modding.Intrinsic<"pathglob">`; `Caller.Uuid` changes with every clean build under obfuscation.
+
 ### Tests
 
 - The Studio test place lives in the repository (`tests/place`), linked to the packages' own builds:
@@ -104,13 +125,15 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   functions (see networking below).
 - **Networking middleware: `processNext` returns the next link's result, not a Promise.** A
   middleware that only returns `processNext(...)`, or `await`s it, needs no change. One that chains
-  on it, `processNext(...).andThen(f)` (or `.then`/`.catch`/`.finally`), becomes
-  `f(processNext(...))`. For an event `processNext` returns nothing; for a function it returns the
-  value or `Networking.Skip`.
-- **Disconnect networking handlers yourself.** `connect` and `registerHandler` no longer go through
-  a BindableEvent, so a handler is not disconnected when the script that connected it is destroyed.
-  A script that is destroyed and recreated (a reset-on-spawn `LocalScript`, say) must disconnect its
-  handlers, or they pile up and keep running.
+  on it, `processNext(...).andThen(f)` (or `.then(f)`), becomes `f(processNext(...))`. An error
+  further down is raised through `processNext` rather than rejecting a Promise, so a `.catch` or
+  `.finally` becomes a `try`/`catch` or `try`/`finally` around the call. For an event `processNext`
+  returns nothing; for a function it returns the value or `Networking.Skip`.
+- **Networking handlers are no longer tied to the script that connected them.** `connect` and
+  `registerHandler` no longer go through a BindableEvent, so the engine does not disconnect a handler
+  along with the script that connected it. A roblox-ts project does not destroy its scripts, so
+  nothing changes for a normal project. (Corrected after release: this note first said a destroyed
+  script's handlers pile up.)
 - **Networking connections have their own type, `Networking.Connection`.** Code that stores what
   `connect` or `registerHandler` returns as `RBXScriptConnection` still compiles, because the shape
   matches, but it should name `Networking.Connection`, which also offers `Destroy()`. A runtime check

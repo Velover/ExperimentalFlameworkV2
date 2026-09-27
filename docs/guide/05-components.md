@@ -8,6 +8,8 @@ when the tag goes away.
 npm install @flamework-experimental/components
 ```
 
+Map it in your Rojo project next to `core` ([Getting started › Rojo](01-getting-started.md#rojo)).
+
 ## Your first component
 
 ```ts

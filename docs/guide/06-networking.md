@@ -7,6 +7,8 @@ generates the remotes, the argument validation and the typed handlers from them.
 npm install @flamework-experimental/networking
 ```
 
+Map it in your Rojo project next to `core` ([Getting started › Rojo](01-getting-started.md#rojo)).
+
 ## Declaring a network
 
 Put this in shared code; both realms import the same object.

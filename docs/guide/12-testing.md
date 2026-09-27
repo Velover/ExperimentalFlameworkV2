@@ -64,7 +64,8 @@ altogether is Rojo's job, see [shipping](#shipping).
 Everything a project needs, in the order it is needed:
 
 1. The package: `bun add @flamework-experimental/testing`. It brings the roblox-ts side and the
-   `flamework-test` CLI, nothing else.
+   `flamework-test` CLI, nothing else. Map it in your Rojo project next to `core`
+   ([Getting started › Rojo](01-getting-started.md#rojo)).
 2. The switch: the `scopes` line above in `flamework.config.json`, and `FLAMEWORK_SCOPES=testing`
    in `.env`. A release build leaves the variable out and gets no tests and no host.
 3. A `Tests` folder per realm, registered under the scope, and `TestingPlugin` in each realm's

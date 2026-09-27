@@ -7,8 +7,11 @@ one, and everything that used to be built into it is now a plugin.
 
 | v1 | v2 |
 |---|---|
+| `@flamework/core`, `@flamework/components`, `@flamework/networking` | `@flamework-experimental/core`, `components`, `networking` (step 1) |
+| `rbxts-transformer-flamework` | `@flamework-experimental/transformer` (step 1) |
 | `@Service()` / `@Controller()` | `@Provider()` on both realms |
 | `Flamework.addPaths("src/services")` | `.registerProviders("src/services")`; like v1, it finds the classes a module defines whether it exports them or not |
+| `Flamework.addPaths(...)` to load a folder for what its modules do as they load | `requireModulesInPath` in a macro of your own; see [Macros › Paths](07-macros.md#paths) |
 | `Flamework.addPathsGlob("src/**/services")` | `.registerProvidersGlob("src/**/services")` / `ComponentPlugin.fromGlob(...)` |
 | `@Optional()` / `includeOptionalClass` | `@Provider({ lazy: true })`, constructed when first resolved |
 | `flamework.json` `profiling` | `flamework.config.json` `core.profiling`, or `createLifecyclePlugin({ profiling })` per module |
@@ -19,19 +22,71 @@ one, and everything that used to be built into it is now a plugin.
 | `Modding.getObjectFromId`, `Reflect.idToObj` | gone; there is no global registry |
 | `Flamework.ignite()` | `Flamework.createModule()…​.ignite()` |
 | Lifecycle events built in | still on: `LifecyclePlugin` is an ordinary plugin every module starts with; `disableDefaultLifecycle()` opts out |
-| `Dependency<T>()` | resolves **registered providers** only, from the first module ignited or the one ignited with `{ default: true }`; `Dependency<T>(module)` answers from a given one. v1 built any decorated class on demand: a component or an unregistered class no longer works (see step 4) |
-| `Flamework.registerExternalClass(C)` | `.registerClassProvider(C)` |
-| `Flamework.createDependency(C)` | `module.createClassInstance(C)` with `@Injectable()` |
-| `Modding.onListenerAdded<T>(cb)` | `target.observe<T>({ onAdded, onRemoved })` in a plugin |
+| `Dependency<T>()` | resolves **registered providers** only, from the first module ignited or the one ignited with `{ default: true }`; `Dependency<T>(module)` answers from a given one. v1 built any decorated class on demand: a component or an unregistered class no longer works (see step 5) |
+| `Flamework.resolveDependency(id)` | `Dependency<T>(undefined, id)`, or `module.resolveDependency<T>(id)` (step 5) |
+| A `@Service()`/`@Controller()` class outside the added paths, a singleton once its module had loaded | `.registerClassProvider(C)` (step 12) |
+| `Modding.createDependency(C)` | `module.createClassInstance(C)` with `@Injectable()` (step 12) |
+| `Modding.createDeferredDependency(C)` | `module.createClassInstance(C)`; nothing hands out the object before its constructor has run |
+| `Modding.resolveSingleton(C)` | `module.resolveDependency<C>()` or `Dependency<C>()`, for a registered provider (step 5) |
+| `Modding.addListener(obj)` / `Modding.removeListener(obj)` | `module.listen<T>(obj)` for each interface, which returns the function that detaches it; or build it with `module.createClassInstance(C)` and detach it with `removeClassInstance` |
+| `Modding.onListenerAdded<T>(cb)` | `target.observe<T>({ onAdded, onRemoved })` in a plugin; for components, `Components.onComponentAdded<T>(cb)` (step 7) |
+| `Modding.Generic`, `Many`, `Caller<M>`, `TupleLabels`, … | `Modding.Target.*`, `Emit`, `Caller.*` (step 9) |
 | Components auto-registered | `.includePlugin(ComponentPlugin.fromPath(…))` |
 | `Components` injected globally | `Components` is provided by the component plugin; inject it as before |
+| Tagged instances get their components in `Components.onStart` (`loadOrder: 0`), before most providers' `onStart` | after every provider's `onStart` (step 6) |
+| An attribute changed to a value its guard rejects is ignored | the component is removed until it is valid, unless a `defaults` entry covers it (step 6) |
 | `Flamework.implements` | unchanged |
 | `Flamework.id`, `createGuard` | unchanged |
 | `Networking.createEvent` | unchanged |
+| Middleware `processNext(...)` returns a Promise | returns the value (step 10) |
+| `connect` returns an `RBXScriptConnection`, tied through a BindableEvent to the script that connected | returns a `Networking.Connection`, not tied to that script's lifetime; nothing changes for a project that does not destroy its scripts (step 10) |
 
 ## Step by step
 
-### 1. Replace the entry point
+### 1. Swap the packages and the configuration
+
+The packages moved to the `@flamework-experimental` scope, and the transformer moved in with them:
+
+| v1 | v2 |
+|---|---|
+| `@flamework/core` | `@flamework-experimental/core` |
+| `@flamework/components` | `@flamework-experimental/components` |
+| `@flamework/networking` | `@flamework-experimental/networking` |
+| `rbxts-transformer-flamework` | `@flamework-experimental/transformer` |
+
+```sh
+npm uninstall @flamework/core @flamework/components @flamework/networking rbxts-transformer-flamework
+npm install @flamework-experimental/core @flamework-experimental/components @flamework-experimental/networking
+npm install -D @flamework-experimental/transformer
+```
+
+Install the ones you use, and upgrade them together: the [changelog](../../CHANGELOG.md) says which
+releases depend on each other. Then:
+
+- **Imports.** `@flamework/core` becomes `@flamework-experimental/core`, and so on for every import.
+- **`tsconfig.json`.** The transformer entry becomes
+  `{ "transform": "@flamework-experimental/transformer" }`, and `typeRoots` lists
+  `node_modules/@flamework-experimental` where it listed `node_modules/@flamework`. Options written
+  inline on the entry still work, and win over `flamework.config.json`; v1's `preloadIds` has no
+  counterpart.
+- **`flamework.json`** becomes `flamework.config.json`, next to `tsconfig.json`, with a section per
+  package ([Project structure › Configuration](09-project-structure.md#configuration)). v1's
+  `profiling` is `core.profiling`; `logLevel` and `disableDependencyWarnings` have no counterpart
+  (v1's warning for `Dependency<T>()` before `ignite()` is an error now; see step 5), and the new
+  file rejects keys it does not know. Nothing reads `flamework.json` any more.
+- **Rojo.** Where the project file maps `node_modules/@flamework`, map each runtime package under
+  `@flamework-experimental` instead -- not the whole folder, which holds the transformer too. See
+  [Getting started › Rojo](01-getting-started.md#rojo).
+- **Build output.** Delete `out/` before the first v2 build. The roblox-ts template builds
+  incrementally, with its `tsbuildinfo` in `out/`, and an incremental build starts from v1's
+  `flamework.build`, which the transformer refuses: `Project was compiled on different version of
+  Flamework. Please recompile by deleting the out directory`.
+
+A library built on v1 imports `@flamework/core` and does not work with v2 until it is ported --
+`@rbxts/flamework-react-utils`, for one, calls `Flamework.resolveDependency`, whose replacement is in
+step 5.
+
+### 2. Replace the entry point
 
 ```ts
 // v1
@@ -56,7 +111,7 @@ Flamework.createModule()
 Note that components and providers are now registered separately -- `registerProviders` only picks up
 `@Provider()` classes, and `registerComponents` only picks up `@Component()` ones.
 
-### 2. Rename the decorators
+### 3. Rename the decorators
 
 `@Service()` and `@Controller()` both become `@Provider()`. Nothing about a provider is
 realm-specific any more; which realm gets it is decided by which entry point registers its folder,
@@ -71,7 +126,7 @@ could be initialised before one it injected; v2 initialises dependencies first a
 that leaves free, and `onStart` follows `loadOrder` alone. See
 [Lifecycle events](04-lifecycle-events.md#load-order).
 
-### 3. Lifecycle events are still on
+### 4. Lifecycle events are still on
 
 `OnInit`, `OnStart`, `OnTick`, `OnPhysics` and `OnRender` work as they did. They are provided by
 `LifecyclePlugin`, an ordinary plugin every module starts with, so there is nothing to add. `OnInit`
@@ -81,14 +136,14 @@ waits; `onPhysics` still receives `(dt, time)`. The signals are v1's too: `onTic
 
 `OnRender` only connects on the client; a provider implementing it on the server is simply inert.
 
-### 4. `Dependency<T>()` still works -- for providers
+### 5. `Dependency<T>()` still works -- for providers
 
 It answers from the **default module**: the first root ignited in the realm, which for a game is the
 one the entry point ignites. For a provider, nothing to change, though constructor injection is
 still the better shape inside a provider:
 
 ```ts
-// still fine, anywhere
+// still fine, once a module has ignited
 const economy = Dependency<Economy>();
 
 // better, inside a provider
@@ -111,7 +166,27 @@ nothing else:
 
 See [Providers](03-providers.md#asking-for-something-that-is-not-a-provider).
 
-### 5. Update components
+v1's `Flamework.resolveDependency(id)` took the id as a string, and libraries built on v1 call it --
+`useFlameworkDependency` in `@rbxts/flamework-react-utils`, for one. In v2 the id is `Dependency`'s
+second argument: `Dependency<T>(undefined, id)` answers from the default module, and
+`module.resolveDependency<T>(id)` from a module you hold. A macro of your own takes the id of a type
+argument with `Modding.Target.Id<T>`:
+
+```ts
+import { Dependency, Modding } from "@flamework-experimental/core";
+
+/** @metadata macro */
+export function resolve<T>(id?: Modding.Target.Id<T>): T {
+    return Dependency<T>(undefined, id);
+}
+
+const economy = resolve<Economy>();
+```
+
+An id passed this way is not checked when you compile, as a type argument is: asking for a
+component's id raises when the call runs.
+
+### 6. Update components
 
 Register them through `ComponentPlugin`, and get `Components` by injection rather than globally:
 
@@ -129,7 +204,6 @@ The component API itself is largely unchanged. What is new:
   constructor.
 - Component-to-component dependencies work: declare the other component as a parameter and Flamework
   waits for it.
-- `ComponentStreamingMode` controls whether instance guards are re-run as the tree streams in.
 - Attributes are writable again, as they were in v1: `this.attributes.speed = 32` writes back to the
   instance. Alpha releases before this made them `Readonly`.
 - An attribute or a child typed as an Instance or as a component becomes a
@@ -142,9 +216,32 @@ The component API itself is largely unchanged. What is new:
   child link is watched, and read through `childComponents` -- or drop it from the tree and use
   `FindFirstChild`. Optional attributes are unaffected.
 
-### 6. Replace `Modding.onListenerAdded`
+Two things behave differently:
 
-The listener-observation API is now a plugin interface:
+- **Components attach after the providers start.** v1's `Components` was itself a service and a
+  controller, with `loadOrder: 0`, and built the components of the instances tagged so far in its
+  own `onStart`, before the `onStart` of every provider left at the default `loadOrder`. v2 starts
+  watching tags once the module has ignited: after every provider's `onStart` has been called,
+  whatever its `loadOrder`, and has run up to its first yield. A provider's `onStart` that reads
+  `getAllComponents<T>()` finds none of the instances tagged before ignition; connect
+  `onComponentAdded<T>(cb)` there instead, which hears each of them as it is built. (`onInit` saw
+  none in v1 either.)
+- **An attribute its guard rejects takes the component down.** v1 ignored such a change, and the
+  component kept the last good value. v2 removes the component, and builds it again, reading the
+  attributes afresh, once the attribute is valid -- unless a `defaults` entry covers that attribute,
+  which keeps the component with its last good value, as v1 did. `refreshAttributes: false` does not
+  change this: it stops `this.attributes` following the instance and `onAttributeChanged` firing,
+  not the check. See [What takes a component down again](05-components.md#what-takes-a-component-down-again).
+
+### 7. Replace `Modding.onListenerAdded`
+
+v1's `Modding.onListenerAdded<T>(cb)` worked from anywhere, at any time: it replayed the providers
+and components implementing `T` that already existed, then reported new ones. v2 has no global
+registry to ask; what replaces it depends on what you listen for.
+
+**Providers: observe from a plugin.** A plugin's `target.observe<T>` hears every object of the
+module that implements `T` -- each provider as it is constructed, and the components and anything
+else attached through `createClassInstance` or `listen` -- and hears it again when it goes:
 
 ```ts
 // v1
@@ -160,9 +257,66 @@ Flamework.createPlugin("PlayerListeners", (target) => {
 });
 ```
 
-See [Plugins](08-plugins.md) for the full shape.
+`observe` replays nothing, so it belongs in the plugin's setup, before the first provider is
+constructed, and only a plugin has it: a provider cannot subscribe to the module it is in. One that
+subscribed from its `onStart` in v1 takes the set from the plugin instead, which keeps it and hands
+it to the module with `provideInstance`:
 
-### 7. Custom decorators
+```ts
+export class PlayerListeners {
+    public readonly all = new Set<OnPlayerJoined>();
+}
+
+export const PlayerListenersPlugin = Flamework.createPlugin("PlayerListeners", (target) => {
+    const listeners = new PlayerListeners();
+    target.provideInstance(listeners);
+    target.observe<OnPlayerJoined>({
+        onAdded: (value) => listeners.all.add(value),
+        onRemoved: (value) => listeners.all.delete(value),
+    });
+});
+
+@Provider()
+export class Lobby implements OnStart {
+    constructor(private readonly listeners: PlayerListeners) {}
+
+    public onStart() {
+        Players.PlayerAdded.Connect((player) => {
+            for (const listener of this.listeners.all) listener.onPlayerJoined(player);
+        });
+    }
+}
+```
+
+**Components: ask `Components`.** Its polymorphic methods take an interface and answer at any time:
+`getAllComponents<T>()` for the components there are, `onComponentAdded<T>(cb)` and
+`onComponentRemoved<T>(cb)` for the ones that come and go. `onComponentAdded` does not replay the
+ones that exist, as v1's `onListenerAdded` did, so read those first:
+
+```ts
+@Provider()
+export class PriceTags implements OnStart {
+    constructor(private readonly components: Components) {}
+
+    public onStart() {
+        for (const tag of this.components.getAllComponents<ShowsPrice>()) this.show(tag);
+        this.components.onComponentAdded<ShowsPrice>((tag) => this.show(tag));
+        this.components.onComponentRemoved<ShowsPrice>((tag) => this.hide(tag));
+    }
+
+    private show(tag: ShowsPrice) {}
+    private hide(tag: ShowsPrice) {}
+}
+```
+
+A generic helper of your own -- an `onListenerAdded<T>` kept for the old call sites, say -- is a
+macro that takes `id?: Modding.Target.Id<T>` and passes it on as the last argument:
+`getAllComponents<T>(id)`, `onComponentAdded<T>(cb, id)`, `onComponentRemoved<T>(cb, id)`.
+
+See [Plugins](08-plugins.md#observing-interfaces) and
+[Working with components](05-components.md#working-with-components).
+
+### 8. Custom decorators
 
 v1's `Modding.createDecorator`, `createMetaDecorator`, `getDecorators`, `getDecorator`,
 `getPropertyDecorators` and `Reflect.decorate` are gone, along with the global class registry behind
@@ -171,6 +325,8 @@ JSDoc tells the transformer which metadata to attach, and which records whatever
 class with `Reflect`:
 
 ```ts
+import { Reflect } from "@flamework-experimental/core";
+
 /**
  * @metadata reflect identifier flamework:implements
  */
@@ -188,19 +344,108 @@ plus what they export that carries one, each once -- the classes v1's registry h
 folder:
 
 ```ts
-import { getClassesInPath } from "@flamework-experimental/core";
+import { getClassesInPath, Reflect } from "@flamework-experimental/core";
 
-for (const ctor of getClassesInPath(path)) {
-    const name = Reflect.getOwnMetadata<string>(ctor, "myGame:command");
-    if (name !== undefined) register(name, ctor);
+export function findCommands(path: readonly string[], register: (name: string, ctor: object) => void) {
+    for (const ctor of getClassesInPath(path)) {
+        const name = Reflect.getOwnMetadata<string>(ctor, "myGame:command");
+        if (name !== undefined) register(name, ctor);
+    }
 }
 ```
 
 `getClassesInPath` takes the Rojo path array the `path` intrinsic produces; wrap it in a macro of
-your own (see [Macros](07-macros.md)) so callers can pass `"src/server/commands"`. Property and method
-decorators work the same way, with `Reflect.defineMetadata(ctor, key, value, propertyName)`.
+your own so callers can pass `"src/server/commands"` -- [Macros › Paths](07-macros.md#paths) shows
+one. A folder v1 loaded with `Flamework.addPaths` only for what its modules do as they load --
+modules that register themselves with a library, say -- is `requireModulesInPath` behind the same
+kind of macro. Property and method decorators work the same way, with
+`Reflect.defineMetadata(ctor, key, value, propertyName)`.
 
-### 8. Removed without replacement
+### 9. Rename the macro types
+
+The types a macro's parameters use are grouped now: what describes the callsite is under
+`Modding.Caller`, what describes a type argument under `Modding.Target`, and `Many` is `Emit`. The
+rename is mechanical, except where the table says what else changed:
+
+| v1 | v2 |
+|---|---|
+| `Modding.Many<T>` | `Modding.Emit<T>` |
+| `Modding.Generic<T, "id">` | `Modding.Target.Id<T>` |
+| `Modding.Generic<T, "text">` | `Modding.Target.Text<T>` |
+| `Modding.Generic<T, "guard">` | `Modding.Target.Guard<T>` |
+| `Modding.GenericMany<T, "id" \| "guard">` | `Modding.Emit<{ id: Modding.Target.Id<T>; guard: Modding.Target.Guard<T> }>` |
+| `Modding.Caller<"line">`, and `"character"`, `"width"`, `"text"` | `Modding.Caller.Line`, and `Character`, `Width`, `Text` |
+| `Modding.Caller<"uuid">` | `Modding.Caller.Uuid`. v1 generated a random one on every compile; v2 derives it from the callsite, so the same source gives the same one in every build unless obfuscation is on |
+| `Modding.CallerMany<"line" \| "text">` | `Modding.Emit<{ line: Modding.Caller.Line; text: Modding.Caller.Text }>` |
+| `Modding.TupleLabels<T>` | `Modding.Target.Labels<T>` |
+| `Modding.Hash<T, C>`, `Modding.Obfuscate<T, C>` | `Modding.Target.Hash<T, C>`, `Modding.Target.Obfuscate<T, C>` |
+| `Modding.Intrinsic<"path", [T]>` | `Modding.Intrinsic<"path", [T], string[]>`: the value is one Rojo path, where v1's was a list holding one (`string[][]`). See [Macros › Paths](07-macros.md#paths) |
+| `IntrinsicSymbolId<T>` from `@flamework/core/out/utility` (`Modding.Intrinsic<"symbol-id", [T], string>`) | `Modding.Target.Id<T>` |
+| `Modding.Intrinsic<"declaration-uid", [], string>`, the id of the declaration a call sits in | gone; `Modding.Caller.Uuid` identifies the callsite |
+
+```ts
+// v1
+/** @metadata macro */
+export function validate<T>(value: unknown, guard?: Modding.Generic<T, "guard">): value is T {
+    return guard!(value);
+}
+
+// v2
+/** @metadata macro */
+export function validate<T>(value: unknown, guard?: Modding.Target.Guard<T>): value is T {
+    return guard!(value);
+}
+```
+
+New in v2 are `Modding.Caller.Constant<T>`, metadata generated once per callsite and shared by
+every call, and `Modding.Target.Dependency<T>` and `DependencyConcise<T>`, the id and metadata
+dependency injection resolves a type by. See [Macros](07-macros.md).
+
+### 10. Networking
+
+`createEvent`, `createFunction`, namespaces, guards and `Networking.Skip` are as they were. What
+changed:
+
+- **`processNext` returns the next link's result, not a Promise**: nothing for an event, the value
+  or `Networking.Skip` for a function. A middleware that returns `processNext(...)`, or `await`s it,
+  needs no change. One that chained on it, `processNext(...).andThen(f)` (or `.then(f)`), calls `f`
+  on the result instead:
+
+  ```ts
+  // v1
+  const logPurchases: Networking.FunctionMiddleware<[itemId: string], boolean> = (processNext) => {
+      return (player, itemId) =>
+          processNext(player, itemId).andThen((bought) => {
+              print(player, itemId, bought);
+              return bought;
+          });
+  };
+
+  // v2
+  const logPurchases: Networking.FunctionMiddleware<[itemId: string], boolean> = (processNext) => {
+      return (player, itemId) => {
+          const bought = processNext(player, itemId);
+          print(player, itemId, bought);
+          return bought;
+      };
+  };
+  ```
+
+  An error further down is now raised through `processNext` rather than rejecting a Promise, so a
+  `.catch` or `.finally` becomes a `try`/`catch` or `try`/`finally` around the call. See
+  [Middleware](06-networking.md#middleware).
+- **`connect` and `registerHandler` return a `Networking.Connection`** -- `Connected`,
+  `Disconnect()`, and `Destroy()` for maids and janitors -- networking's own rather than an engine
+  `RBXScriptConnection`. Code that stores one as `RBXScriptConnection` still compiles, since the
+  shape matches; name `Networking.Connection` instead. `typeIs(connection, "RBXScriptConnection")`
+  is false for one.
+- **Handlers are no longer tied to the lifetime of the script that connected them**, as v1's were
+  through a BindableEvent. A roblox-ts project does not destroy its scripts, so nothing changes for
+  a normal project.
+- **Each handler runs at once, on a thread of its own**, newest connection first, rather than when a
+  BindableEvent delivers it, which the engine defers under `SignalBehavior.Deferred`.
+
+### 11. Removed without replacement
 
 - **Primitive dependencies.** v1 could inject a string or number literal type (`$ps:`/`$pn:` ids).
   Register a function provider under an interface instead.
@@ -208,30 +453,34 @@ decorators work the same way, with `Reflect.defineMetadata(ctor, key, value, pro
 - **`Modding.onListenerAdded` without an id** (every listener). Register an interface per event.
 - **`Flamework.hash`.** `Modding.Target.Hash` still exists for writing a macro of your own.
 
-### 9. Externally created classes
+### 12. Externally created classes
+
+v1 made a `@Service()` or `@Controller()` class a singleton as soon as its module had loaded,
+wherever it sat. v2 registers only what the module is given, so register a provider that no
+registered folder holds by hand:
 
 ```ts
 // v1
-Flamework.registerExternalClass(SomeClass);
+Modding.createDependency(Helper); // a one-off instance, with injection
 
-// v2 -- as a provider
-.registerClassProvider(SomeClass)
+// v2 -- a provider outside the registered folders
+.registerClassProvider(SomeService)
 
-// v2 -- as a one-off instance with injection but no registration
+// v2 -- a one-off instance with injection but no registration
 @Injectable()
-class SomeClass {}
+class Helper {}
 
-module.createClassInstance(SomeClass);
+module.createClassInstance(Helper);
 ```
 
 ## What did not change
 
-The transformer, and everything that depends on it, works the same way: `Flamework.id`,
-`Flamework.implements`, `Flamework.createGuard`, `Modding.inspect`, `Modding.Caller`,
-`Modding.Target`, and writing your own macros with `@metadata macro`.
+The transformer works the same way for everything built on it: `Flamework.id`,
+`Flamework.implements`, `Flamework.createGuard`, `Modding.inspect`, and writing your own macros with
+`@metadata macro` -- with the macro types renamed ([step 9](#9-rename-the-macro-types)).
 
-Networking's public API is unchanged -- `createEvent`, `createFunction`, middleware, `Networking.Skip`
-and the error values all behave as they did.
+Networking's `createEvent`, `createFunction`, namespaces, guards, `Networking.Skip` and the error
+values are as they were; middleware, connections and handlers changed ([step 10](#10-networking)).
 
 ## Things to check after migrating
 
@@ -247,6 +496,15 @@ and the error values all behave as they did.
   it on demand; v2 does not.
 - Is any decorated class in a registered folder meant to stay out of the module? Unexported classes
   are registered now, as in v1: move it out of the folder, or into the function that uses it.
+- Does a provider's `onStart` expect the components of tagged instances to exist already? They are
+  built after it now.
+- Does anything count on a component surviving an invalid attribute? Give the attribute a
+  `defaults` entry.
+- Did anything count on a networking handler going away with the script that connected it?
+  Handlers are no longer tied to that script's lifetime; a roblox-ts project does not destroy its
+  scripts, so nothing changes for a normal project.
+- Is the whole `node_modules/@flamework-experimental` folder mapped in your Rojo project? Map the
+  runtime packages one by one, or ignore the transformer.
 - Do any constructors yield? They used to be tolerable; now they stall ignition.
 - Is there exactly one `ignite()` per realm? Two containers do not share providers, and
   `Dependency<T>()` answers from the first.

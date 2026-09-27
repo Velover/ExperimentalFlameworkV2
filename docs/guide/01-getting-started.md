@@ -42,18 +42,37 @@ to `tsconfig.json`, one section per package; it is covered in
 
 ## Rojo
 
-Flamework resolves a source directory into a Rojo instance path at compile time, so your project
-file has to map the folders you register from. A default roblox-ts project already does:
+Your Rojo project file has to map two things: the folders you register from, and the packages.
+
+Flamework resolves a source directory into a Rojo instance path at compile time, so the folders you
+register from have to be in the project file; a default roblox-ts project maps all of `out/`. The
+packages are ModuleScripts like any `@rbxts` package, and live next to them under
+`ReplicatedStorage.rbxts_include.node_modules`. Map each runtime package you installed there, by
+name:
 
 ```json
 {
   "name": "my-game",
+  "globIgnorePaths": ["**/package.json", "**/tsconfig.json"],
   "tree": {
     "$className": "DataModel",
     "ServerScriptService": {
       "TS": { "$path": "out/server" }
     },
     "ReplicatedStorage": {
+      "rbxts_include": {
+        "$path": "include",
+        "node_modules": {
+          "$className": "Folder",
+          "@rbxts": { "$path": "node_modules/@rbxts" },
+          "@flamework-experimental": {
+            "$className": "Folder",
+            "core": { "$path": "node_modules/@flamework-experimental/core" },
+            "components": { "$path": "node_modules/@flamework-experimental/components" },
+            "networking": { "$path": "node_modules/@flamework-experimental/networking" }
+          }
+        }
+      },
       "TS": { "$path": "out/shared" }
     },
     "StarterPlayer": {
@@ -65,8 +84,26 @@ file has to map the folders you register from. A default roblox-ts project alrea
 }
 ```
 
-If a folder is not in the project file you will get `Could not find Rojo data for 'src/...'` at
-compile time.
+`core` is always needed; list `components`, `networking` and `testing` when you install them, and
+leave out the ones you do not use. `include` holds the roblox-ts runtime and the files Flamework
+generates at compile time (`include/flamework`), and `globIgnorePaths` keeps each package's
+`package.json` from becoming a ModuleScript -- both as in the roblox-ts template.
+
+**Do not map the whole `node_modules/@flamework-experimental` folder.** The transformer is installed
+there too, and Rojo would copy it into `ReplicatedStorage`, which replicates to every client: its
+JavaScript is skipped, but its folders arrive as empty Folders and its three JSON schemas as
+ModuleScripts (`flamework-schema`, `flamework.config.schema`, `rojo-schema`). v1's transformer was
+`rbxts-transformer-flamework`, outside the `@flamework` scope, which is why mapping that whole scope
+was harmless. If you would rather map the folder, leave the transformer out of it:
+
+```json
+"globIgnorePaths": ["**/package.json", "**/tsconfig.json", "node_modules/@flamework-experimental/transformer"]
+```
+
+If a folder you register from is not in the project file you will get `Could not find Rojo data for
+'src/...'` at compile time; a package your code imports that is not mapped fails to compile with
+roblox-ts's `Could not find Rojo data. There is no $path in your Rojo config that covers ...`,
+naming a file of that package.
 
 ## Your first provider
 
@@ -174,6 +211,7 @@ in a plugin both include. That is [Plugins](08-plugins.md).
 | Message | Cause |
 |---|---|
 | `Could not find Rojo data for 'src/...'` | The folder is not mapped in your Rojo project file. |
+| `Could not find Rojo data. There is no $path in your Rojo config that covers ...` (roblox-ts) | The file it names is in a package your code imports that the Rojo project file does not map; see [Rojo](#rojo). |
 | `Path is invalid, expected string literal and got: string` | The path argument is not a literal. |
 | `class 'X' is missing the @Provider() decorator` | `registerClassProvider`/`registerProvider` was given an undecorated class. |
 | `class 'X' is missing the @Provider() decorator: it inherits one from a parent class` | The class extends a provider but is not decorated itself. |
