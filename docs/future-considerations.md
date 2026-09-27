@@ -1,12 +1,46 @@
 # Future considerations
 
-Possible directions for Flamework v2, collected after the September 2026 find-and-fix rounds. Nothing
-here is scheduled. Section 2 records a decision (Immediate signal behaviour stays supported); the rest
-are open, and each item says what it would change and why it came up.
+Possible directions for Flamework v2, collected after the September 2026 find-and-fix rounds. The
+top-priority item comes first. Nothing else here is scheduled. Section 2 records a decision (Immediate
+signal behaviour stays supported); the rest are open, and each item says what it would change and why
+it came up.
 
 The main concern behind all of them: **a game should not pay, in performance or memory, for a feature
 it does not use.** Runtime extinguishing, lazy providers, links and the like are rare in real games,
 yet several fixes made the common path do a little more work so those rare cases stay correct.
+
+## Top priority: `Networking.Serialized`, opting one member into serialization
+
+**The gap.** Serialization is one switch for the whole game (`"networking": { "serialization": true }`
+in `flamework.config.json`, off by default). `Networking.Raw` / `RawReliable` / `RawUnreliable` opt a
+member *out* while it is on, but nothing opts a member *in* while it is off. A game that already ships
+with it off cannot pack only its heavy remotes: turning the switch on changes the wire format of every
+remote at once. Dive In is the case that raised it: about 90 remotes, serialization off, and the
+owner wants to pack only some of them.
+
+**The proposal.** The mirror of `Raw`: `Networking.Serialized<T>`, `SerializedReliable<T>` and
+`SerializedUnreliable<T>` (the last on an `UnreliableRemoteEvent`, like `Unreliable`). With the switch
+off, a member marked this way is packed exactly as it would be with the switch on: the encoder at each
+call site, the decoder in the `createServer`/`createClient` metadata, the result packer for a
+function. With the switch on, the marker changes nothing, and `Raw` still opts out.
+
+**What it touches.**
+- The transformer: where it decides per member whether to generate the codec (today the global
+  switch minus `Raw`), it also reads the new marker. The generator itself is unchanged.
+- networking's types, next to `NetworkRaw`.
+- Guide 06 (Serialization, "Opting out per event" becomes "Opting in and out per event"), the
+  CHANGELOG and the migration notes.
+- Tests: the packed wire format of a marked member with the switch off equals the switch-on format;
+  unmarked members stay unpacked; `Raw` wins over the switch; events, functions and unreliable events;
+  Studio round trips on both realms.
+
+**Constraints.** Server and client must come from the same build, as for the switch itself.
+Changing a member's marker changes its wire format, so it is a coordinated deploy like any protocol
+change.
+
+**Not part of it:** general-purpose compression of the bytes (LZ or similar over the buffer).
+Serialization already writes a compact encoding (sized numbers, variable-length integers, no field
+names); byte compression is a separate idea, worth it only for large payloads and only if measured.
 
 ## 1. Performance and memory cost of each feature
 
