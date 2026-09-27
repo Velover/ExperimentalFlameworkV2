@@ -15,7 +15,7 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@flamework-experimental/core": "*"
+    "@flamework-experimental/core": "^2.0.0-alpha.0"
   },
   "devDependencies": {
     "@flamework-experimental/core": "workspace:*",

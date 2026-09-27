@@ -56,6 +56,40 @@ describe.each(PACKAGES)("@flamework-experimental/%s", (pkg) => {
 	});
 });
 
+describe("peer dependency ranges", () => {
+	// A range such as `*` matches no prerelease under semver, so every install of an alpha printed
+	// `incorrect peer dependency` for each package that names core. Each Flamework peer range has to
+	// take the version the package it names is at now, prerelease or not.
+	const manifest = (pkg: string) =>
+		JSON.parse(fs.readFileSync(path.join(ROOT, "packages", pkg, "package.json"), "utf8")) as {
+			version: string;
+			peerDependencies?: Record<string, string>;
+		};
+
+	test.each(["components", "networking", "testing"])(
+		"%s accepts the Flamework versions it is released with",
+		(pkg) => {
+			const peers = Object.entries(manifest(pkg).peerDependencies ?? {}).filter(([name]) =>
+				name.startsWith("@flamework-experimental/"),
+			);
+			expect(peers.length).toBeGreaterThan(0);
+
+			for (const [name, range] of peers) {
+				const version = manifest(name.slice("@flamework-experimental/".length)).version;
+				expect(`${name}@${version} in ${range}: ${Bun.semver.satisfies(version, range)}`).toBe(
+					`${name}@${version} in ${range}: true`,
+				);
+
+				// Every later release of the same major, and the releases the prerelease leads to.
+				for (const later of ["2.0.0", "2.3.1"]) {
+					expect(Bun.semver.satisfies(later, range)).toBe(true);
+				}
+				expect(Bun.semver.satisfies("3.0.0", range)).toBe(false);
+			}
+		},
+	);
+});
+
 describe("@flamework-experimental/testing's CLI", () => {
 	// A game's Rojo project syncs node_modules/@flamework-experimental into the place, and Rojo makes a
 	// ModuleScript of every .luau it finds; the CLI's Luau is kept under another extension for that.

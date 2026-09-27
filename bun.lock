@@ -39,7 +39,7 @@
         "roblox-ts": "^3.0.0",
       },
       "peerDependencies": {
-        "@flamework-experimental/core": "*",
+        "@flamework-experimental/core": "^2.0.0-alpha.0",
       },
     },
     "packages/core": {
@@ -73,7 +73,7 @@
         "roblox-ts": "^3.0.0",
       },
       "peerDependencies": {
-        "@flamework-experimental/core": "*",
+        "@flamework-experimental/core": "^2.0.0-alpha.0",
       },
     },
     "packages/specs": {
@@ -113,8 +113,8 @@
         "typescript": "^5.9.3",
       },
       "peerDependencies": {
-        "@flamework-experimental/core": "*",
-        "@flamework-experimental/transformer": "*",
+        "@flamework-experimental/core": "^2.0.0-alpha.0",
+        "@flamework-experimental/transformer": "^2.0.0-alpha.0",
       },
     },
     "packages/transformer": {
