@@ -108,6 +108,28 @@ alternating; booleans mixed in; nested objects and arrays of objects, each with 
 decoded values and guards unchanged; wire sizes before and after, including a charm-sync patch
 against the raw table.
 
+## Small: a plain test when the serializer writes a boolean
+
+**Today** a boolean field or argument compiles to:
+
+```lua
+local _value = v.Surfaced
+buffer.writeu8(_exp, _exp_1, if _value ~= 0 and _value == _value and _value ~= "" and _value then 1 else 0)
+```
+
+The generator emits the conditional `value ? 1 : 0`
+(`packages/transformer/src/util/functions/buildSerializerFromType.ts`, the `"boolean"` case of the
+encoder). The synthesized `value` carries no type, so roblox-ts expands the condition into
+JavaScript's full truthiness test: not `0`, not NaN, not `""`, and truthy. The value is known to be a
+boolean, so three of the four checks are wasted on every write. The comment there explains why it
+avoids `value === true`: an argument packed at its call site can be a literal, and TypeScript rejects
+`false === true` when it checks the emitted code.
+
+**Fix:** give the condition the boolean type, for example `(value as boolean) ? 1 : 0`, so that
+roblox-ts emits `if _value then 1 else 0`. Check that a literal argument still compiles, and that the
+output of every other type is unchanged. This is independent of the presence bitmask above, which
+would move booleans into bits, and can ship first.
+
 ## Next: obfuscating networking separately from everything else
 
 **Today one switch does it all.** `"transformer": { "obfuscation": true }` turns on, together:
