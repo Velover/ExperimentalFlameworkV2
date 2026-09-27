@@ -38,9 +38,42 @@ function. With the switch on, the marker changes nothing, and `Raw` still opts o
 Changing a member's marker changes its wire format, so it is a coordinated deploy like any protocol
 change.
 
-**Not part of it:** general-purpose compression of the bytes (LZ or similar over the buffer).
-Serialization already writes a compact encoding (sized numbers, variable-length integers, no field
-names); byte compression is a separate idea, worth it only for large payloads and only if measured.
+**Not part of it:** compressing the bytes. That is the next item, and builds on this one.
+
+## Next: compressing payloads with `EncodingService:CompressBuffer`
+
+**The idea.** Serialization already writes a compact encoding (sized numbers, variable-length
+integers, no field names), but it does not compress. The engine now can: `EncodingService` has
+`CompressBuffer(input, algorithm, compressionLevel?)`, `DecompressBuffer(input, algorithm)` and
+`GetDecompressedBufferSize(input, algorithm)`, with `Enum.CompressionAlgorithm.Zstd` as the only
+algorithm so far. Networking could run a member's packed buffer through it before sending, and back
+after receiving, before the guards and middleware see the values.
+
+**How a game would ask for it** (to decide):
+- a marker per member, `Networking.Compressed<T>` (with reliable and unreliable forms), which implies
+  serialization for that member, since only a buffer can be compressed;
+- or a setting on `createServer`/`createClient` or in `flamework.config.json`, with a size threshold:
+  compress a payload only above N bytes, with a leading flag byte saying whether it was, so small
+  payloads don't grow by Zstd's frame overhead;
+- plus the compression level.
+
+**What must hold.**
+- Payloads from clients are untrusted. Before decompressing, check `GetDecompressedBufferSize` against
+  a limit and drop the payload when the size is unknown or too large, so a small request cannot
+  expand into a huge buffer or cost the server a lot of CPU. A payload that fails to decompress is
+  dropped like any malformed payload.
+- Values that cannot live in a buffer (Instances, `unknown`) keep travelling alongside it,
+  uncompressed.
+- Server and client come from the same build, and changing a member's compression changes its wire
+  format, as with serialization.
+
+**Worth it only where measured.** Zstd pays off on large or repetitive payloads (inventories, map or
+save data, long lists) and costs CPU on both ends. Measure bytes on the wire and time per send and
+receive in Studio before recommending it, and document the numbers.
+
+**Tests:** round trips for events, functions and unreliable events; the threshold's flag byte; the
+decompressed-size limit and a malformed or oversized compressed payload from a client; the
+before/after measurements.
 
 ## 1. Performance and memory cost of each feature
 
