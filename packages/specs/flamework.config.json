@@ -1,4 +1,5 @@
 {
 	"$schema": "../transformer/flamework.config.schema.json",
+	"transformer": { "hashPrefix": "$t" },
 	"networking": { "serialization": true }
 }

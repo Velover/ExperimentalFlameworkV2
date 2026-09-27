@@ -23,6 +23,16 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   fails. A condition on the class or the module still lets the folder load, and so does one on
   `includePlugin` around `ComponentPlugin.fromPath`/`fromGlob`/`registerComponents*`: put it on the
   registration itself.
+- **Transformer options go in `flamework.config.json` only.** The tsconfig entry takes `transform`
+  and `configFile`, plus the plugin loader's own keys such as `import`; any other key fails the
+  build, naming the key and saying to move it to the file or to remove it. Before, an option on the
+  entry won over the file, so a game with `obfuscation: true` in the file and `false` on the entry
+  (as a v1 entry often had) built unobfuscated. Move every transformer option on the entry
+  (`obfuscation`, `hashPrefix`, `idGenerationMode`, `salt`, `noSemanticDiagnostics`,
+  `optimizations`, `plugins`) to the `transformer` section, and remove v1's `preloadIds`.
+- **A game's build writes to its `flamework.config.json` once.** It adds a `$schema` line when the
+  file has none, and creates the file with only that line when `tsconfig.json` is at the package
+  root and there is no file. Commit the change; after that the build leaves the file alone.
 
 ### core
 
@@ -84,6 +94,25 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `ComponentPlugin.fromGlob`, `registerComponentsGlob`, a plugin target's glob form, or a
   `Modding.Intrinsic<"pathglob">` macro), naming the glob and its file, line and column. The build
   still passes and the glob still resolves to no paths. A watcher checks again on every rebuild.
+- A game's build gives its `flamework.config.json` a `$schema` line when it has none, so an editor
+  lists every option with its description and default. The path is relative to the file and goes
+  through the project's `node_modules/@flamework-experimental/transformer`. The line is added as the
+  first key and every other byte is kept (indentation, line endings, comments). A game without the
+  file gets one holding just the line, but only when its tsconfig is at the package root: below it, a
+  created file would hide a shared one added there later. It happens when `rbxtsc` starts, not on a
+  watcher's rebuilds; it never replaces an existing `$schema` and never runs for a package. A file
+  that cannot be written gets a warning.
+- Every option in `flamework.config.schema.json` states its default, and fixed defaults carry
+  `default` (`plugins` and `optimizations` gained one).
+
+#### Changed
+
+- The tsconfig entry is checked, and the options come from `flamework.config.json` alone (no longer
+  merged). Besides `configFile`, only the plugin loader's keys are allowed: roblox-ts's `transform`,
+  `import`, `type`, `after`, `afterDeclarations`, and ts-patch's `name`, `transformProgram`,
+  `isEsm`, `tsConfig`, `resolvePathAliases`. A transformer option on the entry fails with
+  `Move '<key>' to the "transformer" section of <file>`; any other key with
+  `Remove '<key>': not a transformer option`; a `configFile` that is not a string fails too.
 
 #### Fixed
 
@@ -93,6 +122,10 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `Dependency<T>(undefined, Flamework.id<T>())`) was emitted untransformed, as a call to a function
   that does not exist at runtime ("attempt to call a nil value"). Macro arguments are now transformed
   like any call's, at any depth.
+- The schema's and `TransformerConfig`'s `idGenerationMode` default said `"full"`, which is wrong with
+  obfuscation on (`"obfuscated"`); `components.attributeWarningTimeout`'s said 5, where it follows
+  `warningTimeout`; `hashPrefix` said it defaults to the package name, where a game gets no prefix
+  (it also says now that a prefix cannot start with `$`).
 
 ### components
 
@@ -126,6 +159,14 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - `out/index.d.ts` re-exported the stripped `@internal` hooks `__resetTests` and `__isAttached`, so a
   plain `tsc` without `skipLibCheck` failed inside the package (TS2305). The re-exports are stripped
   as well; the Luau still exports them.
+
+### core, components, networking, testing
+
+#### Changed
+
+- Built with their id prefixes (`$`, `$c`, `$n`, `$T`) in a `flamework.config.json` instead of on the
+  tsconfig entry, which also drops the dead v1 key `$rbxpackmode$`. The published `out` and
+  `flamework.build` are byte-identical, ids included.
 
 ### components, networking, testing
 
@@ -167,6 +208,12 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   table in the components guide that rendered in two pieces is whole.
 - Testing: the shipping advice is reversed. A `Tests` folder is registered by its own path with the
   scope condition on the registration, which a release build without the folder now skips (see core).
+- Project structure: the tsconfig entry takes only `transform` and `configFile`; the `$schema` line
+  and when the build adds or creates it; the `hashPrefix` and `idGenerationMode` defaults; the example
+  config's `"hashPrefix": "$g"`, which failed a game build, is now `"g"`; under obfuscation, ids
+  declared in a package (`OnStart`, `OnInit`, `Components`, ...) keep their names, and why that only
+  reveals which Flamework events and package types a class uses. Getting started, Migrating from v1,
+  Transformer plugins and Internals follow.
 
 ### Tests
 
@@ -181,6 +228,11 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `skipLibCheck` and checks that none exports a `__` name. New scope specs and place cases cover
   left-out folder registrations, and new transformer tests cover the empty-glob warning and nested
   macro calls.
+- Transformer tests for the tsconfig entry check (each option, unknown keys, loader keys,
+  `configFile`, a real rbxtsc build) and for the `$schema` line (layouts, CRLF, BOM, comments,
+  creation at the package root and none below it, packages, watcher rebuilds, unwritable files), a
+  test that every schema option states a default, and packaging tests that pin each package's id
+  prefix and the ids games compare against. The fixture's probe files are removed before a run.
 
 ## 2026-09-26: core, components, networking and testing 2.0.0-alpha.2; transformer 2.0.0-alpha.3
 

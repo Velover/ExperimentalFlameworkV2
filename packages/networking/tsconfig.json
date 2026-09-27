@@ -11,9 +11,7 @@
 		"outDir": "out",
 		"plugins": [
 			{
-				"transform": "@flamework-experimental/transformer",
-				"$rbxpackmode$": true,
-				"hashPrefix": "$n"
+				"transform": "@flamework-experimental/transformer"
 			}
 		]
 	}

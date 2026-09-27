@@ -6,4 +6,5 @@ export const FLAMEWORK_SCOPE = "@flamework-experimental";
 export const CORE_PACKAGE = `${FLAMEWORK_SCOPE}/core`;
 export const COMPONENTS_PACKAGE = `${FLAMEWORK_SCOPE}/components`;
 export const NETWORKING_PACKAGE = `${FLAMEWORK_SCOPE}/networking`;
+export const TRANSFORMER_PACKAGE = `${FLAMEWORK_SCOPE}/transformer`;
 export const PLUGIN_PACKAGE = `${FLAMEWORK_SCOPE}/transformer-plugin`;

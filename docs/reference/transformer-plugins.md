@@ -9,20 +9,18 @@ give you an API that survives TypeScript upgrades, not to sandbox you.
 
 ## Setup
 
-Install the plugin module as a dev dependency and list your plugin in the transformer options:
+Install the plugin module as a dev dependency and list your plugin in the `transformer` section of
+`flamework.config.json`:
 
 ```json
 {
-	"compilerOptions": {
-		"plugins": [
-			{
-				"transform": "@flamework-experimental/transformer",
-				"plugins": [{ "path": "./myPlugin.cjs", "options": { "prefix": "fx" } }]
-			}
-		]
+	"transformer": {
+		"plugins": [{ "path": "./myPlugin.cjs", "options": { "prefix": "fx" } }]
 	}
 }
 ```
+
+Don't list it on the tsconfig entry: the build refuses any transformer option there.
 
 Each entry is either a bare string (a module specifier or a path relative to the project root) or an
 object with `path` and `options`. Paths starting with `.` resolve from the project root; anything

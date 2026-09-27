@@ -1,17 +1,60 @@
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import { pathToFileURL } from "url";
 import ts from "typescript";
 import { Logger } from "../classes/logger";
+import { Cache } from "./cache";
 import { coerceBySchema, loadEnv, substituteEnv, type Env } from "./env";
+import { TRANSFORMER_PACKAGE } from "./packages";
 import { getSchema, getSchemaErrors, validateSchema } from "./schema";
 import type { TransformerConfig } from "../classes/transformState";
 
 /** The file every Flamework package reads its options from, found from the tsconfig's directory up to the package root. */
 export const PROJECT_CONFIG_NAME = "flamework.config.json";
 
-/** The transformer's own section: every transformer option except the one that says where the file is. */
-export type TransformerOptions = Omit<TransformerConfig, "configFile">;
+/** The schema of that file, shipped at the root of the transformer package. */
+export const PROJECT_CONFIG_SCHEMA_NAME = "flamework.config.schema.json";
+
+/** The transformer's own section of the file: every transformer option. */
+export type TransformerOptions = TransformerConfig;
+
+/**
+ * The transformer's entry in the tsconfig's `compilerOptions.plugins`. It says which transformer to
+ * load and, optionally, where the config file is. Transformer options are not read from here.
+ */
+export interface TransformerEntry {
+	/** The module the plugin loader loads: `@flamework-experimental/transformer`. */
+	transform?: string;
+
+	/**
+	 * Where `flamework.config.json` is, relative to the tsconfig's directory. By default it is
+	 * looked for in the tsconfig's directory and then in each parent up to the package root.
+	 */
+	configFile?: string;
+
+	/** The plugin loader's own keys (see `LOADER_KEYS`), and anything else the build refuses. */
+	[key: string]: unknown;
+}
+
+/**
+ * Keys of the tsconfig entry that belong to the plugin loader rather than to Flamework, so they are
+ * never refused. roblox-ts reads `transform`, `import`, `type`, `after` and `afterDeclarations`, and
+ * hands the transformer the entry without the last three; ts-patch also reads `name`,
+ * `transformProgram`, `isEsm`, `tsConfig` and `resolvePathAliases`.
+ */
+export const LOADER_KEYS: ReadonlySet<string> = new Set([
+	"transform",
+	"import",
+	"type",
+	"after",
+	"afterDeclarations",
+	"name",
+	"transformProgram",
+	"isEsm",
+	"tsConfig",
+	"resolvePathAliases",
+]);
 
 export interface CoreRuntimeConfig {
 	/** Whether lifecycle events are wrapped in `debug.profilebegin`. Defaults to running in Studio. */
@@ -108,7 +151,7 @@ export interface ProjectConfig extends RuntimeConfig {
 export const RUNTIME_SECTIONS = ["core", "networking", "components", "scopes", "testing"] as const;
 
 export interface LoadedProjectConfig {
-	/** The effective transformer options: the file's `transformer` section with inline tsconfig options on top. */
+	/** The effective transformer options: the file's `transformer` section, empty when there is none. */
 	config: TransformerConfig;
 
 	/** The whole file, or an empty object when there is none. */
@@ -206,28 +249,224 @@ export function readProjectConfig(configPath: string, env: Env = loadEnv(path.di
 }
 
 /**
- * Combines the file's transformer section with the options set inline on the tsconfig entry.
+ * Refuses a tsconfig entry that sets anything but the plugin loader's keys and `configFile`.
  *
- * Inline options win: they are the more specific place to have written something. `optimizations`
- * merges one level deep so that an inline override of one optimisation keeps the file's others.
+ * Transformer options are read from the config file only. v1 read them from the entry, so an
+ * option left there from v1 (or written there by habit) would otherwise be dropped without a word:
+ * a game that set `obfuscation` in both places built unobfuscated. `configPath` is the file the
+ * options belong in, found or about to be looked for, and `exists` says which.
  */
-export function mergeTransformerConfig(
-	fileOptions: TransformerOptions | undefined,
-	inlineConfig: TransformerConfig,
-): TransformerConfig {
-	const merged: Record<string, unknown> = { ...(fileOptions ?? {}) };
+export function assertTransformerEntry(entry: TransformerEntry, configPath: string, exists: boolean) {
+	const optionKeys = Object.keys(
+		(getSchema("projectConfig") as { properties: { transformer: { properties: object } } }).properties.transformer
+			.properties,
+	);
 
-	for (const [key, value] of Object.entries(inlineConfig)) {
-		if (value !== undefined) {
-			merged[key] = value;
+	const options = new Array<string>();
+	const unknown = new Array<string>();
+	for (const [key, value] of Object.entries(entry)) {
+		if (value === undefined || key === "configFile" || LOADER_KEYS.has(key)) continue;
+		(optionKeys.includes(key) ? options : unknown).push(`'${key}'`);
+	}
+
+	if (options.length === 0 && unknown.length === 0) return;
+
+	const lines = [
+		`The tsconfig entry for ${TRANSFORMER_PACKAGE} takes only "transform" and "configFile"; transformer options are read from ${PROJECT_CONFIG_NAME}.`,
+	];
+	if (options.length > 0) {
+		const target = exists ? configPath : `${configPath}, a new file`;
+		lines.push(`Move ${options.join(", ")} to the "transformer" section of ${target}.`);
+	}
+	if (unknown.length > 0) {
+		lines.push(`Remove ${unknown.join(", ")}: not a transformer option.`);
+	}
+
+	throw new Error(lines.join("\n"));
+}
+
+/**
+ * Finds the config file for a tsconfig entry, after checking the entry: its `configFile` if set,
+ * else the nearest `flamework.config.json` from the tsconfig's directory up to the package root.
+ */
+function locateProjectConfig(projectDirectory: string, rootDirectory: string, entry: TransformerEntry) {
+	if (entry.configFile !== undefined && typeof entry.configFile !== "string") {
+		throw new Error(
+			`"configFile" on the tsconfig entry for ${TRANSFORMER_PACKAGE} must be a path, relative to the tsconfig's directory.`,
+		);
+	}
+
+	const configPath = findProjectConfig(projectDirectory, rootDirectory, entry.configFile);
+	assertTransformerEntry(
+		entry,
+		configPath ?? path.join(projectDirectory, PROJECT_CONFIG_NAME),
+		configPath !== undefined,
+	);
+
+	return configPath;
+}
+
+/**
+ * The schema file of the transformer that is running, as the project reaches it: through the
+ * nearest `node_modules/@flamework-experimental/transformer` from the tsconfig's directory up, the
+ * way roblox-ts resolved the entry's `transform`. That path keeps working across upgrades, where
+ * the real path of a linked install (bun, pnpm) names the version. Falls back to the real path when
+ * no `node_modules` entry leads to this transformer.
+ */
+export function findInstalledSchema(projectDirectory: string) {
+	const own = path.join(__dirname, "../..", PROJECT_CONFIG_SCHEMA_NAME);
+	const ownReal = fs.realpathSync(own);
+
+	let current = path.resolve(projectDirectory);
+	while (true) {
+		const candidate = path.join(current, "node_modules", TRANSFORMER_PACKAGE, PROJECT_CONFIG_SCHEMA_NAME);
+		if (fs.existsSync(candidate) && fs.realpathSync(candidate) === ownReal) {
+			return candidate;
 		}
+
+		const parent = path.dirname(current);
+		if (parent === current) {
+			return own;
+		}
+
+		current = parent;
+	}
+}
+
+/**
+ * The `$schema` value that points a config file at a schema file. Relative, with forward slashes,
+ * and starting with `./` or `../`: VS Code's JSON service (vscode-json-languageservice) resolves a
+ * value against the file unless it has a scheme, where a drive letter counts as one, and before
+ * its 4.0 resolved only a value that starts with a dot. A schema on another drive gets a
+ * `file://` URL.
+ */
+export function getSchemaReference(configPath: string, schemaPath: string) {
+	const relative = path.relative(path.dirname(configPath), schemaPath);
+	if (path.isAbsolute(relative)) {
+		return pathToFileURL(schemaPath).href;
 	}
 
-	if (fileOptions?.optimizations && inlineConfig.optimizations) {
-		merged.optimizations = { ...fileOptions.optimizations, ...inlineConfig.optimizations };
+	const reference = relative.replace(/\\/g, "/");
+	return reference.startsWith("../") ? reference : `./${reference}`;
+}
+
+/**
+ * Adds `"$schema": reference` as the first key of a config file's text, keeping every other byte:
+ * the file's indentation, line endings, comments and trailing commas. Returns `undefined` when the
+ * file already has a `$schema` (whatever it points at) or is not an object that parses, which the
+ * config loader then reports.
+ */
+export function insertSchemaReference(text: string, reference: string): string | undefined {
+	const parse = (source: string) => {
+		const file = ts.parseJsonText(PROJECT_CONFIG_NAME, source);
+		const statement = file.statements[0];
+		const diagnostics = (file as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics;
+		if (diagnostics !== undefined && diagnostics.length > 0) return;
+		if (statement === undefined || !ts.isObjectLiteralExpression(statement.expression)) return;
+
+		return { file, root: statement.expression };
+	};
+
+	const parsed = parse(text);
+	if (parsed === undefined) return;
+
+	const { file, root } = parsed;
+	const isSchema = (property: ts.ObjectLiteralElementLike) =>
+		property.name !== undefined && ts.isStringLiteral(property.name) && property.name.text === "$schema";
+	if (root.properties.some(isSchema)) return;
+
+	const property = `"$schema": ${JSON.stringify(reference)}`;
+	const open = root.getStart(file);
+	const firstToken = root.properties.length > 0 ? root.properties[0].getStart(file) : root.end - 1;
+	const lineBreak = text.slice(open, firstToken).search(/\r?\n/);
+
+	let result: string;
+	if (lineBreak === -1) {
+		// Written on one line with its first key (or empty): `{ "$schema": "...", "a": 1 }`.
+		const separator = root.properties.length > 0 ? "," : text[open + 1] === "}" ? " " : "";
+		result = `${text.slice(0, open + 1)} ${property}${separator}${text.slice(open + 1)}`;
+	} else {
+		// One key per line: a line of its own above the first line with anything on it, indented like
+		// it and ended like the brace's line. In an empty object that line is the closing brace.
+		const breakAt = open + lineBreak;
+		const newline = text[breakAt] === "\r" ? "\r\n" : "\n";
+		let lineStart = breakAt + newline.length;
+		for (;;) {
+			const end = text.indexOf("\n", lineStart);
+			if (end === -1 || text.slice(lineStart, end).trim() !== "") break;
+			lineStart = end + 1;
+		}
+
+		let indent = /^[ \t]*/.exec(text.slice(lineStart))![0];
+		if (root.properties.length === 0) indent += "\t";
+
+		const comma = root.properties.length > 0 ? "," : "";
+		result = `${text.slice(0, lineStart)}${indent}${property}${comma}${newline}${text.slice(lineStart)}`;
 	}
 
-	return merged as TransformerConfig;
+	// Never write a file the loader could no longer read.
+	const check = parse(result);
+	return check !== undefined && check.root.properties.some(isSchema) ? result : undefined;
+}
+
+/** What `addSchemaReference` did, when it did anything. */
+export interface SchemaReferenceChange {
+	change: "added" | "created";
+	configPath: string;
+}
+
+/**
+ * Gives a game's `flamework.config.json` a `$schema` line when it has none, so that an editor lists
+ * every option with its description and default. A game without the file gets one holding just
+ * that line, when its tsconfig is at the package root; a place below the root gets none, since the
+ * new file would hide a shared one added above it later. Writing the defaults themselves would pin
+ * them, and some follow other options.
+ *
+ * Only on the first compilation of a process: a watcher's rebuilds leave the file alone. Never for
+ * a package (a scoped package name, which roblox-ts also builds as a package): a package has no
+ * config file unless its author wrote one, and nothing is added to it. A `$schema` already in the
+ * file stays, wherever it points. `project.schema` names the schema file to point at instead of
+ * the installed transformer's.
+ */
+export function addSchemaReference(
+	projectDirectory: string,
+	rootDirectory: string,
+	entry: TransformerEntry,
+	project: { isGame: boolean; schema?: string },
+): SchemaReferenceChange | undefined {
+	if (!project.isGame || !Cache.isInitialCompile) return;
+
+	const configPath = locateProjectConfig(projectDirectory, rootDirectory, entry);
+	const schema = project.schema ?? findInstalledSchema(projectDirectory);
+
+	if (configPath === undefined) {
+		// Only where nothing above could be shadowed. Below the package root the new file would be the
+		// first one found, and would hide a shared file added at the root later (guide 09's multi-place
+		// layout), with every setting in it silently ignored.
+		if (path.relative(path.resolve(projectDirectory), path.resolve(rootDirectory)) !== "") return;
+
+		const created = path.join(projectDirectory, PROJECT_CONFIG_NAME);
+		const reference = getSchemaReference(created, schema);
+		if (!tryWriteConfig(created, `{\n\t"$schema": ${JSON.stringify(reference)}\n}\n`)) return;
+		return { change: "created", configPath: created };
+	}
+
+	const text = fs.readFileSync(configPath, "utf8");
+	const updated = insertSchemaReference(text, getSchemaReference(configPath, schema));
+	if (updated === undefined || !tryWriteConfig(configPath, updated)) return;
+
+	return { change: "added", configPath };
+}
+
+/** Writes the config file, or warns and carries on: the line is a convenience, never worth a failed build. */
+function tryWriteConfig(file: string, text: string) {
+	try {
+		fs.writeFileSync(file, text);
+		return true;
+	} catch (error) {
+		Logger.warn(`Could not write a "$schema" line to ${file}`, `${error instanceof Error ? error.message : error}`);
+		return false;
+	}
 }
 
 /**
@@ -284,23 +523,23 @@ export function fingerprintProjectConfig(loaded: LoadedProjectConfig): string {
 
 /**
  * Resolves the project config, the effective transformer options and the environment for a
- * compilation.
+ * compilation. Raises when the tsconfig entry sets anything but the loader's keys and `configFile`.
  */
 export function loadProjectConfig(
 	projectDirectory: string,
 	rootDirectory: string,
-	inlineConfig: TransformerConfig,
+	entry: TransformerEntry,
 	processEnv?: Env,
 ): LoadedProjectConfig {
-	const configPath = findProjectConfig(projectDirectory, rootDirectory, inlineConfig.configFile);
+	const configPath = locateProjectConfig(projectDirectory, rootDirectory, entry);
 	const env = loadEnv(configPath !== undefined ? path.dirname(configPath) : projectDirectory, processEnv);
 
 	if (configPath === undefined) {
-		return { config: mergeTransformerConfig(undefined, inlineConfig), project: {}, env };
+		return { config: {}, project: {}, env };
 	}
 
 	const project = readProjectConfig(configPath, env);
 	Logger.infoIfVerbose(`Loaded project config from ${path.relative(projectDirectory, configPath) || configPath}`);
 
-	return { config: mergeTransformerConfig(project.transformer, inlineConfig), project, configPath, env };
+	return { config: { ...project.transformer }, project, configPath, env };
 }

@@ -38,8 +38,13 @@ accepts imports from the scopes listed there:
 transformer and the CLI ship an empty declaration file.)
 
 That is all the configuration you need. Optional settings go in a `flamework.config.json` next to
-`tsconfig.json`, with one section per package. See
-[Project structure](09-project-structure.md#configuration).
+`tsconfig.json`, with one section per package. They never go on the tsconfig entry: the build fails
+if the entry sets one. See [Project structure](09-project-structure.md#configuration).
+
+You don't have to write that file to see what you can set. With `tsconfig.json` at the root of your
+package, as here, your first build creates it, holding just a `$schema` line. It also adds the line
+to a file that lacks it. With that line, your editor lists every option with its description and
+its default.
 
 ## Rojo
 

@@ -22,21 +22,23 @@ import glob from "glob";
 import type { PathTranslator } from "@roblox-ts/path-translator";
 import { createPluginHost, type PluginHost } from "../transformations/plugins/pluginHost";
 import { tryResolveTS } from "../util/functions/tryResolve";
-import { fingerprintProjectConfig, getRuntimeConfig, loadProjectConfig, ProjectConfig } from "../util/projectConfig";
+import {
+	addSchemaReference,
+	fingerprintProjectConfig,
+	getRuntimeConfig,
+	loadProjectConfig,
+	ProjectConfig,
+	TransformerEntry,
+} from "../util/projectConfig";
 import type { Env } from "../util/env";
 import { Diagnostics } from "./diagnostics";
 import { FLAMEWORK_SCOPE, CORE_PACKAGE } from "../util/packages";
 
+/**
+ * The transformer's options: the `transformer` section of `flamework.config.json`, the only place
+ * they are read from. The tsconfig plugin entry takes none of them (see `TransformerEntry`).
+ */
 export interface TransformerConfig {
-	/**
-	 * Where to read the rest of these options from, relative to the tsconfig's directory.
-	 *
-	 * By default the transformer looks for `flamework.config.json` in the tsconfig's directory and then in
-	 * each parent up to the package root. Options set inline on the tsconfig entry override the file's `transformer` section.
-	 * Only meaningful inline; it is not a valid key inside the file itself.
-	 */
-	configFile?: string;
-
 	/**
 	 * Transformer plugins to load, which can register additional macro types.
 	 *
@@ -59,7 +61,7 @@ export interface TransformerConfig {
 
 	/**
 	 * This can be used to lower collision chance with packages.
-	 * Defaults to package name.
+	 * Defaults to the package name in a package; a game has no prefix unless it sets one.
 	 */
 	hashPrefix?: string;
 
@@ -74,7 +76,7 @@ export interface TransformerConfig {
 
 	/**
 	 * Determines the id generation mode.
-	 * Defaults to "full" and should only be configured in game projects.
+	 * Defaults to "obfuscated" with obfuscation on, else "full", and should only be configured in game projects.
 	 */
 	idGenerationMode?: "full" | "short" | "tiny" | "obfuscated";
 
@@ -303,7 +305,7 @@ export class TransformState {
 		}
 	}
 
-	/** The effective transformer options: the `transformer` section of `flamework.config.json` with the tsconfig entry's options on top. */
+	/** The effective transformer options: the `transformer` section of `flamework.config.json`. */
 	public config: TransformerConfig;
 
 	/** The `flamework.config.json` the options were read from, if one was found. */
@@ -318,16 +320,31 @@ export class TransformState {
 	constructor(
 		public program: ts.Program,
 		public context: ts.TransformationContext,
-		inlineConfig: TransformerConfig,
+		entry: TransformerEntry,
 	) {
 		const { result: packageJson, directory } = getPackageJson(this.currentDirectory);
 		this.rootDirectory = directory;
 		assert(packageJson.name);
 
+		// Before the config is read, so the watcher's first read already sees the line and a later
+		// read finds nothing changed. A game only: a scoped package is built as a package, by
+		// roblox-ts and by Flamework alike, and its own config file is left as its author wrote it.
+		const schemaReference = addSchemaReference(this.currentDirectory, this.rootDirectory, entry, {
+			isGame: !packageJson.name.startsWith("@"),
+		});
+		if (schemaReference !== undefined) {
+			const file = path.relative(this.currentDirectory, schemaReference.configPath) || schemaReference.configPath;
+			Logger.info(
+				schemaReference.change === "created"
+					? `Created ${file} with a "$schema" line, so editors list every option`
+					: `Added a "$schema" line to ${file}, so editors list every option`,
+			);
+		}
+
 		// Read once per process: a watcher keeps the config and environment it started with, since
 		// only the files that changed are recompiled and the rest would disagree with them. Every
 		// later compilation reads again only to notice a change and ask for a restart.
-		const loaded = loadProjectConfig(this.currentDirectory, this.rootDirectory, inlineConfig);
+		const loaded = loadProjectConfig(this.currentDirectory, this.rootDirectory, entry);
 		const fingerprint = fingerprintProjectConfig(loaded);
 		if (Cache.projectConfig === undefined) {
 			Cache.projectConfig = loaded;

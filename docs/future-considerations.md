@@ -280,6 +280,18 @@ Edge cases found and deliberately left alone, because the fix would cost more th
   (`pass(server[name])`) is a compile error ("must be accessed directly"), as the same expression is
   anywhere else. Callsite uuids depend on the source file's line endings, so one commit checked out
   with CRLF and with LF emits different remote names.
+- **transformer, config file and `$schema` line:** a place whose tsconfig is below the package root
+  and that has no config file gets no file and no `$schema` line (by design: a created file there
+  would hide a shared root one). Once a root place's first build creates the root file, a place
+  below with no file of its own reads `.env` from the root instead of its own folder. A place below
+  the root with a runtime section writes `include/flamework/config.json` under the package root's
+  `include`, and fails with ENOENT when that folder is missing. The line-adding edit keeps the file
+  valid but is naive in rare shapes: an unquoted `$schema` key gets a second, quoted one; a symlinked
+  config is written through to its target with a path relative to the link; non-UTF-8 bytes become
+  U+FFFD; with CR-only line endings the line lands on the brace line; a first line that opens a
+  multi-line block comment is skipped. `flamework-test` ignores a tsconfig entry's `configFile`, and
+  `rbxtsc --type package` on an unscoped project counts as a game. A killed transformer test run
+  can leave `compileProbe`'s `src/<name>.ts` probe files in the fixture.
 - **typings:** `@rbxts/types` 1.0.955 has 14 errors of its own under a plain `tsc` without
   `skipLibCheck`. The test-harness hooks are hidden from the typings but still exported by core's and
   testing's Luau. The transformer's `ComponentsRuntimeConfig` type lacks `attributeWarningTimeout`,

@@ -14,10 +14,10 @@ export interface PluginApi {
 	factory: NodeFactory;
 
 	/**
-	 * The options this plugin was configured with in `tsconfig.json`.
+	 * The options this plugin was configured with in the `transformer` section of `flamework.config.json`.
 	 *
 	 * ```json
-	 * { "transform": "@flamework-experimental/transformer", "plugins": [{ "path": "./my-plugin.js", "options": { "verbose": true } }] }
+	 * { "transformer": { "plugins": [{ "path": "./my-plugin.js", "options": { "verbose": true } }] } }
 	 * ```
 	 */
 	options: Readonly<Record<string, unknown>>;

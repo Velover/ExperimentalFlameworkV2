@@ -1,8 +1,16 @@
 import { spawnSync } from "child_process";
 import fs from "fs";
 import path from "path";
+import ts from "typescript";
 
 const FIXTURE = path.resolve(import.meta.dir, "fixture");
+
+// What `compileWithEntry` and projectConfig.test.ts's `$schema` build write into the fixture. Both
+// remove it when they finish; a run killed halfway leaves it behind, so it goes before anything compiles.
+for (const leftover of ["tsconfig.entry-probe.json", "probe-config"]) {
+	fs.rmSync(path.join(FIXTURE, leftover), { recursive: true, force: true });
+}
+
 const RBXTSC = path.resolve(import.meta.dir, "../../../node_modules/roblox-ts/out/CLI/cli.js");
 
 export interface CompileResult {
@@ -123,6 +131,31 @@ export function compileProbe(name: string, source: string): CompileResult {
 	} finally {
 		fs.rmSync(file, { force: true });
 		fs.rmSync(path.join(FIXTURE, "out", `${name}.luau`), { force: true });
+	}
+}
+
+/**
+ * Compiles the fixture through a tsconfig whose transformer entry is `entry`, and reports what
+ * rbxtsc said. The probe tsconfig is the fixture's own with only the entry replaced, and is removed
+ * again afterwards. An entry the transformer refuses stops the build before anything is emitted;
+ * one it accepts must read the fixture's own config, so what is left on disk is the ordinary build.
+ */
+export function compileWithEntry(entry: Record<string, unknown>): CompileResult {
+	const probe = path.join(FIXTURE, "tsconfig.entry-probe.json");
+	const { config } = ts.readConfigFile(path.join(FIXTURE, "tsconfig.json"), ts.sys.readFile);
+	config.compilerOptions.plugins = [entry];
+	fs.writeFileSync(probe, JSON.stringify(config, undefined, "\t"));
+
+	try {
+		const result = spawnSync("node", [RBXTSC, "-p", probe], { cwd: FIXTURE, encoding: "utf8" });
+
+		return {
+			files: new Map(),
+			output: `${result.stdout ?? ""}${result.stderr ?? ""}`,
+			status: result.status ?? 1,
+		};
+	} finally {
+		fs.rmSync(probe, { force: true });
 	}
 }
 

@@ -1,7 +1,8 @@
 import ts from "typescript";
 import path from "path";
 import { transformFile } from "./transformations/transformFile";
-import { TransformerConfig, TransformState } from "./classes/transformState";
+import { TransformState } from "./classes/transformState";
+import type { TransformerEntry } from "./util/projectConfig";
 import { Logger } from "./classes/logger";
 import { f } from "./util/factory";
 import chalk from "chalk";
@@ -13,12 +14,16 @@ function isDiagnosticWithLocation(diagnostic: ts.Diagnostic): diagnostic is ts.D
 	return diagnostic.file !== undefined && diagnostic.start !== undefined && diagnostic.length !== undefined;
 }
 
-export default function (program: ts.Program, config?: TransformerConfig) {
+/**
+ * The transformer, as roblox-ts loads it from the tsconfig plugin entry. The entry takes only the
+ * loader's own keys and `configFile`; every option is read from flamework.config.json.
+ */
+export default function (program: ts.Program, entry?: TransformerEntry) {
 	return (context: ts.TransformationContext): ((file: ts.SourceFile) => ts.Node) => {
 		if (Logger.verbose) Logger.write("\n");
 		f.setFactory(context.factory);
 
-		const state = new TransformState(program, context, config ?? {});
+		const state = new TransformState(program, context, entry ?? {});
 		const projectFlameworkVersion = state.buildInfo.getFlameworkVersion();
 		if (projectFlameworkVersion !== PKG_VERSION) {
 			Logger.writeLine(

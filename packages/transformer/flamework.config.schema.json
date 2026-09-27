@@ -2,22 +2,23 @@
 	"$schema": "http://json-schema.org/draft-07/schema#",
 	"$id": "flamework.config.schema.json",
 	"title": "Flamework project configuration",
-	"description": "One file for every Flamework package, read from flamework.config.json next to (or above) your tsconfig.json. The transformer section can also be written inline on the transformer entry in tsconfig.json, where it overrides the file; the other sections are compiled into include/flamework/config.json for the runtime packages. Any string may reference the environment as ${NAME} or ${NAME:-fallback} ($$ for a literal dollar), read from .env and .env.local next to this file with the process environment on top; a string where a boolean, number or list is expected is converted.",
+	"description": "One file for every Flamework package, read from flamework.config.json next to (or above) your tsconfig.json. The transformer section is read at build time and is the only place transformer options go: the tsconfig entry takes none. The other sections are compiled into include/flamework/config.json for the runtime packages. Every option says its default; leave an option out to keep the default. Any string may reference the environment as ${NAME} or ${NAME:-fallback} ($$ for a literal dollar), read from .env and .env.local next to this file with the process environment on top; a string where a boolean, number or list is expected is converted.",
 	"type": "object",
 	"additionalProperties": false,
 	"properties": {
 		"$schema": {
 			"type": "string",
-			"description": "Editor support: point this at node_modules/@flamework-experimental/transformer/flamework.config.schema.json."
+			"description": "Editor support: the path of this schema, relative to this file and starting with a dot, such as ./node_modules/@flamework-experimental/transformer/flamework.config.schema.json. A game's build adds the line when the file has none, and never changes one that is there."
 		},
 		"transformer": {
 			"type": "object",
 			"additionalProperties": false,
-			"description": "Options for @flamework-experimental/transformer.",
+			"description": "Options for @flamework-experimental/transformer, read at build time. The tsconfig entry takes none of them.",
 			"properties": {
 				"plugins": {
 					"type": "array",
-					"description": "Transformer plugins to load. Each entry is a module specifier or a path relative to the package root, optionally with options passed to the plugin as `api.options`.",
+					"description": "Transformer plugins to load. Each entry is a module specifier or a path relative to the package root, optionally with options passed to the plugin as `api.options`. Default: none.",
+					"default": [],
 					"items": {
 						"oneOf": [
 							{ "type": "string" },
@@ -35,37 +36,37 @@
 				},
 				"noSemanticDiagnostics": {
 					"type": "boolean",
-					"description": "Skips TypeScript's semantic diagnostics. Faster, but type errors no longer stop the build and diagnostic spans may be wrong.",
+					"description": "Skips TypeScript's semantic diagnostics. Faster, but type errors no longer stop the build and diagnostic spans may be wrong. Default: false.",
 					"default": false
 				},
 				"salt": {
 					"type": "string",
-					"description": "Salt for generated hashes. Defaults to a random 64-byte salt stored in flamework.build."
+					"description": "Salt for generated hashes. Default: a random 64-byte salt, stored in flamework.build. Leave it unset under obfuscation, so that each build gets fresh ids."
 				},
 				"hashPrefix": {
 					"type": "string",
-					"description": "Prefix for generated ids. Defaults to the package name; set a short one in a game to keep ids compact and distinct from any package's."
+					"description": "Prefix for generated ids. It cannot start with $, which Flamework's own packages use. Default: the package name in a package, and no prefix in a game. A game can set a short one to keep its ids distinct from any package's."
 				},
 				"obfuscation": {
 					"type": "boolean",
-					"description": "Obfuscates identifiers: randomises remote names, shuffles metadata and shortens ids. Game projects only.",
+					"description": "Obfuscates identifiers: randomises remote names, shuffles metadata and replaces the game's own ids with short hashes. Ids declared in packages keep their published names. Game projects only. Default: false.",
 					"default": false
 				},
 				"idGenerationMode": {
 					"type": "string",
 					"enum": ["full", "short", "tiny", "obfuscated"],
-					"description": "How identifiers are generated. Only shorten in a game; a published package must stay on \"full\" so its ids do not collide with its consumers'.",
-					"default": "full"
+					"description": "How identifiers are generated. Default: \"obfuscated\" when obfuscation is on, else \"full\". Only shorten in a game; a published package must stay on \"full\" so its ids do not collide with its consumers'."
 				},
 				"optimizations": {
 					"type": "object",
 					"additionalProperties": false,
-					"description": "Experimental output optimisations.",
+					"description": "Experimental output optimisations. Default: none.",
+					"default": {},
 					"properties": {
 						"guardGenerationDedupLimit": {
 							"type": "integer",
 							"minimum": 1,
-							"description": "Object and union types that occur at least this many times inside one generated guard are emitted once as a local and referenced."
+							"description": "Object and union types that occur at least this many times inside one generated guard are emitted once as a local and referenced. Default: unset, which turns this off."
 						}
 					}
 				}
@@ -78,7 +79,7 @@
 			"properties": {
 				"profiling": {
 					"type": "boolean",
-					"description": "Wraps every lifecycle event in debug.profilebegin so providers show up in the MicroProfiler. Defaults to true in Studio and false elsewhere; createLifecyclePlugin({ profiling }) overrides it per module."
+					"description": "Wraps every lifecycle event in debug.profilebegin so providers show up in the MicroProfiler. createLifecyclePlugin({ profiling }) overrides it per module. Default: true in Studio, false elsewhere."
 				}
 			}
 		},
@@ -89,7 +90,7 @@
 			"properties": {
 				"serialization": {
 					"type": "boolean",
-					"description": "Serialises every event and function payload into a buffer, with encode and decode code generated from the event's parameter types at each createServer/createClient call site. Values that cannot live in a buffer (Instances, unknown) travel alongside it.",
+					"description": "Serialises every event and function payload into a buffer, with encode and decode code generated from the event's parameter types at each createServer/createClient call site. Values that cannot live in a buffer (Instances, unknown) travel alongside it. Default: false.",
 					"default": false
 				}
 			}
@@ -102,24 +103,23 @@
 				"warningTimeout": {
 					"type": "number",
 					"minimum": 0,
-					"description": "Seconds before a component that never qualifies produces a warning; 0 disables it. Components that set their own warningTimeout keep it.",
+					"description": "Seconds before a component that never qualifies produces a warning; 0 disables it. Components that set their own warningTimeout keep it. Default: 5.",
 					"default": 5
 				},
 				"attributeWarningTimeout": {
 					"type": "number",
 					"minimum": 0,
-					"description": "Seconds before an instance-valued attribute that has not streamed in produces a warning; 0 disables it. Defaults to warningTimeout.",
-					"default": 5
+					"description": "Seconds before an instance-valued attribute that has not streamed in produces a warning; 0 disables it. Used by components that set neither attributeWarningTimeout nor warningTimeout. Default: warningTimeout (this section's, else 5)."
 				},
 				"streamingMode": {
 					"type": "string",
 					"enum": ["Disabled", "Watching", "Contextual"],
-					"description": "Default ComponentStreamingMode for components that do not set one.",
+					"description": "Default ComponentStreamingMode for components that do not set one. Default: \"Contextual\".",
 					"default": "Contextual"
 				},
 				"watchRenames": {
 					"type": "boolean",
-					"description": "Default watchRenames for components that do not set one: whether the instance tree and the child links follow the children's names as well as children arriving and leaving, so that a rename is noticed when it happens. Off by default, since a rename is rare and following names costs connections on the children; only matters while the tree is watched, so never under streamingMode Disabled.",
+					"description": "Default watchRenames for components that do not set one: whether the instance tree and the child links follow the children's names as well as children arriving and leaving, so that a rename is noticed when it happens. A rename is rare, and following names costs connections on the children. Only matters while the tree is watched, so never under streamingMode Disabled. Default: false.",
 					"default": false
 				}
 			}
@@ -132,7 +132,7 @@
 				"active": {
 					"type": "array",
 					"items": { "type": "string" },
-					"description": "The active scopes. A string from the environment is split on commas; \"*\" activates every scope and an empty list activates none.",
+					"description": "The active scopes. A string from the environment is split on commas; \"*\" activates every scope and an empty list activates none. Default: [], no scope.",
 					"default": []
 				}
 			}
@@ -144,34 +144,34 @@
 			"properties": {
 				"enabled": {
 					"type": "boolean",
-					"description": "Whether the plugin attaches the host at all: Workspace.FlameworkTests (a BindableFunction) and Workspace.FlameworkTestsServer (a RemoteFunction). Unset, it follows activeIn and inactiveIn, so this is an override for either direction."
+					"description": "Whether the plugin attaches the host at all: Workspace.FlameworkTests (a BindableFunction) and Workspace.FlameworkTestsServer (a RemoteFunction). This is an override for either direction. Default: unset, so it follows activeIn and inactiveIn."
 				},
 				"activeIn": {
 					"type": "array",
 					"items": { "type": "string" },
-					"description": "Scopes under which tests are on: the host attaches when at least one is active, the way activeIn works everywhere else (an empty list is no constraint). A string from the environment is split on commas.",
+					"description": "Scopes under which tests are on: the host attaches when at least one is active, the way activeIn works everywhere else (an empty list is no constraint). A string from the environment is split on commas. Default: [\"testing\"].",
 					"default": ["testing"]
 				},
 				"inactiveIn": {
 					"type": "array",
 					"items": { "type": "string" },
-					"description": "Scopes under which tests stay off, whatever else is active. A string from the environment is split on commas.",
+					"description": "Scopes under which tests stay off, whatever else is active. A string from the environment is split on commas. Default: [], none.",
 					"default": []
 				},
 				"autoRun": {
 					"type": "boolean",
-					"description": "Runs every test right after the module ignites, printing the results. Otherwise tests only run when the bindable or remote is invoked.",
+					"description": "Runs every test right after the module ignites, printing the results. Otherwise tests only run when the bindable or remote is invoked. Default: false.",
 					"default": false
 				},
 				"timeout": {
 					"type": "number",
 					"minimum": 0,
-					"description": "Seconds a single test may take before it is cancelled and counted as failed.",
+					"description": "Seconds a single test may take before it is cancelled and counted as failed. Default: 30.",
 					"default": 30
 				},
 				"entry": {
 					"type": "string",
-					"description": "Cloud runs only. The source path of a ModuleScript exporting `ignite()`, for example \"src/server/main\": an Open Cloud Luau execution task runs none of the place's Scripts, so the runner requires this module and ignites the game itself before invoking the bindable. Studio runs need none, the place runs itself. Compiled into the artifact as a tree path."
+					"description": "Cloud runs only. The source path of a ModuleScript exporting `ignite()`, for example \"src/server/main\": an Open Cloud Luau execution task runs none of the place's Scripts, so the runner requires this module and ignites the game itself before invoking the bindable. Studio runs need none, the place runs itself. Compiled into the artifact as a tree path. Default: none, and a cloud run refuses to start without it."
 				}
 			}
 		},
@@ -182,19 +182,19 @@
 			"properties": {
 				"testingUniverseId": {
 					"type": "string",
-					"description": "The testing experience's universe id, from the Creator Dashboard URL (game.GameId in Studio)."
+					"description": "The testing experience's universe id, from the Creator Dashboard URL (game.GameId in Studio). Default: none. --testing-universe and TESTING_UNIVERSE_ID come first."
 				},
 				"testingPlaceId": {
 					"type": "string",
-					"description": "The place to publish to, run tests in, and open in Studio. Never the original place."
+					"description": "The place to publish to, run tests in, and open in Studio. Never the original place. Default: none. --testing-place and TESTING_PLACE_ID come first."
 				},
 				"apiKey": {
 					"type": "string",
-					"description": "An Open Cloud API key with universe-places:write and universe.place.luau-execution-session:read and :write for the testing experience. Reference the environment, \"${ROBLOX_API_KEY:-}\", so the key is never in the file."
+					"description": "An Open Cloud API key with universe-places:write and universe.place.luau-execution-session:read and :write for the testing experience. Reference the environment, \"${ROBLOX_API_KEY:-}\", so the key is never in the file. Default: none. --key and ROBLOX_API_KEY come first."
 				},
 				"originalPlace": {
 					"type": "string",
-					"description": "A copy of the original place (File > Save to File in Studio), relative to this file. When set, the CLI lays the Rojo build over a copy of it before publishing, following the project file, so the tests see assets that exist only in the original. Needs lune."
+					"description": "A copy of the original place (File > Save to File in Studio), relative to this file. When set, the CLI lays the Rojo build over a copy of it before publishing, following the project file, so the tests see assets that exist only in the original. Needs lune. Default: none. --original and ORIGINAL_PLACE come first."
 				}
 			}
 		}

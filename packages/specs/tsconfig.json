@@ -18,8 +18,7 @@
 		"declaration": false,
 		"plugins": [
 			{
-				"transform": "@flamework-experimental/transformer",
-				"hashPrefix": "$t"
+				"transform": "@flamework-experimental/transformer"
 			}
 		]
 	}

@@ -96,6 +96,12 @@ as its own change rather than a version bump.
 
 ### Configuration
 
+The tsconfig plugin entry is checked first (`assertTransformerEntry`). It may hold `configFile` and
+the keys a plugin loader reads itself (`LOADER_KEYS`: roblox-ts's `transform`, `import`, `type`,
+`after`, `afterDeclarations`, and ts-patch's). Anything else raises with the key's name: a
+transformer option with the config file to move it to, any other key with an instruction to remove
+it. Transformer options come from the file alone.
+
 `flamework.config.json` is read in `util/projectConfig.ts`. After the JSON is parsed, `util/env.ts`
 substitutes `${NAME}` and `${NAME:-fallback}` in every string from `.env`, `.env.local` and the
 process environment, then walks the schema alongside the value to convert strings sitting in
@@ -111,6 +117,15 @@ again, and a different fingerprint prints the restart warning while the first re
 so that files which do not recompile never disagree with the ones that do. The build info records
 `idGenerationMode` and drops its identifier table when the mode changes, since an identifier once
 generated is answered from the table without looking at the mode again.
+
+Before the process's first read, a game's build gives its config file a `$schema` line
+(`addSchemaReference`). With no file, it creates one holding only that line, but only when the
+tsconfig is at the package root: below it, the created file would be found first and shadow a
+shared one added at the root later. The path goes through the nearest
+`node_modules/@flamework-experimental/transformer` that leads to the running transformer, not its
+real path, which a linked install (bun, pnpm) makes version-specific. The line is inserted as text,
+so the file keeps every other byte. Doing it before the first read keeps the watcher's fingerprint
+unchanged, and later compilations of the process skip it. A package (a scoped name) is left alone.
 
 ## Macros
 
@@ -184,8 +199,12 @@ how the call itself is emitted:
 **Identifiers** ([`src/util/uid.ts`](../../packages/transformer/src/util/uid.ts)) are how Flamework
 names a type at runtime: dependency injection keys, component ids, `Flamework.id<T>()`. An id is
 derived from the declaration's file path and name plus a salted hash, with the format controlled by
-`idGenerationMode`: `full` (default), `short`, `tiny` and `obfuscated`. Packages must stay on `full`
-so their ids do not collide with a game's; only game projects should shorten.
+`idGenerationMode`: `full` (the default without obfuscation), `short`, `tiny` and `obfuscated`.
+Packages must stay on `full` so their ids do not collide with a game's; only game projects should
+shorten. The mode only applies to the project's own declarations. An id declared in a package is
+read from that package's `flamework.build`, or formatted from its path with the prefix recorded
+there (`getDeclarationUid`), so obfuscation leaves package ids as the package published them: the
+package's compiled code compares against those strings.
 
 **Guards** ([`src/util/functions/buildGuardFromType.ts`](../../packages/transformer/src/util/functions/buildGuardFromType.ts))
 compile a type into a `@rbxts/t` check. Unions become `t.union` (`t.unionList` past two members), tuples `t.strictArray`, arrays

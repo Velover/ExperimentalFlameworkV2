@@ -2,12 +2,23 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { compileFixture, emitted } from "./compile";
+import { compileFixture, compileFixtureFresh, compileWithEntry, emitted } from "./compile";
 
-const { findProjectConfig, fingerprintProjectConfig, getRuntimeConfig, loadProjectConfig, readProjectConfig } =
-	await import("../out/util/projectConfig.js");
+const {
+	addSchemaReference,
+	findInstalledSchema,
+	findProjectConfig,
+	fingerprintProjectConfig,
+	getRuntimeConfig,
+	getSchemaReference,
+	insertSchemaReference,
+	loadProjectConfig,
+	LOADER_KEYS,
+	readProjectConfig,
+} = await import("../out/util/projectConfig.js");
 const { loadEnv, parseEnvFile } = await import("../out/util/env.js");
 const { BuildInfo } = await import("../out/classes/buildInfo.js");
+const { Cache } = await import("../out/util/cache.js");
 
 const FIXTURE = path.resolve(import.meta.dir, "fixture");
 
@@ -317,26 +328,457 @@ describe("the watcher's fingerprint", () => {
 	});
 });
 
-describe("merging with tsconfig options", () => {
-	test("inline options override the transformer section, one level deep for optimizations", () => {
-		write(
-			"flamework.config.json",
-			`{ "transformer": { "hashPrefix": "$file", "obfuscation": true, "optimizations": { "guardGenerationDedupLimit": 3 } } }`,
+describe("the tsconfig entry", () => {
+	const TRANSFORM = "@flamework-experimental/transformer";
+
+	// One value of each transformer option, as v1 (or a habit) would have written it on the entry.
+	const OPTIONS: [string, unknown][] = [
+		["plugins", ["./plugin.cjs"]],
+		["noSemanticDiagnostics", true],
+		["salt", "s"],
+		["hashPrefix", "$g"],
+		["obfuscation", true],
+		["idGenerationMode", "short"],
+		["optimizations", { guardGenerationDedupLimit: 3 }],
+	];
+
+	test("the refused options are exactly the transformer section's", () => {
+		expect(OPTIONS.map(([key]) => key).sort()).toEqual(
+			Object.keys(
+				JSON.parse(fs.readFileSync(path.join(import.meta.dir, "../flamework.config.schema.json"), "utf8"))
+					.properties.transformer.properties,
+			).sort(),
 		);
+	});
 
-		const { config } = loadProjectConfig(place, root, { hashPrefix: "$inline", optimizations: {} });
+	test.each(OPTIONS)("refuses the option %p, naming the file it belongs in", (key, value) => {
+		const file = write("places/a/flamework.config.json", `{ "transformer": { "obfuscation": false } }`);
 
-		expect(config.hashPrefix).toBe("$inline");
-		expect(config.obfuscation).toBe(true);
-		expect(config.optimizations).toEqual({ guardGenerationDedupLimit: 3 });
-		remove("flamework.config.json");
+		expect(() => loadProjectConfig(place, root, { transform: TRANSFORM, [key]: value })).toThrow(
+			`Move '${key}' to the "transformer" section of ${file}.`,
+		);
+		remove("places/a/flamework.config.json");
+	});
+
+	test("names the file it would read when there is none yet", () => {
+		expect(() => loadProjectConfig(place, root, { transform: TRANSFORM, obfuscation: true })).toThrow(
+			`Move 'obfuscation' to the "transformer" section of ${path.join(place, "flamework.config.json")}, a new file.`,
+		);
+	});
+
+	test("names the file configFile points at", () => {
+		const file = write("places/a/config/fw.json", "{}");
+		expect(() =>
+			loadProjectConfig(place, root, { transform: TRANSFORM, configFile: "config/fw.json", hashPrefix: "$g" }),
+		).toThrow(`Move 'hashPrefix' to the "transformer" section of ${file}.`);
+		remove("places/a/config/fw.json");
+	});
+
+	test("refuses a key that is no transformer option, v1's or a typo, and says to remove it", () => {
+		expect(() =>
+			loadProjectConfig(place, root, {
+				transform: TRANSFORM,
+				$rbxpackmode$: true,
+				preloadIds: true,
+				hashPrefx: "$g",
+			}),
+		).toThrow(`Remove '$rbxpackmode$', 'preloadIds', 'hashPrefx': not a transformer option.`);
+	});
+
+	test("lists every refused key in one message", () => {
+		let message = "";
+		try {
+			loadProjectConfig(place, root, {
+				transform: TRANSFORM,
+				obfuscation: true,
+				hashPrefix: "$g",
+				$rbxpackmode$: true,
+			});
+		} catch (error) {
+			message = (error as Error).message;
+		}
+
+		expect(message.split("\n")).toEqual([
+			`The tsconfig entry for ${TRANSFORM} takes only "transform" and "configFile"; transformer options are read from flamework.config.json.`,
+			`Move 'obfuscation', 'hashPrefix' to the "transformer" section of ${path.join(place, "flamework.config.json")}, a new file.`,
+			`Remove '$rbxpackmode$': not a transformer option.`,
+		]);
+	});
+
+	test("accepts the plugin loader's own keys", () => {
+		// roblox-ts reads the first five (and passes `transform` and `import` on); ts-patch the rest.
+		expect([...LOADER_KEYS]).toEqual([
+			"transform",
+			"import",
+			"type",
+			"after",
+			"afterDeclarations",
+			"name",
+			"transformProgram",
+			"isEsm",
+			"tsConfig",
+			"resolvePathAliases",
+		]);
+
+		write("places/a/flamework.config.json", `{ "transformer": { "hashPrefix": "$file" } }`);
+		const entry = {
+			transform: TRANSFORM,
+			import: "default",
+			type: "program",
+			after: false,
+			afterDeclarations: false,
+			name: "flamework",
+			transformProgram: false,
+			isEsm: false,
+			tsConfig: "./tsconfig.json",
+			resolvePathAliases: false,
+		};
+
+		expect(loadProjectConfig(place, root, entry).config).toEqual({ hashPrefix: "$file" });
+		remove("places/a/flamework.config.json");
+	});
+
+	test("still honours configFile, and takes every option from that file alone", () => {
+		const file = write(
+			"places/a/config/fw.json",
+			`{ "transformer": { "hashPrefix": "$x", "obfuscation": true, "optimizations": { "guardGenerationDedupLimit": 3 } } }`,
+		);
+		const loaded = loadProjectConfig(place, root, { transform: TRANSFORM, configFile: "config/fw.json" });
+
+		expect(loaded.configPath).toBe(file);
+		expect(loaded.config).toEqual({
+			hashPrefix: "$x",
+			obfuscation: true,
+			optimizations: { guardGenerationDedupLimit: 3 },
+		});
+		remove("places/a/config/fw.json");
+	});
+
+	test("refuses a configFile that is not a path", () => {
+		expect(() => loadProjectConfig(place, root, { transform: TRANSFORM, configFile: true })).toThrow(
+			/"configFile" on the tsconfig entry .* must be a path/,
+		);
 	});
 
 	test("works with no file at all", () => {
-		const loaded = loadProjectConfig(place, root, { salt: "s" });
+		const loaded = loadProjectConfig(place, root, { transform: TRANSFORM });
 		expect(loaded.configPath).toBeUndefined();
-		expect(loaded.config).toEqual({ salt: "s" });
+		expect(loaded.config).toEqual({});
 		expect(loaded.project).toEqual({});
+	});
+});
+
+describe("the tsconfig entry, through rbxtsc", () => {
+	test("an option on the entry fails the build and names the file to move it to", () => {
+		const result = compileWithEntry({ transform: "@flamework-experimental/transformer", obfuscation: true });
+
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain(
+			`Move 'obfuscation' to the "transformer" section of ${path.join(FIXTURE, "flamework.config.json")}.`,
+		);
+	});
+
+	test("the loader's keys and configFile build as before", () => {
+		const result = compileWithEntry({
+			transform: "@flamework-experimental/transformer",
+			import: "default",
+			type: "program",
+			configFile: "flamework.config.json",
+		});
+
+		expect(result.status).toBe(0);
+		// The `fw` prefix is in the fixture's config file only.
+		expect(fs.readFileSync(path.join(FIXTURE, "out", "nested.luau"), "utf8")).toContain("fw:nested@Target");
+	});
+});
+
+describe("the $schema line", () => {
+	const SCHEMA = "./s.json";
+
+	test("points at the schema from the config file, starting with a dot and with forward slashes", () => {
+		const schema = path.join(
+			root,
+			"node_modules",
+			"@flamework-experimental",
+			"transformer",
+			"flamework.config.schema.json",
+		);
+
+		expect(getSchemaReference(path.join(root, "flamework.config.json"), schema)).toBe(
+			"./node_modules/@flamework-experimental/transformer/flamework.config.schema.json",
+		);
+		expect(getSchemaReference(path.join(root, "places", "a", "config", "fw.json"), schema)).toBe(
+			"../../../node_modules/@flamework-experimental/transformer/flamework.config.schema.json",
+		);
+	});
+
+	test.if(process.platform === "win32")("points at a schema on another drive with a file URL", () => {
+		const other = /^c:/i.test(root) ? "D:\\x\\flamework.config.schema.json" : "C:\\x\\flamework.config.schema.json";
+		expect(getSchemaReference(path.join(root, "flamework.config.json"), other)).toMatch(/^file:\/\/\/[CD]:\/x\//);
+	});
+
+	test.each([
+		[
+			"one key per line, tabs, LF",
+			`{\n\t"core": { "profiling": true }\n}\n`,
+			`{\n\t"$schema": "./s.json",\n\t"core": { "profiling": true }\n}\n`,
+		],
+		[
+			"two spaces, CRLF",
+			`{\r\n  "core": {},\r\n  "networking": {}\r\n}\r\n`,
+			`{\r\n  "$schema": "./s.json",\r\n  "core": {},\r\n  "networking": {}\r\n}\r\n`,
+		],
+		[
+			"a comment above the first key, trailing commas",
+			`{\n\t// the transformer\n\t"transformer": { "obfuscation": true, },\n}`,
+			`{\n\t"$schema": "./s.json",\n\t// the transformer\n\t"transformer": { "obfuscation": true, },\n}`,
+		],
+		[
+			"a comment after the brace",
+			`{ // settings\n\t"core": {}\n}`,
+			`{ // settings\n\t"$schema": "./s.json",\n\t"core": {}\n}`,
+		],
+		[
+			"a blank line after the brace",
+			`{\n\n    "core": {}\n}`,
+			`{\n\n    "$schema": "./s.json",\n    "core": {}\n}`,
+		],
+		["a byte order mark", `\uFEFF{\n\t"core": {}\n}`, `\uFEFF{\n\t"$schema": "./s.json",\n\t"core": {}\n}`],
+		["one line", `{ "core": {} }`, `{ "$schema": "./s.json", "core": {} }`],
+		["empty", `{}`, `{ "$schema": "./s.json" }`],
+		["empty with a space", `{ }\n`, `{ "$schema": "./s.json" }\n`],
+		["empty over two lines", `{\r\n}\r\n`, `{\r\n\t"$schema": "./s.json"\r\n}\r\n`],
+	])("is added as the first key, every other byte kept: %s", (_, text, expected) => {
+		expect(insertSchemaReference(text, SCHEMA)).toBe(expected);
+	});
+
+	test("is not added when the file has one, wherever it points and wherever it is", () => {
+		expect(insertSchemaReference(`{ "$schema": "https://example.com/other.json" }`, SCHEMA)).toBeUndefined();
+		expect(insertSchemaReference(`{\n\t"core": {},\n\t"$schema": "../x.json"\n}`, SCHEMA)).toBeUndefined();
+	});
+
+	test("is not added to a file that does not parse or is not an object", () => {
+		expect(insertSchemaReference(`{ "core": `, SCHEMA)).toBeUndefined();
+		expect(insertSchemaReference(`[]`, SCHEMA)).toBeUndefined();
+		expect(insertSchemaReference(`{ /* never\nclosed "core": {} }`, SCHEMA)).toBeUndefined();
+	});
+
+	test("leaves a file the loader reads as it did", () => {
+		const text = `{\n\t// c\n\t"transformer": { "hashPrefix": "$$g", },\n\t"core": { "profiling": true },\n}\n`;
+		const before = write("flamework.config.json", text);
+		const project = readProjectConfig(before, {});
+
+		write("flamework.config.json", insertSchemaReference(text, SCHEMA)!);
+		expect(readProjectConfig(before, {})).toEqual(project);
+		remove("flamework.config.json");
+	});
+
+	describe("added by a game's build", () => {
+		const schema = () =>
+			path.join(root, "node_modules", "@flamework-experimental", "transformer", "flamework.config.schema.json");
+		const game = () => ({ isGame: true, schema: schema() });
+
+		test("to the file it reads", () => {
+			const text = `{\r\n\t"core": { "profiling": false }\r\n}\r\n`;
+			const file = write("flamework.config.json", text);
+
+			expect(addSchemaReference(place, root, {}, game())).toEqual({ change: "added", configPath: file });
+			expect(fs.readFileSync(file, "utf8")).toBe(
+				`{\r\n\t"$schema": "./node_modules/@flamework-experimental/transformer/flamework.config.schema.json",\r\n\t"core": { "profiling": false }\r\n}\r\n`,
+			);
+			remove("flamework.config.json");
+		});
+
+		test("to the file configFile points at, relative to that file", () => {
+			const file = write("places/a/config/fw.json", `{ "core": {} }`);
+
+			expect(addSchemaReference(place, root, { configFile: "config/fw.json" }, game())?.change).toBe("added");
+			expect(fs.readFileSync(file, "utf8")).toBe(
+				`{ "$schema": "../../../node_modules/@flamework-experimental/transformer/flamework.config.schema.json", "core": {} }`,
+			);
+			remove("places/a/config/fw.json");
+		});
+
+		test("in a new file holding just that line, when the game has none and its tsconfig is at the package root", () => {
+			const file = path.join(root, "flamework.config.json");
+
+			expect(addSchemaReference(root, root, {}, game())).toEqual({ change: "created", configPath: file });
+			expect(fs.readFileSync(file, "utf8")).toBe(
+				`{\n\t"$schema": "./node_modules/@flamework-experimental/transformer/flamework.config.schema.json"\n}\n`,
+			);
+			expect(readProjectConfig(file, {})).toEqual({});
+			remove("flamework.config.json");
+		});
+
+		test("in no new file below the package root, where it would hide a shared one added later", () => {
+			// Guide 09's multi-place layout: places/a has no file of its own and reads the root's once
+			// there is one. A file created in places/a would be found first from then on.
+			expect(addSchemaReference(place, root, {}, game())).toBeUndefined();
+			expect(fs.existsSync(path.join(place, "flamework.config.json"))).toBe(false);
+
+			write("flamework.config.json", `{ "transformer": { "obfuscation": true } }`);
+			expect(loadProjectConfig(place, root, {}, {}).config).toEqual({ obfuscation: true });
+			remove("flamework.config.json");
+		});
+
+		test("never over a $schema the file has", () => {
+			const text = `{\n\t"$schema": "../elsewhere.json",\n\t"core": {}\n}\n`;
+			const file = write("flamework.config.json", text);
+
+			expect(addSchemaReference(place, root, {}, game())).toBeUndefined();
+			expect(fs.readFileSync(file, "utf8")).toBe(text);
+			remove("flamework.config.json");
+		});
+
+		test("never for a package, not even to create the file", () => {
+			const text = `{ "transformer": { "hashPrefix": "$x" } }`;
+			const file = write("flamework.config.json", text);
+
+			expect(addSchemaReference(place, root, {}, { isGame: false, schema: schema() })).toBeUndefined();
+			expect(fs.readFileSync(file, "utf8")).toBe(text);
+
+			remove("flamework.config.json");
+			expect(addSchemaReference(root, root, {}, { isGame: false, schema: schema() })).toBeUndefined();
+			expect(fs.existsSync(path.join(root, "flamework.config.json"))).toBe(false);
+		});
+
+		test("only on a process's first compilation, not on a watcher's rebuilds", () => {
+			const text = `{ "core": {} }`;
+			const file = write("flamework.config.json", text);
+
+			Cache.isInitialCompile = false;
+			try {
+				expect(addSchemaReference(place, root, {}, game())).toBeUndefined();
+				expect(fs.readFileSync(file, "utf8")).toBe(text);
+
+				remove("flamework.config.json");
+				expect(addSchemaReference(root, root, {}, game())).toBeUndefined();
+				expect(fs.existsSync(path.join(root, "flamework.config.json"))).toBe(false);
+			} finally {
+				Cache.isInitialCompile = true;
+			}
+		});
+
+		test("before the first read, so a watcher's later reads find nothing changed", () => {
+			// The build adds the line and then reads the file; a watcher compares every later read
+			// against that first one. Creating the file changes where the config comes from, so it
+			// has to happen before the first read; adding the line changes nothing the reads keep.
+			expect(addSchemaReference(root, root, {}, game())?.change).toBe("created");
+			const first = fingerprintProjectConfig(loadProjectConfig(root, root, {}, {}));
+			expect(fingerprintProjectConfig(loadProjectConfig(root, root, {}, {}))).toBe(first);
+			remove("flamework.config.json");
+
+			const file = write("flamework.config.json", `{ "core": {} }`);
+			const without = fingerprintProjectConfig(loadProjectConfig(place, root, {}, {}));
+			addSchemaReference(place, root, {}, game());
+			expect(fs.readFileSync(file, "utf8")).toContain("$schema");
+			expect(fingerprintProjectConfig(loadProjectConfig(place, root, {}, {}))).toBe(without);
+			remove("flamework.config.json");
+		});
+
+		test("refuses a bad tsconfig entry before writing anything", () => {
+			expect(() => addSchemaReference(root, root, { obfuscation: true }, game())).toThrow(/Move 'obfuscation'/);
+			expect(fs.existsSync(path.join(root, "flamework.config.json"))).toBe(false);
+		});
+
+		test("leaves a file it cannot write alone, without failing the build", () => {
+			const text = `{ "core": {} }`;
+			const file = write("flamework.config.json", text);
+			fs.chmodSync(file, 0o444);
+
+			try {
+				expect(addSchemaReference(place, root, {}, game())).toBeUndefined();
+				expect(fs.readFileSync(file, "utf8")).toBe(text);
+			} finally {
+				fs.chmodSync(file, 0o644);
+				remove("flamework.config.json");
+			}
+		});
+	});
+
+	describe("finds the installed schema", () => {
+		const own = fs.realpathSync(path.resolve(import.meta.dir, "../flamework.config.schema.json"));
+
+		test("through the nearest node_modules link to the running transformer, not its real path", () => {
+			// The fixture reaches the transformer through the workspace root's node_modules, where bun
+			// links the package: the same walk roblox-ts made to load the entry's `transform`.
+			const found = findInstalledSchema(FIXTURE);
+			expect(found).toBe(
+				path.resolve(
+					import.meta.dir,
+					"../../../node_modules/@flamework-experimental/transformer/flamework.config.schema.json",
+				),
+			);
+			expect(fs.realpathSync(found)).toBe(own);
+		});
+
+		test("at its real path when no node_modules leads to it", () => {
+			expect(findInstalledSchema(place)).toBe(path.resolve(import.meta.dir, "../flamework.config.schema.json"));
+		});
+
+		test("past a node_modules copy that is not the running transformer", () => {
+			write("node_modules/@flamework-experimental/transformer/flamework.config.schema.json", "{}");
+			expect(findInstalledSchema(place)).toBe(path.resolve(import.meta.dir, "../flamework.config.schema.json"));
+			fs.rmSync(path.join(root, "node_modules"), { recursive: true, force: true });
+		});
+	});
+
+	describe("through rbxtsc", () => {
+		test("a game's build adds the line to the file configFile names, logs it, and emits the same", () => {
+			// The fixture is a game (an unscoped name). Its own config file already has a `$schema`,
+			// pointing at the repository's copy, which the build keeps; this copy has none.
+			const own = path.join(FIXTURE, "flamework.config.json");
+			const ownText = fs.readFileSync(own, "utf8");
+			const copy = path.join(FIXTURE, "probe-config", "flamework.config.json");
+			fs.mkdirSync(path.dirname(copy), { recursive: true });
+			// Plugin paths resolve from the package root, so the copy's list works unchanged.
+			fs.writeFileSync(copy, ownText.replace(/^\t"\$schema": .*\n/m, ""));
+
+			try {
+				const result = compileWithEntry({
+					transform: "@flamework-experimental/transformer",
+					configFile: "probe-config/flamework.config.json",
+				});
+
+				expect(result.status).toBe(0);
+				expect(result.output).toContain(
+					`Added a "$schema" line to ${path.join("probe-config", "flamework.config.json")}`,
+				);
+				expect(fs.readFileSync(copy, "utf8")).toStartWith(
+					`{\n\t"$schema": "../../../../../node_modules/@flamework-experimental/transformer/flamework.config.schema.json",\n\t"transformer": {`,
+				);
+				expect(fs.readFileSync(path.join(FIXTURE, "out", "nested.luau"), "utf8")).toContain("fw:nested@Target");
+			} finally {
+				fs.rmSync(path.dirname(copy), { recursive: true, force: true });
+				// What later tests read from disk is the ordinary build again.
+				expect(compileFixtureFresh().status).toBe(0);
+			}
+
+			expect(fs.readFileSync(own, "utf8")).toBe(ownText);
+		});
+	});
+});
+
+describe("the schema", () => {
+	test("states every option's default, which the $schema line shows in an editor", () => {
+		type Node = { description?: string; properties?: Record<string, Node> };
+		const schema = JSON.parse(
+			fs.readFileSync(path.join(import.meta.dir, "../flamework.config.schema.json"), "utf8"),
+		);
+		const missing = new Array<string>();
+		const walk = (node: Node, name: string) => {
+			for (const [key, option] of Object.entries(node.properties ?? {})) {
+				if (!/ Default: /.test(option.description ?? "")) missing.push(`${name}${key}`);
+				walk(option, `${name}${key}.`);
+			}
+		};
+
+		// The sections themselves are not options, and neither is `$schema`.
+		for (const [section, node] of Object.entries(schema.properties as Record<string, Node>)) {
+			walk(node, `${section}.`);
+		}
+
+		expect(missing).toEqual([]);
 	});
 });
 

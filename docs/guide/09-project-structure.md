@@ -105,7 +105,7 @@ package has its own section in the file. The only entry `tsconfig.json` needs is
 {
   "$schema": "./node_modules/@flamework-experimental/transformer/flamework.config.schema.json",
   "transformer": {
-    "hashPrefix": "$g",
+    "hashPrefix": "g",
     "obfuscation": false,
     "idGenerationMode": "short",
     "optimizations": { "guardGenerationDedupLimit": 5 },
@@ -120,9 +120,9 @@ package has its own section in the file. The only entry `tsconfig.json` needs is
 
 | Section | Key | Effect |
 |---|---|---|
-| `transformer` | `hashPrefix` | Prefix for generated ids. Defaults to the package name; set a short one in a game. |
+| `transformer` | `hashPrefix` | Prefix for generated ids. Defaults to the package name in a package, and to none in a game; set a short one in a game. It cannot start with `$`, which Flamework's own packages use. |
 | | `obfuscation` | Obfuscates identifiers: random remote names, shuffled metadata, short ids, all different on every plain build. Game projects only; see [obfuscation](#obfuscation). |
-| | `idGenerationMode` | `"full"` (default), `"short"`, `"tiny"` or `"obfuscated"`. Only shorten in a game. |
+| | `idGenerationMode` | `"full"`, `"short"`, `"tiny"` or `"obfuscated"`. Defaults to `"obfuscated"` with obfuscation on, else `"full"`. Only shorten in a game. |
 | | `plugins` | Transformer plugins; see [transformer plugins](../reference/transformer-plugins.md). |
 | | `salt`, `noSemanticDiagnostics`, `optimizations` | Hash salt, skipping semantic diagnostics, [guard deduplication](#guard-deduplication). |
 | `core` | `profiling` | Default for `LifecyclePlugin` profiling; `createLifecyclePlugin({ profiling })` overrides it per module. |
@@ -137,12 +137,23 @@ package root. So a repository with several places can share one file at the root
 still have its own file, which is used instead.
 
 Comments and trailing commas are allowed. Unknown keys are rejected, with their name in the error.
-The `$schema` line gives your editor completion and validation. To use a different name or location,
-set `"configFile": "config/flamework.json"` on the tsconfig entry.
 
-The `transformer` section can also be written inline on the tsconfig entry, where it **overrides**
-the file. The other sections cannot be written there. For a game project, the transformer copies
-the runtime sections (`core`, `networking`, `components`, `scopes` and `testing`) into
+The `$schema` line gives your editor every option, with its description and its default, and checks
+what you write. You don't have to add it yourself. When a game builds, the transformer adds the line
+if the file has none. If the game has no `flamework.config.json` yet, it creates one next to
+`tsconfig.json` with just that line, but only when `tsconfig.json` is at the package root. A place
+in a subfolder gets no file of its own, because that file would hide a shared one you add at the
+root later. The transformer does this once, when `rbxtsc` starts, not on a watcher's rebuilds. It
+never changes a `$schema` that is already there, and never touches a package's config file.
+
+The tsconfig entry takes only `transform` and, if you need it, `configFile`. To use a different
+name or location for the file, set `"configFile": "config/flamework.json"` on the entry. Any other
+key on the entry fails the build, and the error names the key. For a transformer option it also
+names the file to move it to. For any other key it says to remove it. (Keys that the plugin loader
+reads itself, such as `import`, are allowed.)
+
+For a game project, the transformer copies the runtime sections (`core`, `networking`,
+`components`, `scopes` and `testing`) into
 `include/flamework/config.json`, and the packages read them through `getRuntimeConfig()` from
 `@flamework-experimental/core`. `cloud` is not one of them and never reaches the place. A package (a
 project with a scoped name) gets no such file: its defaults come from the game that uses it.
@@ -157,6 +168,16 @@ not a watcher's rebuild or an incremental build (both explained below). That inc
 hashed strings, and the callsite uuids that name every remote. A name mapped in one release is
 useless against the next. That is the point: a cheat cannot carry a map of your remotes from one
 version to another.
+
+Ids declared in a package are the exception. Obfuscation hashes your game's own ids: its classes and
+its own interfaces. A package's ids keep the names the package was published with. That covers
+Flamework's own (`OnStart`, `OnInit`, `OnTick`, `Components` and the rest) and those of any other
+package built with Flamework. The reason: a package is built before your game, and its compiled code
+compares those exact strings at runtime. For example, core's lifecycle plugin looks for
+`$:lifecycle/lifecycleInterfaces@OnStart`. Your game's build cannot rename them. Renaming them at
+runtime would ship the list of new names to the client, next to the package's own readable code, so
+it would hide nothing. Flamework v1 worked the same way. A readable package id only reveals which
+Flamework events and package types a class uses.
 
 The names come from a hash salt and a build seed, both kept in `flamework.build`. A plain `rbxtsc`
 recreates that file, and with it the salt and the seed. A running `rbxtsc -w` keeps reading the

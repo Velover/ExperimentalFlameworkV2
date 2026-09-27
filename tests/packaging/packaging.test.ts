@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import fs from "fs";
 import path from "path";
+import ts from "typescript";
 
 /**
  * Guards the shape of the Luau that ships in the published packages.
@@ -95,5 +96,45 @@ describe("@flamework-experimental/testing's CLI", () => {
 	// ModuleScript of every .luau it finds; the CLI's Luau is kept under another extension for that.
 	test("ships no .luau under cli/", () => {
 		expect(luauFiles(path.join(ROOT, "packages", "testing", "cli"))).toEqual([]);
+	});
+});
+
+describe("package ids", () => {
+	// A game's build names a package's classes and interfaces with the prefix in the package's
+	// flamework.build, and the package's own compiled code compares against those exact strings (the
+	// lifecycle plugin observes "$:lifecycle/lifecycleInterfaces@OnStart"). A changed prefix breaks
+	// every game built against the package.
+	const PREFIXES: [string, string][] = [
+		["core", "$"],
+		["components", "$c"],
+		["networking", "$n"],
+		["testing", "$T"],
+	];
+
+	test.each(PREFIXES)("%s is built with the prefix %p", (pkg, prefix) => {
+		const buildInfo = JSON.parse(fs.readFileSync(path.join(ROOT, "packages", pkg, "flamework.build"), "utf8"));
+		expect(buildInfo.identifierPrefix).toBe(prefix);
+		expect(buildInfo.idGenerationMode).toBe("full");
+	});
+
+	test.each(PREFIXES)("%s takes the prefix from its flamework.config.json, not its tsconfig entry", (pkg, prefix) => {
+		const directory = path.join(ROOT, "packages", pkg);
+		const config = JSON.parse(fs.readFileSync(path.join(directory, "flamework.config.json"), "utf8"));
+		expect(config.transformer).toEqual({ hashPrefix: prefix });
+
+		// The build refuses any option on the entry; this only says where to look.
+		const { config: tsconfig } = ts.readConfigFile(path.join(directory, "tsconfig.json"), ts.sys.readFile);
+		expect(tsconfig.compilerOptions.plugins).toEqual([{ transform: "@flamework-experimental/transformer" }]);
+	});
+
+	test("the compiled packages hold the ids games compare against", () => {
+		const read = (file: string) => fs.readFileSync(path.join(ROOT, "packages", file), "utf8");
+		expect(read("core/out/lifecycle/lifecyclePlugin.luau")).toContain('"$:lifecycle/lifecycleInterfaces@OnStart"');
+		expect(read("core/out/lifecycle/lifecyclePlugin.luau")).toContain('"$:lifecycle/lifecycleInterfaces@OnInit"');
+		expect(
+			luauFiles(path.join(ROOT, "packages", "components", "out")).some((file) =>
+				fs.readFileSync(file, "utf8").includes('"$c:components@Components"'),
+			),
+		).toBe(true);
 	});
 });

@@ -16,7 +16,7 @@ be built into that container is now a **plugin**.
 | `Flamework.addPathsGlob("src/**/services")` | `.registerProvidersGlob("src/**/services")` / `ComponentPlugin.fromGlob(...)` |
 | `@Optional()` / `includeOptionalClass` | `@Provider({ lazy: true })`, constructed when first resolved |
 | `flamework.json` `profiling` | `flamework.config.json` `core.profiling`, or `createLifecyclePlugin({ profiling })` per module |
-| Transformer options inline in `tsconfig.json` | the `transformer` section of `flamework.config.json` (inline still works and wins) |
+| Transformer options inline in `tsconfig.json` | the `transformer` section of `flamework.config.json`; the build refuses them on the entry (step 1) |
 | Values sent as-is over remotes | unchanged by default; `networking.serialization` packs them into buffers with generated code |
 | `OnInit` | unchanged |
 | `Modding.createDecorator` / `getDecorators` | your own decorator + `@metadata reflect` + `Reflect`; see below |
@@ -67,14 +67,18 @@ releases depend on each other. Then:
 - **Imports.** `@flamework/core` becomes `@flamework-experimental/core`, and so on for every import.
 - **`tsconfig.json`.** The transformer entry becomes
   `{ "transform": "@flamework-experimental/transformer" }`, and `typeRoots` lists
-  `node_modules/@flamework-experimental` where it listed `node_modules/@flamework`. Options written
-  inline on the entry still work, and win over `flamework.config.json`. v1's `preloadIds` has no
-  counterpart.
+  `node_modules/@flamework-experimental` where it listed `node_modules/@flamework`. Move every
+  transformer option on the entry, such as `obfuscation`, `hashPrefix` or `idGenerationMode`, to the
+  `transformer` section of `flamework.config.json`. The build refuses them on the entry, and the
+  error names each one and the file to move it to. Any other key it names and tells you to remove,
+  such as v1's `preloadIds`, which has no counterpart.
 - **`flamework.json`** becomes `flamework.config.json`, next to `tsconfig.json`, with a section per
   package ([Project structure › Configuration](09-project-structure.md#configuration)). v1's
   `profiling` is `core.profiling`. `logLevel` and `disableDependencyWarnings` have no counterpart
   (v1's warning for `Dependency<T>()` before `ignite()` is now an error; see step 5), and the new
-  file rejects keys it does not know. Nothing reads `flamework.json` any more.
+  file rejects keys it does not know. Nothing reads `flamework.json` any more. If you have no
+  `flamework.config.json` yet and `tsconfig.json` is at the package root, the first build creates
+  one with just a `$schema` line, so your editor lists every option.
 - **Rojo.** Where the project file maps `node_modules/@flamework`, map each runtime package under
   `@flamework-experimental` instead. Don't map the whole folder, which holds the transformer too. See
   [Getting started › Rojo](01-getting-started.md#rojo).
