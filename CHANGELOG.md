@@ -3,7 +3,7 @@
 Notable changes to the `@flamework-experimental` packages. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 2026-09-27: core, components, networking and testing 2.0.0-alpha.3; transformer 2.0.0-alpha.4; transformer-plugin 2.0.0-alpha.2
 
 ### Upgrade notes
 
