@@ -53,9 +53,9 @@ local result = workspace.FlameworkTests:Invoke()          -- every section
 local result = workspace.FlameworkTests:Invoke("economy") -- one section
 ```
 
-Without the scope, the test providers are skipped at ignition. Their files are still required,
-because a folder registration requires everything under it before it looks at any condition. But no
-test class is constructed, the plugin does nothing, and no instance is made. One switch,
+Without the scope, the `Tests` folders are skipped entirely. A folder registration whose own
+condition does not hold does not look the folder up or require anything in it. No test class is
+loaded or constructed, the plugin does nothing, and no instance is made. One switch,
 `FLAMEWORK_SCOPES`, turns on both the tests and the host that runs them. Keeping the files out of a
 release place altogether is Rojo's job; see [shipping](#shipping).
 
@@ -101,9 +101,13 @@ cloud also needs an API key and a testing place; see [Running the tests](../test
 
 `defineTests` is an ordinary function, so anything may call it. A provider's `onStart` is the
 natural place, since by then every provider is constructed and every `onInit` has run. Put the scope
-condition on the class (`@Provider({ activeIn: ["testing"] })`), on the folder registration
-(`registerProviders("src/server/Tests", { activeIn: ["testing"] })`), or on both. These are the
-usual [scope rules](11-scopes.md), nothing specific to testing.
+condition on the folder registration (`registerProviders("src/server/Tests", { activeIn: ["testing"] })`),
+on the class (`@Provider({ activeIn: ["testing"] })`), or on both. These are the usual
+[scope rules](11-scopes.md), nothing specific to testing.
+
+Only the condition on the folder registration keeps the folder from loading in a build without the
+scope. A release place that leaves the folder out needs that. A condition on the class is read after
+its file has loaded.
 
 Client tests have the same shape, in a client provider, with the plugin included in the client
 module. Each realm has its own host.
@@ -256,9 +260,9 @@ overrides them for one plugin, which is what a test harness of your own would us
 Never ship a build with tests on: the remote lets any client run the server's tests. Keep the
 `testing` scope out of the release `.env`.
 
-Without the scope, the test files still compile and load, since a folder registration requires
-everything under it. To leave them out of the place, give the release build a Rojo project that
-ignores the folders:
+Without the scope, the test files still compile and are still copied into the place. A `Tests`
+folder registered under the scope is never loaded, though. To leave the files out of the place as
+well, give the release build a Rojo project that ignores the folders:
 
 ```jsonc
 // release.project.json, otherwise identical to default.project.json
@@ -268,10 +272,14 @@ ignores the folders:
 `**/Tests` drops every folder with that name, at any depth (`**/Tests/**` would leave empty folders
 behind).
 
-Never register such a folder by its own path, as in `registerProviders("src/server/Tests")`. The
-transformer resolves the path against the project file without regard to `globIgnorePaths`, and a
-registered folder that is not in the place stalls ignition in `WaitForChild`. Instead, let the
-registration of the folder above it find the tests, with the scope condition on the classes.
+Register such a folder by its own path only with the scope condition on the registration itself, as
+in [Setting up](#setting-up): `registerProviders("src/server/Tests", { activeIn: ["testing"] })`.
+The release build does not have the scope, so the folder is never looked up. Without that
+condition on the registration, the folder is looked up in every build that runs it. That includes
+`registerProviders("src/server/Tests")` with the condition only on the classes, and
+`ComponentPlugin.fromPath` with the condition only on `includePlugin`. The transformer resolves the
+path against the project file without regard to `globIgnorePaths`, so a registered folder that is
+not in the place stalls ignition in `WaitForChild`.
 
 ---
 

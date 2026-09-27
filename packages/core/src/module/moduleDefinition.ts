@@ -3,6 +3,7 @@ import type { PluginDefinition } from "../plugin/pluginDefinition";
 import { clearDefaultModule, getDefaultModule, setDefaultModule } from "./defaultModule";
 import { createModuleInstantiation, type Module } from "./module";
 import type { ScopeCondition } from "./scopes";
+import type { LeftOutRegistration } from "../utility/leftOut";
 
 /**
  * Options for one ignition of a module.
@@ -52,6 +53,12 @@ export interface ModuleState {
 
 	/** The plugins to set up on ignition, in inclusion order. */
 	readonly plugins: readonly PluginInclusion[];
+
+	/**
+	 * The path and glob registrations left out by their own scope condition, whose folders were
+	 * never looked up: what a miss on a class under one of them names.
+	 */
+	readonly leftOut?: readonly LeftOutRegistration[];
 }
 
 export class ModuleDefinition {

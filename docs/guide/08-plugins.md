@@ -40,7 +40,7 @@ Everything is a method on `target`, and everything registers into the module bei
 | `provideInstance(value)` | Hands the module an object under its type's id. Providers inject it; `resolveDependency` finds it. |
 | `registerClassProvider(Class, options?)` | Registers a provider, exactly as the module builder would. |
 | `registerProvider<T>(config)` | The same, for a function or alias provider. |
-| `registerProviders(path, options?)` / `registerProvidersGlob(glob, options?)` | Registers every `@Provider()` class the ModuleScripts under a folder define, exported or not, as the module builder does. How a plugin ships a folder of providers. |
+| `registerProviders(path, options?)` / `registerProvidersGlob(glob, options?)` | Registers every `@Provider()` class the ModuleScripts under a folder define, exported or not, as the module builder does. How a plugin ships a folder of providers. When the options' scope condition does not hold, the folder is not looked up at all. |
 | `includePlugin(plugin, options?)` | Includes another plugin, set up now, before this one continues. |
 | `onPreIgnite(cb, options?)` | Runs `cb` before the module's providers are constructed. |
 | `onPostIgnite(cb, options?)` | Runs `cb` after every provider has been constructed. |
@@ -54,9 +54,11 @@ Everything is a method on `target`, and everything registers into the module bei
 Every hook receives the module: `target.onPostIgnite((module) => module.resolveDependency<Shop>())`.
 
 The `options` on the registrations and on `includePlugin` are a
-[scope condition](11-scopes.md#conditions) (`activeIn`, `inactiveIn`). A plugin that keeps its own
-registry of classes, as the components plugin does, has to call `target.isActive(condition)` for
-each class it holds. Otherwise its classes ignore the module's condition:
+[scope condition](11-scopes.md#conditions) (`activeIn`, `inactiveIn`). When an inclusion's condition
+does not hold, the plugin's setup never runs, so the folders its setup registers are never looked up. A
+plugin that keeps its own registry of classes, as the components plugin does, has to call
+`target.isActive(condition)` for each class it holds. Otherwise its classes ignore the module's
+condition:
 
 ```ts
 for (const component of registered) {

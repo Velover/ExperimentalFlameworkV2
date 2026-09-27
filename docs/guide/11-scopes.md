@@ -71,6 +71,25 @@ should, put it in another module or registration.
 A module whose own condition does not hold still ignites. It holds no providers and no components,
 but its plugins are set up. `Dependency<T>(module)` raises an error for anything it would have had.
 
+A path or glob registration whose own condition does not hold skips its folder entirely. It does not
+look the folder up or load anything in it, so the folder does not have to be in the place. This
+applies to `registerProviders`, `registerProvidersGlob`, `ComponentPlugin.fromPath` and `fromGlob`,
+`registerComponents` and `registerComponentsGlob`, and a plugin's own `registerProviders` and
+`registerProvidersGlob`.
+
+The other levels work differently:
+
+- The module's condition and the class's condition are checked at ignition, after the folder has
+  loaded.
+- A plugin inclusion whose condition does not hold skips the plugin's setup. So the registrations a
+  plugin makes in its setup never run, and their folders are not looked up.
+
+`ComponentPlugin.fromPath` and `fromGlob` look their folder up when you call them, before
+`includePlugin` sees its condition. Put the condition on `fromPath` itself.
+
+In the example above, `registerProviders` loads its folder only when `components` is active.
+`ComponentPlugin.fromPath` loads its folder in every build.
+
 ## What being left out means
 
 A class whose conditions do not hold is **not registered**. It is not constructed, it receives no
@@ -85,6 +104,20 @@ inactive (activeIn [components]; active scopes [])
 
 `getComponent` on a left-out component says the same. A lazy provider that was left out reports it
 the first time something resolves it.
+
+A class under a folder whose registration was left out is different. That folder was never loaded,
+so the class was never registered at all. The error names the registration instead:
+
+```
+module 'Game' could not resolve dependency 'server/Testing/Probe@Probe': 'Probe'
+(ServerScriptService.TS.Testing.Probe) is under registerProviders("src/server/Testing"), which is
+left out by its scope (activeIn [components]; active scopes []): nothing under it is registered.
+Change the build's scopes so that the condition holds, or do not depend on it in this build
+```
+
+This needs the class to be loaded, for example by a file that imports it as a value. If nothing has
+loaded it, the error lists every registration that the module left out this way, since the class
+may be under any of them. `getComponent` does the same for the registrations of the module's component plugins.
 
 ## Standing in for production code
 
@@ -107,10 +140,12 @@ real game loop, or a component whose tag a test rig reuses.
 
 ## Where scopes are decided
 
-Every condition is checked once, at ignition, against the scopes the build was compiled with. After
-a change to `.env`, rebuild (restart the watcher if one is running) and, in Studio, stop and play
-again. There is no runtime override. The scopes a place runs with are part of the build, so a test
-scope cannot be switched on in a published game.
+Every condition is checked against the scopes the build was compiled with. It is checked at
+ignition. A path or glob registration's own condition is also checked when the registration is
+made, so that a left-out folder is never loaded. Both checks give the same answer. After a change to
+`.env`, rebuild (restart the watcher if one is running) and, in Studio, stop and play again. There
+is no runtime override. The scopes a place runs with are part of the build, so a test scope cannot
+be switched on in a published game.
 
 ## Caveats
 

@@ -258,6 +258,32 @@ Edge cases found and deliberately left alone, because the fix would cost more th
   resolved during ignition runs `onInit` where it was resolved, and `onStart` at the default 1.
 - **packaging:** the peer range `^2.0.0-alpha.0` stops matching at the first 2.1.0 prerelease; widen
   it when one ships.
+- **core, components, left-out folder registrations:** only a registration's own condition keeps its
+  folder from loading (a failing inclusion also skips the registrations a plugin's setup makes); the
+  module's `ignite` condition, a class's condition and an `includePlugin`
+  condition around `ComponentPlugin.fromPath` do not. The explanation of a miss matches a loaded
+  class to a left-out folder by its ModuleScript's ancestor names, so a moved or renamed ModuleScript
+  (or StarterCharacterScripts) is not matched. It can mislead in unusual setups: a non-provider under
+  a left-out folder is told to change the scopes; with the same folder registered twice, or a parent
+  left out and a child kept, a loaded non-provider is told nothing under it is registered; a provider
+  only re-exported by a left-out folder is told to add its folder; an alias with a missing target or
+  a function provider returning nil, in a module with left-out registrations, is said to be
+  registered by nothing. An id nothing has loaded gets the list of every left-out registration. In
+  the Lune harness, the scope override in force at the builder call decides.
+- **transformer, the empty-glob warning:** it is a logger line, not a TypeScript diagnostic, so it has
+  no code frame and, in watch mode, prints after "Found 0 errors". A glob that matches only files
+  outside the Rojo tree, or only empty folders, registers nothing without a warning. Several empty
+  globs in one chain warn in reverse source order. The warnings also print on a build that fails with
+  type errors. An element-access call of a glob macro (`builder["registerProvidersGlob"](...)`) is
+  not recognised as a macro at all.
+- **transformer:** a computed, key-obfuscated networking handler member passed directly to a macro
+  (`pass(server[name])`) is a compile error ("must be accessed directly"), as the same expression is
+  anywhere else. Callsite uuids depend on the source file's line endings, so one commit checked out
+  with CRLF and with LF emits different remote names.
+- **typings:** `@rbxts/types` 1.0.955 has 14 errors of its own under a plain `tsc` without
+  `skipLibCheck`. The test-harness hooks are hidden from the typings but still exported by core's and
+  testing's Luau. The transformer's `ComponentsRuntimeConfig` type lacks `attributeWarningTimeout`,
+  and the schema's default of 5 for it ignores the fallback to `warningTimeout`.
 - **harness:** `ValueBase.Value` and its `Changed` are not modelled; `typeof` of an enum item is
   `"table"`; `GetAttribute` returns the same handle each read; a `task.defer` chain outside a deferred
   batch is not capped at 80.

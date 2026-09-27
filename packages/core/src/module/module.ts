@@ -13,6 +13,7 @@ import { getClassImplements } from "../utility/getClassImplements";
 import { getClassesInPath } from "../utility/getClassesInPath";
 import { getClassesInGlob } from "../utility/globs";
 import { explainUnresolvedClass } from "../utility/explainUnresolved";
+import { explainLeftOut, leftOutRegistration } from "../utility/leftOut";
 import { extinguishesBegun, threadWaits } from "../utility/threadWaits";
 import type { Destructor, ExtractSingleCallback } from "../utility/types";
 import type {
@@ -200,6 +201,9 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 
 	/** The registrations left out, by id, with the conditions that were judged: for the error a miss gets. */
 	const skipped = new Map<string, ReadonlyArray<ScopeCondition>>();
+
+	/** The path and glob registrations left out by their own condition, the builder's and the plugins'. */
+	const leftOut = [...(state.leftOut ?? [])];
 
 	/** Modules searched after this one's own providers, in order. Ignited before this one, and extinguished after. */
 	const imports = options?.imports ?? [];
@@ -589,6 +593,14 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 			if (inactive !== undefined) {
 				error(
 					`module '${state.debugName}' could not resolve dependency '${info.id}': it is registered but inactive (${describeConditions(inactive)})${searched}`,
+				);
+			}
+
+			// A folder registration left out by its own condition registered nothing to be inactive.
+			const leftOutReason = explainLeftOut(info.id, leftOut);
+			if (leftOutReason !== undefined) {
+				error(
+					`module '${state.debugName}' could not resolve dependency '${info.id}': ${leftOutReason}${searched}`,
 				);
 			}
 
@@ -987,13 +999,27 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		scope: hasCondition(moduleScope) ? moduleScope : undefined,
 		isActive: (...conditions) => holdsEveryCondition([moduleScope, ...conditions]),
 		registerClassProvider,
-		registerProviders: (_path, registrationOptions, resolved) => {
+		// A registration whose own condition does not hold leaves its folders untouched, as the
+		// module builder's forms do.
+		registerProviders: (path, registrationOptions, resolved) => {
 			assert(resolved !== undefined);
-			registerProviderClasses(getClassesInPath(resolved), registrationOptions);
+			if (holdsCondition(registrationOptions)) {
+				registerProviderClasses(getClassesInPath(resolved), registrationOptions);
+			} else {
+				leftOut.push(
+					leftOutRegistration(`registerProviders("${path}")`, registrationOptions!, { path: resolved }),
+				);
+			}
 		},
-		registerProvidersGlob: (_glob, registrationOptions, resolved) => {
+		registerProvidersGlob: (glob, registrationOptions, resolved) => {
 			assert(resolved !== undefined);
-			registerProviderClasses(getClassesInGlob(resolved), registrationOptions);
+			if (holdsCondition(registrationOptions)) {
+				registerProviderClasses(getClassesInGlob(resolved), registrationOptions);
+			} else {
+				leftOut.push(
+					leftOutRegistration(`registerProvidersGlob("${glob}")`, registrationOptions!, { glob: resolved }),
+				);
+			}
 		},
 		registerProvider: (config, injectionId) => {
 			assert(injectionId !== undefined);

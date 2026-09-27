@@ -117,6 +117,23 @@ describe("reading flamework.config.json", () => {
 		remove("flamework.config.json");
 	});
 
+	test("accepts components.watchRenames as a boolean and rejects any other type", () => {
+		// The components package reads it as the default for components that do not set their own;
+		// the schema used to reject the key outright.
+		const file = write("flamework.config.json", `{ "components": { "watchRenames": true } }`);
+		expect(readProjectConfig(file)).toEqual({ components: { watchRenames: true } });
+
+		write("flamework.config.json", `{ "components": { "watchRenames": "${"${WATCH}"}" } }`);
+		expect(readProjectConfig(file, { WATCH: "false" })).toEqual({ components: { watchRenames: false } });
+		expect(() => readProjectConfig(file, { WATCH: "sometimes" })).toThrow(
+			/\/components\/watchRenames.*not a boolean/,
+		);
+
+		write("flamework.config.json", `{ "components": { "watchRenames": 1 } }`);
+		expect(() => readProjectConfig(file)).toThrow(/\/components\/watchRenames must be boolean/);
+		remove("flamework.config.json");
+	});
+
 	test("reports a parse error with the file name", () => {
 		const file = write("flamework.config.json", `{ "transformer": `);
 		expect(() => readProjectConfig(file)).toThrow(/Failed to parse .*flamework\.config\.json/);
@@ -359,7 +376,7 @@ describe("the fixture", () => {
 		// way a path macro is; `cloud` is read by the CLI only and never reaches the place.
 		expect(JSON.parse(fs.readFileSync(artifact, "utf8"))).toEqual({
 			networking: { serialization: true },
-			components: { warningTimeout: 2 },
+			components: { warningTimeout: 2, watchRenames: true },
 			scopes: { active: ["fixture", "demo"] },
 			testing: { enabled: false, entry: ["out", "env"] },
 		});

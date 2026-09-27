@@ -24,6 +24,46 @@ describe("nested macros", () => {
 			'local nestedInArray = { "fw:nested@Target", "fw:nested@Target" }',
 		);
 	});
+
+	// A macro call written directly as an argument of another macro call, rather than inside an
+	// object or array there: the outer macro visited only the argument's children, so the inner
+	// call reached the output as a call to a function that does not exist at runtime.
+	const ID = '"fw:nestedMacros@Economy"';
+
+	test("transforms a core macro that is an argument of a core macro", () => {
+		// The reported case: `Dependency<Economy>(undefined, Flamework.id<Economy>())`.
+		expect(normalize(emitted("nestedMacros"))).toContain(`return Dependency(nil, ${ID})`);
+	});
+
+	test("transforms a user macro that is an argument of a core macro", () => {
+		const source = normalize(emitted("nestedMacros"));
+		expect(source).toContain(`return Dependency(nil, idOf(${ID}))`);
+		// A core macro rewritten to its runtime implementation takes the same path.
+		expect(source).toContain(`return Flamework._implements(value, typedId(${ID}))`);
+	});
+
+	test("transforms a core macro that is an argument of a user macro", () => {
+		expect(normalize(emitted("nestedMacros"))).toContain(`local coreInUser = tagged(${ID}, ${ID})`);
+	});
+
+	test("transforms a user macro that is an argument of a networking macro", () => {
+		expect(normalize(emitted("nestedMacros"))).toMatch(
+			/local namedEvents = Networking\.createEvent\(eventName\("[0-9a-f-]{36}"\)\)/,
+		);
+	});
+
+	test("transforms macros nested two and three levels deep", () => {
+		const source = normalize(emitted("nestedMacros"));
+		expect(source).toContain(`return Dependency(nil, tagged(${ID}, ${ID}))`);
+		expect(source).toContain(`local threeLevels = tagged(tagged(tagged(idOf(${ID}), ${ID}), ${ID}), ${ID})`);
+	});
+
+	test("leaves no call to a macro without its generated arguments", () => {
+		const source = normalize(emitted("nestedMacros"));
+		expect(source).not.toContain("Flamework.id(");
+		expect(source).not.toMatch(/\b(idOf|typedId|eventName)\(\)/);
+		expect(source).not.toMatch(/\btagged\("[^"]*"\)/);
+	});
 });
 
 describe("guard generation", () => {

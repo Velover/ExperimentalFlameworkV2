@@ -13,7 +13,8 @@ import type { Constructor } from "../utility/constructors";
 import type { WritableState } from "../utility/writable";
 import { LIFECYCLE_SLOT, type PluginDefinition } from "../plugin/pluginDefinition";
 import { getProviderClassId, normalizeProviderConfig } from "./providerRegistration";
-import type { ScopeCondition } from "./scopes";
+import { holdsCondition, type ScopeCondition } from "./scopes";
+import { leftOutRegistration } from "../utility/leftOut";
 
 type GenericId<T> = string | Modding.Target.Id<T>;
 
@@ -29,6 +30,7 @@ export class ModuleBuilder {
 			debugName: "Anonymous",
 			providers: [],
 			plugins: [],
+			leftOut: [],
 		};
 	}
 
@@ -103,6 +105,9 @@ export class ModuleBuilder {
 	 * of a provider is not registered.
 	 *
 	 * The options apply to every provider found: a scope condition here scopes the whole folder.
+	 * When it does not hold, the folder is not touched at all -- not looked up, nothing under it
+	 * required -- so a build can leave the folder out of the place (a release build without its
+	 * tests, say).
 	 *
 	 * @metadata macro
 	 */
@@ -112,6 +117,14 @@ export class ModuleBuilder {
 		path?: Modding.Intrinsic<"path", [T], string[]>,
 	) {
 		assert(path);
+
+		// The active scopes are the ones the build was compiled with, so this is the answer
+		// ignition would give; what it would register is only ever skipped there. Recorded, so that
+		// a miss on a class under the folder can say why it is missing.
+		if (!holdsCondition(options)) {
+			this.module.leftOut!.push(leftOutRegistration(`registerProviders("${_stringPath}")`, options!, { path }));
+			return this;
+		}
 
 		return this.registerProviderClasses(getClassesInPath(path), options);
 	}
@@ -123,6 +136,9 @@ export class ModuleBuilder {
 	 * This is the v2 equivalent of v1's `Flamework.addPathsGlob`. Globs can match a large number of
 	 * paths, so keep them as specific as possible.
 	 *
+	 * As with `registerProviders`, a scope condition that does not hold leaves every matched folder
+	 * untouched.
+	 *
 	 * @metadata macro
 	 */
 	public registerProvidersGlob<T extends string>(
@@ -131,6 +147,11 @@ export class ModuleBuilder {
 		glob?: Modding.Intrinsic<"pathglob", [T], string>,
 	) {
 		assert(glob !== undefined);
+
+		if (!holdsCondition(options)) {
+			this.module.leftOut!.push(leftOutRegistration(`registerProvidersGlob("${_glob}")`, options!, { glob }));
+			return this;
+		}
 
 		return this.registerProviderClasses(getClassesInGlob(glob), options);
 	}

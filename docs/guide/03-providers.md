@@ -37,7 +37,8 @@ It helps to know this, because the caveats follow from it:
 2. **At runtime**, Flamework finds that instance with `WaitForChild` and requires every
    `ModuleScript` under it. It collects every Flamework class those ModuleScripts define, **exported
    or not**. It also collects anything they export that carries Flamework metadata, such as a
-   re-export of a class from elsewhere.
+   re-export of a class from elsewhere. A registration whose own scope condition does not hold
+   skips this step: the folder is not looked up and nothing is required. See [Scopes](11-scopes.md).
 3. It keeps the classes marked as providers, and registers each one once under its generated id,
    however many ways it was found.
 
@@ -70,6 +71,9 @@ The glob is resolved at **compile time** against your source tree, and the match
 written to `include/flamework/globs.json`, which the runtime reads. Two consequences: the include
 directory must be part of your Rojo project (it is in a default roblox-ts project), and only game
 projects emit the file -- a published package cannot use globs. This is v1's `Flamework.addPathsGlob`.
+
+A glob that matches no files is not an error, since a folder can be empty on purpose. It registers
+nothing, and the build prints a warning with the glob and the file and line that use it.
 
 ### Explicit registration
 
@@ -294,7 +298,8 @@ export class ComponentProbe {}
 The same `activeIn`/`inactiveIn` pair also goes on a registration
 (`registerProviders(path, { ... })`, `registerClassProvider(Class, { ... })`, or the config of
 `registerProvider`) and on `ignite`. The conditions combine by AND: all of them must hold. A
-provider that is left out is not registered at all. See [Scopes](11-scopes.md).
+provider that is left out is not registered at all. A path or glob registration whose own
+condition does not hold does not even load its folder. See [Scopes](11-scopes.md).
 
 ## Classes that are not providers
 
@@ -388,10 +393,10 @@ to get configuration into everything without a global.
   a test registers in a module of its own. Put that class in a folder no module registers, or inside
   the function that uses it. A class declared inside a function is found only through its file's
   exports.
-- **Path registration requires every ModuleScript in the folder.** Their import side effects run. A
-  ModuleScript that throws while loading fails the ignition with its path and error, as in v1.
+- **Path registration requires every ModuleScript in the folder**, so their import side effects
+  run. A ModuleScript that throws while loading fails the ignition with its path and error, as in v1.
   Otherwise, a provider that silently failed to register would only show up later, as a missing
-  dependency.
+  dependency. A registration whose own scope condition does not hold requires nothing.
 - **Subclasses need their own decorator.** `class Fake extends Economy {}` without `@Provider()` is
   not a provider; registering it explicitly raises, and path registration skips it.
 - **`WaitForChild` yields.** If the folder has not replicated yet, ignition waits.

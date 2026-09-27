@@ -3,6 +3,7 @@ import path from "path";
 import { f } from "../../../util/factory";
 import ts from "typescript";
 import { Diagnostics } from "../../../classes/diagnostics";
+import type { GlobUse } from "../../../classes/buildInfo";
 
 /**
  * Generates a path glob.
@@ -23,8 +24,36 @@ export function buildPathGlobIntrinsic(state: TransformState, node: ts.Node, pat
 		? path.relative(state.rootDirectory, path.resolve(path.dirname(file.fileName), glob)).replace(/\\/g, "/")
 		: glob;
 
-	state.buildInfo.addGlob(absoluteGlob, state.getFileId(file));
+	state.buildInfo.addGlob(absoluteGlob, state.getFileId(file), getGlobUse(file, node, glob, absoluteGlob));
 	return f.string(state.obfuscateText(absoluteGlob, "addPaths"));
+}
+
+/**
+ * Where a glob is used: the macro call it was given to, and the glob as written. The build warns
+ * there when the glob matches nothing (see `TransformState.warnEmptyGlobs`).
+ */
+function getGlobUse(file: ts.SourceFile, node: ts.Node, text: string, glob: string): GlobUse {
+	const call = ts.getParseTreeNode(node) ?? node;
+
+	// A method call is placed at the method's name: a chain of registrations
+	// (`createModule().registerProvidersGlob(a).registerProvidersGlob(b)`) is one expression, and
+	// every call in it starts where the chain does.
+	let macro = "a macro";
+	let anchor: ts.Node = call;
+	if (ts.isCallExpression(call) || ts.isNewExpression(call)) {
+		const callee = call.expression;
+		if (ts.isPropertyAccessExpression(callee)) {
+			macro = callee.name.text;
+			anchor = callee.name;
+		} else if (ts.isIdentifier(callee)) {
+			macro = callee.text;
+		}
+	}
+
+	const position = anchor.pos >= 0 ? anchor.getStart(file) : 0;
+	const { line, character } = file.getLineAndCharacterOfPosition(position);
+
+	return { glob, text, macro, line: line + 1, column: character + 1 };
 }
 
 /**

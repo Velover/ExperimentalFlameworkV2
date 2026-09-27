@@ -325,6 +325,67 @@ describe("glob registration", () => {
 	});
 });
 
+describe("a glob that matches no files", () => {
+	// A glob matching nothing resolves to no paths, so whatever it is given to registers nothing;
+	// the build says so where the glob is used, without failing, since a folder may be empty on
+	// purpose. fixture/src/globWarnings.ts has two such globs and a relative one that matches.
+	const plain = (output: string) => output.replace(/\x1b\[[0-9;]*m/g, "");
+	const warning = (location: string, glob: string) =>
+		`${location} - the glob ${glob} given to registerProvidersGlob matches no files`;
+
+	test("is warned about where it is used, once per use, and the build still passes", () => {
+		const result = compileFixture();
+		const output = plain(result.output);
+
+		expect(result.status).toBe(0);
+		expect(output).toContain(warning("src/globWarnings.ts:6:3", "'src/missing/**/*.ts'"));
+		expect(output.match(/matches no files/g)).toHaveLength(2);
+	});
+
+	test("is named as written and as resolved when it is relative", () => {
+		expect(plain(compileFixture().output)).toContain(
+			warning("src/globWarnings.ts:7:3", "'./missing/*.ts' (src/missing/*.ts)"),
+		);
+	});
+
+	test("is not warned about once it matches, relative or not", () => {
+		const output = plain(compileFixture().output);
+
+		expect(output).not.toContain("'./glob/*.ts'");
+		expect(output).not.toContain("'src/glob/**/*.ts'");
+	});
+
+	test("still resolves, to no paths", () => {
+		const source = emitted("globWarnings");
+		expect(source).toContain('registerProvidersGlob("src/missing/**/*.ts", nil, "src/missing/**/*.ts")');
+		expect(source).toContain('registerProvidersGlob("./missing/*.ts", nil, "src/missing/*.ts")');
+
+		const globs = JSON.parse(fs.readFileSync(path.join(FIXTURE, "include", "flamework", "globs.json"), "utf8"));
+		expect(globs.game["src/missing/**/*.ts"]).toEqual([]);
+		expect(globs.game["src/missing/*.ts"]).toEqual([]);
+		expect(globs.game["src/glob/*.ts"]).toEqual([["out", "glob", "target"]]);
+	});
+
+	test("is named as written under obfuscation, which hashes the glob the runtime is given", () => {
+		const result = compileFixtureWithEnv({ FLAMEWORK_FIXTURE_OBFUSCATE: "true" });
+		try {
+			const output = plain(result.output);
+			expect(result.status).toBe(0);
+			expect(output).toContain(warning("src/globWarnings.ts:6:3", "'src/missing/**/*.ts'"));
+			expect(output).toContain(warning("src/globWarnings.ts:7:3", "'./missing/*.ts' (src/missing/*.ts)"));
+			expect(output.match(/matches no files/g)).toHaveLength(2);
+
+			// The generated argument is the hash, not the glob.
+			expect(result.files.get("globWarnings")).not.toContain('nil, "src/missing/**/*.ts")');
+		} finally {
+			const restored = compileFixtureFresh();
+			if (restored.status !== 0) {
+				throw new Error(`fixture failed to restore:\n${restored.output}`);
+			}
+		}
+	});
+});
+
 describe("plugin host", () => {
 	test("loads a plugin for a second transformer state in the same process", async () => {
 		// Regression: the host relied on `require` re-running the plugin's top level, which Node's

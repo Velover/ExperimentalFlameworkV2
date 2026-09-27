@@ -1,4 +1,6 @@
+import { ComponentPlugin, Components } from "@flamework-experimental/components";
 import { Dependency, Flamework, OnStart, Provider } from "@flamework-experimental/core";
+import { DiscoveryExported, DiscoveryExportedComponent } from "server/Discovery/exported";
 import { defer, defineTests, expectFalse, expectThrows, expectTrue, test } from "@flamework-experimental/testing";
 
 /** Registered under a scope no build activates, so it must never reach a container. */
@@ -50,6 +52,72 @@ export class ScopeTests implements OnStart {
 				expectThrows(
 					() => module.resolveDependency<NeverRegistered>(),
 					"the class's own condition still holds",
+				);
+			});
+
+			test("a path or glob registration whose condition does not hold never waits for its folder", () => {
+				// A folder the place does not have, as a release build leaves out its Tests folders:
+				// looking it up would wait in WaitForChild for good. Explicit paths, since the
+				// transformer only generates one for a folder the Rojo project maps.
+				const folder = ["ServerScriptService", "TS", "NoSuchTests"] as never;
+				const glob = "src/server/NoSuchTests/**" as never;
+				const off = { activeIn: ["a-scope-no-build-activates"] };
+
+				let finished = false;
+				const thread = task.spawn(() => {
+					Flamework.createModule()
+						.registerProviders("src/server/NoSuchTests", off, folder)
+						.registerProvidersGlob("src/server/NoSuchTests/**", off, glob)
+						.includePlugin(ComponentPlugin.fromPath("src/server/NoSuchTests", off, folder))
+						.includePlugin(ComponentPlugin.fromGlob("src/server/NoSuchTests/**", off, glob));
+					finished = true;
+				});
+				if (!finished) task.cancel(thread);
+
+				expectTrue(finished, "every registration returned without looking its folder up");
+			});
+
+			test("a miss on a class under a folder its registration left out names that registration", () => {
+				// The discovery fixtures are loaded by this file's import, as a class is loaded by
+				// whatever imports it in a game; the folder itself is never registered here.
+				const off = { activeIn: ["a-scope-no-build-activates"] };
+				const reason = "left out by its scope (activeIn [a-scope-no-build-activates]";
+
+				const byPath = Flamework.createModule().registerProviders("src/server/Discovery", off).ignite();
+				defer(() => byPath.extinguish());
+				const pathMessage = expectThrows(() => byPath.resolveDependency<DiscoveryExported>(), "by path");
+				expectTrue(
+					pathMessage.find(`is under registerProviders("src/server/Discovery")`, 1, true)[0] !== undefined,
+					pathMessage,
+				);
+				expectTrue(pathMessage.find(reason, 1, true)[0] !== undefined, pathMessage);
+				expectFalse(pathMessage.find("add its folder", 1, true)[0] !== undefined, pathMessage);
+
+				// A glob is matched against what it matched when the build was compiled (globs.json).
+				const byGlob = Flamework.createModule()
+					.registerProvidersGlob("src/server/Discovery/*.ts", off)
+					.ignite();
+				defer(() => byGlob.extinguish());
+				const globMessage = expectThrows(() => byGlob.resolveDependency<DiscoveryExported>(), "by glob");
+				expectTrue(
+					globMessage.find(`is under registerProvidersGlob("src/server/Discovery/*.ts")`, 1, true)[0] !==
+						undefined,
+					globMessage,
+				);
+
+				const withComponents = Flamework.createModule()
+					.includePlugin(ComponentPlugin.fromPath("src/server/Discovery", off))
+					.ignite();
+				defer(() => withComponents.extinguish());
+				const components = withComponents.resolveDependency<Components>();
+				const componentMessage = expectThrows(
+					() => components.getComponent<DiscoveryExportedComponent>(new Instance("Folder")),
+					"a component",
+				);
+				expectTrue(
+					componentMessage.find(`is under ComponentPlugin.fromPath("src/server/Discovery")`, 1, true)[0] !==
+						undefined,
+					componentMessage,
 				);
 			});
 		});

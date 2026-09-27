@@ -1,1 +1,1 @@
-{"game":{"src/glob/**/*.ts":[["out","glob","target"]]},"packages":{}}
+{"game":{"src/glob/*.ts":[["out","glob","target"]],"src/missing/*.ts":[],"src/missing/**/*.ts":[],"src/glob/**/*.ts":[["out","glob","target"]]},"packages":{}}

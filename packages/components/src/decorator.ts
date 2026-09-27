@@ -136,7 +136,7 @@ export interface ComponentConfig {
 
 	/**
 	 * Specifies where components can not be constructed via CollectionService.
-	 * Defaults to ServerStorage and ReplicatedStorage.
+	 * Defaults to ServerStorage, ReplicatedStorage, StarterPack, StarterGui and StarterPlayer.
 	 *
 	 * This has the same behavior as a predicate.
 	 */

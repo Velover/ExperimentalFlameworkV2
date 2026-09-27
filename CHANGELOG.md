@@ -16,6 +16,13 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   at compile time.** v1 built any decorated class on demand; v2 resolves registered providers only.
   Make such a class a `@Provider()` (`{ lazy: true }` keeps v1's "built when first asked for"), or get
   the component from `Components`.
+- **A path or glob registration whose own scope condition does not hold no longer loads its
+  folder.** `registerProviders(path, { activeIn })`, the glob forms, a plugin target's forms and
+  `ComponentPlugin.fromPath`/`fromGlob`/`registerComponents*` return before looking the folder up,
+  so the top-level code of the ModuleScripts under it no longer runs in a build where the condition
+  fails. A condition on the class or the module still lets the folder load, and so does one on
+  `includePlugin` around `ComponentPlugin.fromPath`/`fromGlob`/`registerComponents*`: put it on the
+  registration itself.
 
 ### core
 
@@ -35,17 +42,35 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - A failed resolution of a class that has loaded says what the class is, where it is defined and what
   to do: a component (get it from `Components`, or make it a `@Provider()`), a `@Provider()` that
   nothing in the module registers or provides, or a class that is not a provider.
+- `explainLeftOut`, `leftOutRegistration` and the `LeftOutRegistration` type, beside the other
+  path-registration utilities: what a plugin that registers folders under a scope condition uses to
+  say why a class under a left-out folder cannot be found.
 
 #### Changed
 
 - `getClassesInPath` also returns the classes a module does not export: each module's classes in
   definition order, then what it exports. `requireModulesInPath` is unchanged.
 - Eager providers are constructed in ascending `loadOrder`; with none set, the order is unchanged.
+- A path or glob registration whose own scope condition does not hold no longer touches its folder.
+  `registerProviders`, `registerProvidersGlob` and a plugin target's forms of both return before
+  looking the folder up (no `WaitForChild`) or requiring anything under it. The active scopes are the
+  compiled `scopes.active`, so this leaves out exactly what ignition would have left out. A build can
+  now drop such a folder from the place: a release build without its `Tests` folders, registered
+  under `activeIn: ["testing"]` as the testing guide sets them up, no longer waits for them forever.
+  The registration is recorded, and a lookup that misses a class under it names it:
+  `'X' (...) is under registerProviders("..."), which is left out by its scope (...)`. When the class
+  has not loaded, the message lists the module's left-out registrations.
+- `getGlobPaths`'s error names its real causes: the include folder not in the Rojo project, a glob
+  used inside a package, a string that did not come from a glob macro, or `globs.json` from another
+  build. A glob that matched no files never raised it; it resolves to no paths.
 
 #### Fixed
 
 - `getClassesInPath` over a package folder returned a class twice when the package also re-exported
   it (`Components` from the components package).
+- `out/index.d.ts` re-exported the stripped `@internal` hooks `__setActiveScopes` and
+  `__setPathRoot`, so a plain `tsc` without `skipLibCheck` failed inside the package (TS2724). The
+  re-exports are stripped as well; the Luau still exports them.
 
 ### transformer
 
@@ -55,6 +80,19 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   a namespace in it, against its module (`flamework:module`), for path registration.
 - A compile error for `Dependency<T>()`, `module.resolveDependency<T>()` and a `@Provider()`
   constructor parameter whose type is a `@Component()` class that is not a provider.
+- A build warning at every use of a glob that matches no files (`registerProvidersGlob`,
+  `ComponentPlugin.fromGlob`, `registerComponentsGlob`, a plugin target's glob form, or a
+  `Modding.Intrinsic<"pathglob">` macro), naming the glob and its file, line and column. The build
+  still passes and the glob still resolves to no paths. A watcher checks again on every rebuild.
+
+#### Fixed
+
+- `flamework.config.json` rejected `components.watchRenames`, which guide 09 documents and the
+  components package reads; the schema now accepts a boolean.
+- A macro call written directly as an argument of another macro call (for example
+  `Dependency<T>(undefined, Flamework.id<T>())`) was emitted untransformed, as a call to a function
+  that does not exist at runtime ("attempt to call a nil value"). Macro arguments are now transformed
+  like any call's, at any depth.
 
 ### components
 
@@ -66,12 +104,28 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   component can link to one registered by another plugin, and `Dependency<Components>()` and
   constructor injection get that one. A module that imports another keeps its own `Components` when it
   includes a component plugin, and resolves the import's when it does not.
+- `ancestorBlacklist`'s doc comment named two default services. The default is ServerStorage,
+  ReplicatedStorage, StarterPack, StarterGui and StarterPlayer.
 
 #### Changed
 
 - `fromPath`, `fromGlob`, `registerComponents` and `registerComponentsGlob` register components their
   modules do not export (see core).
 - A link to an unregistered component now raises `… not registered in any ComponentPlugin of this module`.
+- `ComponentPlugin.fromPath`, `fromGlob`, `registerComponents` and `registerComponentsGlob` whose own
+  scope condition does not hold no longer look their folder up, as in core. `getComponent` on a component
+  under such a folder says `component '...' could not be found: ... is under
+  ComponentPlugin.fromPath("..."), which is left out by its scope (...)`. A condition given to
+  `includePlugin` does not stop `fromPath` from looking its folder up, because `fromPath` looks it
+  up when it is called; put the condition on `fromPath` itself.
+
+### testing
+
+#### Fixed
+
+- `out/index.d.ts` re-exported the stripped `@internal` hooks `__resetTests` and `__isAttached`, so a
+  plain `tsc` without `skipLibCheck` failed inside the package (TS2305). The re-exports are stripped
+  as well; the Luau still exports them.
 
 ### components, networking, testing
 
@@ -111,6 +165,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   followed only with `watchRenames`; migrating step 6 no longer suggests an optional child typed as a
   component, which the transformer rejects; `build()` and `ignite()` do not return the builder; a
   table in the components guide that rendered in two pieces is whole.
+- Testing: the shipping advice is reversed. A `Tests` folder is registered by its own path with the
+  scope condition on the registration, which a release build without the folder now skips (see core).
 
 ### Tests
 
@@ -121,6 +177,10 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `WaitForChild` and `GetFullName`, so specs can register a folder by path.
 - The place's providers that cases register in modules of their own moved out of the registered
   `Tests` folders into `src/server/Fixtures`.
+- `tests/packaging/typings.test.ts` type-checks every published declaration file without
+  `skipLibCheck` and checks that none exports a `__` name. New scope specs and place cases cover
+  left-out folder registrations, and new transformer tests cover the empty-glob warning and nested
+  macro calls.
 
 ## 2026-09-26: core, components, networking and testing 2.0.0-alpha.2; transformer 2.0.0-alpha.3
 

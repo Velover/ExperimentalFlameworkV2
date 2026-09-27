@@ -26,8 +26,10 @@ export function getGlobPaths(glob: string): string[][] {
 	if (paths === undefined) {
 		error(
 			`Flamework has no paths for the glob '${glob}'. ` +
-				"Globs are resolved at compile time into include/flamework/globs.json, which only game projects emit; " +
-				"make sure the include directory is part of your Rojo project and that the glob matched at least one file.",
+				"A game's globs are resolved at compile time into include/flamework/globs.json, and this one is not there: " +
+				"the include folder is not in your Rojo project, the glob is used inside a package (a package's globs " +
+				"are not resolved), the string was not produced by a glob macro, or globs.json is from another build. " +
+				"A glob that matched no files does not raise: it resolves to no paths, and the build warns about it.",
 			0,
 		);
 	}

@@ -297,7 +297,8 @@ in every roblox-ts template.
 - **Overlapping registration paths raise.** `registerProviders("src/server")` and
   `registerProviders("src/server/services")` both find the same classes.
 - **Path registration requires every ModuleScript under the path**, so import side effects run at
-  ignition.
+  ignition. A registration whose own scope condition does not hold skips its folder instead
+  ([Scopes](11-scopes.md)).
 - **Every registered folder must be mapped in Rojo**, or the build fails with
   `Could not find Rojo data`.
 - **`ModuleDefinition`s in a registered folder get built as a side effect.** Keep them out of

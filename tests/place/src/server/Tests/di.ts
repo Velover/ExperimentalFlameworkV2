@@ -1,5 +1,5 @@
 import { Components } from "@flamework-experimental/components";
-import { Dependency, OnStart, Provider } from "@flamework-experimental/core";
+import { Dependency, Flamework, OnStart, Provider } from "@flamework-experimental/core";
 import { defineTests, expectDefined, expectEqual, expectTrue, test } from "@flamework-experimental/testing";
 import { FwTestDependency } from "server/Features/Testing/Services/FwTestDependency";
 import { FwTestService } from "server/Features/Testing/Services/FwTestService";
@@ -27,6 +27,21 @@ export class DiTests implements OnStart {
 				expectEqual(Dependency<FwTestService>(), this.service, "the injected instance");
 				expectEqual(
 					module?.resolveDependency<FwTestService>(),
+					this.service,
+					"the same instance through the module",
+				);
+			});
+
+			test("Dependency<T>(undefined, Flamework.id<T>()) resolves the provider the nested macro names", () => {
+				// A macro call written directly as another macro's argument: it used to be emitted as a
+				// call to Flamework.id, which does not exist at runtime ("attempt to call a nil value").
+				expectEqual(
+					Dependency<FwTestService>(undefined, Flamework.id<FwTestService>()),
+					this.service,
+					"the injected instance",
+				);
+				expectEqual(
+					module?.resolveDependency<FwTestService>(Flamework.id<FwTestService>()),
 					this.service,
 					"the same instance through the module",
 				);

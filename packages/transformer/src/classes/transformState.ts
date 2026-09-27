@@ -241,6 +241,42 @@ export class TransformState {
 		}
 	}
 
+	/**
+	 * Warns at every use of a glob that matched nothing in this build. Such a glob still resolves, to
+	 * no paths, so what it is given to registers or finds nothing; a folder may be empty on purpose,
+	 * so this never fails the build.
+	 *
+	 * It is judged here, once the globs are matched, on every build and on every rebuild of a
+	 * watcher, rather than when the file using the glob is transformed: a folder that gains a file
+	 * or loses its last one changes the answer without that file being compiled again.
+	 */
+	private warnEmptyGlobs() {
+		const globs = this.buildInfo.getMetadata("globs");
+		if (!globs?.paths || !globs.uses) {
+			return;
+		}
+
+		const paths = globs.paths;
+
+		for (const [origin, uses] of Object.entries(globs.uses)) {
+			// A file deleted under a watcher is never compiled again, so its entry outlives it.
+			if (!fs.existsSync(path.join(this.rootDirectory, origin))) {
+				continue;
+			}
+
+			for (const use of uses) {
+				if (paths[use.glob]?.length !== 0) {
+					continue;
+				}
+
+				const glob = use.text === use.glob ? `'${use.glob}'` : `'${use.text}' (${use.glob})`;
+				Logger.warn(
+					`${origin}:${use.line}:${use.column} - the glob ${glob} given to ${use.macro} matches no files, so nothing is registered or found through it`,
+				);
+			}
+		}
+	}
+
 	private convertGlobs(
 		globs: Record<string, string[]> | undefined,
 		luaOut: Map<string, Array<ReadonlyArray<string>>>,
@@ -458,6 +494,10 @@ export class TransformState {
 				process.stdout.write("\n");
 			}
 		}
+
+		// Printed last: the verbose message above clears the line it takes to be the watcher's blank
+		// one, which would be the last warning if the warnings came first.
+		this.warnEmptyGlobs();
 	}
 
 	isUserMacro(symbol: ts.Symbol) {

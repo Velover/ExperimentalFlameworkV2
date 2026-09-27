@@ -24,6 +24,23 @@
 							"type": "string"
 						}
 					}
+				},
+				"uses": {
+					"type": "object",
+					"additionalProperties": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"required": ["glob", "text", "macro", "line", "column"],
+							"properties": {
+								"glob": { "type": "string" },
+								"text": { "type": "string" },
+								"macro": { "type": "string" },
+								"line": { "type": "number" },
+								"column": { "type": "number" }
+							}
+						}
+					}
 				}
 			}
 		},

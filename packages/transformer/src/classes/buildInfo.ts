@@ -7,10 +7,27 @@ import { isPathDescendantOf } from "../util/functions/isPathDescendantOf";
 import { validateSchema } from "../util/schema";
 import { PKG_VERSION } from "../util/constants";
 
+/** One use of a glob in a file, kept so that a glob matching nothing can be reported where it is written. */
+export interface GlobUse {
+	/** The glob relative to the package root, as `paths` keys it. */
+	glob: string;
+
+	/** The glob as written, which differs from `glob` for a relative (`./`) one. */
+	text: string;
+
+	/** The macro the glob was given to, such as `registerProvidersGlob`. */
+	macro: string;
+
+	/** Where the macro is called (a method call at the method's name), both one-based. */
+	line: number;
+	column: number;
+}
+
 interface FlameworkMetadata {
 	globs?: {
 		paths?: Record<string, string[]>;
 		origins?: Record<string, string[]>;
+		uses?: Record<string, GlobUse[]>;
 	};
 }
 
@@ -240,7 +257,7 @@ export class BuildInfo {
 	/**
 	 * Adds a glob that will automatically be tracked between compiles.
 	 */
-	addGlob(glob: string, origin: string) {
+	addGlob(glob: string, origin: string, use?: GlobUse) {
 		this.buildInfo.metadata ??= {};
 		this.buildInfo.metadata.globs ??= {};
 		this.buildInfo.metadata.globs.paths ??= {};
@@ -248,6 +265,12 @@ export class BuildInfo {
 		this.buildInfo.metadata.globs.paths[glob] = [];
 		this.buildInfo.metadata.globs.origins[origin] ??= [];
 		this.buildInfo.metadata.globs.origins[origin].push(glob);
+
+		if (use) {
+			this.buildInfo.metadata.globs.uses ??= {};
+			this.buildInfo.metadata.globs.uses[origin] ??= [];
+			this.buildInfo.metadata.globs.uses[origin].push(use);
+		}
 	}
 
 	/**
@@ -255,6 +278,10 @@ export class BuildInfo {
 	 */
 	invalidateGlobs(origin: string) {
 		const globs = this.buildInfo.metadata?.globs;
+		if (globs?.uses) {
+			delete globs.uses[origin];
+		}
+
 		if (globs && globs.paths && globs.origins) {
 			delete globs.origins[origin];
 

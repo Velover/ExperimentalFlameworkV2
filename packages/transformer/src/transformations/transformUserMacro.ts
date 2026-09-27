@@ -57,13 +57,18 @@ export function transformUserMacro(
 	// arguments beyond it can contain macros of their own, and leaving them untransformed emits a
 	// call to a `declare`d function that only fails at runtime. `highestParameterIndex` still
 	// determines how far to pad with `nil` so that a generated parameter lands at the right index.
+	//
+	// Each argument goes through `transformNode`, which transforms the argument itself, as a call
+	// that is not a macro has its arguments transformed. `transform` would only visit its children,
+	// so a macro call written directly as the argument (`Dependency<T>(undefined, Flamework.id<T>())`)
+	// would be emitted as a plain call to a function that does not exist at runtime.
 	const argumentCount = Math.max(args.length, highestParameterIndex + 1);
 	for (let i = 0; i < argumentCount; i++) {
 		const userMacro = parameters.get(i);
 		if (userMacro) {
 			args[i] = buildUserMacro(state, node, userMacro);
 		} else {
-			args[i] = args[i] ? state.transform(args[i]) : f.nil();
+			args[i] = args[i] ? state.transformNode(args[i]) : f.nil();
 		}
 	}
 

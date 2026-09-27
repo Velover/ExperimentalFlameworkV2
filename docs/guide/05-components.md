@@ -540,6 +540,11 @@ decorator or on the registration (`registerComponent(Class, { ... })`, `fromPath
 A component left out by scope is not registered in the plugin at all. It is never attached, and
 `getComponent` on it raises an error with the reason. See [Scopes](11-scopes.md).
 
+When the condition on `fromPath`, `fromGlob`, `registerComponents` or `registerComponentsGlob` does
+not hold, the folder is not loaded at all, so it can be missing from the place. The error from
+`getComponent` then names that registration. A condition on `includePlugin` does not stop
+`fromPath` from loading its folder: `fromPath` looks the folder up when you call it.
+
 ## Streaming
 
 With StreamingEnabled, an instance can arrive before its descendants. So an instance tree that

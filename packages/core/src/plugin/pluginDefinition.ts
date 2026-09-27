@@ -75,7 +75,8 @@ export interface PluginTarget {
 	/**
 	 * Registers every `@Provider()` class the modules under a source folder define, exported or not,
 	 * as the module builder's `registerProviders` does. This is how a plugin ships a folder of
-	 * providers. The options apply to every class found.
+	 * providers. The options apply to every class found; when their scope condition does not hold,
+	 * the folder is not looked up and nothing under it is required.
 	 *
 	 * @metadata macro
 	 */
@@ -87,7 +88,8 @@ export interface PluginTarget {
 
 	/**
 	 * Registers every `@Provider()` class the modules under every folder a compile-time glob matches
-	 * define, exported or not.
+	 * define, exported or not. As with `registerProviders`, a scope condition that does not hold
+	 * leaves the folders untouched.
 	 *
 	 * @metadata macro
 	 */

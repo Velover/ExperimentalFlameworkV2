@@ -4,6 +4,7 @@ import {
 	OnStart,
 	Provider,
 	Reflect,
+	explainLeftOut,
 	type Modding,
 	getRuntimeConfig,
 } from "@flamework-experimental/core";
@@ -2153,6 +2154,12 @@ export class Components {
 		const inactive = identifier !== undefined ? this.skipped.get(identifier) : undefined;
 		if (inactive !== undefined) {
 			return `component '${identifier}' is registered but inactive (${inactive})`;
+		}
+
+		// A folder registration left out by its own condition registered nothing to be inactive.
+		const leftOut = identifier !== undefined ? explainLeftOut(identifier, this.config.leftOut ?? []) : undefined;
+		if (leftOut !== undefined) {
+			return `component '${identifier}' could not be found: ${leftOut}`;
 		}
 
 		return `Could not find component from specifier: ${specifier}`;

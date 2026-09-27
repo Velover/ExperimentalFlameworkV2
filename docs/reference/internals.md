@@ -299,11 +299,17 @@ providers are invoked with an `InjectionContext` naming the requesting module an
 Alias providers forward to another id.
 
 A miss consults `skipped`: a registration the scopes left out raises `registered but inactive`
-with the conditions and the active set, and either message names the imports that were searched.
-Otherwise the module record (below) is asked whether the id belongs to a class that has loaded
-(`utility/explainUnresolved.ts`); one that has says what it is -- a component, a provider nothing
-here registers, a class that is not a provider -- where it is defined, and what to do. The walk is
-linear over the recorded classes, which only a failing resolution pays for.
+with the conditions and the active set, and every message names the imports that were searched.
+Next come the path and glob registrations left out by their own condition, which put nothing in
+`skipped` because their folders were never loaded (`utility/leftOut.ts`; the module state's
+`leftOut` and a plugin target's). A loaded class whose ModuleScript is under one of them names it,
+matched by ancestor names against the recorded Rojo path, or against `globs.json` for a glob. An id
+nothing has loaded lists them all. Otherwise the module record (below) is asked whether the id
+belongs to a class that has loaded (`utility/explainUnresolved.ts`); one that has says what it is
+-- a component, a provider nothing here registers, a class that is not a provider -- where it is
+defined, and what to do. The walk is linear over the recorded classes, which only a failing
+resolution pays for. `Components`' `missingComponentMessage` does the same with its plugins'
+left-out registrations.
 `lookupProvider` is the non-constructing form of the same walk, used to decide sharing at ignition.
 
 Resolution during `PreIgniting` is refused: providers do not exist yet, and allowing it would make
@@ -371,6 +377,13 @@ the classes the module record holds for it, then whatever it exports that carrie
 identifier and was not among them (`export =`, a re-export, a class compiled by a transformer that
 wrote no record), each class once. `requireModulesInPath` is the loading half and still returns
 exports only.
+
+Every path and glob registration form first asks `holdsCondition` of its own options: the module
+builder's, a plugin target's and `ComponentPlugin`'s. When the condition does not hold, it records a
+`LeftOutRegistration` and returns before `getClassesInPath` or `getClassesInGlob`. The scopes are
+the compiled `scopes.active`, so this matches what `activateProviders` (or, for components, the
+plugin's own scope check) would decide for those classes. Skipping the lookup is what lets a build
+leave the folder out of the place.
 
 ## Components
 

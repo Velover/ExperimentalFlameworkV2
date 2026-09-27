@@ -6,6 +6,9 @@ import {
 	describeConditions,
 	getClassesInGlob,
 	getClassesInPath,
+	holdsCondition,
+	leftOutRegistration,
+	type LeftOutRegistration,
 	type Module,
 	type ScopeCondition,
 } from "@flamework-experimental/core";
@@ -22,6 +25,12 @@ export interface ComponentModuleConfig {
 	 * a description of why, for the error a lookup of one gets.
 	 */
 	skipped?: Map<string, string>;
+
+	/**
+	 * The path and glob registrations left out by their own condition, whose folders were never
+	 * looked up: what a lookup of a component under one of them names.
+	 */
+	leftOut?: ReadonlyArray<LeftOutRegistration>;
 }
 
 /** No condition: what a component or a registration that was not given one contributes to a list. */
@@ -46,6 +55,7 @@ function getComponentScope(component: Constructor): ScopeCondition {
 interface SharedRegistration {
 	active: Array<Constructor>;
 	skipped: Map<string, string>;
+	leftOut: Array<LeftOutRegistration>;
 }
 
 /** By the module being ignited: set up by the first component plugin, gone with the module. */
@@ -60,6 +70,7 @@ export class ComponentPlugin {
 	 * This is a shorthand for creating a default components plugin.
 	 *
 	 * A module may include any number of component plugins; they share the module's one `Components`.
+	 * With a scope condition that does not hold, the folder is not touched (see `registerComponents`).
 	 *
 	 * @metadata macro
 	 */
@@ -68,7 +79,7 @@ export class ComponentPlugin {
 		options?: ScopeCondition,
 		path?: Modding.Intrinsic<"path", [T], string[]>,
 	) {
-		return this.createPlugin().registerComponents(_stringPath, options, path).build();
+		return this.createPlugin().registerFolder(`ComponentPlugin.fromPath("${_stringPath}")`, options, path).build();
 	}
 
 	/**
@@ -81,13 +92,16 @@ export class ComponentPlugin {
 		options?: ScopeCondition,
 		glob?: Modding.Intrinsic<"pathglob", [T], string>,
 	) {
-		return this.createPlugin().registerComponentsGlob(_glob, options, glob).build();
+		return this.createPlugin().registerGlob(`ComponentPlugin.fromGlob("${_glob}")`, options, glob).build();
 	}
 
 	private components = new Array<Constructor>();
 
 	/** The condition each registration was given, for the classes that were given one. */
 	private registrationScopes = new Map<Constructor, ScopeCondition>();
+
+	/** The path and glob registrations whose own condition did not hold: their folders were never looked up. */
+	private leftOut = new Array<LeftOutRegistration>();
 
 	private constructor() {}
 
@@ -124,6 +138,11 @@ export class ComponentPlugin {
 	 * Registers every `@Component()` class the modules under the specified path and its descendants
 	 * define, exported or not. The options apply to every class found.
 	 *
+	 * When their scope condition does not hold, the folder is not touched at all -- not looked up,
+	 * nothing under it required -- so a build can leave it out of the place. The condition is this
+	 * registration's own: one given to `includePlugin` is judged later, at ignition, after the folder
+	 * has been required.
+	 *
 	 * @metadata macro
 	 */
 	public registerComponents<T extends string>(
@@ -131,14 +150,13 @@ export class ComponentPlugin {
 		options?: ScopeCondition,
 		path?: Modding.Intrinsic<"path", [T], string[]>,
 	) {
-		assert(path !== undefined);
-
-		return this.registerComponentClasses(getClassesInPath(path), options);
+		return this.registerFolder(`registerComponents("${_stringPath}")`, options, path);
 	}
 
 	/**
 	 * Registers every `@Component()` class the modules under every path matched by the specified
-	 * glob define, exported or not. The glob is resolved at compile time.
+	 * glob define, exported or not. The glob is resolved at compile time. As with
+	 * `registerComponents`, a scope condition that does not hold leaves every matched folder untouched.
 	 *
 	 * @metadata macro
 	 */
@@ -147,7 +165,30 @@ export class ComponentPlugin {
 		options?: ScopeCondition,
 		glob?: Modding.Intrinsic<"pathglob", [T], string>,
 	) {
+		return this.registerGlob(`registerComponentsGlob("${_glob}")`, options, glob);
+	}
+
+	/** `registerComponents`, named in messages as `call`. */
+	private registerFolder(call: string, options: ScopeCondition | undefined, path: string[] | undefined) {
+		assert(path !== undefined);
+
+		// Recorded, so that a lookup of a component under the folder can say why it is missing.
+		if (!holdsCondition(options)) {
+			this.leftOut.push(leftOutRegistration(call, options!, { path }));
+			return this;
+		}
+
+		return this.registerComponentClasses(getClassesInPath(path), options);
+	}
+
+	/** `registerComponentsGlob`, named in messages as `call`. */
+	private registerGlob(call: string, options: ScopeCondition | undefined, glob: string | undefined) {
 		assert(glob !== undefined);
+
+		if (!holdsCondition(options)) {
+			this.leftOut.push(leftOutRegistration(call, options!, { glob }));
+			return this;
+		}
 
 		return this.registerComponentClasses(getClassesInGlob(glob), options);
 	}
@@ -167,6 +208,7 @@ export class ComponentPlugin {
 	public build() {
 		const registered = this.components;
 		const registrationScopes = this.registrationScopes;
+		const leftOut = this.leftOut;
 
 		// Components are constructed through the module this plugin is included in (see
 		// `Components.module`), so they take their lifecycle events from that module's plugins.
@@ -179,14 +221,20 @@ export class ComponentPlugin {
 			let shared = sharedRegistrations.get(target.module);
 			const isFirst = shared === undefined;
 			if (shared === undefined) {
-				shared = { active: [], skipped: new Map() };
+				shared = { active: [], skipped: new Map(), leftOut: [] };
 				sharedRegistrations.set(target.module, shared);
+			}
+
+			for (const registration of leftOut) {
+				if (!shared.leftOut.includes(registration)) {
+					shared.leftOut.push(registration);
+				}
 			}
 
 			// Judged per ignition, against the module's condition as well as each class's own, so
 			// that a component is scoped the way a provider is. A class that several plugins register
 			// is kept once, when any registration of it holds.
-			const { active, skipped } = shared;
+			const { active, skipped, leftOut: sharedLeftOut } = shared;
 			for (const component of registered) {
 				const conditions = [registrationScopes.get(component) ?? NO_CONDITION, getComponentScope(component)];
 				const identifier = Reflect.getOwnMetadata<string>(component, "identifier");
@@ -213,7 +261,7 @@ export class ComponentPlugin {
 			target.onPreIgnite(
 				(module) => {
 					sharedRegistrations.delete(module);
-					components = new Components(module, { components: active, skipped });
+					components = new Components(module, { components: active, skipped, leftOut: sharedLeftOut });
 					target.provideInstance(components);
 				},
 				{ priority: HookPriority.First },

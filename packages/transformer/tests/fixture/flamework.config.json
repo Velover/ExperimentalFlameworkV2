@@ -8,7 +8,7 @@
 		"plugins": [{ "path": "./fieldInfoPlugin.cjs", "options": { "prefix": "fx" } }]
 	},
 	"networking": { "serialization": true },
-	"components": { "warningTimeout": 2 },
+	"components": { "warningTimeout": 2, "watchRenames": true },
 	"scopes": { "active": "${FLAMEWORK_FIXTURE_SCOPES:-unset}" },
 	"testing": { "enabled": "${FLAMEWORK_FIXTURE_TESTS:-false}", "entry": "src/env" },
 	"cloud": { "testingUniverseId": "1", "testingPlaceId": "2", "apiKey": "${FLAMEWORK_FIXTURE_KEY:-}" }

@@ -116,6 +116,11 @@
 					"enum": ["Disabled", "Watching", "Contextual"],
 					"description": "Default ComponentStreamingMode for components that do not set one.",
 					"default": "Contextual"
+				},
+				"watchRenames": {
+					"type": "boolean",
+					"description": "Default watchRenames for components that do not set one: whether the instance tree and the child links follow the children's names as well as children arriving and leaving, so that a rename is noticed when it happens. Off by default, since a rename is rare and following names costs connections on the children; only matters while the tree is watched, so never under streamingMode Disabled.",
+					"default": false
 				}
 			}
 		},

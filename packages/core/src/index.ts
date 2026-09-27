@@ -27,7 +27,7 @@ export type {
 export type { HookOptions } from "./module/moduleHooks";
 
 // Scopes
-export { describeConditions, holdsCondition, holdsEveryCondition, __setActiveScopes } from "./module/scopes";
+export { describeConditions, holdsCondition, holdsEveryCondition } from "./module/scopes";
 export type { ScopeCondition } from "./module/scopes";
 
 // Plugins
@@ -48,7 +48,9 @@ export type { OnExtinguished, OnInit, OnPhysics, OnRender, OnStart, OnTick } fro
 // Utilities that plugins need in order to implement path-based registration.
 export { getClassesInPath, importModule, requireModulesInPath } from "./utility/getClassesInPath";
 export { getClassesInGlob, getGlobPaths } from "./utility/globs";
-export { getPathRoot, resolveRbxPath, __setPathRoot } from "./utility/pathRoot";
+export { getPathRoot, resolveRbxPath } from "./utility/pathRoot";
+export { explainLeftOut, leftOutRegistration } from "./utility/leftOut";
+export type { LeftOutRegistration } from "./utility/leftOut";
 export { getRuntimeConfig } from "./utility/runtimeConfig";
 export type {
 	ComponentsRuntimeConfig,
@@ -59,3 +61,11 @@ export type {
 	TestingRuntimeConfig,
 } from "./utility/runtimeConfig";
 export type { AbstractConstructor, Constructor } from "./utility/constructors";
+
+// The test harness's hooks: exported for the Luau it reaches through the package entry, and marked
+// @internal like their declarations so that stripInternal leaves them out of the typings as well
+// (a re-export of a stripped declaration would not type-check).
+/** @internal */
+export { __setActiveScopes } from "./module/scopes";
+/** @internal */
+export { __setPathRoot } from "./utility/pathRoot";
