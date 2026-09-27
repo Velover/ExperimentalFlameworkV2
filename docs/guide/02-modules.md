@@ -1,14 +1,14 @@
 # 2. Modules
 
-A module is two things at once:
+A **module** is the object `Flamework.createModule()` builds. It is two things at once:
 
-1. **A dependency-injection container.** It holds a set of providers and resolves their
-   dependencies from each other.
-2. **A lifecycle unit.** It ignites as a whole and extinguishes as a whole.
+1. **A dependency-injection container.** It holds a set of providers, and gives each provider the
+   other providers it depends on.
+2. **A lifecycle unit.** It starts (*ignites*) as a whole and stops (*extinguishes*) as a whole.
 
-In v1 there was exactly one, global and implicit. In v2 you create it, which is what makes tests and
-tools possible -- but **most games have exactly one module per realm and never extinguish it**. If
-that is you, this page's second half is optional reading.
+In v1 there was exactly one module, and it was global and implicit. In v2 you create it yourself,
+which is what makes tests and tools possible. But **most games have exactly one module per realm and
+never extinguish it**. If that is your game, the second half of this page is optional reading.
 
 ## The one-module case
 
@@ -18,24 +18,26 @@ Flamework.createModule()
     .ignite();
 ```
 
-That is the whole story for a typical game. You never call `build()` or `extinguish`, and
-`Dependency<T>()` reaches this module from anywhere.
+That is all a typical game needs. You never call `build()` or `extinguish`, and `Dependency<T>()`
+reaches this module from anywhere.
 
 ## The builder
 
-`Flamework.createModule()` returns a `ModuleBuilder`. Every method returns the builder, so it chains.
+`Flamework.createModule()` returns a `ModuleBuilder`. Every method except `build()` and `ignite()`
+returns the builder, so those calls chain. `build()` returns a `ModuleDefinition`, and `ignite()`
+returns the ignited `Module`.
 
 | Method | Does |
 |---|---|
-| `registerProviders(path)` | Registers every `@Provider()` class the modules under a source folder define, exported or not. |
-| `registerProvidersGlob(glob)` | The same, for every folder a compile-time glob matches. |
+| `registerProviders(path)` | Registers every `@Provider()` class defined in the files under a source folder, exported or not. |
+| `registerProvidersGlob(glob)` | The same, for every folder a glob matches, resolved when you build. |
 | `registerClassProvider(Class)` | Registers one class explicitly. |
 | `registerProvider<T>(config, id?)` | Registers a class, function or alias provider. |
 | `includePlugin(plugin)` | Adds a plugin, which can hook into this module. |
 | `disableDefaultLifecycle()` | Leaves out the `LifecyclePlugin` every module starts with. |
 | `setDebugName(name)` | Names the module in error messages. |
 | `apply(fn)` | Runs `fn(builder)` without breaking the chain. |
-| `build()` | Finalises into a `ModuleDefinition`. |
+| `build()` | Finishes the builder and returns a `ModuleDefinition`. |
 | `ignite(options?)` | Shorthand for `.build().ignite()`. `{ default: true }` makes this the module `Dependency<T>()` answers from. |
 
 ### `build()` vs `ignite()`
@@ -52,26 +54,27 @@ const module = definition.ignite();
 const module = Flamework.createModule().registerClassProvider(Economy).ignite();
 ```
 
-A definition can be ignited repeatedly, and **each ignition gets its own provider instances**. That
-is what makes a module a clean unit for tests: build the definition once, ignite a fresh one per
+You can ignite a definition many times, and **each ignition gets its own provider instances**. That
+makes a module a clean unit for tests: build the definition once, and ignite a fresh module for each
 test.
 
 ## What ignition does
 
 In order:
 
-1. Plugins are set up -- each one's setup function runs against this module, registering providers,
-   hooks and observers into it. A plugin reached twice is set up once.
+1. Plugins are set up. Each plugin's setup function runs against this module and registers
+   providers, hooks and observers into it. A plugin reached twice is set up once.
 2. `onPreIgnite` hooks run.
-3. Every registered provider is constructed, resolving its constructor dependencies.
-4. `onPostIgnite` hooks run. `LifecyclePlugin` calls `onInit` on everything that implements it here.
-   A raise up to this point fails the ignition.
-5. The module is ignited, and `onIgnited` hooks run. `LifecyclePlugin` calls `onStart` on everything
-   that implements it here, then starts its `RunService` connections, so an `onStart` sees
-   `isIgnited()`, may `extinguish()` the module, and may ignite one that imports it.
+3. Every registered provider is constructed, and its constructor dependencies are resolved.
+4. `onPostIgnite` hooks run. This is where `LifecyclePlugin` calls `onInit` on everything that
+   implements it. An error raised up to this point fails the ignition.
+5. The module is now ignited, and `onIgnited` hooks run. This is where `LifecyclePlugin` calls
+   `onStart` on everything that implements it, and then starts its `RunService` connections. So an
+   `onStart` sees `isIgnited()` return `true`, may `extinguish()` the module, and may ignite a module
+   that imports it.
 
-Providers are constructed lazily *within* step 3 -- resolving a dependency constructs it if it does
-not exist yet -- so a provider's constructor can safely use anything injected into it.
+Within step 3, providers are constructed on demand: resolving a dependency constructs it if it does
+not exist yet. So a provider's constructor can safely use anything injected into it.
 
 ## Resolving by hand
 
@@ -79,11 +82,11 @@ not exist yet -- so a provider's constructor can safely use anything injected in
 const shop = module.resolveDependency<Shop>();
 ```
 
-Use this at the boundary between Flamework and code that is not managed by it. Inside a provider,
-take a constructor parameter instead.
+Use this where Flamework meets code that it does not manage. Inside a provider, take a constructor
+parameter instead.
 
-When there is no module handle to hand -- a UI component, a script, a callback registered with
-something outside Flamework -- `Dependency<T>()` resolves against the **default module**:
+Some code has no module handle at hand: a UI component, a script, a callback registered with
+something outside Flamework. There, `Dependency<T>()` resolves against the **default module**:
 
 ```ts
 import { Dependency } from "@flamework-experimental/core";
@@ -91,20 +94,22 @@ import { Dependency } from "@flamework-experimental/core";
 const shop = Dependency<Shop>();
 ```
 
-The first root module ignited in a realm is the default, which for a game is the one the entry point
-ignites. Pass `{ default: true }` to make a later one the default instead:
+The first module ignited in a realm is the default. In a game, that is the one the entry point
+ignites. To make a later module the default instead, pass `{ default: true }`:
 
 ```ts
 const module = definition.ignite({ default: true });
 ```
 
-Extinguishing the default releases it, so the next root ignited claims it -- a test that ignites and
-extinguishes per case never leaks one into the next. A root that fails to ignite never becomes it:
-one ignited with `{ default: true }` that raises leaves the previous default as it was. With no
-default, `Dependency<T>()` raises `Dependency<T>() was called before any module was ignited`.
+Extinguishing the default module releases it, and the next module ignited becomes the default. So a
+test that ignites and extinguishes a module per case never leaks one into the next. A module that
+fails to ignite never becomes the default: if one ignited with `{ default: true }` raises, the
+previous default stays as it was. With no default, `Dependency<T>()` raises
+`Dependency<T>() was called before any module was ignited`.
 
-With more than one module live, pass the one to resolve from. It is `module.resolveDependency<T>()`
-for code that has the handle but prefers the global's shape:
+With more than one module running, pass the one to resolve from. This is the same as
+`module.resolveDependency<T>()`, for code that has the handle but prefers the shape of the global
+function:
 
 ```ts
 const shop = Dependency<Shop>(worldModule);
@@ -129,26 +134,27 @@ class Registry {
 module.extinguish();
 ```
 
-This runs `onExtinguished` hooks, releases the instances the module created, and unregisters them
-from every plugin observing them, so a lifecycle plugin stops ticking dead providers.
+This runs the `onExtinguished` hooks, releases the instances the module created, and unregisters
+them from every plugin observing them. So the lifecycle plugin stops ticking providers that are gone.
 
-Games rarely call this. Tests, and tools that mount and unmount, do.
+Games rarely call this. Tests do, and so do tools that mount and unmount.
 
 ## More than one module?
 
-A second module is a second container: nothing in one can inject anything from the other unless it
-imports it, and `Dependency<T>()` answers from only one of them. Reach for one only when that
-separation is the point:
+A second module is a second container. Nothing in one module can inject anything from the other
+unless it imports it, and `Dependency<T>()` answers from only one of them. Use a second module only
+when you want that separation:
 
-- **Tests**, where each case wants a fresh container. Build the definition once, ignite per case.
-- **A tool** with a lifetime shorter than the game's, extinguished when it closes.
-- **A scenario** that runs against the game -- a test rig, a debug world -- and is torn down on its
-  own. It imports the game module, below.
+- **Tests**, where each case wants a fresh container. Build the definition once, and ignite it for
+  each case.
+- **A tool** that lives for less time than the game, and is extinguished when it closes.
+- **A scenario** that runs against the game, such as a test rig or a debug world, and is torn down on
+  its own. It imports the game module (see below).
 
 ### Importing a module
 
-A module ignited with `imports` can inject and resolve the providers of the modules it names, after
-its own:
+A module ignited with `imports` can inject and resolve the providers of the modules it lists. It
+looks in its own providers first:
 
 ```ts
 const game = Flamework.createModule()
@@ -160,33 +166,36 @@ const rig = Flamework.createModule()
     .ignite({ imports: [game] });
 ```
 
-A provider in `rig` takes `DataService` in its constructor like any provider in `game` does.
-Resolution looks in `rig` first, then in each import in order, each through its own imports, and a
-miss names the imports it searched. Nothing is copied: the import keeps its providers, their
-lifecycle, their observers and their extinguish, and `rig` only resolves them. A lazy provider of
-the import is constructed by the import, the first time either module asks.
+A provider in `rig` can take `DataService` in its constructor, just as a provider in `game` can.
+Resolution looks in `rig` first, then in each import in order, and each import also searches its own
+imports. When nothing is found, the error names the imports it searched. Nothing is copied: the
+import keeps its providers, their lifecycle, their observers and their extinguish, and `rig` only
+resolves them. A lazy provider of the import is constructed by the import, the first time either
+module asks for it.
 
-Every import has to be ignited already. `ignite()` is synchronous, so in one entry script that is
-the order of the lines; getting it wrong raises `imported module '...' is not ignited` before
-anything in the importer is constructed.
+Every import has to be ignited first. `ignite()` is synchronous, so in one entry script this is just
+the order of the lines. If you get it wrong, `ignite()` raises `imported module '...' is not ignited`
+before anything in the importer is constructed.
 
-Two rules decide what happens when both modules register the same id:
+Two rules decide what happens when both modules register the same id (the string Flamework uses to
+identify a class):
 
-- **The same class is shared.** An own registration of a class an import already resolves to is
-  dropped, and the import's instance answers, so a folder matched by both modules' paths does not
-  produce two of everything. `registerClassProvider(Class, { isolated: true })` keeps an own
-  instance instead.
+- **The same class is shared.** If the importer registers a class that an import already resolves
+  to, the importer's registration is dropped and the import's instance answers. So a folder that
+  both modules' paths match does not produce two of everything.
+  `registerClassProvider(Class, { isolated: true })` keeps a separate instance in the importer
+  instead.
 - **A different class wins.** `rig.registerProvider<DataService>({ type: "class", value: FakeDataService })`
-  is kept and answers ahead of the import's, which is how a scenario stands a fake in for one of
-  the game's providers, for itself only. The game keeps the real one.
+  is kept, and answers before the import's `DataService`. This is how a scenario replaces one of the
+  game's providers with a fake, for itself only. The game keeps the real one.
 
-Extinguishing an import extinguishes every module that imports it first, deepest first, so
+Extinguishing an import first extinguishes every module that imports it, deepest first. So
 `game.extinguish()` takes `rig` down before the game. An importer extinguished on its own detaches,
-and the import carries on.
+and the import keeps running.
 
-What used to be a reason for a second module -- a library that ships providers, code both realms
-share -- is a [plugin](08-plugins.md): its setup registers the providers into whichever module
-includes it, and a plugin two others both include is set up once.
+Some things that used to need a second module are now a [plugin](08-plugins.md): a library that
+ships providers, or code both realms share. A plugin's setup registers the providers into whichever
+module includes it. A plugin that two other plugins both include is set up once.
 
 ```ts
 // src/shared/plugins/core.ts
@@ -198,11 +207,13 @@ export const CorePlugin = Flamework.createPlugin("Core", (target) => {
 .includePlugin(CorePlugin)
 ```
 
-Each realm ignites its own module, which is what you want -- they are different processes.
+Each realm ignites its own module, which is what you want: the server and the client are different
+processes.
 
 ## Patterns
 
-**A module per test.** Build the definition once, ignite per case, extinguish after:
+**A module per test.** Build the definition once, ignite it for each case, and extinguish it
+afterwards:
 
 ```ts
 const definition = Flamework.createModule().registerClassProvider(Shop).build();
@@ -222,20 +233,20 @@ Flamework.createModule()
 
 ## Caveats
 
-- **Ignition is a state machine and it is strict.** Igniting a `Module` twice, or extinguishing
-  twice, raises `module is in invalid state when transitioning to '...'`. Ignite the *definition*
-  again instead if you want a second container.
-- **You cannot resolve during plugin setup or `onPreIgnite`.** Providers do not exist yet;
-  `module is in pre-ignite phase, dependency cannot be resolved` tells you a plugin tried. Register
-  state early and resolve in `onPostIgnite`.
-- **`Dependency<T>()` answers from one module.** The first root ignited, unless a later one was
-  ignited with `{ default: true }`. A realm with two live roots -- tests, tools -- should say which,
-  or resolve through the handle.
+- **A module ignites once and extinguishes once.** Igniting a `Module` twice, or extinguishing it
+  twice, raises `module is in invalid state when transitioning to '...'`. If you want a second
+  container, ignite the *definition* again.
+- **You cannot resolve during plugin setup or `onPreIgnite`.** Providers do not exist yet. The error
+  `module is in pre-ignite phase, dependency cannot be resolved` means a plugin tried. Register state
+  early, and resolve in `onPostIgnite`.
+- **`Dependency<T>()` answers from one module.** It uses the first module ignited, unless a later one
+  was ignited with `{ default: true }`. A realm with two running modules (tests, tools) should say
+  which one, or resolve through the module handle.
 - **Duplicate registration raises at ignition.** `provider ID was registered more than once` usually
-  means two `registerProviders` paths overlap, or a class is registered both by path and by hand --
-  or by the module and by a plugin. Two registrations whose [scope conditions](11-scopes.md) keep
-  at most one of them are fine.
-- **Imports are one way.** A module sees its imports' providers; an import never sees the
+  means two `registerProviders` paths overlap. It can also mean a class is registered both by path
+  and by hand, or by both the module and a plugin. Two registrations are fine when their
+  [scope conditions](11-scopes.md) keep at most one of them.
+- **Imports are one way.** A module sees its imports' providers, but an import never sees the
   importer's. A fake registered in the importer replaces nothing in the import.
 
 ---

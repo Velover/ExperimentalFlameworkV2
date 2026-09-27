@@ -1,11 +1,11 @@
 # 7. Macros
 
-A macro is a function whose arguments the compiler fills in from the callsite. It is why
-`Flamework.id<Shop>()` knows about `Shop` at runtime, and why `registerProviders("src/services")`
-knows where that folder ends up in the DataModel.
+A **macro** is a function with some arguments that the transformer fills in when you build, from
+the place where the function is called (the **callsite**). Macros are why `Flamework.id<Shop>()`
+knows about `Shop` at runtime, and why `registerProviders("src/services")` knows where that folder
+ends up in the DataModel.
 
-Understanding this matters for one practical reason: **when a macro does not fire, you get `nil`, not
-an error.**
+This matters for one practical reason: **when a macro does not fire, you get `nil`, not an error.**
 
 ## What you already used
 
@@ -17,9 +17,10 @@ Flamework.env("BUILD_CHANNEL", "dev");    // an environment variable, inlined as
 Modding.inspect<Array<"a" | "b">>();      // ["a", "b"] at runtime
 ```
 
-`Flamework.env` reads the variable from `.env`, `.env.local` and the process environment when the
-compiler starts (see [values from the environment](09-project-structure.md#values-from-the-environment))
-and replaces the call with the value, so nothing is looked up at runtime:
+`Flamework.env` reads the variable from `.env`, `.env.local` and the process environment when
+`rbxtsc` starts (see
+[values from the environment](09-project-structure.md#values-from-the-environment)). It replaces
+the call with the value, so nothing is looked up at runtime:
 
 ```ts
 const channel = Flamework.env("BUILD_CHANNEL", "dev");   // string: the fallback is inlined if unset
@@ -31,12 +32,12 @@ local channel = "dev"
 local tests = "true"
 ```
 
-The value is always the string as written in `.env`; compare or convert it yourself. The fallback
-has to be a string literal, since it is inlined too. It is for deployment values -- a place id, a
-channel, a version -- and not for secrets: the value ends up in the emitted Luau, where anyone
-with the place can read it.
+The value is always the string as written in `.env`, so compare or convert it yourself. The
+fallback has to be a string literal, since it is inlined too. Use `Flamework.env` for deployment
+values, such as a place id, a channel or a version. Don't use it for secrets: the value ends up in
+the emitted Luau, where anyone with the place can read it.
 
-`Modding.inspect` is the general "give me this type as a value" escape hatch:
+`Modding.inspect` is the general way to get a type as a value:
 
 ```ts
 Modding.inspect<{ label: "hello"; count: 3 }>(); // { label: "hello", count: 3 }
@@ -46,8 +47,9 @@ Modding.inspect<Array<"a" | "b">>();             // { "a", "b" } -- a union beco
 
 ## Writing your own
 
-Add `@metadata macro` to the JSDoc and make the generated parameters **optional**. Flamework fills
-them in at each callsite; the `!` is how you tell TypeScript they will be there.
+Add `@metadata macro` to the function's JSDoc, and make the generated parameters **optional**.
+Flamework fills them in at each callsite. Where you use one, the `!` (as in `guard!` below) tells
+TypeScript it will be there.
 
 ```ts
 import { Modding } from "@flamework-experimental/core";
@@ -73,13 +75,13 @@ Ordinary parameters come first, generated ones after. A caller passes only the o
 | `Character` | The column, from 1. |
 | `Width` | The width of the call expression. |
 | `Text` | The source text of the call. |
-| `Uuid` | A string, unique between callsites and identical across compilations of the same source -- unless obfuscation is on, which makes it different in every clean build ([Obfuscation](09-project-structure.md#obfuscation)). |
+| `Uuid` | A string that is unique to each callsite and the same in every build of the same source. With obfuscation on, it changes with every plain build; a running watcher and an incremental build keep it ([Obfuscation](09-project-structure.md#obfuscation)). |
 
-`Uuid` is what `Networking.createEvent` uses to give each network object a distinct name without you
-naming it.
+`Networking.createEvent` uses `Uuid` to give each network object its own name, without you naming
+it.
 
-`Modding.Caller.Constant<T>` generates its metadata **once per callsite** and shares that one table
-between every invocation, which makes it usable as a cache key:
+`Modding.Caller.Constant<T>` generates its metadata **once per callsite**, and every call from that
+callsite gets the same table. So you can use it as a cache key:
 
 ```ts
 /** @metadata macro */
@@ -129,12 +131,15 @@ keysOf<{ a: 1; b: 2 }>(); // { "a", "b" }
 
 ### Paths
 
-A macro can take a source path the way `registerProviders` does. A parameter typed
-`Modding.Intrinsic<"path", [T], string[]>` receives the folder the caller's string literal `T`
-names, as its Rojo path: an array of instance names from the root of the tree. To use it with, core
-exports what `registerProviders` is built on: `requireModulesInPath(path)` requires every
-ModuleScript at and under the path and returns what they export, and `getClassesInPath(path)`
-returns the Flamework classes they define.
+A macro can take a source path, the way `registerProviders` does. Give it a parameter typed
+`Modding.Intrinsic<"path", [T], string[]>`. That parameter receives the folder the caller's string
+literal `T` names, as a Rojo path: an array of instance names from the root of the tree.
+
+To use the path, core exports the functions `registerProviders` is built on:
+
+- `requireModulesInPath(path)` requires every ModuleScript at and under the path, and returns what
+  they export.
+- `getClassesInPath(path)` returns the Flamework classes those ModuleScripts define.
 
 ```ts
 import { getClassesInGlob, Modding, requireModulesInPath } from "@flamework-experimental/core";
@@ -156,9 +161,9 @@ loadFolder("src/server/commands", { "ServerScriptService", "TS", "commands" })
 ```
 
 `Modding.Intrinsic<"pathglob", [T], string>` does the same for a glob. The glob is matched against
-your source when you compile, and the parameter receives the glob string (obfuscated when
-obfuscation is on), which `getGlobPaths(glob)` turns into the Rojo paths it matched and
-`getClassesInGlob(glob)` into the classes found under them:
+your source when you build, and the parameter receives the glob string (obfuscated when obfuscation
+is on). Pass it to `getGlobPaths(glob)` for the Rojo paths it matched, or to
+`getClassesInGlob(glob)` for the classes found under them:
 
 ```ts
 /**
@@ -177,13 +182,19 @@ classesIn("src/*/commands");
 classesIn("src/*/commands", "src/*/commands")
 ```
 
-The rules are `registerProviders`'s: the argument must be a string literal naming a source path,
-not a Rojo one, and a `path` folder must be in your Rojo project (`Could not find Rojo data for
-'...'` otherwise). What a glob matched is written to `include/flamework/globs.json`, which only a
-game project gets, so a glob macro called from a published package raises `Flamework has no paths
-for the glob '...'` when it runs. `Modding.Intrinsic` is marked `@hidden` in core's declarations;
-that is a tag for documentation generators, which TypeScript ignores, and the type is the one
-`registerProviders`, `ComponentPlugin.fromPath` and a plugin target's `registerProviders` declare.
+The rules are the same as for `registerProviders`:
+
+- The argument must be a string literal naming a source path (a file path like `src/...`), not a
+  Rojo path.
+- A `path` folder must be in your Rojo project. Otherwise you get
+  `Could not find Rojo data for '...'`.
+- What a glob matched is written to `include/flamework/globs.json`, which only a game project gets.
+  So a glob macro called from a published package raises
+  `Flamework has no paths for the glob '...'` when it runs.
+
+`Modding.Intrinsic` is marked `@hidden` in core's declarations. That tag is for documentation
+generators, and TypeScript ignores it. It is the same type that `registerProviders`,
+`ComponentPlugin.fromPath` and a plugin target's `registerProviders` declare.
 
 ### Serializers
 
@@ -203,65 +214,71 @@ const [payload, blobs] = snapshots.serialize(snapshot);
 const back = snapshots.deserialize(payload, blobs); // raises on malformed input
 ```
 
-The output is plain buffer code: each field is a `buffer.write*` at an offset the transformer
-computed, fixed-size types at literal offsets, and the decoder mirrors it. Fields go in declaration
-order; counts and lengths are varints; `Serialization.varint` does the same for an integer of your
-own. Named types with a variable size are hoisted into `s_`, `w_` and `r_` functions (size, write,
-read) ahead of the statement, once per statement, which is also how recursive types work. There is
-no runtime library behind it and nothing in the output describes the type. Wrap `deserialize` in
-`pcall` for untrusted input. Create serializers at module scope: one built inside a function is
-rebuilt on every call. This is also what powers [networking serialization](06-networking.md#serialization),
-which lists what each kind of type costs and what travels as a blob.
+The output is plain buffer code. Each field is a `buffer.write*` at an offset the transformer
+computed, with fixed-size types at literal offsets, and the decoder mirrors it. Fields go in
+declaration order. Counts and lengths are varints, and `Serialization.varint` does the same for an
+integer of your own. Named types with a variable size are moved out into `s_`, `w_` and `r_`
+functions (size, write, read), placed ahead of the statement, once per statement. That is also how
+recursive types work. There is no runtime library behind it, and nothing in the output describes the
+type.
+
+- Wrap `deserialize` in `pcall` for untrusted input.
+- Create serializers at the top level of a file (module scope). One built inside a function is
+  rebuilt on every call.
+
+The same generator powers [networking serialization](06-networking.md#serialization), which lists
+what each kind of type costs and what travels as a blob.
 
 ## When a macro does not fire
 
-This is the failure mode to recognise, because it is silent.
+Learn to recognise this failure, because it is silent.
 
 If Flamework does not recognise a parameter's type as a macro type, it generates **no argument**.
-The parameter is `nil`, your `!` lied, and you get "attempt to index nil" or "attempt to call a nil
-value" somewhere unrelated. Nothing warns at compile time.
+The parameter is `nil`, your `!` was wrong, and you get "attempt to index nil" or "attempt to call a
+nil value" somewhere unrelated. Nothing warns when you build.
 
-Causes, in rough order of likelihood:
+Causes, most likely first:
 
-1. **The transformer is not configured.** No `@flamework-experimental/transformer` in `tsconfig.json` means
-   *no* macro fires -- Flamework's own included.
+1. **The transformer is not configured.** Without `@flamework-experimental/transformer` in
+   `tsconfig.json`, *no* macro fires, Flamework's own included.
 2. **`@metadata macro` is missing** from the function's JSDoc, or the JSDoc is not directly attached
    to the declaration.
 3. **The parameter is not optional.** A required parameter is one the caller is expected to pass.
-4. **The type is not a macro type.** A plain `string` parameter is just a string.
-5. **A type alias hid the marker.** Macro types are marker intersections; aliasing through something
-   that widens or strips the marker loses it.
+4. **The type is not a macro type.** A plain `string` parameter is an ordinary string.
+5. **A type alias hid the marker.** Macro types are intersections with a marker. An alias that widens
+   the type or strips the marker loses it.
 
-The quickest diagnosis is to read the emitted Luau. If the call has fewer arguments than you expect,
+The quickest check is to read the emitted Luau. If the call has fewer arguments than you expect,
 the macro did not fire.
 
-`Flamework.implements` is worth knowing about here: it is `declare`d, so it has no runtime value of
-its own and is rewritten by the transformer into a real call. If its macro does not fire you get
-`attempt to call a nil value` on the call itself rather than a `nil` argument.
+`Flamework.implements` fails differently. It is `declare`d, so it has no runtime value of its own:
+the transformer rewrites it into a real call. If its macro does not fire, you get
+`attempt to call a nil value` on the call itself, not a `nil` argument.
 
 ## Patterns
 
-**A macro is a compile-time constant.** Prefer hoisting `Flamework.id<T>()` into a `const` over
-calling it in a loop -- it emits the same string either way, but the intent is clearer.
+**A macro is a compile-time constant.** Put `Flamework.id<T>()` in a `const` rather than calling it
+in a loop. It emits the same string either way, but the intent is clearer.
 
 **Wrap `Modding.Target.Guard` for validation at boundaries.** A one-line `validate<T>` macro is often
-nicer than importing `t` and writing the guard out.
+simpler than importing `t` and writing the guard out.
 
-**Use `Uuid` for identity you do not want to name.** Anything needing a stable, unique key per
-callsite -- caches, network objects, hooks -- can take one instead of asking the caller for a string.
+**Use `Uuid` when you need an identity but don't want to name it.** Anything that needs a stable,
+unique key per callsite (caches, network objects, hooks) can take one instead of asking the caller
+for a string.
 
 ## Caveats
 
-- **Generated parameters must be optional**, and are conventionally last.
-- **String arguments to path macros must be literals.** `registerProviders(path)` where `path` is a
-  variable fails to compile.
-- **A macro does not fire without the transformer**, which is a silent `nil` rather than an error.
-- **`Line` and `Character` are numbers**, not strings, despite being callsite "text" information.
-- **`Line` is the TypeScript line.** For the line in the emitted Luau -- what the console and
-  tracebacks report -- call `debug.info(1, "l")` yourself where you need it.
+- **Generated parameters must be optional**, and by convention come last.
+- **String arguments to path macros must be literals.** `registerProviders(path)`, where `path` is a
+  variable, fails to compile.
+- **A macro does not fire without the transformer.** You get a silent `nil`, not an error.
+- **`Line` and `Character` are numbers**, not strings, even though they describe the callsite's text.
+- **`Line` is the TypeScript line.** For the line in the emitted Luau (what the console and
+  tracebacks report), call `debug.info(1, "l")` yourself where you need it.
 - **Macros are resolved at each callsite.** A wrapper function around a macro captures *the
-  wrapper's* callsite, not its caller's -- if you want the caller's, take the metadata as a parameter
-  and pass it through.
+  wrapper's* callsite, not its caller's. To get the caller's, take the metadata as a parameter and
+  pass it through.
 
 ---
 

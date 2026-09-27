@@ -1,6 +1,8 @@
 # 4. Lifecycle events
 
-Lifecycle events come from `LifecyclePlugin`, and every module starts with it included:
+Lifecycle events are methods, such as `onStart` and `onTick`, that Flamework calls at set points:
+on your providers, and also on components and on objects you attach by hand (both covered below).
+They come from `LifecyclePlugin`, which every module includes from the start:
 
 ```ts
 Flamework.createModule()
@@ -9,12 +11,12 @@ Flamework.createModule()
 ```
 
 It is an ordinary plugin with no special access. `disableDefaultLifecycle()` on the builder leaves
-it out, for a module that wants no per-frame work at all, and including one built with
-`createLifecyclePlugin({ … })` takes its place rather than adding a second.
+it out, for a module that wants no per-frame work at all. Including one built with
+`createLifecyclePlugin({ … })` replaces it, rather than adding a second.
 
 ## The events
 
-Implement the interface; the plugin finds you.
+Implement the interface, and the plugin finds your class.
 
 ```ts
 import { OnStart, OnTick, Provider } from "@flamework-experimental/core";
@@ -40,20 +42,28 @@ export class Spawner implements OnStart, OnTick {
 | `OnRender` | `onRender(dt)` | `RunService.PreRender` -- client only |
 | `OnExtinguished` | `onExtinguished()` | `module.extinguish()` |
 
-Within a frame the order is `onPhysics`, then `onTick`, then `onRender`, matching Roblox's own
-signal order. `Heartbeat` is the same point of the frame as `PostSimulation` in a running game; it
-is used because it also fires where nothing is simulated -- an edit-mode plugin, an Open Cloud
-task -- so `onTick` keeps working there. `PreSimulation` has no such alias, so `onPhysics` is
-silent in those environments.
+The three per-frame events repeat in a fixed cycle: `onPhysics`, then `onTick`, then `onRender`, then
+`onPhysics` again. This follows Roblox's task scheduler: `PreSimulation` fires before the physics
+simulation, `Heartbeat` after it, and, on the client, `PreRender` before the frame is rendered.
 
-There is nothing to register. Flamework checks each constructed object against the interfaces
-plugins have claimed, structurally, using metadata the transformer attached -- which is why the
-class must carry a Flamework decorator for this to work at all.
+In a running game, `Heartbeat` fires at the same point of the frame as `PostSimulation`. Flamework
+uses `Heartbeat` because it also fires where nothing is simulated, such as an edit-mode plugin or an
+Open Cloud task, so `onTick` keeps working there. `PreSimulation` has no such alias, so `onPhysics`
+does not fire in those environments.
+
+There is nothing to register. Flamework checks each constructed object against the interfaces that
+plugins have claimed. The check goes by name, not by shape: a class matches the interfaces listed in
+its `implements` clause, which the transformer records as metadata on the class. A class that only
+has the method, without `implements OnTick`, is not matched. The metadata is why the class must
+carry a Flamework decorator for this to work at all. A parent class's `implements` clause counts
+too, but only if the parent carries a Flamework decorator as well. See
+[Plugins](08-plugins.md#observing-interfaces).
 
 ## `onInit` in detail
 
-`onInit` is the ordered, awaitable setup step. It runs after every provider has been constructed,
-once per provider, **in dependency order**, and everything after it waits:
+`onInit` is the setup step. It runs in order, and it can be awaited. It runs once per provider,
+after every provider has been constructed, **in dependency order**, and everything after it waits
+for it:
 
 ```ts
 @Provider()
@@ -64,29 +74,27 @@ class Database implements OnInit {
 }
 ```
 
-A rejected Promise fails ignition with `onInit failed for '<id>': <reason>`. Because it blocks, keep
-it to setup that other providers genuinely depend on; anything else belongs in `onStart`.
+A rejected Promise fails ignition with `onInit failed for '<id>': <reason>`. Because `onInit` blocks,
+use it only for setup that other providers really depend on. Anything else belongs in `onStart`.
 
-Across an import, the order is kept for what a constructor takes **directly**. A provider can take
-a lazy provider of a module it imports that is still running its `onInit` -- one that nothing had
-resolved until this provider's constructor did, which the import initialises on a turn of its own,
-or one resolved earlier that is still loading. Its `onInit` then waits for that one's to finish,
-and the ignition waits with it, as for an `onInit` that yields; a provider without an `onInit`
-waits the same way, before its `onStart` and per-frame events. Providers that take nothing still
-initialising do not wait. If the import begins to extinguish meanwhile, the ignition fails without
-running that `onInit` (`'<id>' takes a provider of a module that was extinguished while this module
-was igniting`). This
-holds wherever the ignition runs, Promise work included (a profile load's `andThen`, an `async`
-handler). The one exception is an import's own `onInit` that ignites this module before it yields,
-or from a thread it started and has not got back from: what it is itself initialising is not
-waited for, since that `onInit` cannot finish before the ignition does, nor a lazy provider of the
-import first resolved there, which joins its turn. After it yields -- an `async` `onInit` after an
-`await`, a Promise callback -- such an ignition cannot be told apart from one started by unrelated
-Promise work, so it waits, and a module that takes a provider whose `onInit` ignites it, or one
-that joins that `onInit`'s turn, waits for itself. Such a wait that lasts more than a few seconds
-is warned about, once, naming the provider that waits and the one it waits for; the warning can
-also come for an ordinary wait on a load that takes that long. Ignite such a module from `onStart`
-or a `PlayerAdded` handler instead.
+### Across an import
+
+Most of this section only matters when one module imports another (see
+[Modules](02-modules.md#importing-a-module)).
+
+A provider can take a lazy provider of a module it imports while that lazy provider is still running
+its `onInit`. This happens in two ways:
+
+- Nothing had resolved the lazy provider until this provider's constructor did. The import then
+  initialises it on a *turn* of its own: a separate batch in which the lifecycle plugin runs the
+  `onInit`s, then the `onStart`s, of lazy providers resolved too late to join ignition's own
+  `onInit` step.
+- It was resolved earlier and is still loading.
+
+The order is kept for what a constructor takes **directly**. The provider's `onInit` waits for the
+lazy provider's `onInit` to finish, and the ignition waits with it, as it does for an `onInit` that
+yields. A provider without an `onInit` waits the same way, before its `onStart` and per-frame events.
+Providers that take nothing still initialising do not wait.
 
 ```ts
 // in the game module
@@ -108,11 +116,13 @@ class PlayerData implements OnInit {
 }
 ```
 
-The wait is not transitive: a provider in between that has no pending `onInit` of its own is not
-followed. If `PlayerInventory` takes `InventoryService`, which has no `onInit` and takes the
-loading `DataStore`, `PlayerInventory` does not wait for `DataStore`. Give the service in between
-an `onInit` -- an empty one will do: it waits for `DataStore`, and `PlayerInventory` waits for it --
-or have `PlayerInventory` take `DataStore` directly.
+The wait is not transitive: Flamework does not follow a provider in between that has no pending
+`onInit` of its own. Say `PlayerInventory` takes `InventoryService`, which has no `onInit` and takes
+the loading `DataStore`. Then `PlayerInventory` does not wait for `DataStore`. There are two fixes:
+
+- Give `InventoryService` an `onInit`. An empty one will do: `InventoryService` then waits for
+  `DataStore`, and `PlayerInventory` waits for `InventoryService`.
+- Have `PlayerInventory` take `DataStore` directly.
 
 ```ts
 @Provider({ lazy: true })
@@ -123,18 +133,39 @@ class InventoryService implements OnInit {
 }
 ```
 
+If the import begins to extinguish during the wait, the ignition fails without running that `onInit`
+(`'<id>' takes a provider of a module that was extinguished while this module was igniting`).
+
+The wait happens wherever the ignition runs, including in Promise work (a profile load's `andThen`,
+an `async` handler).
+
+**The one exception: an import's own `onInit` that ignites this module.** This applies when the
+`onInit` ignites the module before it yields, or from a thread it started and has not got back
+from. The ignition then does not wait for:
+
+- what that `onInit` is itself initialising, since the `onInit` cannot finish before the ignition
+  does;
+- a lazy provider of the import first resolved there, which joins the `onInit`'s turn.
+
+After the `onInit` yields (an `async` `onInit` after an `await`, or a Promise callback), Flamework
+cannot tell such an ignition apart from one started by unrelated Promise work, so it waits. A module
+that takes a provider whose `onInit` ignites it, or a provider that joins that `onInit`'s turn, then
+waits for itself. If such a wait lasts more than a few seconds, Flamework warns once, naming the
+provider that waits and the one it waits for. The warning can also come for an ordinary wait on a
+load that takes that long. Ignite such a module from `onStart` or a `PlayerAdded` handler instead.
+
 ## `onStart` in detail
 
 `onStart` runs once per provider, at the end of ignition, **on its own thread**. Two consequences:
 
-- **It may yield.** `task.wait`, `WaitForChild` and network calls are fine; they will not block other
+- **It may yield.** `task.wait`, `WaitForChild` and network calls are fine. They do not stop other
   providers from starting.
 - **Order between providers is their `loadOrder`**, and otherwise the order they were constructed in.
-  Each is started on its own thread, so one runs up to its first yield before the next is started,
-  and nothing waits for one that yields. If a provider needs another *initialised*, inject it: its
-  `onInit` finishes first, by definition.
+  Each one starts on its own thread, so one runs up to its first yield before the next one starts,
+  and nothing waits for one that yields. If a provider needs another one *initialised*, inject it:
+  the injected provider's `onInit` always finishes first.
 
-Constructors run during ignition, in dependency order, and must **not** yield -- a yielding
+Constructors run during ignition, in dependency order, and must **not** yield. A yielding
 constructor stalls ignition.
 
 ```ts
@@ -151,22 +182,23 @@ class Matchmaker implements OnStart {
 ## Load order
 
 `@Provider({ loadOrder })` orders `onInit` and `onStart` among the providers one ignition constructs.
-Lower goes first; the default is `1`, as in v1.
+Lower values go first. The default is `1`, as in v1.
 
 - **Construction and `onInit`.** The module constructs its providers in ascending `loadOrder`, each
-  after what its constructor takes, and `onInit` runs in that order. Dependency order wins: a
-  provider's dependencies are initialised before it even when their `loadOrder` is higher, so a low
+  one after what its constructor takes, and `onInit` runs in that order. Dependency order wins: a
+  provider's dependencies are initialised before it, even when their `loadOrder` is higher. So a low
   `loadOrder` pulls what the provider needs forward with it. Providers with the same `loadOrder` keep
   their registration order.
-- **`onStart`** is started in ascending `loadOrder` alone, dependencies or not, the same order among
-  equals. Each runs on its own thread up to its first yield before the next one is started, so a
-  lower `loadOrder`'s synchronous setup is done before a higher one begins -- which is what v1 gave.
-- **Per-frame events** (`onTick`, `onPhysics`, `onRender`) are not ordered: the listener set is
-  unordered, and sorting it would cost every frame.
-- **Lazy providers** are not part of it: one starts when it is first resolved, and its `loadOrder` is
-  ignored.
-- **One module at a time.** An imported module ignites, and starts, before the module importing it,
-  whatever the `loadOrder`s.
+- **`onStart`** runs in ascending `loadOrder` alone, whatever the dependencies. Among providers with
+  the same `loadOrder`, the order is the same as for `onInit`. Each one runs on its own thread up to
+  its first yield before the next one starts. So the synchronous setup of a lower `loadOrder` is done
+  before a higher one begins, which is what v1 did.
+- **Per-frame events** (`onTick`, `onPhysics`, `onRender`) are not ordered. The listener set is
+  unordered, and sorting it would cost time every frame.
+- **Lazy providers** are not part of the order. A lazy provider starts when it is first resolved,
+  and its `loadOrder` is ignored.
+- **One module at a time.** An imported module ignites, and starts, before the module that imports
+  it, whatever their `loadOrder`s.
 
 ```ts
 @Provider({ loadOrder: 10 })
@@ -195,8 +227,8 @@ class Plain implements OnInit, OnStart {
 
 ## Ad-hoc listeners
 
-For something that is not a provider -- a UI component, a temporary system -- `module.listen`
-attaches a listener and returns a destructor.
+For something that is not a provider, such as a UI component or a temporary system, `module.listen`
+attaches a listener. It returns a function that detaches the listener again.
 
 ```ts
 // Full form: an object implementing the interface
@@ -212,57 +244,76 @@ const stop = module.listen<OnTick>((dt) => print(dt));
 stop();
 ```
 
-`listen` attaches *after* ignition, so `onStart` does **not** fire retroactively for a listener
-registered with it. Per-frame events start immediately.
+`listen` attaches *after* ignition, so `onStart` is **not** replayed for a listener attached with it.
+Per-frame events start at once.
 
-The same applies to anything built with `createClassInstance`: it is attached to the lifecycle
-events it implements, and detached by `removeClassInstance` or when the module extinguishes.
-Detached means no further event, `onExtinguished` included: an instance that an earlier
+The same applies to anything built with `createClassInstance`. It is attached to the lifecycle
+events it implements, and detached by `removeClassInstance` or when the module extinguishes. Once
+detached, it gets no further events, `onExtinguished` included. So an instance that an earlier
 `onExtinguished` handler removes is not told.
-`onInit` and `onStart` are a provider's: the plugin never runs them for an instance, before or after
-ignition; whoever created the instance owns its initialisation and its start.
 
-A **lazy provider** is different: it is a provider, so when it is first resolved after ignition the
-plugin runs its `onInit` and `onStart` for it, on the next resume point, in that order. Several
-resolved together -- one, and the lazy providers its constructor takes -- go the way eager providers
-do: every `onInit` in the order they were resolved, a dependency first, each finished before the
-next begins, then every `onStart`. One that one of those `onInit`s resolves, sync or `async`, before
-or after it yields, joins them: one resolved on the `onInit`'s own thread, on a thread it started and
-has not yet got back from, or, while a Promise the `onInit` returned is pending, on a thread running
-Promise work (an `async` body, a Promise executor, an `andThen` callback -- any Promise's, since
-which one a thread works for cannot be told). One resolved anywhere else meanwhile -- a thread an
-`onInit` spawned counts, once it has yielded -- gets its own turn, and its `onInit` (or, without
-one, its `onStart` and per-frame events) waits for
-nothing but the `onInit`s still running of the providers its constructor takes directly: one taking a
-dependency that another turn is still initialising is initialised once that dependency's `onInit`
-has finished, so it never sees that dependency half-initialised (the wait is not transitive; see
-`onInit` in detail above). A dependency waiting in turn for what depends on
-it hangs both, as with eager providers. One whose `onInit` raises is reported, never ticks and is
-never started, and the ones after it, or waiting for it, carry on. One first
-resolved while the module is still igniting, by a plugin's `onPostIgnite` hook after the lifecycle
-plugin's, waits for ignition to finish, and hears neither if the ignition fails. Its
-per-frame events wait for that too: it does not tick before its `onInit` has finished. Once the
-module has begun to extinguish neither runs: one first resolved by an `onExtinguished` handler is
-told `onExtinguished`, and that is all it hears.
+`onInit` and `onStart` belong to providers. The plugin never runs them for an instance, before or
+after ignition. Whoever created the instance is in charge of initialising and starting it.
+
+## Lazy providers
+
+A [lazy provider](03-providers.md#lazy-providers) is different from an instance: it is a provider.
+So when it is first resolved after ignition, the plugin runs its `onInit` and then its `onStart`, at
+the next resume point.
+
+The plugin runs lazy providers in *turns*. A turn works the way ignition does for eager providers:
+it runs every `onInit` in the order the providers were resolved, each one finished before the next
+begins, and then every `onStart`. The cases below say which turn a lazy provider joins, what it
+waits for, and what happens when something goes wrong:
+
+- **Resolved together.** A lazy provider and the lazy providers its constructor takes share a turn,
+  a dependency first.
+- **Resolved by one of the turn's `onInit`s.** It joins that turn, whether the `onInit` is sync or
+  `async`, and before or after the `onInit` yields. That covers a lazy provider resolved:
+  - on the `onInit`'s own thread;
+  - on a thread the `onInit` started and has not yet got back from;
+  - while a Promise the `onInit` returned is pending, on a thread running Promise work (an `async`
+    body, a Promise executor, an `andThen` callback). This counts any Promise's work, since
+    Flamework cannot tell which Promise a thread works for.
+- **Resolved anywhere else meanwhile.** It gets its own turn. A thread that an `onInit` spawned
+  counts as "anywhere else" once it has yielded. Its `onInit` (or, without one, its `onStart` and
+  per-frame events) waits only for the `onInit`s still running of the providers its constructor
+  takes directly. So if another turn is still initialising one of those dependencies, this provider
+  is initialised once that dependency's `onInit` has finished, and never sees it half-initialised.
+  The wait is not transitive; see [Across an import](#across-an-import).
+- **Waiting in a circle.** A dependency that is itself waiting for what depends on it hangs both, as
+  with eager providers.
+- **An `onInit` that raises.** The error is reported, and that provider never ticks and is never
+  started. The providers after it, or waiting for it, carry on.
+- **Resolved while the module is still igniting**, by a plugin's `onPostIgnite` hook that runs after
+  the lifecycle plugin's. It waits for ignition to finish, and gets neither `onInit` nor `onStart` if
+  the ignition fails. Its per-frame events wait for that too: it does not tick before its `onInit`
+  has finished.
+- **Once the module has begun to extinguish**, neither `onInit` nor `onStart` runs for a lazy
+  provider that has not had them yet, whenever it was resolved. One first resolved by an
+  `onExtinguished` handler is told `onExtinguished`, and that is all it hears.
 
 ## Components
 
-Components are constructed through the module that includes `ComponentPlugin`, so they take their
-per-frame events from **that module's** lifecycle plugin -- the default one, unless the module
+Components are constructed through the module that includes `ComponentPlugin`. So they get their
+per-frame events from **that module's** lifecycle plugin: the default one, unless the module
 disabled it, in which case components do not tick. `onInit` and `onStart` are the exceptions:
-`Components` calls both itself, so they work either way. `onInit` runs synchronously, right after
-construction and before the component can be seen anywhere -- before `getComponent` hands it back,
-before another component receives it through a link, before an added listener hears of it -- and a
-Promise it returns is not awaited; a raise leaves the component in place but invalid, hidden from
-everything until the tracker rebuilds it. `onStart` runs on its own thread once the component is
-attached, and not before ignition has finished: a component built from a provider's `onInit` starts
-once every provider has. See [Components](05-components.md#lifecycle).
+`Components` calls both itself, so they work either way.
+
+- `onInit` runs synchronously, right after construction, before the component can be seen anywhere:
+  before `getComponent` hands it back, before another component receives it through a link, and
+  before an added listener hears of it. A Promise it returns is not awaited. If it raises, the
+  component stays in place but is invalid, hidden from everything until the tracker rebuilds it.
+- `onStart` runs on its own thread once the component is attached, and not before ignition has
+  finished. So a component built from a provider's `onInit` starts once every provider has started.
+
+See [Components](05-components.md#lifecycle).
 
 ## Profiling
 
-In Studio, every per-frame callback runs under `debug.profilebegin` and `debug.setmemorycategory`
-with the provider's identifier, so providers show up by name in the MicroProfiler and the memory
-view. To force it on or off, build the plugin with options instead of using the default:
+In Studio, every per-frame callback runs under `debug.profilebegin` and `debug.setmemorycategory`,
+labelled with the provider's id. So providers show up by name in the MicroProfiler and the memory
+view. To force profiling on or off, build the plugin with options instead of using the default:
 
 ```ts
 import { createLifecyclePlugin } from "@flamework-experimental/core";
@@ -272,16 +323,16 @@ Flamework.createModule()
     .ignite();
 ```
 
-Including a configured plugin takes the default's place; the module still runs exactly one. The
-project-wide default lives in `flamework.config.json` as `core.profiling`; this option overrides it
-for one module.
+Including a configured plugin replaces the default, so the module still runs exactly one. The
+project-wide default is `core.profiling` in `flamework.config.json`. This option overrides it for one
+module.
 
-The identifier each object is profiled under is looked up once and remembered until the object
-leaves its last lifecycle event, so components that come and go leave nothing behind.
+The id each object is profiled under is looked up once, and remembered until the object leaves its
+last lifecycle event. So components that come and go leave nothing behind.
 
 ## Asking what is attached
 
-The plugin provides its `LifecycleProvider`, so a module can be asked what it is currently running:
+The plugin provides its `LifecycleProvider`, so you can ask a module what it is currently running:
 
 ```ts
 import { LifecycleProvider } from "@flamework-experimental/core";
@@ -291,8 +342,8 @@ print(lifecycle.onTick.size(), "objects are ticking");
 ```
 
 `onStart`, `onTick`, `onPhysics`, `onRender` and `onExtinguished` are the live sets, one per module.
-They are there to be read: the plugin fills and empties them from the interfaces a class implements,
-and `listen` is how you attach something by hand.
+They are there to be read. The plugin fills and empties them from the interfaces a class implements.
+To attach something by hand, use `listen`.
 
 ```ts
 @Injectable()
@@ -307,15 +358,15 @@ module.removeClassInstance(countdown); // stops
 ## Patterns
 
 **Constructor for wiring, `onStart` for work.** Take your dependencies in the constructor and do
-nothing else there; put anything that yields, waits on replication or touches the world in
+nothing else there. Put anything that yields, waits on replication or touches the world in
 `onStart`.
 
-**Guard `OnRender` to the client.** `PreRender` does not fire on the server, so a provider
-implementing `OnRender` is simply inert there -- but it is clearer to register it only in the client
+**Keep `OnRender` on the client.** `PreRender` does not fire on the server, so a provider
+implementing `OnRender` does nothing there. Still, it is clearer to register it only in the client
 module.
 
-**Clean up in `OnExtinguished`.** If a provider opens connections that outlive it -- signals, threads,
-Instances -- close them there, so a module that extinguishes leaves nothing behind.
+**Clean up in `OnExtinguished`.** If a provider opens connections that outlive it (signals, threads,
+Instances), close them there. Then a module that extinguishes leaves nothing behind.
 
 ```ts
 @Provider()
@@ -328,28 +379,30 @@ class Broadcaster implements OnExtinguished {
 }
 ```
 
-**One listener, many objects.** If you have hundreds of short-lived objects that need a tick, prefer
-one provider iterating them over hundreds of `listen` calls.
+**One listener, many objects.** If you have hundreds of short-lived objects that need a tick, use one
+provider that loops over them rather than hundreds of `listen` calls.
 
 ## Caveats
 
-- **`disableDefaultLifecycle()` is silent.** Nothing complains that `onStart` never ran.
+- **`disableDefaultLifecycle()` is silent.** Nothing warns you that `onStart` never ran.
 - **One lifecycle plugin per module.** Including a configured one on the builder replaces the
-  default; a plugin that includes a second one is refused at ignition, so include it on the module.
+  default. A plugin that includes a second one is refused at ignition, so include it on the module
+  instead.
 - **Per-frame events are unordered.** `loadOrder` orders `onInit` and `onStart` only; the per-frame
   listener set is unordered.
 - **`listen` does not replay `onStart`.** It attaches from that moment on.
 - **Extinguishing disconnects everything.** The plugin disconnects its `RunService` connections and
-  releases the providers, so a dead module stops ticking. This was a bug once; it is covered by a
-  spec now. Nothing ticks or starts from the moment `extinguish()` is called, either: not while the
-  modules importing it go down first, whose `onExtinguished` handlers may yield.
-- **A failing `onExtinguished` does not abort extinguish.** It is warned about and the remaining
-  handlers still run, so the module cannot get stuck half-extinguished. The same goes for a
-  plugin's extinguished hook.
-- **A failing ignition is extinguished.** A raise during ignition -- a constructor, an `onInit`, a
-  plugin's hook -- runs the extinguished hooks for what had been set up, so nothing keeps ticking,
-  and then comes out of `ignite()`.
-- **`onInit` blocks.** A yielding `onInit` delays every provider after it; a rejected Promise fails
+  releases the providers, so a module that has been extinguished stops ticking. (This was once a
+  bug; a spec covers it now.) Nothing ticks or starts from the moment `extinguish()` is called. That
+  includes the time while the modules importing it go down first, whose `onExtinguished` handlers
+  may yield.
+- **A failing `onExtinguished` does not abort extinguish.** Flamework warns about it, and the
+  remaining handlers still run, so the module cannot get stuck half-extinguished. The same goes for
+  a plugin's extinguished hook.
+- **A failing ignition is extinguished.** An error raised during ignition (in a constructor, an
+  `onInit` or a plugin's hook) first runs the extinguished hooks for what had been set up, so nothing
+  keeps ticking. Then the error comes out of `ignite()`.
+- **`onInit` blocks.** A yielding `onInit` delays every provider after it. A rejected Promise fails
   ignition.
 - **A yielding constructor stalls ignition**, because construction is synchronous. Yield in
   `onStart`.

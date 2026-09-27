@@ -1,6 +1,8 @@
 # 3. Providers
 
-A provider is a singleton within its module. It is the unit you write most of your game in.
+A **provider** is usually a class that its module creates once: a singleton within that module.
+(Other kinds are covered under [Other kinds of provider](#other-kinds-of-provider).) You write most
+of your game as providers.
 
 ```ts
 import { Provider } from "@flamework-experimental/core";
@@ -11,50 +13,54 @@ export class Economy {
 }
 ```
 
-`@Provider()` does two things: it marks the class as a provider, and it tells the transformer to
-attach the metadata dependency injection needs -- the class's identifier, its constructor parameter
-types, and the interfaces it implements.
+`@Provider()` does two things. It marks the class as a provider, and it tells the transformer to
+attach the metadata that dependency injection needs: the class's identifier (id), its constructor
+parameter types, and the interfaces it implements.
 
 ## Registration
 
-**No, you do not list your services by hand.** `registerProviders` takes a folder:
+**You do not list your providers by hand.** `registerProviders` takes a folder:
 
 ```ts
 Flamework.createModule().registerProviders("src/server/services").ignite();
 ```
 
-That is the v2 equivalent of v1's `Flamework.addPaths(...)`, and it is what you should use for
-ordinary game code.
+This is v2's version of v1's `Flamework.addPaths(...)`. Use it for ordinary game code.
 
 ### How it actually works
 
-Worth knowing, because the caveats fall out of it:
+It helps to know this, because the caveats follow from it:
 
-1. **At compile time**, the transformer turns `"src/server/services"` into the Rojo instance path
-   that folder ends up at, using your Rojo project file. This is why the argument must be a string
-   literal and why the folder must be mapped.
-2. **At runtime**, Flamework walks to that instance with `WaitForChild`, requires every `ModuleScript`
-   under it, and collects every Flamework class those modules define, **exported or not**, plus
-   anything they export that carries Flamework metadata (a re-export of a class from elsewhere).
-3. It then keeps the ones marked as providers and registers each under its generated identifier,
-   once, however many ways it was found.
+1. **At compile time**, the transformer uses your Rojo project file to turn `"src/server/services"`
+   into the Rojo path that the folder ends up at. This is why the argument must be a string literal,
+   and why the folder must be mapped.
+2. **At runtime**, Flamework finds that instance with `WaitForChild` and requires every
+   `ModuleScript` under it. It collects every Flamework class those ModuleScripts define, **exported
+   or not**. It also collects anything they export that carries Flamework metadata, such as a
+   re-export of a class from elsewhere.
+3. It keeps the classes marked as providers, and registers each one once under its generated id,
+   however many ways it was found.
 
-So registration is "require everything in this folder and see what falls out", as it was in v1.
-The transformer records each class against the ModuleScript that defines it (`script`), which is
-how an unexported one is found; the identifier plays no part, so this holds in every
-`idGenerationMode` and with obfuscation on. Only a class the module creates once as it loads is
-recorded -- one declared at the top level of the file, or of a namespace in it. A class declared
-inside a function is created by every call, so it is never recorded, and a later path registration
-never picks up a class that belongs to a test case or a factory; it is found only if its module
+So registration means "require everything in this folder and see what comes out", as it did in v1.
+
+Unexported classes are found because the transformer records each class against the ModuleScript
+that defines it (`script`). The id plays no part in this, so it works in every `idGenerationMode`
+and with obfuscation on.
+
+Only a class that the ModuleScript creates once, as it loads, is recorded: one declared at the top
+level of the file, or at the top level of a namespace in it. A class declared inside a function is
+created again by every call, so it is never recorded. That way, a later path registration never
+picks up a class that belongs to a test case or a factory. Such a class is found only if its file
 exports it.
 
 Only classes that carry `@Provider()` **themselves** are registered. Metadata is inherited through
-the class hierarchy, so an exported but undecorated subclass of a provider is skipped rather than
-registered under its parent's identifier -- and registering one explicitly raises.
+the class hierarchy, but an exported, undecorated subclass of a provider is still skipped, rather
+than registered under its parent's id. Registering one explicitly raises an error.
 
 ### Registering by glob
 
-When the providers are spread over folders that share a pattern, a glob avoids listing them:
+When your providers are spread over folders whose paths share a pattern, a glob saves listing each
+folder:
 
 ```ts
 Flamework.createModule().registerProvidersGlob("src/server/**/services").ignite();
@@ -67,7 +73,8 @@ projects emit the file -- a published package cannot use globs. This is v1's `Fl
 
 ### Explicit registration
 
-When you want one specific class -- a library's provider, a test double, something conditional:
+To register one specific class, such as a library's provider, a test double or something
+conditional:
 
 ```ts
 // Shorthand: uses the class's generated identifier
@@ -77,8 +84,8 @@ When you want one specific class -- a library's provider, a test double, somethi
 .registerProvider<Economy>({ type: "class", value: Economy })
 ```
 
-Both raise `class 'X' is missing the @Provider() decorator` if the class is not decorated -- including
-when it merely inherits the decorator from a parent class.
+Both raise `class 'X' is missing the @Provider() decorator` if the class is not decorated itself,
+even when it inherits the decorator from a parent class.
 
 ## Dependency injection
 
@@ -94,19 +101,20 @@ export class Shop {
 }
 ```
 
-There is nothing to annotate. The transformer records each parameter's identifier, and the module
-resolves them, constructing anything that does not exist yet.
+There is nothing to annotate. The transformer records each parameter's id, and the module resolves
+them, constructing anything that does not exist yet.
 
-Resolution stays inside the module: its own providers, and whatever its plugins registered or
-provided.
+Resolution looks in the module first: its own providers, and whatever its plugins registered or
+provided. Then it looks in the modules this one imports, in order (see
+[Importing a module](02-modules.md#importing-a-module)). Nothing else is searched.
 
-You can also inject `Module`, the module doing the resolving, and anything a plugin provided -- see
+You can also inject `Module` (the module doing the resolving) and anything a plugin provided. See
 [Plugins](08-plugins.md).
 
 ### Outside a provider
 
-Code with no constructor -- a UI component, a script, a signal handler -- reaches a provider through
-`Dependency<T>()`, which resolves against the default module: the first one ignited, or the one
+Code with no constructor, such as a UI component, a script or a signal handler, reaches a provider
+through `Dependency<T>()`. It resolves against the default module: the first one ignited, or the one
 ignited with `{ default: true }` (see [Modules](02-modules.md#resolving-by-hand)).
 
 ```ts
@@ -115,14 +123,15 @@ import { Dependency } from "@flamework-experimental/core";
 const economy = Dependency<Economy>();
 ```
 
-Prefer a constructor parameter wherever there is one. It declares the dependency where it can be
-read, and it orders construction. `Dependency<T>()` inside a provider's constructor works, as it did
-in v1, but hides the edge from the module.
+Prefer a constructor parameter wherever you can use one. It declares the dependency where readers can
+see it, and it makes the module construct the dependency first. `Dependency<T>()` inside a
+provider's constructor works, as it did in v1, but the module cannot see that dependency.
 
 ### Circular dependencies
 
 Two providers that inject each other cannot both be constructed first, and Flamework will not
-untangle it for you. Break the cycle by injecting `Module` into one of them and resolving lazily:
+untangle this for you. Break the cycle: inject `Module` into one of them, and resolve the other
+lazily, only when it is used:
 
 ```ts
 @Provider()
@@ -135,34 +144,39 @@ class A {
 }
 ```
 
-Better, though: the cycle usually means a third provider is trying to exist.
+Better still, look for the third provider: a cycle usually means one is trying to exist.
 
 ### Asking for something that is not a provider
 
-`Dependency<T>()`, `resolveDependency<T>()` and constructor injection resolve **providers**. v1
-built any decorated class on demand; v2 does not. Asking for a class that is not one fails:
+`Dependency<T>()`, `resolveDependency<T>()` and constructor injection resolve only **providers**. v1
+built any decorated class on demand, but v2 does not. Asking for a class that is not a provider
+fails:
 
 - **A component** (`@Component()`) is built by `Components` on the instances it is attached to, never
-  by a module. The transformer refuses `Dependency<T>()`, `module.resolveDependency<T>()` and a
-  `@Provider()`'s constructor parameter whose type is a component, at compile time:
-  `'QuestsUI' is a component (@Component), not a provider`. Make it a `@Provider()` (a provider
-  cannot extend `BaseComponent`, so move what callers need into one), or get the component from the
-  instance: `components.getComponent<QuestsUI>(instance)`.
-- **A `@Provider()` nothing registers** raises at runtime, saying so and where the class is defined:
-  `'Shop' (ServerScriptService.TS.shop) is a @Provider() that nothing in this module registers or
-  provides`. Register its folder, register the class, include the plugin that provides it, or
-  import a module that has it.
+  by a module. When you build, the transformer refuses `Dependency<T>()`,
+  `module.resolveDependency<T>()` and a `@Provider()`'s constructor parameter when the type is a
+  component: `'QuestsUI' is a component (@Component), not a provider`. Make it a `@Provider()`: a
+  provider cannot extend `BaseComponent`, so move what callers need into a provider. Or get the
+  component from the instance: `components.getComponent<QuestsUI>(instance)`.
+- **A `@Provider()` that nothing registers** raises at runtime. The error says so, and says where the
+  class is defined: `'Shop' (ServerScriptService.TS.shop) is a @Provider() that nothing in this
+  module registers or provides`. Register its folder, register the class, include the plugin that
+  provides it, or import a module that has it.
 - **An `@Injectable()` class** is built with `createClassInstance`, never resolved:
   `'Session' (...) is not a provider`.
 
-The compile-time check covers only what is certain from the type. An id passed by hand
-(`Dependency<T>(undefined, id)`), an interface or abstract class (a function or alias provider may
-stand behind it), `Dependency<Components>()` and anything else a plugin provides, a `@Provider()`
-class, and a macro of your own that takes a `Modding.Target.Dependency<T>` are never refused. A
-component's own constructor may take another component -- that is a component dependency -- and so
-may an `@Injectable()`'s, which `overrideDependency` can answer. At runtime the explanation is given
-for a class that has loaded and was defined at the top level of its module; anything else keeps the
-plain `could not resolve dependency 'X'`.
+The check made when you build covers only what the type makes certain. It never refuses:
+
+- an id passed by hand (`Dependency<T>(undefined, id)`)
+- an interface or abstract class, since a function or alias provider may stand behind it
+- `Dependency<Components>()`, and anything else a plugin provides
+- a `@Provider()` class
+- a macro of your own that takes a `Modding.Target.Dependency<T>`
+
+A component's own constructor may take another component: that is a component dependency. An
+`@Injectable()`'s constructor may take one too, and `overrideDependency` can answer it. At runtime,
+the full explanation is given only for a class that has loaded and was defined at the top level of
+its file. Anything else gets the plain `could not resolve dependency 'X'`.
 
 ## Other kinds of provider
 
@@ -170,8 +184,9 @@ A provider does not have to be a class.
 
 ### Function providers
 
-Called on **every** resolution -- once per constructor parameter that asks for it, and once per
-`resolveDependency`. Nothing is cached for you, so cache in the callback if you want a singleton:
+The callback is called on **every** resolution: once per constructor parameter that asks for it, and
+once per `resolveDependency`. Nothing is cached for you, so if you want a singleton, cache it in the
+callback:
 
 ```ts
 interface Config {
@@ -193,7 +208,7 @@ The callback receives an `InjectionContext` describing *who asked*:
 | `module` | The module resolving the dependency. |
 | `origin` | The class being constructed, if any. |
 
-`origin` is what makes a per-consumer logger possible:
+`origin` lets you give each consumer its own logger:
 
 ```ts
 .registerProvider<Logger>({
@@ -202,8 +217,8 @@ The callback receives an `InjectionContext` describing *who asked*:
 })
 ```
 
-Every class that injects a `Logger` gets one tagged with its own name, which is exactly why the
-callback runs per resolution. For a shared value, close over it:
+Every class that injects a `Logger` gets one tagged with its own name. That is why the callback runs
+on every resolution. For a shared value, create it outside the callback and close over it:
 
 ```ts
 const config = { maxPlayers: 8 };
@@ -212,19 +227,19 @@ const config = { maxPlayers: 8 };
 
 ### Alias providers
 
-Resolve one id to another. This is how an interface gets an implementation:
+An alias provider resolves one id to another. This is how an interface gets an implementation:
 
 ```ts
 .registerClassProvider(DataStoreStorage)
 .registerProvider<Storage>({ type: "alias", injectionId: Flamework.id<DataStoreStorage>() })
 ```
 
-Anything injecting `Storage` now gets the `DataStoreStorage` instance -- the same instance, not a
-second one. Swap the alias in tests to swap the implementation.
+Anything that injects `Storage` now gets the `DataStoreStorage` instance: the same instance, not a
+second one. In tests, swap the alias to swap the implementation.
 
 ### Lazy providers
 
-A provider is normally constructed during ignition whether or not anything uses it. Mark it lazy to
+A provider is normally constructed during ignition, whether or not anything uses it. Mark it lazy to
 construct it only when something first resolves it:
 
 ```ts
@@ -233,16 +248,16 @@ export class Telemetry implements OnStart {}
 ```
 
 A lazy provider that nothing ever resolves is never created. One that is resolved after ignition
-still gets `onInit` and `onStart`, on the next resume point after it is constructed, so it behaves
-like any other provider from then on; one resolved during ignition, from another provider's
-`onInit`, is initialised in its turn, before anything starts. This is v1's `@Optional()`; there is
-no equivalent of `includeOptionalClass`, because resolving it is how you include it.
+still gets `onInit` and `onStart`, on the next resume point after it is constructed. From then on it
+behaves like any other provider. One resolved during ignition, from another provider's `onInit`, is
+initialised in order, before anything starts. This is v1's `@Optional()`. There is no equivalent
+of `includeOptionalClass`, because resolving a lazy provider is how you include it.
 
 ### Load order
 
-`loadOrder` orders a provider's `onInit` and `onStart` against the other providers of the same
-ignition, as v1's `@Service({ loadOrder })` did: lower goes first, the default is `1`, and providers
-with the same value keep the order they would have without one.
+`loadOrder` sets when a provider's `onInit` and `onStart` run, compared with the other providers of
+the same ignition, as v1's `@Service({ loadOrder })` did. Lower values go first, and the default is
+`1`. Providers with the same value keep the order they would have without one.
 
 ```ts
 @Provider({ loadOrder: 0 })
@@ -256,31 +271,36 @@ export class Interface implements OnStart {
 }
 ```
 
-Dependencies still come first: a provider is constructed, and initialised, after what its
-constructor takes, even when that has a higher `loadOrder` -- a low one pulls its dependencies
-forward with it. See [Lifecycle events](04-lifecycle-events.md#load-order) for the exact order.
-It has no effect on a lazy provider, which starts when it is first resolved, and none across
-modules: an imported module ignites, and starts, before the module importing it. Any finite number
-is accepted; anything else raises as the class's module loads.
+Dependencies still come first. A provider is constructed and initialised after what its constructor
+takes, even when that has a higher `loadOrder`. So a low `loadOrder` pulls the provider's
+dependencies forward with it. See [Lifecycle events](04-lifecycle-events.md#load-order) for the
+exact order.
+
+`loadOrder` has no effect on a lazy provider, which starts when it is first resolved. It also has no
+effect across modules: an imported module ignites, and starts, before the module that imports it.
+Any finite number is accepted. Anything else raises an error when the ModuleScript that defines the
+class loads.
 
 ### Scoped providers
 
-A provider can be tied to the build's scopes, so that a test scenario or a debug tool only exists in
-builds that ask for it:
+A provider can be tied to the build's *scopes*, the names a build is compiled with. Then a test
+scenario or a debug tool exists only in the builds that ask for it:
 
 ```ts
 @Provider({ activeIn: ["components"] })
 export class ComponentProbe {}
 ```
 
-The same `activeIn`/`inactiveIn` pair goes on a registration (`registerProviders(path, { ... })`,
-`registerClassProvider(Class, { ... })`, or on the config of `registerProvider`) and on `ignite`,
-and they combine by AND. A provider left out is not registered at all. See [Scopes](11-scopes.md).
+The same `activeIn`/`inactiveIn` pair also goes on a registration
+(`registerProviders(path, { ... })`, `registerClassProvider(Class, { ... })`, or the config of
+`registerProvider`) and on `ignite`. The conditions combine by AND: all of them must hold. A
+provider that is left out is not registered at all. See [Scopes](11-scopes.md).
 
 ## Classes that are not providers
 
-Sometimes you want dependency injection for a class you create yourself -- a session, a request, a
-per-player object -- without it being a singleton or being picked up by `registerProviders`.
+Sometimes you want dependency injection for a class you create yourself, such as a session, a
+request or a per-player object. You do not want it to be a singleton, or to be picked up by
+`registerProviders`. Use `@Injectable()`:
 
 ```ts
 import { Injectable } from "@flamework-experimental/core";
@@ -295,10 +315,10 @@ class Session {
 const session = module.createClassInstance(Session);
 ```
 
-`@Injectable()` attaches the same metadata as `@Provider()` but does **not** mark the class as a
-provider, so path registration skips it and it cannot be resolved by id.
+`@Injectable()` attaches the same metadata as `@Provider()`, but does **not** mark the class as a
+provider. So path registration skips it, and it cannot be resolved by id.
 
-The instance is owned by the module: it is attached to any lifecycle events it implements, and
+The module owns the instance. The instance is attached to any lifecycle events it implements, and
 released when the module extinguishes or when you release it yourself:
 
 ```ts
@@ -331,14 +351,14 @@ const session = module.createClassInstance(Session, {
 });
 ```
 
-Returning `undefined` falls back to the module's normal resolution, so you only intercept what you
-mean to. This is exactly how `@flamework-experimental/components` gives every component its `instance` and
+Returning `undefined` falls back to the module's normal resolution, so you intercept only what you
+mean to. This is how `@flamework-experimental/components` gives every component its `instance` and
 `attributes`.
 
 ## Realms
 
-There is no `@Service` / `@Controller` distinction. A provider is not bound to a realm; the module
-that registers it decides:
+There is no `@Service` / `@Controller` split. A provider is not bound to a realm. The module that
+registers it decides:
 
 ```ts
 // server entry point
@@ -353,7 +373,7 @@ Shared providers go in a shared folder registered by both, or in a shared plugin
 ## Patterns
 
 **Interface plus alias for swappable implementations.** Declare the interface, register the concrete
-class, alias the interface to it. Tests register a different class under the same alias.
+class, and alias the interface to it. Tests register a different class under the same alias.
 
 **A config provider at the top.** A function provider returning a frozen object is the simplest way
 to get configuration into everything without a global.
@@ -363,24 +383,26 @@ to get configuration into everything without a global.
 
 ## Caveats
 
-- **Path registration takes every provider a module defines, exported or not.** A `@Provider()`
-  class that must stay out of a registered folder's module -- a fixture a test registers in a
-  module of its own, say -- belongs in a folder no module registers, or inside the function that
-  uses it. A class declared inside a function is found only through its module's exports.
-- **Path registration requires every module in the folder.** Import side effects run, and a module
-  that throws while loading fails the ignite with that module's path and error, as in v1. A provider
-  that silently failed to register would otherwise only surface later as a missing dependency.
+- **Path registration takes every provider a file defines, exported or not.** Sometimes a
+  `@Provider()` class must stay out of the module that registers its folder, such as a fixture that
+  a test registers in a module of its own. Put that class in a folder no module registers, or inside
+  the function that uses it. A class declared inside a function is found only through its file's
+  exports.
+- **Path registration requires every ModuleScript in the folder.** Their import side effects run. A
+  ModuleScript that throws while loading fails the ignition with its path and error, as in v1.
+  Otherwise, a provider that silently failed to register would only show up later, as a missing
+  dependency.
 - **Subclasses need their own decorator.** `class Fake extends Economy {}` without `@Provider()` is
   not a provider; registering it explicitly raises, and path registration skips it.
 - **`WaitForChild` yields.** If the folder has not replicated yet, ignition waits.
 - **Overlapping paths raise.** Registering `src/server` and `src/server/services` will hit
   `provider ID was registered more than once`.
-- **`@Injectable()` classes are not resolvable.** `resolveDependency<Session>()` will not find one;
-  that is the point of the decorator.
-- **A missing dependency is a runtime error, not a compile error** -- except a component, which the
-  transformer refuses. `module could not resolve dependency 'X'` means the type was never registered
-  in this module or anything it includes; for a class that has loaded, the message goes on to say
-  what it is and what to do.
+- **`@Injectable()` classes are not resolvable.** `resolveDependency<Session>()` will not find one.
+  That is the point of the decorator.
+- **A missing dependency is a runtime error, not a compile error.** The exception is a component,
+  which the transformer refuses. `module could not resolve dependency 'X'` means the type was never
+  registered in this module or in anything it includes. For a class that has loaded, the message goes
+  on to say what the class is and what to do.
 - **Constructor injection only.** There is no property or method injection.
 
 ---

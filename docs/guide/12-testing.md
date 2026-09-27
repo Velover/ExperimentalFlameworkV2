@@ -1,8 +1,8 @@
 # 12. Testing in the place
 
 `@flamework-experimental/testing` runs tests inside a real place: in Studio, in a live server, or
-in an Open Cloud task. Tests are plain functions grouped into **sections**; they are defined by
-providers, so they get their dependencies injected like any other code, and they are tied to a
+in an Open Cloud task. Tests are plain functions grouped into **sections**. Providers define them,
+so they get their dependencies injected like any other code. They are tied to a
 [scope](11-scopes.md), so a build that did not ask for them does not register them.
 
 ```ts
@@ -43,9 +43,9 @@ Flamework.createModule()
 "scopes": { "active": "${FLAMEWORK_SCOPES:-}" }
 ```
 
-With `FLAMEWORK_SCOPES=testing` in `.env`, the test providers register like any other, define
-their sections as they start, and the plugin creates `Workspace.FlameworkTests` and waits.
-Nothing runs until something invokes it:
+With `FLAMEWORK_SCOPES=testing` in `.env`, the test providers register like any other and define
+their sections as they start. The plugin creates `Workspace.FlameworkTests` and waits. Nothing runs
+until something invokes it:
 
 ```lua
 -- the Studio command bar, a debug UI, or `flamework-test` from a terminal
@@ -53,11 +53,11 @@ local result = workspace.FlameworkTests:Invoke()          -- every section
 local result = workspace.FlameworkTests:Invoke("economy") -- one section
 ```
 
-Without the scope, the test providers are skipped at ignition: their files are still required (a
-folder registration requires everything under it before it looks at any condition), but no test
-class is constructed, the plugin is inert, and no instance is made. One switch, `FLAMEWORK_SCOPES`,
-turns on both the tests and the host that runs them; keeping the files out of a release place
-altogether is Rojo's job, see [shipping](#shipping).
+Without the scope, the test providers are skipped at ignition. Their files are still required,
+because a folder registration requires everything under it before it looks at any condition. But no
+test class is constructed, the plugin does nothing, and no instance is made. One switch,
+`FLAMEWORK_SCOPES`, turns on both the tests and the host that runs them. Keeping the files out of a
+release place altogether is Rojo's job; see [shipping](#shipping).
 
 ## Setting up
 
@@ -81,10 +81,10 @@ Everything a project needs, in the order it is needed:
        .ignite();
    ```
 
-   A shared folder registered by both modules gives sections that run in both realms, one copy
-   each; the component specs of this repository's test place, [`tests/place`](../../tests/place/README.md),
-   live there.
-4. A script that builds and runs, with `*.rbxl` in `.gitignore`:
+   A shared folder registered by both modules gives sections that run in both realms, one copy in
+   each. The component specs of this repository's test place,
+   [`tests/place`](../../tests/place/README.md), live in such a folder.
+4. A script that builds the place and runs the tests, with `*.rbxl` in `.gitignore`:
 
    ```jsonc
    // package.json
@@ -94,26 +94,26 @@ Everything a project needs, in the order it is needed:
 5. Roblox Studio with "MCP server" enabled in its Assistant settings, which is what lets the CLI
    open a window, run the tests in it and close it again.
 
-`bun run test` then prints one summary per realm. That is the whole setup for Studio; the cloud
-route needs an API key and a testing place on top, see [Running the tests](../testing/place.md).
+`bun run test` then prints one summary per realm. That is the whole setup for Studio. Running in the
+cloud also needs an API key and a testing place; see [Running the tests](../testing/place.md).
 
 ## Where tests live
 
-`defineTests` is an ordinary function, so anything may call it; a provider's `onStart` is the
-natural place, since by then every provider is constructed and every `onInit` has run. The scope
-condition goes on the class, `@Provider({ activeIn: ["testing"] })`, or on the folder registration,
-`registerProviders("src/server/Tests", { activeIn: ["testing"] })`, or both; these are the usual
-[scope rules](11-scopes.md), nothing testing-specific.
+`defineTests` is an ordinary function, so anything may call it. A provider's `onStart` is the
+natural place, since by then every provider is constructed and every `onInit` has run. Put the scope
+condition on the class (`@Provider({ activeIn: ["testing"] })`), on the folder registration
+(`registerProviders("src/server/Tests", { activeIn: ["testing"] })`), or on both. These are the
+usual [scope rules](11-scopes.md), nothing specific to testing.
 
-Client tests are the same shape in a client provider, with the plugin included in the client
-module; each realm has its own host.
+Client tests have the same shape, in a client provider, with the plugin included in the client
+module. Each realm has its own host.
 
 ## Sections and tests
 
-`defineTests(name, body)` runs `body` at once; inside it, `test(name, fn)` registers a test and
-`beforeEach` / `afterEach` register hooks. `name` may be `undefined`, which is the section
-`"default"`. The same section name from several providers is one section, so a feature's tests
-can sit in several files. Sections do not nest, and a name may not contain `/`.
+`defineTests(name, body)` runs `body` at once. Inside it, `test(name, fn)` registers a test, and
+`beforeEach` / `afterEach` register hooks. `name` may be `undefined`, which means the section
+`"default"`. The same section name used by several providers is one section, so a feature's tests
+can be spread over several files. Sections do not nest, and a name may not contain `/`.
 
 The body receives a context with the section's `name` and the `module` that was igniting when the
 section was defined:
@@ -127,19 +127,20 @@ defineTests("components", ({ module }) => {
 });
 ```
 
-`onStart` runs on its own thread and the module is only marked current until ignition finishes,
-so define sections before the first yield of `onStart`; a section defined after a `task.wait`
-still registers, but without a module. Few tests need it: a provider already has what it
+Define sections before the first yield of `onStart`. `onStart` runs on its own thread, and the
+module is only marked current until ignition finishes. A section defined after a `task.wait` still
+registers, but without a module. Few tests need the module: a provider already has what it
 injected.
 
 A test may yield (`task.wait`, `WaitForChild`, a signal), and a Promise it returns is awaited.
-Each test runs on its own thread with a timeout, `testing.timeout` seconds (30 by default): one
-that overruns is cancelled and counted as failed, and the run moves on.
+Each test runs on its own thread, with a timeout of `testing.timeout` seconds (30 by default). A
+test that runs over is cancelled and counted as failed, and the run moves on.
 
 ## Cleanup
 
 Tests in a place leave things behind unless they clean up, and the next test would run against
-whatever was left. Three tools, all of which run whether the test passed, failed or timed out:
+whatever was left. There are three cleanup tools, and all of them run whether the test passed,
+failed or timed out:
 
 | Tool | Does |
 |---|---|
@@ -153,9 +154,10 @@ A cleanup that raises fails the test, since whatever it was meant to remove is s
 
 `expectEqual`, `expectTrue`, `expectFalse`, `expectDefined`, `expectThrows`, `expectNoThrow`,
 `expectArrayEqual`, `expectResolves`, `expectRejects` and `fail` raise a one-line message that
-becomes the test's failure. `eventually(predicate, what?, timeout?)` polls every frame for
-something the engine delivers later: a deferred signal, a replicated instance, a component built
-on the next resumption. Any other assertion library works too; a test fails when its body raises.
+becomes the test's failure. `eventually(predicate, what?, timeout?)` checks `predicate` every frame,
+for something the engine delivers later: a deferred signal, a replicated instance, a component built
+on the next resumption. Any other assertion library works too: a test fails when its body raises an
+error.
 
 ## Running
 
@@ -169,9 +171,9 @@ on the next resumption. Any other assertion library works too; a test fails when
 | A client, for the server's tests | `Testing.runOnServer(filter?)`, over `Workspace.FlameworkTestsServer` |
 | Start-up | `"autoRun": true` in the config runs everything right after ignition |
 
-A filter is nothing, one section name, one `section/test` name, or a list of those. `{ list =
-true }` as the options reports the selection without running it. The result is a plain table,
-the same whether it came back from an invoke, a remote or `Testing.run`:
+A filter is nothing (every section), one section name, one `section/test` name, or a list of
+those. Passing `{ list = true }` as the options reports the selection without running it. The
+result is a plain table, the same whether it came back from an invoke, a remote or `Testing.run`:
 
 ```lua
 { ok = true, realm = "server", passed = 12, failed = 0, durationMs = 340,
@@ -180,30 +182,34 @@ the same whether it came back from an invoke, a remote or `Testing.run`:
   unknown = {} }  -- filter entries that named nothing; any makes ok false
 ```
 
-Every test also prints one line, `[FWTEST] server economy/buying deducts the price: PASS (3ms)`,
-and the run ends with a summary line, so the Output window and a task's log read the same as
-the table.
+Every test also prints one line, such as
+`[FWTEST] server economy/buying deducts the price: PASS (3ms)`, and the run ends with a summary
+line. So the Output window and a task's log show the same as the table.
 
-A place made by `flamework-test` knows which Rojo project it was made under: `getProject()` is
-that project's name (`deferred` for `tests/deferred.project.json`, `undefined` in a place opened
-by hand), and the result carries it as `project`. A test that only holds under one project's
-`Workspace` settings, `SignalBehavior` say, checks it and returns early under the others; see
+A place made by `flamework-test` knows which Rojo project it was made under. `getProject()` returns
+that project's name: `deferred` for `tests/deferred.project.json`, and `undefined` in a place opened
+by hand. The result carries it as `project`. A test that only holds under one project's `Workspace`
+settings (`SignalBehavior`, say) checks it and returns early under the others; see
 [several projects, one suite](../testing/place.md#several-projects-one-suite).
 
-Each realm has its own instance callback: a client with the plugin answers on the same
-`Workspace.FlameworkTests` for its own tests, and `FlameworkTestsServer` is how it reaches the
-server's. A second invoke while a run is in progress raises.
+A BindableFunction's callback is set per realm, so the one `Workspace.FlameworkTests` serves both.
+A client with the plugin answers on it for its own tests, and reaches the server's tests through
+`FlameworkTestsServer`. A second invoke while a run is in progress raises an error.
 
 ### Both realms in one session
 
-`flamework-test test` runs the server's sections and then the client's in the same play session,
-so the client's tests run against a server whose own tests have already run, and they see
-whatever those left on the wire. One engine fact matters there: a RemoteEvent message fired at a
-client before it has connected `OnClientEvent` is not dropped, the engine queues it and delivers
-it the first time anything connects. A server test that `predict`s with the real player, through
-a handler that answers with `fire(player, ...)`, therefore leaves a reply waiting, and it lands in
-the middle of the client's cases as an answer nobody asked for. Predict with a stand-in that is
-not a `Player` (`scratch()` will do) and have the answering handler skip it:
+`flamework-test test` runs the server's sections and then the client's, in the same play session.
+So the client's tests run against a server whose own tests have already run, and they see whatever
+those tests left on the wire.
+
+One engine fact matters here. A RemoteEvent message fired at a client before it has connected
+`OnClientEvent` is not dropped: the engine queues it and delivers it the first time anything
+connects. Say a server test calls `predict` with the real player, through a handler that answers
+with `fire(player, ...)`. That leaves a reply waiting, and the reply lands in the middle of the
+client's tests as an answer nobody asked for.
+
+So predict with a stand-in that is not a `Player` (`scratch()` will do), and have the answering
+handler skip it:
 
 ```ts
 function fromPlayer(player: Player) {
@@ -234,33 +240,37 @@ are written this way.
 }
 ```
 
-`entry` exists for one reason: an Open Cloud task loads the place but runs none of its Scripts,
-so nothing ignites the game there. The runner has to require a ModuleScript and call its
-`ignite()` itself, and `entry` names it. In Studio the place runs its own Scripts and the module is
-up before anything invokes the tests, so a project that only ever runs its tests locally never sets
-it. A cloud command refuses to publish without it.
+`entry` exists for one reason. An Open Cloud task loads the place but runs none of its Scripts, so
+nothing ignites the game there. The runner has to require a ModuleScript and call its `ignite()`
+itself, and `entry` names that ModuleScript. In Studio, the place runs its own Scripts, and the
+module is up before anything invokes the tests. So a project that only runs its tests locally never
+sets `entry`. A cloud command refuses to publish without it.
 
-`activeIn` and `inactiveIn` follow the same rules as everywhere else: at least one active name,
-none of the names active, and an empty `activeIn` is no constraint. `TestingPlugin` is the plugin
-with the file's settings; `createTestingPlugin({ ... })` overrides them per plugin, which is what
-a test harness of your own would use.
+`activeIn` and `inactiveIn` follow the same rules as everywhere else: `activeIn` needs at least one
+of its names active, `inactiveIn` needs none of its names active, and an empty `activeIn` is no
+constraint. `TestingPlugin` is the plugin with the file's settings. `createTestingPlugin({ ... })`
+overrides them for one plugin, which is what a test harness of your own would use.
 
 ## Shipping
 
 Never ship a build with tests on: the remote lets any client run the server's tests. Keep the
-`testing` scope out of the release `.env`. The test files themselves still compile and load
-without the scope, since a folder registration requires everything under it; to leave them out of
-the place, give the release build a Rojo project that ignores the folders:
+`testing` scope out of the release `.env`.
+
+Without the scope, the test files still compile and load, since a folder registration requires
+everything under it. To leave them out of the place, give the release build a Rojo project that
+ignores the folders:
 
 ```jsonc
 // release.project.json, otherwise identical to default.project.json
 "globIgnorePaths": ["**/package.json", "**/tsconfig.json", "**/Tests"]
 ```
 
-`**/Tests` drops every folder of that name at any depth (`**/Tests/**` would leave empty folders
-behind). Never register such a folder by its own path, `registerProviders("src/server/Tests")`:
-the transformer resolves the path against the project file without regard to `globIgnorePaths`,
-and a registered folder that is not in the place stalls ignition in `WaitForChild`. Let the
+`**/Tests` drops every folder with that name, at any depth (`**/Tests/**` would leave empty folders
+behind).
+
+Never register such a folder by its own path, as in `registerProviders("src/server/Tests")`. The
+transformer resolves the path against the project file without regard to `globIgnorePaths`, and a
+registered folder that is not in the place stalls ignition in `WaitForChild`. Instead, let the
 registration of the folder above it find the tests, with the scope condition on the classes.
 
 ---

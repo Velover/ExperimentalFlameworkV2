@@ -101,6 +101,16 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `Flamework.registerExternalClass` and `Flamework.createDependency`, which v1 1.3.2 does not have.
 - Macros: writing a path or glob macro of your own with `Modding.Intrinsic<"path">` /
   `Modding.Intrinsic<"pathglob">`; `Caller.Uuid` changes with every clean build under obfuscation.
+- Every guide page, the README and the testing package's README are reworded in plainer language:
+  shorter sentences, terms defined where they first appear, steps and rules as lists. Code examples
+  are unchanged. Facts corrected along the way: interfaces match through a class's `implements`
+  clause (a parent's only if it is decorated too), not by shape; remote folder names and
+  `Caller.Uuid` change with every plain build under obfuscation, not with a watcher's rebuild or an
+  incremental build; only the runtime sections of `flamework.config.json` reach the place (`cloud`
+  never does); `Flamework.env` reads the environment when `rbxtsc` starts; a child's `Name` is
+  followed only with `watchRenames`; migrating step 6 no longer suggests an optional child typed as a
+  component, which the transformer rejects; `build()` and `ignite()` do not return the builder; a
+  table in the components guide that rendered in two pieces is whole.
 
 ### Tests
 
