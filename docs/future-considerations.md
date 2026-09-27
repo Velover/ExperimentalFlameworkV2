@@ -108,6 +108,42 @@ alternating; booleans mixed in; nested objects and arrays of objects, each with 
 decoded values and guards unchanged; wire sizes before and after, including a charm-sync patch
 against the raw table.
 
+## Next: obfuscating networking separately from everything else
+
+**Today one switch does it all.** `"transformer": { "obfuscation": true }` turns on, together:
+- networking: event and function names hashed and their order shuffled, middleware keys hashed,
+  key-obfuscated handler members, and the remote folder names, which come from callsite uuids seeded
+  by the build, so they change with every plain build
+  (`transformations/macros/intrinsics/networking.ts`, `transformAccessExpression.ts`,
+  `getCallsiteUuid` in `transformUserMacro.ts`);
+- everything else: class and interface ids (through `idGenerationMode`'s default), glob strings,
+  text hashed by `Modding.Obfuscate`/`Hash` macros, and `Caller.Uuid`.
+
+Only the ids can be separated now, by setting `idGenerationMode` explicitly (`"full"` keeps them
+readable with the switch on). Nothing lets a game obfuscate its remotes but keep the rest readable,
+or the other way round.
+
+**Why a game wants them apart.**
+- Hide what the remotes are called from exploiters, while keeping readable ids and paths in error
+  messages and logs.
+- Or obfuscate its code's structure while keeping remote names stable across builds: network logs
+  stay readable, and remote names don't churn with every plain build.
+
+**The proposal.** Keep `obfuscation: true` as the shorthand for everything, and let it also take an
+object, for example `{ "networking": true, "ids": false, "text": true }`, one switch per group
+above. `idGenerationMode` keeps working and wins for the ids. Possibly a seed of its own for
+networking, so a game can pin remote names without pinning everything else (today `transformer.salt`
+pins the whole build's seed and warns).
+
+**What it touches.** The transformer config type and schema (each group with its default stated),
+every `state.config.obfuscation` / `obfuscateText` / `obfuscateArray` call site (each is told which
+group it belongs to), `getCallsiteUuid`'s seed, guide 09's Obfuscation section, the CHANGELOG.
+
+**Tests:** each group on and off on its own; the emitted names in each case; the shorthand is
+byte-identical to today's `true`; the ids follow `idGenerationMode` when it is set; remote names
+stable across plain builds with networking off and everything else on; Studio round trips on both
+realms with networking obfuscated.
+
 ## 1. Performance and memory cost of each feature
 
 The table below started as an estimate from reading the code (September 2026). The rows this release
