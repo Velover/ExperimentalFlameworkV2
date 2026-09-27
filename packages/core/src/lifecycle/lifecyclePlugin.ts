@@ -6,6 +6,7 @@ import type { OnExtinguished, OnInit, OnPhysics, OnRender, OnStart, OnTick } fro
 import { recycleThread } from "../utility/recycleThread";
 import { extinguishesBegun, runsPromiseWork, threadWaits } from "../utility/threadWaits";
 import { Reflect } from "../reflect";
+import { DEFAULT_LOAD_ORDER } from "../module/providerRegistration";
 import {
 	LIFECYCLE_SLOT,
 	PluginDefinition,
@@ -122,8 +123,13 @@ export class LifecycleProvider {
 	private onInit = new Array<OnInit>();
 	private initMembers = new Set<OnInit>();
 
-	/** The providers `postIgnite` starts, in attachment order; `onStart` is every member. */
+	/** The providers `start` starts, in attachment order; `onStart` is every member. */
 	private startOrder = new Array<OnStart>();
+	/**
+	 * The `loadOrder` of each provider in `startOrder` that has one other than the default, which
+	 * `start` orders them by. Empty unless a provider sets one, and emptied once they have started.
+	 */
+	private startLoadOrders = new Map<OnStart, number>();
 	public onStart = new Set<OnStart>();
 	public onTick = new Set<OnTick>();
 	public onPhysics = new Set<OnPhysics>();
@@ -717,6 +723,9 @@ export class LifecycleProvider {
 
 		if (!this.hasStarted) {
 			this.startOrder.push(object);
+			if (context.loadOrder !== undefined && context.loadOrder !== DEFAULT_LOAD_ORDER) {
+				this.startLoadOrders.set(object, context.loadOrder);
+			}
 		} else {
 			this.scheduleLateProvider(object);
 		}
@@ -725,6 +734,7 @@ export class LifecycleProvider {
 	public removeStart(object: OnStart) {
 		this.onStart.delete(object);
 		this.lateProviders.delete(object);
+		this.startLoadOrders.delete(object);
 
 		const index = this.startOrder.indexOf(object);
 		if (index !== -1) {
@@ -792,7 +802,7 @@ export class LifecycleProvider {
 	 */
 	public start(module: Module) {
 		// An `onStart` may extinguish the module; nothing starts or ticks after that.
-		for (const object of [...this.startOrder]) {
+		for (const object of this.inLoadOrder(this.startOrder)) {
 			if (this.hasBegunExtinguishing()) {
 				return;
 			}
@@ -830,6 +840,34 @@ export class LifecycleProvider {
 		}
 
 		this.moduleConnections.set(module, connections);
+	}
+
+	/**
+	 * A copy of the providers to start, in ascending `loadOrder`: each on its own thread, so a lower
+	 * one runs up to its first yield before the next is started. Attachment order -- dependency order
+	 * -- among equals, and unchanged when no provider sets one. Sorted once, at ignition: nothing per
+	 * frame is ordered.
+	 */
+	private inLoadOrder(objects: ReadonlyArray<OnStart>) {
+		const orders = this.startLoadOrders;
+		if (orders.isEmpty()) {
+			return [...objects];
+		}
+
+		this.startLoadOrders = new Map();
+
+		// `table.sort` is not stable, so equals are ordered by their position.
+		const position = new Map<OnStart, number>();
+		objects.forEach((object, index) => position.set(object, index));
+
+		const sorted = [...objects];
+		sorted.sort((a, b) => {
+			const orderA = orders.get(a) ?? DEFAULT_LOAD_ORDER;
+			const orderB = orders.get(b) ?? DEFAULT_LOAD_ORDER;
+			return orderA !== orderB ? orderA < orderB : position.get(a)! < position.get(b)!;
+		});
+
+		return sorted;
 	}
 
 	public extinguished(module: Module) {

@@ -73,9 +73,9 @@ export interface PluginTarget {
 	registerClassProvider: (provider: Constructor, options?: ProviderRegistrationOptions) => void;
 
 	/**
-	 * Registers every exported `@Provider()` class under a source folder, as the module builder's
-	 * `registerProviders` does. This is how a plugin ships a folder of providers. The options apply
-	 * to every class found.
+	 * Registers every `@Provider()` class the modules under a source folder define, exported or not,
+	 * as the module builder's `registerProviders` does. This is how a plugin ships a folder of
+	 * providers. The options apply to every class found.
 	 *
 	 * @metadata macro
 	 */
@@ -86,7 +86,8 @@ export interface PluginTarget {
 	) => void;
 
 	/**
-	 * Registers every exported `@Provider()` class under every folder a compile-time glob matches.
+	 * Registers every `@Provider()` class the modules under every folder a compile-time glob matches
+	 * define, exported or not.
 	 *
 	 * @metadata macro
 	 */
@@ -191,4 +192,13 @@ export interface InterfaceContext {
 	 * @internal
 	 */
 	dependencies?: ReadonlyArray<defined>;
+
+	/**
+	 * Where a provider the module constructed sits in its ignition's startup, from its
+	 * `@Provider({ loadOrder })`: the lifecycle plugin starts providers in ascending order. Absent
+	 * for a lazy provider, for which it has no meaning, and for anything else.
+	 *
+	 * @internal
+	 */
+	loadOrder?: number;
 }

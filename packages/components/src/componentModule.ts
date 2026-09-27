@@ -1,10 +1,12 @@
 import {
 	Flamework,
+	HookPriority,
 	Reflect,
 	Modding,
 	describeConditions,
 	getClassesInGlob,
 	getClassesInPath,
+	type Module,
 	type ScopeCondition,
 } from "@flamework-experimental/core";
 import type { Constructor } from "./utility";
@@ -35,6 +37,20 @@ function getComponentScope(component: Constructor): ScopeCondition {
 	return { activeIn: config.activeIn, inactiveIn: config.inactiveIn };
 }
 
+/**
+ * What every component plugin set up in one ignition of a module registers into: the components
+ * kept, in the order the plugins were set up and each registered them, and the ones left out by
+ * scope. They share one `Components`, which the first plugin set up builds from this once every
+ * plugin has registered.
+ */
+interface SharedRegistration {
+	active: Array<Constructor>;
+	skipped: Map<string, string>;
+}
+
+/** By the module being ignited: set up by the first component plugin, gone with the module. */
+const sharedRegistrations = new WeakMap<Module, SharedRegistration>();
+
 export class ComponentPlugin {
 	public static createPlugin() {
 		return new ComponentPlugin();
@@ -42,6 +58,8 @@ export class ComponentPlugin {
 
 	/**
 	 * This is a shorthand for creating a default components plugin.
+	 *
+	 * A module may include any number of component plugins; they share the module's one `Components`.
 	 *
 	 * @metadata macro
 	 */
@@ -103,8 +121,8 @@ export class ComponentPlugin {
 	}
 
 	/**
-	 * Registers every exported `@Component()` class under the specified path and its descendants.
-	 * The options apply to every class found.
+	 * Registers every `@Component()` class the modules under the specified path and its descendants
+	 * define, exported or not. The options apply to every class found.
 	 *
 	 * @metadata macro
 	 */
@@ -119,8 +137,8 @@ export class ComponentPlugin {
 	}
 
 	/**
-	 * Registers every exported `@Component()` class under every path matched by the specified glob,
-	 * which is resolved at compile time.
+	 * Registers every `@Component()` class the modules under every path matched by the specified
+	 * glob define, exported or not. The glob is resolved at compile time.
 	 *
 	 * @metadata macro
 	 */
@@ -152,31 +170,63 @@ export class ComponentPlugin {
 
 		// Components are constructed through the module this plugin is included in (see
 		// `Components.module`), so they take their lifecycle events from that module's plugins.
+		//
+		// Every component plugin a module includes -- several `fromPath`s, a `fromGlob` beside a
+		// built one -- registers into the one `Components` of that module: two would each provide
+		// `Components` under the same id, a component could link only to those of its own plugin,
+		// and `Dependency<Components>()` could answer for one of them at most.
 		return Flamework.createPlugin("Components", (target) => {
+			let shared = sharedRegistrations.get(target.module);
+			const isFirst = shared === undefined;
+			if (shared === undefined) {
+				shared = { active: [], skipped: new Map() };
+				sharedRegistrations.set(target.module, shared);
+			}
+
 			// Judged per ignition, against the module's condition as well as each class's own, so
-			// that a component is scoped the way a provider is.
-			const active = new Array<Constructor>();
-			const skipped = new Map<string, string>();
+			// that a component is scoped the way a provider is. A class that several plugins register
+			// is kept once, when any registration of it holds.
+			const { active, skipped } = shared;
 			for (const component of registered) {
 				const conditions = [registrationScopes.get(component) ?? NO_CONDITION, getComponentScope(component)];
+				const identifier = Reflect.getOwnMetadata<string>(component, "identifier");
+				assert(identifier !== undefined, `class '${component}' has no identifier`);
+
 				if (target.isActive(...conditions)) {
-					active.push(component);
-				} else {
-					const identifier = Reflect.getOwnMetadata<string>(component, "identifier");
-					assert(identifier !== undefined, `class '${component}' has no identifier`);
+					if (!active.includes(component)) {
+						active.push(component);
+					}
+
+					skipped.delete(identifier);
+				} else if (!active.includes(component) && !skipped.has(identifier)) {
 					skipped.set(identifier, describeConditions([target.scope ?? NO_CONDITION, ...conditions]));
 				}
 			}
 
-			const components = new Components(target.module, { components: active, skipped });
-			target.provideInstance(components);
+			if (!isFirst) {
+				return;
+			}
+
+			// Built once every plugin has been set up, so that it holds what all of them registered,
+			// and before any provider is constructed, which is when one can first be injected with it.
+			let components: Components | undefined;
+			target.onPreIgnite(
+				(module) => {
+					sharedRegistrations.delete(module);
+					components = new Components(module, { components: active, skipped });
+					target.provideInstance(components);
+				},
+				{ priority: HookPriority.First },
+			);
 
 			// Tags are only watched once the module has ignited, so that every provider a component
 			// might inject exists by the time one is constructed. At `onIgnited`, after the lifecycle
 			// plugin has started the providers there, so that the components built during ignition
 			// still start after every provider has.
-			target.onIgnited(() => components.startCollectionService());
-			target.onExtinguished(() => components.stopCollectionService());
+			target.onIgnited(() => components?.startCollectionService());
+
+			// Nothing to stop when the ignition failed before it was built.
+			target.onExtinguished(() => components?.stopCollectionService());
 		});
 	}
 }

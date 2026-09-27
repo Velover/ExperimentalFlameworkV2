@@ -8,6 +8,7 @@ import { getDependencyInjectionMetadata } from "../transformUserMacro";
 import { validateConstraintMetadata } from "../../util/functions/validateConstraintMetadata";
 import { Diagnostics } from "../../classes/diagnostics";
 import { CORE_PACKAGE } from "../../util/packages";
+import { getComponentOnlyClass, getFlameworkDecorators } from "../../util/functions/getFlameworkDecorators";
 
 /**
  * A parameter together with the type it has at the class being transformed.
@@ -158,6 +159,17 @@ function generateClassMetadata(state: TransformState, metadata: NodeMetadata, no
 
 	if (metadata.isRequested("identifier")) {
 		fields.push(["identifier", getNodeTypeUid(state, node)]);
+
+		// The module that defined the class, so that path registration finds it whether or not the
+		// module exports it. `script` is the ModuleScript itself, which the runtime keys the record on:
+		// an identifier cannot say where a class came from once ids are short, tiny or obfuscated.
+		// Only a class the module creates once as it loads is recorded -- one declared at the top
+		// level of the file, or of a namespace in it. A class declared inside a function is created
+		// anew by every call, and recording each would grow without bound and hand a later path
+		// registration classes that belong to a test case or a factory.
+		if (isModuleLevel(node)) {
+			fields.push(["flamework:module", f.identifier("script")]);
+		}
 	}
 
 	if (metadata.isRequested("flamework:implements")) {
@@ -192,9 +204,50 @@ function generateClassMetadata(state: TransformState, metadata: NodeMetadata, no
 		});
 
 		fields.push(...generateParametersMetadata(state, metadata, parameters));
+
+		if (metadata.isRequested("flamework:dependencies") && getFlameworkDecorators(state, node).has("provider")) {
+			validateProviderParameters(state, node, parameters);
+		}
 	}
 
 	return fields;
+}
+
+/**
+ * A module constructs a provider by resolving every constructor parameter among its providers, so
+ * a parameter typed as a component can never be satisfied: components are built by `Components`
+ * on the instances they are attached to, and a module never constructs or resolves one. Only a
+ * `@Provider()` class is judged. A component's own constructor takes other components on its
+ * instance, and an `@Injectable()` class may be given one through `overrideDependency`.
+ */
+function validateProviderParameters(state: TransformState, node: ts.ClassDeclaration, parameters: ParameterInfo[]) {
+	for (const parameter of parameters) {
+		const component = getComponentOnlyClass(state, parameter.type);
+		if (component === undefined) continue;
+
+		const componentName = component.name?.text ?? state.typeChecker.typeToString(parameter.type);
+		const providerName = node.name?.text ?? "this provider";
+		Diagnostics.error(
+			parameter.trace,
+			`'${providerName}' takes '${componentName}' in its constructor, but '${componentName}' is a component (@Component), not a provider: a module only injects providers, and never constructs a component.`,
+			`Make '${componentName}' a @Provider(), or take Components and get the component from the instance it is attached to: components.getComponent<${componentName}>(instance).`,
+		);
+	}
+}
+
+/**
+ * Whether a class is created once per load of its module: declared at the top level of the file,
+ * or of a namespace in it, rather than inside a function, a block or another class.
+ */
+function isModuleLevel(node: ts.ClassDeclaration) {
+	let parent: ts.Node | undefined = node.parent;
+	while (parent !== undefined) {
+		if (ts.isSourceFile(parent)) return true;
+		if (!ts.isModuleBlock(parent) && !ts.isModuleDeclaration(parent)) return false;
+		parent = parent.parent;
+	}
+
+	return false;
 }
 
 function getNodeReflection(

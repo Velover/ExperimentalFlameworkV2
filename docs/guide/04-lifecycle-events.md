@@ -33,8 +33,8 @@ export class Spawner implements OnStart, OnTick {
 
 | Interface | Method | Fires on |
 |---|---|---|
-| `OnInit` | `onInit()` | Once, during ignition, in dependency order, before any `onStart`. May return a Promise. |
-| `OnStart` | `onStart()` | Once, at the end of ignition. |
+| `OnInit` | `onInit()` | Once, during ignition, in dependency order and then `loadOrder`, before any `onStart`. May return a Promise. |
+| `OnStart` | `onStart()` | Once, at the end of ignition, in `loadOrder`. |
 | `OnTick` | `onTick(dt)` | `RunService.Heartbeat` |
 | `OnPhysics` | `onPhysics(dt, time)` | `RunService.PreSimulation`; `time` is the elapsed game time. |
 | `OnRender` | `onRender(dt)` | `RunService.PreRender` -- client only |
@@ -129,9 +129,10 @@ class InventoryService implements OnInit {
 
 - **It may yield.** `task.wait`, `WaitForChild` and network calls are fine; they will not block other
   providers from starting.
-- **Order between providers is unspecified.** Do not rely on one provider's `onStart` running before
-  another's. If you need ordering, either inject the dependency (its constructor runs first by
-  definition) or do the work in a constructor.
+- **Order between providers is their `loadOrder`**, and otherwise the order they were constructed in.
+  Each is started on its own thread, so one runs up to its first yield before the next is started,
+  and nothing waits for one that yields. If a provider needs another *initialised*, inject it: its
+  `onInit` finishes first, by definition.
 
 Constructors run during ignition, in dependency order, and must **not** yield -- a yielding
 constructor stalls ignition.
@@ -142,9 +143,54 @@ class Matchmaker implements OnStart {
     // runs first, synchronously, in dependency order
     constructor(private economy: Economy) {}
 
-    // runs last, on its own thread, order between providers unspecified
+    // runs last, on its own thread, in loadOrder
     public onStart() {}
 }
+```
+
+## Load order
+
+`@Provider({ loadOrder })` orders `onInit` and `onStart` among the providers one ignition constructs.
+Lower goes first; the default is `1`, as in v1.
+
+- **Construction and `onInit`.** The module constructs its providers in ascending `loadOrder`, each
+  after what its constructor takes, and `onInit` runs in that order. Dependency order wins: a
+  provider's dependencies are initialised before it even when their `loadOrder` is higher, so a low
+  `loadOrder` pulls what the provider needs forward with it. Providers with the same `loadOrder` keep
+  their registration order.
+- **`onStart`** is started in ascending `loadOrder` alone, dependencies or not, the same order among
+  equals. Each runs on its own thread up to its first yield before the next one is started, so a
+  lower `loadOrder`'s synchronous setup is done before a higher one begins -- which is what v1 gave.
+- **Per-frame events** (`onTick`, `onPhysics`, `onRender`) are not ordered: the listener set is
+  unordered, and sorting it would cost every frame.
+- **Lazy providers** are not part of it: one starts when it is first resolved, and its `loadOrder` is
+  ignored.
+- **One module at a time.** An imported module ignites, and starts, before the module importing it,
+  whatever the `loadOrder`s.
+
+```ts
+@Provider({ loadOrder: 10 })
+class Heavy implements OnInit, OnStart {
+    public onInit() {}
+    public onStart() {}
+}
+
+@Provider({ loadOrder: 0 })
+class Needy implements OnInit, OnStart {
+    constructor(private heavy: Heavy) {}
+
+    public onInit() {} // after Heavy's: it needs Heavy initialised
+    public onStart() {} // first
+}
+
+@Provider()
+class Plain implements OnInit, OnStart {
+    public onInit() {}
+    public onStart() {}
+}
+
+// onInit:  Heavy, Needy, Plain
+// onStart: Needy, Plain, Heavy   (loadOrder alone)
 ```
 
 ## Ad-hoc listeners
@@ -290,8 +336,8 @@ one provider iterating them over hundreds of `listen` calls.
 - **`disableDefaultLifecycle()` is silent.** Nothing complains that `onStart` never ran.
 - **One lifecycle plugin per module.** Including a configured one on the builder replaces the
   default; a plugin that includes a second one is refused at ignition, so include it on the module.
-- **Order between providers is unspecified** for every event, not just `onStart`. The listener set is
-  unordered.
+- **Per-frame events are unordered.** `loadOrder` orders `onInit` and `onStart` only; the per-frame
+  listener set is unordered.
 - **`listen` does not replay `onStart`.** It attaches from that moment on.
 - **Extinguishing disconnects everything.** The plugin disconnects its `RunService` connections and
   releases the providers, so a dead module stops ticking. This was a bug once; it is covered by a

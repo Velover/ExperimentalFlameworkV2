@@ -1371,4 +1371,278 @@ export = suite("lifecycle", [
 			}
 		},
 	],
+	[
+		// v1's `@Service/@Controller({ loadOrder })`: lower first, default 1.
+		"runs onInit and onStart in ascending loadOrder, registration order among equals",
+		() => {
+			const log = new Array<string>();
+
+			@Provider({ loadOrder: 5 })
+			class OrderLate implements OnInit, OnStart {
+				public onInit() {
+					log.push("init:late");
+				}
+				public onStart() {
+					log.push("start:late");
+				}
+			}
+
+			@Provider()
+			class OrderPlain implements OnInit, OnStart {
+				public onInit() {
+					log.push("init:plain");
+				}
+				public onStart() {
+					log.push("start:plain");
+				}
+			}
+
+			@Provider({ loadOrder: 0 })
+			class OrderEarly implements OnInit, OnStart {
+				public onInit() {
+					log.push("init:early");
+				}
+				public onStart() {
+					log.push("start:early");
+				}
+			}
+
+			@Provider({ loadOrder: -1.5 })
+			class OrderEarliest implements OnInit, OnStart {
+				public onInit() {
+					log.push("init:earliest");
+				}
+				public onStart() {
+					log.push("start:earliest");
+				}
+			}
+
+			/** The default spelled out: it keeps its place after the one registered before it. */
+			@Provider({ loadOrder: 1 })
+			class OrderPlainToo implements OnInit, OnStart {
+				public onInit() {
+					log.push("init:plain2");
+				}
+				public onStart() {
+					log.push("start:plain2");
+				}
+			}
+
+			const module = Flamework.createModule()
+				.registerClassProvider(OrderLate)
+				.registerClassProvider(OrderPlain)
+				.registerClassProvider(OrderEarly)
+				.registerClassProvider(OrderEarliest)
+				.registerClassProvider(OrderPlainToo)
+				.ignite();
+
+			expectArrayEqual(
+				log,
+				[
+					"init:earliest",
+					"init:early",
+					"init:plain",
+					"init:plain2",
+					"init:late",
+					"start:earliest",
+					"start:early",
+					"start:plain",
+					"start:plain2",
+					"start:late",
+				],
+				"lifecycle order",
+			);
+
+			module.extinguish();
+		},
+	],
+	[
+		"initialises a provider's dependencies before it whatever their loadOrder, and starts in loadOrder alone",
+		() => {
+			const log = new Array<string>();
+
+			@Provider({ loadOrder: 10 })
+			class Heavy implements OnInit, OnStart {
+				public onInit() {
+					log.push("init:heavy");
+				}
+				public onStart() {
+					log.push("start:heavy");
+				}
+			}
+
+			@Provider({ loadOrder: 0 })
+			class Needy implements OnInit, OnStart {
+				constructor(public readonly heavy: Heavy) {}
+
+				public onInit() {
+					log.push("init:needy");
+				}
+				public onStart() {
+					log.push("start:needy");
+				}
+			}
+
+			@Provider()
+			class Bystander implements OnInit, OnStart {
+				public onInit() {
+					log.push("init:bystander");
+				}
+				public onStart() {
+					log.push("start:bystander");
+				}
+			}
+
+			const module = Flamework.createModule()
+				.registerClassProvider(Bystander)
+				.registerClassProvider(Heavy)
+				.registerClassProvider(Needy)
+				.ignite();
+
+			// `Needy` goes first and pulls `Heavy` forward with it: its onInit sees `Heavy` initialised.
+			expectArrayEqual(
+				log.filter((entry) => entry.find("init:", 1, true)[0] !== undefined),
+				["init:heavy", "init:needy", "init:bystander"],
+				"onInit order",
+			);
+			expectArrayEqual(
+				log.filter((entry) => entry.find("start:", 1, true)[0] !== undefined),
+				["start:needy", "start:bystander", "start:heavy"],
+				"onStart order",
+			);
+
+			module.extinguish();
+		},
+	],
+	[
+		"keeps dependency order through a provider with no onInit of its own",
+		() => {
+			const log = new Array<string>();
+
+			@Provider({ loadOrder: 9 })
+			class Bedrock implements OnInit {
+				public onInit() {
+					log.push("bedrock");
+				}
+			}
+
+			@Provider()
+			class Between {
+				constructor(public readonly bedrock: Bedrock) {}
+			}
+
+			@Provider({ loadOrder: 0 })
+			class Summit implements OnInit {
+				constructor(public readonly between: Between) {}
+
+				public onInit() {
+					log.push("summit");
+				}
+			}
+
+			@Provider()
+			class Aside implements OnInit {
+				public onInit() {
+					log.push("aside");
+				}
+			}
+
+			const module = Flamework.createModule()
+				.registerClassProvider(Aside)
+				.registerClassProvider(Bedrock)
+				.registerClassProvider(Between)
+				.registerClassProvider(Summit)
+				.ignite();
+
+			expectArrayEqual(log, ["bedrock", "summit", "aside"], "onInit order");
+			module.extinguish();
+		},
+	],
+	[
+		"starts a lower loadOrder's onStart up to its first yield before the next one starts",
+		() => {
+			const log = new Array<string>();
+
+			@Provider({ loadOrder: 0 })
+			class Yielder implements OnStart {
+				public onStart() {
+					log.push("yielder:begin");
+					task.wait();
+					log.push("yielder:end");
+				}
+			}
+
+			@Provider()
+			class Follower implements OnStart {
+				public onStart() {
+					log.push("follower");
+				}
+			}
+
+			const module = Flamework.createModule()
+				.registerClassProvider(Follower)
+				.registerClassProvider(Yielder)
+				.ignite();
+
+			expectArrayEqual(log, ["yielder:begin", "follower"], "by the end of ignition");
+
+			module.extinguish();
+		},
+	],
+	[
+		"ignores the loadOrder of a lazy provider",
+		() => {
+			const log = new Array<string>();
+
+			@Provider({ lazy: true, loadOrder: -100 })
+			class LazyFirst implements OnStart {
+				public onStart() {
+					log.push("lazy");
+				}
+			}
+
+			@Provider({ loadOrder: 0.5 })
+			class EagerHalf implements OnStart {
+				public onStart() {
+					log.push("eager");
+				}
+			}
+
+			/** Resolves the lazy one during ignition, so that it starts with the eager ones. */
+			@Provider()
+			class LazyPuller implements OnInit {
+				constructor(private readonly module: Module) {}
+
+				public onInit() {
+					this.module.resolveDependency<LazyFirst>();
+				}
+			}
+
+			const module = Flamework.createModule()
+				.registerClassProvider(LazyFirst)
+				.registerClassProvider(EagerHalf)
+				.registerClassProvider(LazyPuller)
+				.ignite();
+
+			expectArrayEqual(log, ["eager", "lazy"], "onStart order");
+			module.extinguish();
+		},
+	],
+	[
+		"refuses a loadOrder that is not a finite number",
+		() => {
+			for (const bad of [math.huge, -math.huge, 0 / 0, "2" as unknown as number]) {
+				const message = expectThrows(
+					() => {
+						@Provider({ loadOrder: bad })
+						class BadOrder {}
+					},
+					`loadOrder ${tostring(bad)}`,
+				);
+
+				expectTrue(message.find("loadOrder must be a finite number", 1, true)[0] !== undefined, message);
+				expectTrue(message.find("BadOrder", 1, true)[0] !== undefined, `names the class: ${message}`);
+			}
+		},
+	],
 ]);

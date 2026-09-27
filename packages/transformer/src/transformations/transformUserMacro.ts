@@ -25,6 +25,7 @@ import { inlineMacroIntrinsic } from "./macros/intrinsics/inlining";
 import { addLeadingComment } from "../util/functions/addLeadingComment";
 import { transformComponentConfig } from "./macros/intrinsics/components";
 import { CORE_PACKAGE } from "../util/packages";
+import { getComponentOnlyClass, isCoreDependencyResolver } from "../util/functions/getFlameworkDecorators";
 
 export function transformUserMacro(
 	state: TransformState,
@@ -46,6 +47,7 @@ export function transformUserMacro(
 		const targetParameter = state.typeChecker.getParameterType(signature, i).getNonNullableType();
 		const userMacro = getUserMacroOfUnion(state, node, targetParameter);
 		if (userMacro) {
+			validateDependencyTarget(state, node, signatureDeclaration, userMacro);
 			parameters.set(i, userMacro);
 			highestParameterIndex = Math.max(highestParameterIndex, i);
 		}
@@ -109,6 +111,34 @@ export function transformUserMacro(
 	} else {
 		Diagnostics.error(node, `Macro could not be transformed.`);
 	}
+}
+
+/**
+ * `Dependency<T>()` and `module.resolveDependency<T>()` resolve providers, and a class that is a
+ * component and not a provider is never one: modules do not construct components, `Components`
+ * does, on the instances they are attached to. Such a call can only fail, at runtime, so it is
+ * refused here. Only where the type makes that certain -- a class decorated with `@Component()`
+ * and not `@Provider()`; an id passed explicitly (`Dependency<T>(undefined, id)`) generates no
+ * metadata and is not judged, and neither is a macro of the user's that takes a dependency.
+ */
+function validateDependencyTarget(
+	state: TransformState,
+	node: ts.NewExpression | ts.CallExpression,
+	declaration: ts.Declaration | undefined,
+	macro: UserMacro,
+) {
+	if (macro.kind !== "generic" || (macro.metadata !== "dependency" && macro.metadata !== "dependencyConcise")) return;
+	if (!isCoreDependencyResolver(declaration)) return;
+
+	const component = getComponentOnlyClass(state, macro.target);
+	if (component === undefined) return;
+
+	const name = component.name?.text ?? state.typeChecker.typeToString(macro.target);
+	Diagnostics.error(
+		node,
+		`'${name}' is a component (@Component), not a provider: ${ts.getParseTreeNode(node.expression)?.getText() ?? "Dependency"}<${name}>() resolves providers, and a module never constructs a component, so this fails at runtime.`,
+		`Make '${name}' a @Provider(), or get the component from the instance it is attached to: Dependency<Components>().getComponent<${name}>(instance).`,
+	);
 }
 
 export function getDependencyInjectionMetadata(state: TransformState, node: ts.Node, type: ts.Type, concise = false) {

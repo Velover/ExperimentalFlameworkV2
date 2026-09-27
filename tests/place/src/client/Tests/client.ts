@@ -1,5 +1,5 @@
 import { Components } from "@flamework-experimental/components";
-import { Flamework, Module, OnRender, OnStart, OnTick, Provider } from "@flamework-experimental/core";
+import { Flamework, Module, OnInit, OnRender, OnStart, OnTick, Provider } from "@flamework-experimental/core";
 import {
 	defer,
 	defineTests,
@@ -117,6 +117,38 @@ export class ClientTests implements OnStart, OnRender, OnTick {
 					}
 				}
 				expectTrue(count > 0, `remotes replicated, found ${count}`);
+			});
+
+			test("orders onInit and onStart by loadOrder on the client too", () => {
+				const log = new Array<string>();
+
+				@Provider({ loadOrder: 5 })
+				class ClientLate implements OnInit, OnStart {
+					public onInit() {
+						log.push("init:late");
+					}
+					public onStart() {
+						log.push("start:late");
+					}
+				}
+
+				@Provider({ loadOrder: 0 })
+				class ClientEarly implements OnInit, OnStart {
+					public onInit() {
+						log.push("init:early");
+					}
+					public onStart() {
+						log.push("start:early");
+					}
+				}
+
+				const orderModule = Flamework.createModule()
+					.registerClassProvider(ClientLate)
+					.registerClassProvider(ClientEarly)
+					.ignite();
+				defer(() => orderModule.extinguish());
+
+				expectArrayEqual(log, ["init:early", "init:late", "start:early", "start:late"], "lifecycle order");
 			});
 
 			test("the client's own registry is separate from the server's", () => {

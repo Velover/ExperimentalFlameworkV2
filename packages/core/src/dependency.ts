@@ -12,6 +12,10 @@ import { getDefaultModule } from "./module/defaultModule";
  * handed to something outside Flamework. Inside a provider, take a constructor parameter instead:
  * it declares the dependency where it can be read, and it orders construction.
  *
+ * It resolves what the module registers -- providers, and what plugins provide -- and nothing else:
+ * unlike v1, it does not build an unregistered class on demand. A component is never one; the
+ * transformer refuses `Dependency<T>()` on a `@Component()` class, which `Components` hands out.
+ *
  * Raises if no module was given and none has been ignited yet, or if the default has since been
  * extinguished.
  *

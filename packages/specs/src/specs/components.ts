@@ -673,6 +673,12 @@ class FussyPointer extends BaseComponent<{ Target: Folder; Linked: Fussy }, Fold
 @Component({ tag: "Static", refreshAttributes: false })
 class Static extends BaseComponent<{ speed: number }, Folder> {}
 
+/** Takes the module's `Components`, for the specs that ask which one a provider is given. */
+@Provider()
+class ComponentsTaker {
+	constructor(public readonly components: Components) {}
+}
+
 /**
  * Builds a module with the component plugin and just the components the specs use, so that no spec
  * depends on path-based discovery.
@@ -3628,7 +3634,10 @@ export = suite("components", [
 				"ignition with an unregistered link",
 			);
 
-			expectTrue(message.find("not registered in this plugin")[0] !== undefined, "message explains the link");
+			expectTrue(
+				message.find("not registered in any ComponentPlugin of this module")[0] !== undefined,
+				"message explains the link",
+			);
 		},
 	],
 	[
@@ -5247,6 +5256,162 @@ export = suite("components", [
 				linked.Destroy();
 				module.extinguish();
 			}
+		},
+	],
+	[
+		// Guide 09 includes a `ComponentPlugin.fromPath` per folder in one module. Each plugin used to
+		// build and provide a `Components` of its own under the one id, which raised
+		// `provider ID was registered more than once` at ignition.
+		"several component plugins in one module share one Components",
+		() => {
+			const first = ComponentPlugin.createPlugin().registerComponent(Engine).registerComponent(Handler).build();
+			const second = ComponentPlugin.createPlugin().registerComponent(Car).registerComponent(Owner).build();
+
+			const definition = Flamework.createModule()
+				.includePlugin(first)
+				.includePlugin(second)
+				.registerClassProvider(ComponentsTaker)
+				.build();
+
+			let module = undefined as unknown as ReturnType<typeof definition.ignite>;
+			expectNoThrow(() => {
+				module = definition.ignite();
+			}, "igniting a module with two component plugins");
+
+			const components = module.resolveDependency<Components>();
+			expectEqual(
+				module.resolveDependency<ComponentsTaker>().components,
+				components,
+				"the Components a provider is injected with",
+			);
+
+			// A registration from each plugin, and a constructor dependency across them.
+			const car = folder("SharedPluginsCar");
+			collectionService().AddTag(car, "Engine");
+			collectionService().AddTag(car, "Car");
+			const built = expectDefined(components.getComponent<Car>(car), "the second plugin's component");
+			expectEqual(built.engine, components.getComponent<Engine>(car), "its dependency from the first plugin");
+
+			// A link across them: `Owner` (second) names a `Handler` (first) child.
+			const owner = folder("SharedPluginsOwner");
+			const core = addCore(owner);
+			collectionService().AddTag(core, "Handler");
+			collectionService().AddTag(owner, "Owner");
+			__harness.flush();
+			const linked = expectDefined(components.getComponent<Owner>(owner), "the linking component");
+			expectEqual(linked.childComponents.Core, components.getComponent<Handler>(core), "the link across plugins");
+
+			// Extinguishing takes every plugin's components down, and the definition ignites again.
+			module.extinguish();
+			expectEqual(components.getComponent<Car>(car), undefined, "the car once the module was extinguished");
+			expectEqual(
+				components.getComponent<Handler>(core),
+				undefined,
+				"the handler once the module was extinguished",
+			);
+
+			const again = definition.ignite();
+			const rebuilt = again.resolveDependency<Components>();
+			expectTrue(rebuilt !== components, "a fresh Components for the second ignition");
+			expectDefined(rebuilt.getComponent<Car>(car), "the car again");
+			expectDefined(rebuilt.getComponent<Owner>(owner), "the owner again");
+			again.extinguish();
+
+			car.Destroy();
+			owner.Destroy();
+		},
+	],
+	[
+		"keeps a component two plugins register once, and when either registration holds",
+		() => {
+			const scoped = ComponentPlugin.createPlugin()
+				.registerComponent(Engine, { activeIn: ["fix5NeverActive"] })
+				.registerComponent(Handler, { activeIn: ["fix5NeverActive"] })
+				.build();
+			const plain = ComponentPlugin.createPlugin().registerComponent(Engine).build();
+
+			const module = Flamework.createModule().includePlugin(scoped).includePlugin(plain).ignite();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("SharedPluginsEngine");
+			collectionService().AddTag(instance, "Engine");
+			expectDefined(components.getComponent<Engine>(instance), "the component the second plugin keeps");
+			expectEqual(components.getComponents<Engine>(instance).size(), 1, "Engine components on the instance");
+
+			// Scoped out by the only plugin that registers it: the lookup explains why.
+			const handler = folder("SharedPluginsHandler");
+			const message = expectThrows(
+				() => components.addComponent<Handler>(handler),
+				"adding a scoped-out component",
+			);
+			expectTrue(
+				message.find("fix5NeverActive", 1, true)[0] !== undefined,
+				`the message names the scope: ${message}`,
+			);
+
+			module.extinguish();
+			instance.Destroy();
+			handler.Destroy();
+		},
+	],
+	[
+		"keeps a Components per module across imports",
+		() => {
+			const imported = Flamework.createModule()
+				.includePlugin(ComponentPlugin.createPlugin().registerComponent(Engine).build())
+				.ignite();
+			const importing = Flamework.createModule()
+				.includePlugin(ComponentPlugin.createPlugin().registerComponent(Handler).build())
+				.ignite({ imports: [imported] });
+			const plain = Flamework.createModule().ignite({ imports: [imported] });
+
+			const importedComponents = imported.resolveDependency<Components>();
+			const ownComponents = importing.resolveDependency<Components>();
+			expectTrue(
+				ownComponents !== importedComponents,
+				"a module with a plugin of its own has its own Components",
+			);
+			expectEqual(
+				plain.resolveDependency<Components>(),
+				importedComponents,
+				"a module with none resolves its import's",
+			);
+
+			const instance = folder("ImportedEngine");
+			collectionService().AddTag(instance, "Engine");
+			collectionService().AddTag(instance, "Handler");
+			expectDefined(importedComponents.getComponent<Engine>(instance), "the import's component");
+			expectDefined(ownComponents.getComponent<Handler>(instance), "the importer's own component");
+			// Each registers its own: the importer's Components does not know the import's classes.
+			expectThrows(
+				() => ownComponents.getComponent<Engine>(instance),
+				"the import's component, asked of the importer's",
+			);
+
+			plain.extinguish();
+			importing.extinguish();
+			imported.extinguish();
+			instance.Destroy();
+		},
+	],
+	[
+		"explains a component's dependency on a component no plugin of its module registers",
+		() => {
+			// `Car` takes an `Engine`, which is a component this module does not register at all.
+			const module = Flamework.createModule()
+				.includePlugin(ComponentPlugin.createPlugin().registerComponent(Car).build())
+				.ignite();
+			const components = module.resolveDependency<Components>();
+
+			const instance = folder("UnregisteredEngineCar");
+			const message = expectThrows(() => components.addComponent<Car>(instance), "building the car");
+			expectTrue(
+				message.find("no ComponentPlugin of this module registers", 1, true)[0] !== undefined,
+				`the message says what is missing: ${message}`,
+			);
+
+			instance.Destroy();
+			module.extinguish();
 		},
 	],
 ]);

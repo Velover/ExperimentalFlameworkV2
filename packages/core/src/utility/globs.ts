@@ -36,8 +36,8 @@ export function getGlobPaths(glob: string): string[][] {
 }
 
 /**
- * Requires every ModuleScript under every path the glob matched and returns the exported classes,
- * each at most once.
+ * Requires every ModuleScript under every path the glob matched and returns the Flamework classes
+ * they hold, exported or not, each at most once (see {@link getClassesInPath}).
  */
 export function getClassesInGlob(glob: string): Array<object> {
 	const classes = new Array<object>();

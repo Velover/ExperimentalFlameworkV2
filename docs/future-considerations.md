@@ -234,6 +234,26 @@ Edge cases found and deliberately left alone, because the fix would cost more th
     TEMP (another user, CI) do not take turns; a claim holding a reused PID or an empty file makes
     the run wait, naming the wrong process, until the 10-minute refusal; two runs taking over one
     stale claim at nearly the same instant can both fail or both hold it.
+- **core, path registration of unexported classes:** only classes at a file's top level or in a
+  namespace body are recorded against their module, not ones in a top-level `if` or loop body. A
+  module that declares its own top-level `script` records its classes against that value. A cloned
+  ModuleScript that is required again records its classes a second time, and the record keeps them.
+  A new transformer with an older core, or the reverse, silently falls back to exported classes only.
+- **core, the explanation of a failed resolution:** it covers only module-level classes that have
+  loaded; any other id keeps the plain message. A component that is registered but scoped out is
+  explained as "no ComponentPlugin of this module registers it" (Components' own list of skipped
+  classes is not consulted). For a plugin-provided class such as `Components` in a module with no
+  component plugin, the advice opens with `registerProviders` / `registerClassProvider`, which cannot
+  help; "include the plugin that provides it" is further down the same list. Under Lune, "defined in"
+  prints `Instance<name>` rather than a full path.
+- **transformer, the component diagnostic:** `Dependency<typeof SomeComponent>()` is refused too. A
+  function provider registered under a component class's id is refused for constructor injection,
+  which has no escape; `Dependency<T>(undefined, id)` is the escape for the macro.
+- **core, `loadOrder`:** objects handed over with `provideInstance` join before any provider, so an
+  `onInit`/`onStart` on one (none exists today) would precede every `loadOrder`. A lazy provider
+  resolved during ignition runs `onInit` where it was resolved, and `onStart` at the default 1.
+- **packaging:** the peer range `^2.0.0-alpha.0` stops matching at the first 2.1.0 prerelease; widen
+  it when one ships.
 - **harness:** `ValueBase.Value` and its `Changed` are not modelled; `typeof` of an enum item is
   `"table"`; `GetAttribute` returns the same handle each read; a `task.defer` chain outside a deferred
   batch is not capped at 80.

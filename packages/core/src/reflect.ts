@@ -1,4 +1,5 @@
 import { forgetImplements } from "./utility/implementsCache";
+import { recordModuleClass } from "./utility/moduleClasses";
 
 /**
  * Reflection/metadata API
@@ -42,6 +43,10 @@ export namespace Reflect {
 
 		// What `getClassImplements` keeps per class is built from this key.
 		if (key === "flamework:implements") forgetImplements(obj);
+
+		// The transformer records the module a class was defined in under this key, which is how
+		// path registration finds a class its module does not export.
+		if (key === "flamework:module" && property === undefined) recordModuleClass(value, obj);
 	}
 
 	/**

@@ -34,10 +34,19 @@ Worth knowing, because the caveats fall out of it:
    that folder ends up at, using your Rojo project file. This is why the argument must be a string
    literal and why the folder must be mapped.
 2. **At runtime**, Flamework walks to that instance with `WaitForChild`, requires every `ModuleScript`
-   under it, and collects every exported value carrying Flamework metadata.
-3. It then keeps the ones marked as providers and registers each under its generated identifier.
+   under it, and collects every Flamework class those modules define, **exported or not**, plus
+   anything they export that carries Flamework metadata (a re-export of a class from elsewhere).
+3. It then keeps the ones marked as providers and registers each under its generated identifier,
+   once, however many ways it was found.
 
-So registration is "require everything in this folder and see what falls out".
+So registration is "require everything in this folder and see what falls out", as it was in v1.
+The transformer records each class against the ModuleScript that defines it (`script`), which is
+how an unexported one is found; the identifier plays no part, so this holds in every
+`idGenerationMode` and with obfuscation on. Only a class the module creates once as it loads is
+recorded -- one declared at the top level of the file, or of a namespace in it. A class declared
+inside a function is created by every call, so it is never recorded, and a later path registration
+never picks up a class that belongs to a test case or a factory; it is found only if its module
+exports it.
 
 Only classes that carry `@Provider()` **themselves** are registered. Metadata is inherited through
 the class hierarchy, so an exported but undecorated subclass of a provider is skipped rather than
@@ -128,6 +137,33 @@ class A {
 
 Better, though: the cycle usually means a third provider is trying to exist.
 
+### Asking for something that is not a provider
+
+`Dependency<T>()`, `resolveDependency<T>()` and constructor injection resolve **providers**. v1
+built any decorated class on demand; v2 does not. Asking for a class that is not one fails:
+
+- **A component** (`@Component()`) is built by `Components` on the instances it is attached to, never
+  by a module. The transformer refuses `Dependency<T>()`, `module.resolveDependency<T>()` and a
+  `@Provider()`'s constructor parameter whose type is a component, at compile time:
+  `'QuestsUI' is a component (@Component), not a provider`. Make it a `@Provider()` (a provider
+  cannot extend `BaseComponent`, so move what callers need into one), or get the component from the
+  instance: `components.getComponent<QuestsUI>(instance)`.
+- **A `@Provider()` nothing registers** raises at runtime, saying so and where the class is defined:
+  `'Shop' (ServerScriptService.TS.shop) is a @Provider() that nothing in this module registers or
+  provides`. Register its folder, register the class, include the plugin that provides it, or
+  import a module that has it.
+- **An `@Injectable()` class** is built with `createClassInstance`, never resolved:
+  `'Session' (...) is not a provider`.
+
+The compile-time check covers only what is certain from the type. An id passed by hand
+(`Dependency<T>(undefined, id)`), an interface or abstract class (a function or alias provider may
+stand behind it), `Dependency<Components>()` and anything else a plugin provides, a `@Provider()`
+class, and a macro of your own that takes a `Modding.Target.Dependency<T>` are never refused. A
+component's own constructor may take another component -- that is a component dependency -- and so
+may an `@Injectable()`'s, which `overrideDependency` can answer. At runtime the explanation is given
+for a class that has loaded and was defined at the top level of its module; anything else keeps the
+plain `could not resolve dependency 'X'`.
+
 ## Other kinds of provider
 
 A provider does not have to be a class.
@@ -201,6 +237,31 @@ still gets `onInit` and `onStart`, on the next resume point after it is construc
 like any other provider from then on; one resolved during ignition, from another provider's
 `onInit`, is initialised in its turn, before anything starts. This is v1's `@Optional()`; there is
 no equivalent of `includeOptionalClass`, because resolving it is how you include it.
+
+### Load order
+
+`loadOrder` orders a provider's `onInit` and `onStart` against the other providers of the same
+ignition, as v1's `@Service({ loadOrder })` did: lower goes first, the default is `1`, and providers
+with the same value keep the order they would have without one.
+
+```ts
+@Provider({ loadOrder: 0 })
+export class CameraShake implements OnStart {
+    public onStart() {} // started before the providers left at 1
+}
+
+@Provider({ loadOrder: 5 })
+export class Interface implements OnStart {
+    public onStart() {} // started after them
+}
+```
+
+Dependencies still come first: a provider is constructed, and initialised, after what its
+constructor takes, even when that has a higher `loadOrder` -- a low one pulls its dependencies
+forward with it. See [Lifecycle events](04-lifecycle-events.md#load-order) for the exact order.
+It has no effect on a lazy provider, which starts when it is first resolved, and none across
+modules: an imported module ignites, and starts, before the module importing it. Any finite number
+is accepted; anything else raises as the class's module loads.
 
 ### Scoped providers
 
@@ -302,8 +363,10 @@ to get configuration into everything without a global.
 
 ## Caveats
 
-- **Registration requires the class to be exported.** Path registration reads a ModuleScript's
-  exports; a non-exported class is invisible to it.
+- **Path registration takes every provider a module defines, exported or not.** A `@Provider()`
+  class that must stay out of a registered folder's module -- a fixture a test registers in a
+  module of its own, say -- belongs in a folder no module registers, or inside the function that
+  uses it. A class declared inside a function is found only through its module's exports.
 - **Path registration requires every module in the folder.** Import side effects run, and a module
   that throws while loading fails the ignite with that module's path and error, as in v1. A provider
   that silently failed to register would otherwise only surface later as a missing dependency.
@@ -314,9 +377,10 @@ to get configuration into everything without a global.
   `provider ID was registered more than once`.
 - **`@Injectable()` classes are not resolvable.** `resolveDependency<Session>()` will not find one;
   that is the point of the decorator.
-- **A missing dependency is a runtime error, not a compile error.**
-  `module could not resolve dependency 'X'` means the type was never registered in this module or
-  anything it includes.
+- **A missing dependency is a runtime error, not a compile error** -- except a component, which the
+  transformer refuses. `module could not resolve dependency 'X'` means the type was never registered
+  in this module or anything it includes; for a class that has loaded, the message goes on to say
+  what it is and what to do.
 - **Constructor injection only.** There is no property or method injection.
 
 ---

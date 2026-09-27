@@ -273,21 +273,6 @@ class BrokenPointer extends BaseComponent<{ Target: Folder }, Folder> implements
 /** The instance `EarlyAdder` gives a component to during ignition. */
 let earlyInstance: Instance | undefined;
 
-/** A provider that builds a component from its `onInit`, before ignition has finished. */
-@Provider()
-class EarlyAdder implements OnInit, OnStart {
-	constructor(private readonly components: Components) {}
-
-	public onInit() {
-		this.components.addComponent<Initialised>(earlyInstance!);
-		events.push("adder:init-done");
-	}
-
-	public onStart() {
-		events.push("adder:start");
-	}
-}
-
 @Component({ tag: "Engine" })
 class Engine extends BaseComponent<{}, Folder> {}
 
@@ -3463,7 +3448,7 @@ export class ComponentSpecs implements OnStart {
 				);
 
 				expectTrue(
-					message.find("not registered in this plugin", 1, true)[0] !== undefined,
+					message.find("not registered in any ComponentPlugin of this module", 1, true)[0] !== undefined,
 					"message explains the link",
 				);
 			});
@@ -4426,6 +4411,23 @@ export class ComponentSpecs implements OnStart {
 			});
 
 			test("starts a component built during ignition only once ignition has finished", () => {
+				// Declared here rather than at the top of the file: `registerProviders("src/shared/Tests")`
+				// takes every provider a module defines, and this one belongs to the case's module.
+				/** A provider that builds a component from its `onInit`, before ignition has finished. */
+				@Provider()
+				class EarlyAdder implements OnInit, OnStart {
+					constructor(private readonly components: Components) {}
+
+					public onInit() {
+						this.components.addComponent<Initialised>(earlyInstance!);
+						events.push("adder:init-done");
+					}
+
+					public onStart() {
+						events.push("adder:start");
+					}
+				}
+
 				events.clear();
 				earlyInstance = folder("Early");
 

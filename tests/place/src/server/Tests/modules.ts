@@ -22,43 +22,7 @@ import {
 import { LogService } from "@rbxts/services";
 import { FwTestLazyProvider } from "server/Features/Testing/Services/FwTestLazyProvider";
 import { FwTestService } from "server/Features/Testing/Services/FwTestService";
-
-@Provider()
-class Widget {
-	public readonly kind = "widget";
-}
-
-@Provider()
-class Consumer {
-	constructor(public readonly widget: Widget) {}
-}
-
-@Provider({ lazy: true })
-class Gadget {
-	public static constructed = 0;
-
-	constructor() {
-		Gadget.constructed += 1;
-	}
-}
-
-/**
- * Ticks and counts its extinguish, to show what a module still holds after it went wrong. Not
- * exported, so the game's `registerProviders("src/server/Tests")` leaves it to the case's module.
- */
-@Provider()
-class Ticking implements OnTick, OnExtinguished {
-	public static frames = 0;
-	public static extinguished = 0;
-
-	public onTick() {
-		Ticking.frames += 1;
-	}
-
-	public onExtinguished() {
-		Ticking.extinguished += 1;
-	}
-}
+import { Consumer, Gadget, Ticking, Widget } from "server/Fixtures/moduleProviders";
 
 /** A plugin that records the module it was extinguished with, to watch teardown order. */
 function tracked(name: string, log: Array<string>) {

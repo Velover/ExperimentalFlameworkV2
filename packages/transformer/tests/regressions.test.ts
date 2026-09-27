@@ -87,12 +87,18 @@ describe("callsite uuids", () => {
 		// they are derived from, so two builds disagree; the plain run above is the control.
 		const plain = uuids(emitted("callsites"));
 
-		const first = compileFixtureWithEnv({ FLAMEWORK_FIXTURE_OBFUSCATE: "true" });
+		const first = compileFixtureWithEnv({
+			FLAMEWORK_FIXTURE_OBFUSCATE: "true",
+			FLAMEWORK_FIXTURE_IDMODE: "obfuscated",
+		});
 		if (first.status !== 0) {
 			throw new Error(`fixture failed to compile obfuscated:\n${first.output}`);
 		}
 
-		const second = compileFixtureWithEnv({ FLAMEWORK_FIXTURE_OBFUSCATE: "true" });
+		const second = compileFixtureWithEnv({
+			FLAMEWORK_FIXTURE_OBFUSCATE: "true",
+			FLAMEWORK_FIXTURE_IDMODE: "obfuscated",
+		});
 		if (second.status !== 0) {
 			throw new Error(`fixture failed to compile obfuscated again:\n${second.output}`);
 		}
@@ -113,6 +119,173 @@ describe("callsite uuids", () => {
 				throw new Error(`fixture failed to restore:\n${restored.output}`);
 			}
 		}
+	});
+});
+
+describe("module records", () => {
+	// Path registration finds a class its module does not export through the record of the module
+	// that defined it: the ModuleScript itself, `script`, never the identifier, which says nothing
+	// about where a class came from once ids are short, tiny or obfuscated.
+	const record = (name: string) => `Reflect.defineMetadata(${name}, "flamework:module", script)`;
+
+	function expectRecords(source: string) {
+		const normalized = normalize(source);
+		expect(normalized).toContain(record("FixtureHiddenProvider"));
+		expect(normalized).toContain(record("FixtureExportedProvider"));
+		expect(normalized).toContain(record("FixtureNamespacedProvider"));
+		expect(normalized).not.toContain(record("FixtureLocalProvider"));
+		expect(normalized).not.toContain(record("FixtureUndecorated"));
+	}
+
+	test("records every class the module creates as it loads, exported or not, and none a function creates", () => {
+		const source = emitted("discovery");
+		expectRecords(source);
+
+		// The class made by a call still gets everything else: only the record is left out.
+		expect(normalize(source)).toContain(
+			`Reflect.defineMetadata(FixtureLocalProvider, "identifier", "fw:discovery@fixtureFactory.FixtureLocalProvider")`,
+		);
+	});
+
+	test.each(["short", "tiny", "obfuscated"])("records the same way under the %s id generation mode", (mode) => {
+		const result = compileFixtureWithEnv({ FLAMEWORK_FIXTURE_IDMODE: mode });
+		try {
+			expect(result.status).toBe(0);
+			const source = result.files.get("discovery")!;
+			expectRecords(source);
+
+			// The ids themselves no longer name the file.
+			expect(normalize(source)).not.toContain(`"fw:discovery@FixtureHiddenProvider"`);
+		} finally {
+			const restored = compileFixtureFresh();
+			if (restored.status !== 0) {
+				throw new Error(`fixture failed to restore:\n${restored.output}`);
+			}
+		}
+	});
+
+	test("records the same way with obfuscation on", () => {
+		const result = compileFixtureWithEnv({
+			FLAMEWORK_FIXTURE_OBFUSCATE: "true",
+		});
+		try {
+			expect(result.status).toBe(0);
+			expectRecords(result.files.get("discovery")!);
+		} finally {
+			const restored = compileFixtureFresh();
+			if (restored.status !== 0) {
+				throw new Error(`fixture failed to restore:\n${restored.output}`);
+			}
+		}
+	});
+});
+
+describe("dependencies on components", () => {
+	const component = `import { BaseComponent, Component } from "@flamework-experimental/components";
+
+@Component({})
+export class QuestsUI extends BaseComponent<{}, Instance> {}
+`;
+
+	test("refuses Dependency<T>() on a component", () => {
+		const result = compileProbe(
+			"dependencyOnComponent",
+			`${component}
+import { Dependency } from "@flamework-experimental/core";
+
+export const ui = Dependency<QuestsUI>();
+`,
+		);
+
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("'QuestsUI' is a component (@Component), not a provider");
+		expect(result.output).toContain("Make 'QuestsUI' a @Provider()");
+		expect(result.output).toContain("getComponent<QuestsUI>(instance)");
+	});
+
+	test("refuses module.resolveDependency<T>() on a component", () => {
+		const result = compileProbe(
+			"resolveOnComponent",
+			`${component}
+import { Flamework } from "@flamework-experimental/core";
+
+export const ui = Flamework.createModule().ignite().resolveDependency<QuestsUI>();
+`,
+		);
+
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("'QuestsUI' is a component (@Component), not a provider");
+	});
+
+	test("refuses a provider's constructor taking a component", () => {
+		const result = compileProbe(
+			"providerTakesComponent",
+			`${component}
+import { Provider } from "@flamework-experimental/core";
+
+@Provider()
+export class QuestHandler {
+	constructor(private readonly ui: QuestsUI) {}
+}
+`,
+		);
+
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("'QuestHandler' takes 'QuestsUI' in its constructor");
+		expect(result.output).toContain("take Components");
+	});
+
+	test("judges nothing it cannot be sure of", () => {
+		const result = compileProbe(
+			"dependencyNotJudged",
+			`${component}
+import { Components, ComponentMetadata } from "@flamework-experimental/components";
+import { Dependency, Flamework, Injectable, Modding, Provider } from "@flamework-experimental/core";
+
+export interface Storage {}
+export abstract class AbstractStorage {}
+
+@Provider()
+export class Economy {}
+
+/** A class a function provider may stand behind. */
+export class Plain {}
+
+// Provided by the component plugin, not registered.
+export const components = Dependency<Components>();
+export const economy = Dependency<Economy>();
+export const storage = Dependency<Storage>();
+export const abstractStorage = Dependency<AbstractStorage>();
+export const plain = Dependency<Plain>();
+
+// An id passed by hand generates no metadata, and is the way past this check.
+export const explicit = Dependency<QuestsUI>(undefined, Flamework.id<QuestsUI>());
+
+// A component's constructor takes components on its own instance.
+@Component({ tag: "Car" })
+export class Car extends BaseComponent<{}, Instance> {
+	constructor(metadata: ComponentMetadata, public readonly ui: QuestsUI) {
+		super(metadata);
+	}
+}
+
+// An injectable may be handed one through overrideDependency.
+@Injectable()
+export class Session {
+	constructor(public readonly ui: QuestsUI) {}
+}
+
+// A macro of the user's may do anything with the dependency it is given.
+/** @metadata macro */
+export function myDependency<T>(info?: Modding.Target.Dependency<T>) {
+	return info;
+}
+export const custom = myDependency<QuestsUI>();
+`,
+		);
+
+		expect(result.output).not.toContain("not a provider");
+		expect(result.status).toBe(0);
 	});
 });
 

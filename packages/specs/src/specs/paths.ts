@@ -1,9 +1,38 @@
 import * as core from "@flamework-experimental/core";
-import { resolveRbxPath } from "@flamework-experimental/core";
-import { expectThrows, expectTrue, suite } from "../testkit";
+import {
+	Flamework,
+	Reflect,
+	getClassesInPath,
+	requireModulesInPath,
+	resolveRbxPath,
+} from "@flamework-experimental/core";
+import { ExportedProvider } from "../fixtures/discovery/exported";
+import { hiddenIds, makeLocalProvider } from "../fixtures/discovery/hidden";
+import { expectDefined, expectEqual, expectFalse, expectThrows, expectTrue, suite } from "../testkit";
 
 /** Internal and stripped from the package's types, so reached through a cast, as `ignite` is. */
 const harness = core as unknown as { __setPathRoot: (root: Instance | undefined) => void };
+
+/**
+ * The harness's module graph is the files on disk, and each module's `script` is its node in it: the
+ * specs package's `out` folder is two above this module. Path registration walks that tree the way
+ * it walks a place's, from a root set here as a plugin's would be.
+ */
+const SPECS_OUT = (script.Parent as Instance).Parent as Instance;
+const DISCOVERY = ["fixtures", "discovery"];
+
+function underSpecs<T>(callback: () => T): T {
+	harness.__setPathRoot(SPECS_OUT);
+	try {
+		return callback();
+	} finally {
+		harness.__setPathRoot(undefined);
+	}
+}
+
+function contains(message: string, text: string) {
+	return message.find(text, 1, true)[0] !== undefined;
+}
 
 function folderIn(parent: Instance, name: string) {
 	const instance = new Instance("Folder");
@@ -45,6 +74,101 @@ export = suite("paths", [
 			}
 
 			expectThrows(() => resolveRbxPath([]), "an empty path under game names no service");
+		},
+	],
+	[
+		// v1 registered every decorated class it required; v2 read only a module's exports, and
+		// silently left out every class a module did not export. The transformer now records each
+		// class against the ModuleScript that defined it.
+		"finds every class the modules under a path define, exported or not, each once",
+		() => {
+			// Made by a call: never recorded against its module, so never found by a path.
+			const made = makeLocalProvider();
+
+			const names = underSpecs(() => getClassesInPath(DISCOVERY)).map((value) => tostring(value));
+			const listed = names.join(", ");
+			for (const name of [
+				"ExportedProvider",
+				"HiddenProvider",
+				"HiddenComponent",
+				"HiddenInjectable",
+				"ExportEqualsProvider",
+				"OutsideProvider",
+				"NamespacedProvider",
+				"DeepProvider",
+			]) {
+				expectTrue(names.includes(name), `${name} among the classes found: ${listed}`);
+			}
+
+			expectFalse(names.includes(tostring(made)), `a class made by a call is not found: ${listed}`);
+			expectFalse(names.includes("UndecoratedChild"), `an undecorated subclass is not found: ${listed}`);
+			expectEqual(new Set(names).size(), names.size(), `each class once: ${listed}`);
+		},
+	],
+	[
+		"registers the providers a folder defines whether or not they are exported, each once",
+		() => {
+			const module = underSpecs(() =>
+				Flamework.createModule()
+					.registerProviders("fixtures/discovery", undefined, DISCOVERY as never)
+					.ignite(),
+			);
+
+			expectDefined(module.resolveDependency(hiddenIds.provider), "the provider its module does not export");
+			expectDefined(module.resolveDependency<ExportedProvider>(), "the exported one");
+
+			// Only `@Provider()` classes: the component and the injectable beside them are not.
+			expectThrows(() => module.resolveDependency(hiddenIds.component), "the component");
+			expectThrows(() => module.resolveDependency(hiddenIds.injectable), "the injectable");
+
+			module.extinguish();
+		},
+	],
+	[
+		"requireModulesInPath still hands back what each module exports",
+		() => {
+			const loaded = underSpecs(() => requireModulesInPath(DISCOVERY));
+			expectEqual(loaded.size(), 6, "one value per module that exports something");
+			expectTrue(
+				loaded.some((value) => (value as { ExportedProvider?: object }).ExportedProvider === ExportedProvider),
+				"the exported module's exports",
+			);
+		},
+	],
+	[
+		// v1 built any decorated class lazily; v2 resolves registered providers only. The class is
+		// known -- its module defined it and has loaded -- so the error says what it is and what to do.
+		"explains why a loaded class that is not a registered provider cannot be resolved",
+		() => {
+			const module = Flamework.createModule().ignite();
+
+			const component = expectThrows(() => module.resolveDependency(hiddenIds.component), "a component");
+			expectTrue(contains(component, "is a component (@Component), not a provider"), component);
+			// A module's full name in a place; the harness's tree prints the module's own name.
+			expectTrue(
+				component.match("%([^)]*hidden>?%) is a component")[0] !== undefined,
+				`names the module it was defined in: ${component}`,
+			);
+			expectTrue(contains(component, "getComponent"), `says what to do instead: ${component}`);
+
+			const provider = expectThrows(
+				() => module.resolveDependency(hiddenIds.provider),
+				"an unregistered provider",
+			);
+			expectTrue(contains(provider, "nothing in this module registers or provides"), provider);
+			expectTrue(contains(provider, "registerProviders"), provider);
+
+			const injectable = expectThrows(() => module.resolveDependency(hiddenIds.injectable), "an injectable");
+			expectTrue(contains(injectable, "is not a provider"), injectable);
+			expectTrue(contains(injectable, "createClassInstance"), injectable);
+
+			// A class made by a call is not recorded: the plain message, as for any id.
+			const localId = Reflect.getOwnMetadata<string>(makeLocalProvider(), "identifier")!;
+			const unexplained = expectThrows(() => module.resolveDependency(localId), "a class made by a call");
+			expectTrue(contains(unexplained, `could not resolve dependency '${localId}'`), unexplained);
+			expectFalse(contains(unexplained, `'${localId}':`), `no explanation: ${unexplained}`);
+
+			module.extinguish();
 		},
 	],
 ]);

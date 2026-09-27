@@ -27,7 +27,7 @@ That is the whole story for a typical game. You never call `build()` or `extingu
 
 | Method | Does |
 |---|---|
-| `registerProviders(path)` | Registers every exported `@Provider()` class under a source folder. |
+| `registerProviders(path)` | Registers every `@Provider()` class the modules under a source folder define, exported or not. |
 | `registerProvidersGlob(glob)` | The same, for every folder a compile-time glob matches. |
 | `registerClassProvider(Class)` | Registers one class explicitly. |
 | `registerProvider<T>(config, id?)` | Registers a class, function or alias provider. |

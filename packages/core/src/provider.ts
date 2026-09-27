@@ -13,6 +13,26 @@ export interface ProviderDecoratorConfig extends ScopeCondition {
 	 * Defaults to `false`.
 	 */
 	lazy?: boolean;
+
+	/**
+	 * Orders this provider's `onInit` and `onStart` against the other providers the same ignition
+	 * constructs, as v1's `loadOrder` did: lower goes first. Defaults to `1`; any finite number,
+	 * negative and fractional ones included. Providers with the same `loadOrder` keep the order
+	 * they would have without one.
+	 *
+	 * Dependency order still wins. The module constructs its providers in ascending `loadOrder`,
+	 * each after what its constructor takes, so a provider's dependencies are constructed and
+	 * initialised before it even when theirs is higher: a low `loadOrder` pulls what the provider
+	 * needs forward with it. `onInit` runs in that construction order. `onStart` runs in ascending
+	 * `loadOrder` alone, each on its own thread as always, so a lower one runs up to its first yield
+	 * before the next is started.
+	 *
+	 * Only within one module's ignition: imported modules ignite, and start, before it. Per-frame
+	 * events (`onTick`, `onPhysics`, `onRender`) stay unordered. A lazy provider is not part of
+	 * the order: it is initialised and started when it is first resolved, and its `loadOrder` is
+	 * ignored.
+	 */
+	loadOrder?: number;
 }
 
 /**
@@ -29,6 +49,17 @@ export interface ProviderDecoratorConfig extends ScopeCondition {
  */
 export function Provider(config?: ProviderDecoratorConfig) {
 	return (constructor: object) => {
+		const loadOrder = config?.loadOrder;
+		if (
+			loadOrder !== undefined &&
+			// NaN compares false with everything, so this refuses it along with both infinities.
+			(!typeIs(loadOrder, "number") || !(math.abs(loadOrder) < math.huge))
+		) {
+			error(
+				`@Provider() on '${constructor}': loadOrder must be a finite number, got ${tostring(loadOrder)} (${typeOf(loadOrder)})`,
+			);
+		}
+
 		Reflect.defineMetadata(constructor, "flamework:provider", true);
 		Reflect.defineMetadata(constructor, "flamework:providerConfig", config ?? {});
 	};

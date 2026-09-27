@@ -263,7 +263,13 @@ rather than half-working.
    which Luau can neither measure nor walk.
 4. Objects the plugins provided join the interfaces they implement, now that every observer is in
    place -- each once, however many ids it was provided under, and it leaves them once on release;
-   then every kept provider is resolved, which constructs it.
+   then every kept provider is resolved, which constructs it -- in ascending `loadOrder`
+   (`@Provider({ loadOrder })`, default 1), registration order among equals, each after what its
+   constructor takes. That construction order is the order observers are told `onAdded` in, which is
+   the order the lifecycle plugin runs `onInit` in, so a low `loadOrder` pulls its dependencies
+   forward and dependency order still wins. Each provider's `loadOrder` rides along in the
+   `onAdded` context (none for a lazy one), and the lifecycle plugin sorts `onStart` by it, stably,
+   once, as it starts the providers.
 5. `onPostIgnite` hooks run -- the lifecycle plugin runs `onInit` in its own -- and the imports are
    checked again, since a yielding `onInit` lets another thread extinguish one. Before a provider's
    `onInit`, and before a provider without one is started, the plugin waits for the pending
@@ -294,6 +300,10 @@ Alias providers forward to another id.
 
 A miss consults `skipped`: a registration the scopes left out raises `registered but inactive`
 with the conditions and the active set, and either message names the imports that were searched.
+Otherwise the module record (below) is asked whether the id belongs to a class that has loaded
+(`utility/explainUnresolved.ts`); one that has says what it is -- a component, a provider nothing
+here registers, a class that is not a provider -- where it is defined, and what to do. The walk is
+linear over the recorded classes, which only a failing resolution pays for.
 `lookupProvider` is the non-constructing form of the same walk, used to decide sharing at ignition.
 
 Resolution during `PreIgniting` is refused: providers do not exist yet, and allowing it would make
@@ -335,6 +345,16 @@ The transformer writes this metadata from a decorator's `@metadata reflect ...` 
 decorator reflects matters: `Components` reads `flamework:parameters` to discover component
 dependencies, so a decorator that does not emit it disables that feature silently.
 
+**The module record.** For a class that gets an `identifier` and is declared at the top level of its
+file, or of a namespace in it, the transformer also writes
+`Reflect.defineMetadata(Class, "flamework:module", script)`. `defineMetadata` hands that key to
+`utility/moduleClasses.ts`, a map from the ModuleScript to the classes it defined, in definition
+order. It is keyed by the `script` rather than read off the identifier, which says nothing about a
+class's module once ids are short, tiny or obfuscated, and it only ever holds classes created once
+per load of their module: a class declared inside a function gets no record, so the map cannot grow
+with calls and a later path registration never finds a test case's class. It is held for good, as
+the require cache holds a module's exports.
+
 ### Paths
 
 The `path` intrinsic emits a Rojo path as the resolver gives it, relative to the tree's root: in a
@@ -346,11 +366,21 @@ folder's parent; with no metadata to climb from it is `game`. `resolveRbxPath` w
 there, with the `StarterPlayer` rewrite to `PlayerScripts` kept for the `game` case, and
 `getClassesInPath` and the glob runtime both go through it.
 
+`getClassesInPath` requires every ModuleScript under the path, in tree order, and takes from each
+the classes the module record holds for it, then whatever it exports that carries its own
+identifier and was not among them (`export =`, a re-export, a class compiled by a transformer that
+wrote no record), each class once. `requireModulesInPath` is the loading half and still returns
+exports only.
+
 ## Components
 
-`ComponentPlugin` is a plugin whose setup constructs `Components` over the registered classes,
-provides it to the module, and hooks `onIgnited` to `startCollectionService` and `onExtinguished`
-to `stopCollectionService`. It brings no lifecycle plugin of its own: components are constructed
+`ComponentPlugin` is a plugin whose setup adds its registered classes (those whose scope holds) to
+a registration shared by every component plugin of the module being ignited, kept in a `WeakMap`
+keyed by the module. The first one set up registers an `onPreIgnite` hook at `HookPriority.First`
+that constructs the one `Components` over everything the plugins registered and provides it --
+after every plugin's setup, before any provider exists -- and hooks `onIgnited` to
+`startCollectionService` and `onExtinguished` to `stopCollectionService`; the others only add
+their classes. Two plugins each providing a `Components` of their own collided on its id. It brings no lifecycle plugin of its own: components are constructed
 through the module, so they take their per-frame events from that module's.
 
 The DataModel is what a tag is announced by, so the DataModel is what the three places that weigh a
@@ -910,7 +940,10 @@ the harness has to be enough of Roblox for the emitted code to run.
 `TS.import(script, base, ...parts)`, where `base` is an Instance. `harness.luau` models that tree
 over the filesystem: every directory and `.luau` file is a node, `TS.import` resolves a node to a
 file and loads it with `script` bound in its environment. The tree is built eagerly, because Lune's
-`fs` yields and a metamethod cannot. Package manifests are read for `main`, and `types` is aliased
+`fs` yields and a metamethod cannot. A node answers the few Instance methods path registration calls
+-- `IsA`, `GetChildren`, `GetDescendants` (by name), `FindFirstChild`, `WaitForChild`,
+`GetFullName` -- and is a `ModuleScript` when it has a file of its own, so a spec can set the path
+root to a folder of the specs package and register it by path. Package manifests are read for `main`, and `types` is aliased
 onto it -- roblox-ts derives a nested import path from `types` (`lib/t.d.ts` → `lib.t`) while the
 module lives at `main` (`lib/ts.lua`).
 

@@ -12,6 +12,7 @@ import { convertConciseDependencyInfo } from "../utility/convertConciseDependenc
 import { getClassImplements } from "../utility/getClassImplements";
 import { getClassesInPath } from "../utility/getClassesInPath";
 import { getClassesInGlob } from "../utility/globs";
+import { explainUnresolvedClass } from "../utility/explainUnresolved";
 import { extinguishesBegun, threadWaits } from "../utility/threadWaits";
 import type { Destructor, ExtractSingleCallback } from "../utility/types";
 import type {
@@ -23,7 +24,13 @@ import type {
 } from "./moduleDefinition";
 import { clearDefaultModule } from "./defaultModule";
 import { HookPriority, type HookPhase, type RegisteredHook } from "./moduleHooks";
-import { getProviderClassId, getProviderClassScope, normalizeProviderConfig } from "./providerRegistration";
+import {
+	DEFAULT_LOAD_ORDER,
+	getProviderClassId,
+	getProviderClassScope,
+	getProviderLoadOrder,
+	normalizeProviderConfig,
+} from "./providerRegistration";
 import {
 	NO_CONDITION,
 	describeConditions,
@@ -349,6 +356,22 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		providers = active;
 	};
 
+	/**
+	 * The registrations in ascending `loadOrder`, registration order among equals. The same list
+	 * when none sets one, which is every module that does not use it.
+	 */
+	const inLoadOrder = (entries: ReadonlyArray<ModuleProvider>) => {
+		const orders = entries.map((entry) => getProviderLoadOrder(entry.config) ?? DEFAULT_LOAD_ORDER);
+		if (orders.every((order) => order === DEFAULT_LOAD_ORDER)) {
+			return entries;
+		}
+
+		// `table.sort` is not stable, so equals are ordered by their position.
+		const indices = entries.map((_, index) => index);
+		indices.sort((a, b) => (orders[a] !== orders[b] ? orders[a] < orders[b] : a < b));
+		return indices.map((index) => entries[index]);
+	};
+
 	const registerHook = (phase: HookPhase, callback: (module: Module) => void, priority?: number) => {
 		hooks.push({ phase, callback, priority: priority ?? HookPriority.Normal });
 	};
@@ -402,6 +425,7 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		instance: object,
 		kind: InterfaceTargetKind,
 		dependencies?: ReadonlyArray<defined>,
+		loadOrder?: number,
 	) => {
 		const interfaces = getClassImplements(instance);
 
@@ -418,7 +442,7 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 				}
 
 				for (const observer of interested) {
-					observer.onAdded?.(instance, { interfaceId, kind, dependencies });
+					observer.onAdded?.(instance, { interfaceId, kind, dependencies, loadOrder });
 					attached += 1;
 				}
 			}
@@ -518,7 +542,12 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 				// not be cached either -- the next resolve handed it out with no lifecycle at all, and
 				// `release` told every observer, the refusing one included, it was removed again.
 				const [attached, err] = pcall(() =>
-					registerClassInterfaces(instantiatedProvider, "provider", dependencies),
+					registerClassInterfaces(
+						instantiatedProvider,
+						"provider",
+						dependencies,
+						getProviderLoadOrder(config),
+					),
 				);
 				if (!attached) {
 					instantiatedProviders.delete(info.id);
@@ -560,6 +589,15 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 			if (inactive !== undefined) {
 				error(
 					`module '${state.debugName}' could not resolve dependency '${info.id}': it is registered but inactive (${describeConditions(inactive)})${searched}`,
+				);
+			}
+
+			// A class that has been loaded says why it is not here: a component, a provider nothing
+			// registered, a class that is not a provider at all.
+			const explanation = explainUnresolvedClass(info.id, requestingOrigin);
+			if (explanation !== undefined) {
+				error(
+					`module '${state.debugName}' could not resolve dependency '${info.id}': ${explanation}${searched}`,
 				);
 			}
 
@@ -708,7 +746,10 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 				unjoinedInstances.delete(instance);
 			}
 
-			for (const provider of providers) {
+			// In ascending `loadOrder`, each after what its constructor takes, which is the order the
+			// lifecycle plugin runs `onInit` in: a low `loadOrder` goes first and pulls its
+			// dependencies forward with it, and dependency order still wins over `loadOrder`.
+			for (const provider of inLoadOrder(providers)) {
 				// Lazy providers are constructed the first time they are resolved instead.
 				if (provider.config.type === "class" && provider.config.lazy !== true) {
 					resolveDependency(provider.injectionId);

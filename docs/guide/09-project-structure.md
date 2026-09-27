@@ -1,7 +1,8 @@
 # 9. Project structure
 
 Nothing here is enforced. Flamework only cares that the folders you register from are mapped in your
-Rojo project and that your classes are exported. This is what tends to work.
+Rojo project; a class is found in the module that defines it, exported or not. This is what tends
+to work.
 
 ## A layout that scales
 
@@ -49,6 +50,9 @@ Flamework.createModule()
 
 `services` and `controllers` are just names -- there is no `@Service`/`@Controller` distinction in v2.
 Keeping the folders separate is what keeps server code off the client.
+
+The two `ComponentPlugin`s each entry point includes share the module's one `Components`, so a
+server component can link to a shared one ([Components](05-components.md)).
 
 ## One module per realm
 

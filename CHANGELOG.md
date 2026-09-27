@@ -5,11 +5,91 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ## Unreleased
 
+### Upgrade notes
+
+- **Path registration takes every class a module defines, exported or not, as v1 did.** A `@Provider()`
+  or `@Component()` class declared at the top level of a module under a registered folder is now
+  registered even if the module does not export it. Move a decorated class that must stay out of the
+  module to a folder no module registers, or into the function that uses it. `core` and `transformer`
+  have to come from this release together: with an older one of either, only exported classes are found.
+- **`Dependency<T>()`, `module.resolveDependency<T>()` and a provider's constructor refuse a component
+  at compile time.** v1 built any decorated class on demand; v2 resolves registered providers only.
+  Make such a class a `@Provider()` (`{ lazy: true }` keeps v1's "built when first asked for"), or get
+  the component from `Components`.
+
+### core
+
+#### Added
+
+- `@Provider({ loadOrder })`, v1's ordering of `onInit` and `onStart` within one ignition: lower first,
+  default 1, registration order among equals. A provider's dependencies are still constructed and
+  initialised before it, whatever their `loadOrder`; `onStart` follows `loadOrder` alone, each on its
+  own thread up to its first yield before the next. Lazy providers ignore it, per-frame events stay
+  unordered, and an imported module still ignites first. A value that is not a finite number raises
+  when the class's module loads.
+- Path registration (`registerProviders`, `registerProvidersGlob`, the plugin target's forms,
+  `getClassesInPath`, `getClassesInGlob`) finds the classes a module defines at its top level whether
+  or not it exports them, each once. Classes are tied to the ModuleScript that defines them, so this
+  holds in every `idGenerationMode` and with obfuscation on. A class declared inside a function is
+  found only through its module's exports.
+- A failed resolution of a class that has loaded says what the class is, where it is defined and what
+  to do: a component (get it from `Components`, or make it a `@Provider()`), a `@Provider()` that
+  nothing in the module registers or provides, or a class that is not a provider.
+
+#### Changed
+
+- `getClassesInPath` also returns the classes a module does not export: each module's classes in
+  definition order, then what it exports. `requireModulesInPath` is unchanged.
+- Eager providers are constructed in ascending `loadOrder`; with none set, the order is unchanged.
+
+#### Fixed
+
+- `getClassesInPath` over a package folder returned a class twice when the package also re-exported
+  it (`Components` from the components package).
+
+### transformer
+
+#### Added
+
+- Records each class with a Flamework identifier that is declared at the top level of its file, or of
+  a namespace in it, against its module (`flamework:module`), for path registration.
+- A compile error for `Dependency<T>()`, `module.resolveDependency<T>()` and a `@Provider()`
+  constructor parameter whose type is a `@Component()` class that is not a provider.
+
+### components
+
+#### Fixed
+
+- Several `ComponentPlugin`s in one module -- a `fromPath` per folder as guide 09 shows, a `fromGlob`, a
+  built one, in any mix -- raised `provider ID was registered more than once: $c:components@Components`
+  at ignition. They now share one `Components` per module: every registration ends up in it, a
+  component can link to one registered by another plugin, and `Dependency<Components>()` and
+  constructor injection get that one. A module that imports another keeps its own `Components` when it
+  includes a component plugin, and resolves the import's when it does not.
+
+#### Changed
+
+- `fromPath`, `fromGlob`, `registerComponents` and `registerComponentsGlob` register components their
+  modules do not export (see core).
+- A link to an unregistered component now raises `… not registered in any ComponentPlugin of this module`.
+
+### components, networking, testing
+
+#### Fixed
+
+- The peer dependency on `@flamework-experimental/core` (and testing's on
+  `@flamework-experimental/transformer`) was `*`, which matches no prerelease, so every install of an
+  alpha warned about an incorrect peer dependency. It is `^2.0.0-alpha.0` now.
+
 ### Tests
 
 - The Studio test place lives in the repository (`tests/place`), linked to the packages' own builds:
   `bun run test:place` builds the packages and runs its suite in Studio under the default,
   immediate, deferred and streaming projects.
+- The Lune harness's module tree answers `IsA`, `GetChildren`, `GetDescendants`, `FindFirstChild`,
+  `WaitForChild` and `GetFullName`, so specs can register a folder by path.
+- The place's providers that cases register in modules of their own moved out of the registered
+  `Tests` folders into `src/server/Fixtures`.
 
 ## 2026-09-26: core, components, networking and testing 2.0.0-alpha.2; transformer 2.0.0-alpha.3
 

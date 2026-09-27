@@ -1,5 +1,5 @@
-import { Components } from "@flamework-experimental/components";
-import { OnStart, Provider } from "@flamework-experimental/core";
+import { ComponentPlugin, Components } from "@flamework-experimental/components";
+import { Flamework, Module, OnStart, Provider } from "@flamework-experimental/core";
 import {
 	defer,
 	defineTests,
@@ -12,6 +12,9 @@ import {
 	test,
 } from "@flamework-experimental/testing";
 import { CollectionService, Workspace } from "@rbxts/services";
+import { DiscoveryExportedComponent } from "server/Discovery/exported";
+import { discoveryIds } from "server/Discovery/hidden";
+import { deepIds } from "server/Discovery/nested/deep";
 import { FwTestPartComponent } from "server/Features/Testing/Components/FwTestPartComponent";
 import { FW_TEST_TAG } from "shared/Features/Testing/FwTestConfig";
 
@@ -26,6 +29,24 @@ function teardowns(name: string) {
  * run rather than every run since the server started.
  */
 let nextPartId = 0;
+
+/** A module of the case's own, extinguished once the case is over unless the case already did. */
+function caseModule(module: Module) {
+	defer(() => {
+		if (module.isIgnited()) module.extinguish();
+	});
+
+	return module;
+}
+
+/** A folder in the case's scratch space carrying a tag. */
+function taggedFolder(name: string, tag: string) {
+	const folder = new Instance("Folder");
+	folder.Name = name;
+	folder.Parent = scratch();
+	CollectionService.AddTag(folder, tag);
+	return folder;
+}
 
 function taggedPart(prefix: string) {
 	nextPartId += 1;
@@ -52,6 +73,98 @@ export class ComponentTests implements OnStart {
 
 	onStart() {
 		defineTests("components", () => {
+			// Guide 09 includes a `ComponentPlugin.fromPath` per folder in one module. Each plugin used
+			// to build and provide a `Components` of its own under the one id, and the second raised
+			// `provider ID was registered more than once` at ignition.
+			test("several component plugins in one module share one Components", () => {
+				@Provider()
+				class ComponentsHolder {
+					constructor(public readonly components: Components) {}
+				}
+
+				const definition = Flamework.createModule()
+					.includePlugin(ComponentPlugin.fromPath("src/server/Discovery/nested"))
+					.includePlugin(ComponentPlugin.fromGlob("src/server/Discovery/hid*.ts"))
+					.includePlugin(ComponentPlugin.createPlugin().registerComponent(DiscoveryExportedComponent).build())
+					.registerClassProvider(ComponentsHolder)
+					.build();
+
+				const module = caseModule(definition.ignite());
+				const components = module.resolveDependency<Components>();
+				expectEqual(
+					module.resolveDependency<ComponentsHolder>().components,
+					components,
+					"the Components a provider is injected with",
+				);
+
+				// One from each plugin -- two of them classes their modules do not export.
+				const deep = taggedFolder("SharedDeep", "DiscoveryDeep");
+				const hidden = taggedFolder("SharedHidden", "DiscoveryHidden");
+				const exported = taggedFolder("SharedExported", "DiscoveryExported");
+				eventually(() => components.getComponent(deep, deepIds.component) !== undefined, "the path plugin's");
+				eventually(
+					() => components.getComponent(hidden, discoveryIds.component) !== undefined,
+					"the glob plugin's",
+				);
+				eventually(
+					() => components.getComponent<DiscoveryExportedComponent>(exported) !== undefined,
+					"the built plugin's",
+				);
+
+				// Extinguishing takes every plugin's components down, and the definition ignites again.
+				module.extinguish();
+				expectEqual(components.getComponent(deep, deepIds.component), undefined, "once extinguished");
+				expectEqual(components.getComponent(hidden, discoveryIds.component), undefined, "once extinguished");
+
+				const again = caseModule(definition.ignite());
+				const rebuilt = again.resolveDependency<Components>();
+				expectTrue(rebuilt !== components, "a fresh Components for the second ignition");
+				eventually(
+					() => rebuilt.getComponent(deep, deepIds.component) !== undefined,
+					"the path plugin's again",
+				);
+				eventually(
+					() => rebuilt.getComponent<DiscoveryExportedComponent>(exported) !== undefined,
+					"the built plugin's again",
+				);
+			});
+
+			test("overlapping component plugins register a class they share once", () => {
+				const module = caseModule(
+					Flamework.createModule()
+						.includePlugin(ComponentPlugin.fromPath("src/server/Discovery"))
+						.includePlugin(ComponentPlugin.fromPath("src/server/Discovery/nested"))
+						.ignite(),
+				);
+				const components = module.resolveDependency<Components>();
+
+				const deep = taggedFolder("OverlapDeep", "DiscoveryDeep");
+				eventually(() => components.getComponent(deep, deepIds.component) !== undefined, "the shared class");
+				expectEqual(components.getAllComponents(deepIds.component).size(), 1, "built once");
+			});
+
+			test("a module that imports another keeps a Components of its own", () => {
+				const imported = caseModule(
+					Flamework.createModule()
+						.includePlugin(ComponentPlugin.fromPath("src/server/Discovery/nested"))
+						.ignite(),
+				);
+				const importing = caseModule(
+					Flamework.createModule()
+						.includePlugin(ComponentPlugin.fromGlob("src/server/Discovery/hid*.ts"))
+						.ignite({ imports: [imported] }),
+				);
+				const plain = caseModule(Flamework.createModule().ignite({ imports: [imported] }));
+
+				const importedComponents = imported.resolveDependency<Components>();
+				expectTrue(importing.resolveDependency<Components>() !== importedComponents, "the importer's own");
+				expectEqual(
+					plain.resolveDependency<Components>(),
+					importedComponents,
+					"one with none resolves its import's",
+				);
+			});
+
 			test("a tagged part gets its component, which ticks", () => {
 				const part = taggedPart("FwSectionPart");
 				defer(() => CollectionService.RemoveTag(part, FW_TEST_TAG));

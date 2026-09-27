@@ -347,7 +347,7 @@ export class Components {
 
 				error(
 					`component '${info.identifier}' links to '${link.component}' through ${describeLink(link)}, ` +
-						`but that component is not registered in this plugin`,
+						`but that component is not registered in any ComponentPlugin of this module`,
 				);
 			}
 		}

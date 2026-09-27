@@ -23,58 +23,12 @@ import {
 } from "@flamework-experimental/testing";
 import { RunService } from "@rbxts/services";
 import { FwTestDependency } from "server/Features/Testing/Services/FwTestDependency";
+import { DupChild, dupLog, inits, LazyInit, LazyResolver, Multi } from "server/Fixtures/lifecycleProviders";
 
-// The providers below are not exported on purpose: `registerProviders("src/server/Tests")` takes
-// every exported class with an identifier into the game's module, and these belong to the module a
-// case builds, whose ticks and extinguishes the case counts.
-
-const inits = new Array<string>();
-
-@Provider({ lazy: true })
-class LazyInit implements OnInit, OnStart {
-	public onInit() {
-		inits.push("lazy:init");
-	}
-
-	public onStart() {
-		inits.push("lazy:start");
-	}
-}
-
-/**
- * Resolves the lazy provider from its `onInit`, the way a provider setting itself up would. Through
- * the module it was built by: `Dependency<T>()` without one answers from the game's module here.
- */
-@Provider()
-class LazyResolver implements OnInit {
-	constructor(private readonly module: Module) {}
-
-	public onInit() {
-		inits.push("resolver:init");
-		this.module.resolveDependency<LazyInit>();
-		inits.push("resolver:resolved");
-	}
-}
-
-/** Implements three events, so that listening for one of them shows which ones attach. */
-@Provider()
-class Multi implements OnTick, OnPhysics, OnExtinguished {
-	public ticks = 0;
-	public physics = 0;
-	public extinguishes = 0;
-
-	public onTick() {
-		this.ticks += 1;
-	}
-
-	public onPhysics() {
-		this.physics += 1;
-	}
-
-	public onExtinguished() {
-		this.extinguishes += 1;
-	}
-}
+// The providers the cases register in modules of their own live in server/Fixtures, outside every
+// folder the game's module registers: path registration takes every class a module defines,
+// exported or not, and those belong to the module a case builds, whose ticks and extinguishes the
+// case counts.
 
 @Injectable()
 class FrameListener implements OnTick {
@@ -98,28 +52,6 @@ function collectUntilReleased(probe: Map<object, true>) {
 
 	return probe.size();
 }
-
-const dupLog = new Array<string>();
-
-/** Logs its events; the subclass below re-declares every interface it implements. */
-@Provider()
-class DupBase implements OnInit, OnStart, OnTick {
-	public onInit() {
-		dupLog.push("init");
-	}
-
-	public onStart() {
-		dupLog.push("start");
-	}
-
-	public onTick() {
-		dupLog.push("tick");
-	}
-}
-
-/** Re-declares its parent's interfaces, so the transformer writes every id on both classes. */
-@Provider()
-class DupChild extends DupBase implements OnInit, OnStart, OnTick {}
 
 /** Counts its ticks on the class, since a refused attachment hands nothing back to count on. */
 @Injectable()
@@ -199,6 +131,113 @@ export class LifecycleTests implements OnStart, OnTick, OnPhysics {
 
 	onStart() {
 		defineTests("lifecycle", () => {
+			// v1's `@Service/@Controller({ loadOrder })`: lower first, default 1.
+			test("runs onInit and onStart in ascending loadOrder, dependencies first", () => {
+				const log = new Array<string>();
+
+				@Provider({ loadOrder: 10 })
+				class OrderHeavy implements OnInit, OnStart {
+					public onInit() {
+						log.push("init:heavy");
+					}
+					public onStart() {
+						log.push("start:heavy");
+					}
+				}
+
+				/** Low, and takes `OrderHeavy`: its onInit still comes after the dependency's. */
+				@Provider({ loadOrder: 0 })
+				class OrderNeedy implements OnInit, OnStart {
+					constructor(public readonly heavy: OrderHeavy) {}
+
+					public onInit() {
+						log.push("init:needy");
+					}
+					public onStart() {
+						log.push("start:needy");
+					}
+				}
+
+				@Provider()
+				class OrderPlain implements OnInit, OnStart {
+					public onInit() {
+						log.push("init:plain");
+					}
+					public onStart() {
+						log.push("start:plain");
+					}
+				}
+
+				@Provider({ loadOrder: -2.5 })
+				class OrderFirst implements OnInit, OnStart {
+					public onInit() {
+						log.push("init:first");
+					}
+					public onStart() {
+						log.push("start:first");
+					}
+				}
+
+				caseModule((builder) =>
+					builder
+						.registerClassProvider(OrderPlain)
+						.registerClassProvider(OrderHeavy)
+						.registerClassProvider(OrderNeedy)
+						.registerClassProvider(OrderFirst),
+				);
+
+				expectArrayEqual(
+					log,
+					[
+						"init:first",
+						"init:heavy",
+						"init:needy",
+						"init:plain",
+						"start:first",
+						"start:needy",
+						"start:plain",
+						"start:heavy",
+					],
+					"lifecycle order",
+				);
+			});
+
+			test("starts a lower loadOrder's onStart up to its first yield before the next one", () => {
+				const log = new Array<string>();
+
+				@Provider({ loadOrder: 0 })
+				class OrderYielder implements OnStart {
+					public onStart() {
+						log.push("yielder:begin");
+						task.wait();
+						log.push("yielder:end");
+					}
+				}
+
+				@Provider()
+				class OrderFollower implements OnStart {
+					public onStart() {
+						log.push("follower");
+					}
+				}
+
+				caseModule((builder) =>
+					builder.registerClassProvider(OrderFollower).registerClassProvider(OrderYielder),
+				);
+
+				expectArrayEqual(log, ["yielder:begin", "follower"], "by the end of ignition");
+				eventually(() => log.includes("yielder:end"), "the yielder to finish");
+			});
+
+			test("refuses a loadOrder that is not a finite number", () => {
+				const message = expectThrows(() => {
+					@Provider({ loadOrder: math.huge })
+					class OrderInfinite {}
+				}, "an infinite loadOrder");
+
+				expectTrue(message.find("loadOrder must be a finite number", 1, true)[0] !== undefined, message);
+			});
+
 			test("onTick fires every frame with a positive delta", () => {
 				const before = this.ticks;
 				eventually(() => this.ticks > before, "onTick to fire");

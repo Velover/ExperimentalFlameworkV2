@@ -38,6 +38,7 @@ local PACKAGES: { [string]: string } = {
 export type Node = {
 	Name: string,
 	Parent: Node?,
+	ClassName: string,
 	__path: string,
 	__virtual: { [string]: any }?,
 }
@@ -48,12 +49,75 @@ local children: { [Node]: { [string]: Node } } = {}
 --- Nodes whose module file is not derived from their path, taken from a package's `main` field.
 local mainOverrides: { [any]: string } = {}
 
+--- The few Instance methods path registration calls on the tree (`resolveRbxPath`, `getClassesInPath`):
+--- a node is a `ModuleScript` when it has a file of its own (`init.luau` for a directory), and a
+--- `Folder` otherwise. A child of the same name is found ahead of them, as it is on an Instance.
+local nodeMethods = {}
+
+function nodeMethods.IsA(node: any, className: string): boolean
+	return className == "Instance"
+		or className == node.ClassName
+		or (node.ClassName == "ModuleScript" and className == "LuaSourceContainer")
+end
+
+function nodeMethods.GetChildren(node: any): { any }
+	local list = {}
+	for _, child in children[node] or {} do
+		table.insert(list, child)
+	end
+
+	-- A directory listing has no order to keep; by name, so every run walks the same way.
+	table.sort(list, function(a, b)
+		return a.Name < b.Name
+	end)
+	return list
+end
+
+function nodeMethods.GetDescendants(node: any): { any }
+	local list = {}
+	local function walk(parent)
+		for _, child in nodeMethods.GetChildren(parent) do
+			table.insert(list, child)
+			walk(child)
+		end
+	end
+	walk(node)
+	return list
+end
+
+function nodeMethods.FindFirstChild(node: any, name: string): any
+	local map = children[node]
+	return map and map[name] or nil
+end
+
+function nodeMethods.WaitForChild(node: any, name: string): any
+	local child = nodeMethods.FindFirstChild(node, name)
+	if not child then
+		error("harness: '" .. node.__path .. "' has no child '" .. name .. "'", 2)
+	end
+	return child
+end
+
+function nodeMethods.GetFullName(node: any): string
+	local names = {}
+	local current = node
+	while current do
+		table.insert(names, 1, current.Name)
+		current = current.Parent
+	end
+	return table.concat(names, ".")
+end
+
 -- Lune's `fs` calls yield, and yielding inside `__index` crosses a C-call boundary. The tree is
 -- therefore built eagerly when a node is created, leaving the metamethod a pure table lookup.
 local nodeMeta = {}
 nodeMeta.__index = function(node: Node, key: string)
 	local map = children[node]
-	return map and map[key] or nil
+	local child = map and map[key]
+	if child ~= nil then
+		return child
+	end
+	return nodeMethods[key]
 end
 nodeMeta.__tostring = function(node: Node)
 	return "Instance<" .. node.Name .. ">"
@@ -104,6 +168,7 @@ local function aliasModule(base: Node, directory: string, relative: string, targ
 	local alias = setmetatable({
 		Name = name,
 		Parent = parent,
+		ClassName = "ModuleScript",
 		__path = directory .. "/" .. relative,
 	}, nodeMeta) :: any
 
@@ -155,9 +220,14 @@ function harness.node(path: string, name: string?, parent: Node?, mode: WalkMode
 		return nil
 	end
 
+	local isModule = fs.isFile(path .. ".luau")
+		or fs.isFile(path .. ".lua")
+		or (isDir and (fs.isFile(path .. "/init.luau") or fs.isFile(path .. "/init.lua")))
+
 	local node: Node = setmetatable({
 		Name = name or path,
 		Parent = parent,
+		ClassName = if isModule then "ModuleScript" else "Folder",
 		__path = path,
 	}, nodeMeta) :: any
 
@@ -201,6 +271,7 @@ function harness.virtualNode(name: string, exports: { [string]: any }): Node
 		Name = name,
 		Parent = nil,
 		__path = "\0virtual\0" .. name,
+		ClassName = "ModuleScript",
 		__virtual = exports,
 	}, nodeMeta) :: any
 

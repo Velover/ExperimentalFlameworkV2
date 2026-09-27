@@ -8,7 +8,7 @@ one, and everything that used to be built into it is now a plugin.
 | v1 | v2 |
 |---|---|
 | `@Service()` / `@Controller()` | `@Provider()` on both realms |
-| `Flamework.addPaths("src/services")` | `.registerProviders("src/services")` |
+| `Flamework.addPaths("src/services")` | `.registerProviders("src/services")`; like v1, it finds the classes a module defines whether it exports them or not |
 | `Flamework.addPathsGlob("src/**/services")` | `.registerProvidersGlob("src/**/services")` / `ComponentPlugin.fromGlob(...)` |
 | `@Optional()` / `includeOptionalClass` | `@Provider({ lazy: true })`, constructed when first resolved |
 | `flamework.json` `profiling` | `flamework.config.json` `core.profiling`, or `createLifecyclePlugin({ profiling })` per module |
@@ -19,7 +19,7 @@ one, and everything that used to be built into it is now a plugin.
 | `Modding.getObjectFromId`, `Reflect.idToObj` | gone; there is no global registry |
 | `Flamework.ignite()` | `Flamework.createModule()…​.ignite()` |
 | Lifecycle events built in | still on: `LifecyclePlugin` is an ordinary plugin every module starts with; `disableDefaultLifecycle()` opts out |
-| `Dependency<T>()` | unchanged; answers from the first module ignited, or the one ignited with `{ default: true }`. `Dependency<T>(module)` answers from a given one |
+| `Dependency<T>()` | resolves **registered providers** only, from the first module ignited or the one ignited with `{ default: true }`; `Dependency<T>(module)` answers from a given one. v1 built any decorated class on demand: a component or an unregistered class no longer works (see step 4) |
 | `Flamework.registerExternalClass(C)` | `.registerClassProvider(C)` |
 | `Flamework.createDependency(C)` | `module.createClassInstance(C)` with `@Injectable()` |
 | `Modding.onListenerAdded<T>(cb)` | `target.observe<T>({ onAdded, onRemoved })` in a plugin |
@@ -65,8 +65,11 @@ so keep the folders separate.
 If you had a class used on both realms with different behaviour, that is now two classes in two
 folders, or one class registered by both.
 
-`loadOrder` is gone. Ordering comes from dependencies: if `A` must exist before `B`, inject `A` into
-`B`.
+`loadOrder` moves to `@Provider({ loadOrder })`, with v1's meaning: lower first, default `1`, ordering
+`onInit` and `onStart`. One difference: v1 sorted by `loadOrder` before dependencies, so a provider
+could be initialised before one it injected; v2 initialises dependencies first and orders what
+that leaves free, and `onStart` follows `loadOrder` alone. See
+[Lifecycle events](04-lifecycle-events.md#load-order).
 
 ### 3. Lifecycle events are still on
 
@@ -78,11 +81,11 @@ waits; `onPhysics` still receives `(dt, time)`. The signals are v1's too: `onTic
 
 `OnRender` only connects on the client; a provider implementing it on the server is simply inert.
 
-### 4. `Dependency<T>()` still works
+### 4. `Dependency<T>()` still works -- for providers
 
 It answers from the **default module**: the first root ignited in the realm, which for a game is the
-one the entry point ignites. Nothing to change, though constructor injection is still the better
-shape inside a provider:
+one the entry point ignites. For a provider, nothing to change, though constructor injection is
+still the better shape inside a provider:
 
 ```ts
 // still fine, anywhere
@@ -94,6 +97,19 @@ constructor(private economy: Economy) {}
 
 If a realm ignites more than one root -- tests, tools -- pass `{ default: true }` to the one
 `Dependency<T>()` should answer from, or use `module.resolveDependency<T>()` on the handle.
+
+What changed is what it can resolve. v1's `Dependency<T>()` built **any** decorated class as a
+singleton the first time it was asked for, registered or not -- a `@Component({})` with no tag
+reached only through `Dependency<T>()`, say. v2 resolves the providers a module registers, and
+nothing else:
+
+- a **component** is refused at compile time (`'X' is a component (@Component), not a provider`).
+  Make it a `@Provider()` -- `@Provider({ lazy: true })` keeps v1's "built when first asked for" --
+  or get it from `Components` on its instance;
+- a `@Provider()` that no registered folder, registration, plugin or import brings in raises at
+  runtime, saying so and naming the module the class is defined in.
+
+See [Providers](03-providers.md#asking-for-something-that-is-not-a-provider).
 
 ### 5. Update components
 
@@ -166,7 +182,10 @@ export function Command(name: string) {
 ```
 
 Discovery is path-based, exactly like providers. Where v1 offered `Modding.getDecorators<typeof Command>()`,
-walk a folder and filter on your own metadata:
+walk a folder and filter on your own metadata. `getClassesInPath` returns every class with its own
+Flamework identifier that the modules under the path define at their top level, exported or not,
+plus what they export that carries one, each once -- the classes v1's registry held, scoped to a
+folder:
 
 ```ts
 import { getClassesInPath } from "@flamework-experimental/core";
@@ -222,7 +241,12 @@ and the error values all behave as they did.
 - Did anything rely on `Modding.getDecorators`? Replace it with path scanning and your own metadata.
 - Are your component folders registered with `ComponentPlugin`, not `registerProviders`?
 - Did any `@Service` rely on being server-only? Providers are not realm-gated; the module decides.
-- Did anything rely on `loadOrder`? Replace it with a dependency.
+- Did anything rely on `loadOrder`? Move it to `@Provider({ loadOrder })`; a provider it injected is
+  now initialised before it whatever the numbers say.
+- Does anything call `Dependency<T>()` on a component, or on a class no folder registers? v1 built
+  it on demand; v2 does not.
+- Is any decorated class in a registered folder meant to stay out of the module? Unexported classes
+  are registered now, as in v1: move it out of the folder, or into the function that uses it.
 - Do any constructors yield? They used to be tolerable; now they stall ignition.
 - Is there exactly one `ignite()` per realm? Two containers do not share providers, and
   `Dependency<T>()` answers from the first.

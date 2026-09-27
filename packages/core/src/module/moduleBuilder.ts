@@ -96,8 +96,11 @@ export class ModuleBuilder {
 	/**
 	 * Register all providers under the specified path and its descendants.
 	 *
-	 * The providers must be exported, and must carry the `@Provider()` decorator themselves: an
-	 * undecorated subclass of a provider is not registered.
+	 * Every `@Provider()` class the modules there define at their top level is registered, exported
+	 * or not, as v1 registered every decorated class it required, and so is one they export from
+	 * elsewhere; each once. A class declared inside a function is registered only if its module
+	 * exports it. A provider must carry the `@Provider()` decorator itself: an undecorated subclass
+	 * of a provider is not registered.
 	 *
 	 * The options apply to every provider found: a scope condition here scopes the whole folder.
 	 *

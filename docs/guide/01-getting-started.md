@@ -99,8 +99,8 @@ Flamework.createModule()
 
 Two things happened:
 
-1. **`registerProviders("src/server/services")`** found every exported `@Provider()` class under that
-   folder. You do not list them by hand -- see [Providers](03-providers.md#registration) for exactly
+1. **`registerProviders("src/server/services")`** found every `@Provider()` class the modules under
+   that folder define, exported or not. You do not list them by hand -- see [Providers](03-providers.md#registration) for exactly
    how this works and when it does not.
 2. **`ignite()`** constructed every provider, injected their dependencies, ran every `onInit` in
    dependency order, and then ran `onStart`.
@@ -162,8 +162,9 @@ in a plugin both include. That is [Plugins](08-plugins.md).
   `Path is invalid, expected string literal`.
 - **The path is a source path, not a Rojo path.** Write `"src/server/services"`, not
   `"ServerScriptService/TS/services"`.
-- **Providers must be exported.** Registration works by requiring each ModuleScript and looking at
-  its exports; a class that is not exported is invisible.
+- **Providers are found where they are defined.** Registration requires each ModuleScript under the
+  folder and takes every class it defines at its top level, exported or not, as v1 did. A class
+  declared inside a function is not found unless its module exports it.
 - **`@Provider()` metadata must exist on both realms.** It is written when the decorator evaluates,
   and nothing about it is realm-specific, so a class shared between realms behaves identically on
   both.
@@ -181,7 +182,11 @@ in a plugin both include. That is [Plugins](08-plugins.md).
 | `module '...' has been extinguished, cannot ...` | Something resolved from, or created an instance on, a module after `extinguish()`. |
 | `provider ID was registered more than once: ...` | The same class was registered twice, often by two overlapping `registerProviders` paths. Raised at ignition. |
 | `could not resolve dependency '...': it is registered but inactive` | The class is tied to a [scope](11-scopes.md) that this build does not have active. |
+| `could not resolve dependency 'X': 'X' (...) is a component (@Component), not a provider` | `Dependency<X>()`, `resolveDependency` or a constructor asked for a component. Components are built by `Components`: get one with `getComponent`, or make the class a `@Provider()`. The transformer refuses the plain `Dependency<X>()` and a provider's constructor parameter at compile time. |
+| `could not resolve dependency 'X': 'X' (...) is a @Provider() that nothing in this module registers or provides` | The class has loaded, but no path, registration, plugin or import of this module brings it in. |
 | `module could not resolve dependency 'X'` | A constructor parameter's type is not registered in this module or any module it includes. |
+| `'X' is a component (@Component), not a provider` (compile error) | `Dependency<X>()`, `resolveDependency<X>()` or a provider's constructor names a component. |
+| `@Provider() on 'X': loadOrder must be a finite number` | `loadOrder` is `math.huge`, NaN or not a number. Raised when the class's module loads. |
 
 ---
 

@@ -72,3 +72,24 @@ export function getProviderClassScope(config: ProviderConfig): ScopeCondition {
 
 	return { activeIn: decoratorConfig.activeIn, inactiveIn: decoratorConfig.inactiveIn };
 }
+
+/** v1's default, which a provider that does not set `loadOrder` has. */
+export const DEFAULT_LOAD_ORDER = 1;
+
+/**
+ * Where a registration sits in its module's startup: its class's `loadOrder`, or the default. A
+ * lazy one has none (`undefined`): it starts when it is first resolved, whatever its decorator says.
+ * Own metadata, as everywhere else.
+ */
+export function getProviderLoadOrder(config: ProviderConfig): number | undefined {
+	if (config.type !== "class") {
+		return DEFAULT_LOAD_ORDER;
+	}
+
+	if (config.lazy === true) {
+		return undefined;
+	}
+
+	const decoratorConfig = Reflect.getOwnMetadata<ProviderDecoratorConfig>(config.value, "flamework:providerConfig");
+	return decoratorConfig?.loadOrder ?? DEFAULT_LOAD_ORDER;
+}

@@ -3,6 +3,7 @@
 	"transformer": {
 		"hashPrefix": "fw",
 		"obfuscation": "${FLAMEWORK_FIXTURE_OBFUSCATE:-false}",
+		"idGenerationMode": "${FLAMEWORK_FIXTURE_IDMODE:-full}",
 		"optimizations": { "guardGenerationDedupLimit": "${FLAMEWORK_FIXTURE_DEDUP:-3}" },
 		"plugins": [{ "path": "./fieldInfoPlugin.cjs", "options": { "prefix": "fx" } }]
 	},

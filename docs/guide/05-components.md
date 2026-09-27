@@ -97,6 +97,24 @@ Register by glob when the components are spread across feature folders:
 ComponentPlugin.fromGlob("src/**/components");
 ```
 
+A module may include several component plugins -- a `fromPath` per folder, a `fromGlob`, one built
+by hand, in any mix -- and they share **one** `Components` for that module: every class any of them
+registers ends up in it, a component in one can link to a component in another, and
+`Dependency<Components>()` and constructor injection get that one. A class two plugins register is
+registered once, and kept when either registration's scope holds. A module that imports another
+keeps its own `Components` when it includes a component plugin of its own, and resolves the
+import's when it includes none.
+
+```ts
+Flamework.createModule()
+    .includePlugin(ComponentPlugin.fromPath("src/shared/components"))
+    .includePlugin(ComponentPlugin.fromPath("src/server/components"))
+    .ignite();
+```
+
+Path and glob registration find every component the modules there define, exported or not, the way
+`registerProviders` finds providers ([Providers](03-providers.md#how-it-actually-works)).
+
 As with providers, only classes decorated with `@Component()` **themselves** are registered; an
 exported but undecorated subclass is skipped, and `registerComponent` raises for one.
 
@@ -655,10 +673,12 @@ for.
   its guard rejects still takes the component down.
 - **A component with no `tag` can only be added by hand.**
 - **`@Component` classes are not providers.** They are not picked up by `registerProviders`, and
-  `registerComponents` will not pick up providers.
+  `registerComponents` will not pick up providers. `Dependency<T>()` and a provider's constructor
+  cannot take one either -- the transformer refuses both; get it from `Components` instead.
 - **Component dependencies are same-instance only.** There is no cross-instance dependency; a link
   is how you reach another instance.
-- **A linked component must be registered in the same plugin.** Igniting raises if it is not.
+- **A linked component must be registered in the same module**, by any of its component plugins.
+  Igniting raises if it is not.
 - **`addComponent` will not wait.** By hand, a link that has not resolved raises instead of yielding;
   through a tag, the component simply is not created until it has.
 - **A link is only kept current for a tag-driven component.** One added by hand is resolved once,
