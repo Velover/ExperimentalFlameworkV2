@@ -3,13 +3,18 @@
   "version": "2.0.0-alpha.3",
   "main": "out/init.luau",
   "types": "out/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Velover/ExperimentalFlameworkV2.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/Velover/ExperimentalFlameworkV2#readme",
+  "bugs": {
+    "url": "https://github.com/Velover/ExperimentalFlameworkV2/issues"
+  },
   "scripts": {
     "build": "rbxtsc",
     "watch": "rbxtsc -w"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/rbxts-flamework/core.git"
   },
   "files": [
     "out",

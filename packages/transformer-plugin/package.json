@@ -14,5 +14,14 @@
   "devDependencies": {
     "@types/node": "^16.11.1"
   },
-  "types": "out/index.d.ts"
+  "types": "out/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Velover/ExperimentalFlameworkV2.git",
+    "directory": "packages/transformer-plugin"
+  },
+  "homepage": "https://github.com/Velover/ExperimentalFlameworkV2#readme",
+  "bugs": {
+    "url": "https://github.com/Velover/ExperimentalFlameworkV2/issues"
+  }
 }

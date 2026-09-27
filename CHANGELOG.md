@@ -3,6 +3,15 @@
 Notable changes to the `@flamework-experimental` packages. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### core, components, networking, testing, transformer, transformer-plugin
+
+#### Changed
+
+- Each package.json links this repository, with the package's folder, plus its homepage and issues, so
+  npm shows them on the package page. core and transformer pointed at the original v1 repositories.
+
 ## 2026-09-27: core, components, networking and testing 2.0.0-alpha.3; transformer 2.0.0-alpha.4; transformer-plugin 2.0.0-alpha.2
 
 ### Upgrade notes

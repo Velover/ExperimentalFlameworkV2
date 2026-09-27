@@ -138,3 +138,24 @@ describe("package ids", () => {
 		).toBe(true);
 	});
 });
+
+describe("repository links", () => {
+	// npm shows these on each package's page. They point at this monorepo, with each package's folder,
+	// and not at the original v1 repositories the forked packages started from.
+	const REPO = "https://github.com/Velover/ExperimentalFlameworkV2";
+
+	test.each(["core", "components", "networking", "testing", "transformer", "transformer-plugin"])(
+		"%s links this repository",
+		(pkg) => {
+			const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "packages", pkg, "package.json"), "utf8")) as {
+				repository?: { type?: string; url?: string; directory?: string };
+				homepage?: string;
+				bugs?: { url?: string };
+			};
+
+			expect(manifest.repository).toEqual({ type: "git", url: `git+${REPO}.git`, directory: `packages/${pkg}` });
+			expect(manifest.homepage).toBe(`${REPO}#readme`);
+			expect(manifest.bugs).toEqual({ url: `${REPO}/issues` });
+		},
+	);
+});
