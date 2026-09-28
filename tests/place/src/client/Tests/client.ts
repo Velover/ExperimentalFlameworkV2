@@ -1,5 +1,14 @@
 import { Components } from "@flamework-experimental/components";
-import { Flamework, Module, OnInit, OnRender, OnStart, OnTick, Provider } from "@flamework-experimental/core";
+import {
+	Flamework,
+	Module,
+	OnInit,
+	OnRender,
+	OnStart,
+	OnTick,
+	Provider,
+	requireModules,
+} from "@flamework-experimental/core";
 import {
 	defer,
 	defineTests,
@@ -7,6 +16,7 @@ import {
 	expectArrayEqual,
 	expectDefined,
 	expectEqual,
+	expectThrows,
 	expectTrue,
 	test,
 } from "@flamework-experimental/testing";
@@ -43,6 +53,22 @@ export class ClientTests implements OnStart, OnRender, OnTick {
 				expectEqual(module, this.module, "the igniting module");
 				expectTrue(RunService.IsClient(), "running on the client");
 				expectDefined(Players.LocalPlayer, "a local player exists");
+			});
+
+			// The server's folders never replicate: the client is told so at once, not after a wait
+			// for a child that cannot arrive.
+			test("requireModules on a server folder says it is the server's, at once", () => {
+				const started = os.clock();
+				const message = expectThrows(() => requireModules("src/server/Required"), "a server folder");
+				expectTrue(
+					message.find(
+						`requireModules("src/server/Required"): the folder is in ServerScriptService, which does not replicate to clients`,
+						1,
+						true,
+					)[0] !== undefined,
+					message,
+				);
+				expectTrue(os.clock() - started < 1, "without waiting for the folder");
 			});
 
 			test("onRender fires on the client, where the server sees nothing", () => {

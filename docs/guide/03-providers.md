@@ -393,6 +393,11 @@ to get configuration into everything without a global.
   a test registers in a module of its own. Put that class in a folder no module registers, or inside
   the function that uses it. A class declared inside a function is found only through its file's
   exports.
+- **A path is resolved in the project that compiles it.** The transformer turns it into a Rojo
+  path with that project's Rojo file. So a published package cannot register its own folders:
+  `registerProviders("src/...")` in a package gets a path in the package's project, which a game's
+  place does not have, and fails at runtime. In a package, register classes one by one with
+  `registerClassProvider`. See [Macros › Paths](07-macros.md#paths).
 - **Path registration requires every ModuleScript in the folder**, so their import side effects
   run. A ModuleScript that throws while loading fails the ignition with its path and error, as in v1.
   Otherwise, a provider that silently failed to register would only show up later, as a missing

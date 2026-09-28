@@ -132,3 +132,44 @@ export const value = Flamework.env("FLAMEWORK_FIXTURE_SCOPES", computed);
 		expect(result.output).toContain("expects the fallback as a string literal");
 	});
 });
+
+describe("requireModules", () => {
+	// core exports it as a free function, a macro through its `@metadata macro` tag in core's
+	// declarations, as a game compiled against the published package sees it.
+	test("is given the folder's Rojo path, at a module's top level and in a provider", () => {
+		const source = normalize(emitted("requireModules"));
+
+		expect(source).toContain('local requiredAtLoad = requireModules("src/glob", { "out", "glob" })');
+		expect(source).toContain('requireModules("src/glob/target", { "out", "glob", "target" })');
+	});
+
+	test("fails the build on a path the Rojo project does not map, and says why", () => {
+		const result = compileProbe(
+			"requireModulesUnmapped",
+			`import { requireModules } from "@flamework-experimental/core";
+
+requireModules("elsewhere/commands");
+`,
+		);
+
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("Could not find Rojo data for 'elsewhere/commands'");
+		expect(result.output).toContain(
+			"It compiles to 'elsewhere/commands', and no $path in your Rojo project covers that",
+		);
+	});
+
+	test("fails the build on a path that is not a string literal", () => {
+		const result = compileProbe(
+			"requireModulesComputed",
+			`import { requireModules } from "@flamework-experimental/core";
+
+declare const folder: string;
+requireModules(folder);
+`,
+		);
+
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("Path is invalid, expected string literal and got: string");
+	});
+});

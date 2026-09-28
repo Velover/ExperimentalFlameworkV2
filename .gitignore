@@ -13,6 +13,9 @@ flamework.build
 packages/*/README.md
 !packages/testing/README.md
 
+# The guide, copied into core prior to publishing (scripts/copy-docs.mjs)
+packages/core/docs
+
 # Yarn
 .pnp.*
 .yarn/*

@@ -9,6 +9,7 @@ import {
 	OnStart,
 	Provider,
 	Reflect,
+	requireModules,
 	requireModulesInPath,
 	resolveRbxPath,
 } from "@flamework-experimental/core";
@@ -26,6 +27,7 @@ import { ServerScriptService, Workspace } from "@rbxts/services";
 import { DiscoveryExported } from "server/Discovery/exported";
 import { discoveryIds, makeDiscoveryLocal } from "server/Discovery/hidden";
 import { deepIds } from "server/Discovery/nested/deep";
+import { requiredLog } from "server/Fixtures/requiredLog";
 import { FwTestService } from "server/Features/Testing/Services/FwTestService";
 
 /**
@@ -218,6 +220,56 @@ export class PathTests implements OnStart {
 			test("requireModulesInPath still hands back what each module exports", () => {
 				const loaded = requireModulesInPath(DISCOVERY_PATH);
 				expectEqual(loaded.size(), 6, "one value per module that exports something");
+			});
+
+			// core's built-in macro for v1's `Flamework.addPaths` on a folder that holds no providers,
+			// called from game code: the build turns the source path into the folder's Rojo path.
+			// `src/server/Required` is in no registered folder, so nothing has required it before.
+			test("requireModules requires every module under a folder once, and returns what they export", () => {
+				const loaded = requireModules("src/server/Required");
+
+				const ran = [...requiredLog].sort().join(", ");
+				expectEqual(ran, "deep, first, silent", "every module ran once");
+				expectEqual(loaded.size(), 2, "one value per module that exports something; silent exports nothing");
+				expectTrue(
+					loaded.some((value) => (value as { first?: string }).first === "first"),
+					"the first module's exports",
+				);
+				expectTrue(
+					loaded.some((value) => (value as { deep?: string }).deep === "deep"),
+					"the nested module's exports",
+				);
+
+				// Through the module cache: a second call returns the same exports and runs nothing again.
+				const again = requireModules("src/server/Required");
+				expectEqual([...requiredLog].sort().join(", "), ran, "no module ran twice");
+				expectTrue(
+					again.size() === loaded.size() && again.every((value) => loaded.includes(value)),
+					"the same exports",
+				);
+			});
+
+			test("requireModules raises on a folder that is not in the place, naming the missing part", () => {
+				const message = expectThrows(() => requireModules("src/server/NotInThePlace"), "a missing folder");
+				expectTrue(
+					contains(message, `requireModules("src/server/NotInThePlace"): the folder is not in the place`),
+					message,
+				);
+				expectTrue(contains(message, "The build put it at ServerScriptService/TS/NotInThePlace"), message);
+				expectTrue(contains(message, "ServerScriptService.TS has no child named 'NotInThePlace'"), message);
+			});
+
+			test("requireModules on a client folder says it is the client's, at once", () => {
+				const started = os.clock();
+				const message = expectThrows(() => requireModules("src/client/Core"), "a client folder");
+				expectTrue(
+					contains(
+						message,
+						`requireModules("src/client/Core"): the folder is in StarterPlayer/StarterPlayerScripts, which only a client requires from`,
+					),
+					message,
+				);
+				expectTrue(os.clock() - started < 1, "without waiting for the folder");
 			});
 
 			// v1 built any decorated class lazily; v2 resolves registered providers only. A class that

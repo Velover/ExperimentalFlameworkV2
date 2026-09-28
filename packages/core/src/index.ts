@@ -4,6 +4,7 @@ export { Reflect } from "./reflect";
 export { Provider } from "./provider";
 export { Injectable } from "./injectable";
 export { Dependency } from "./dependency";
+export { requireModules } from "./utility/getClassesInPath";
 export { Serialization } from "./serialization/types";
 
 export type { ProviderDecoratorConfig } from "./provider";

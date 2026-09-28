@@ -12,7 +12,7 @@ be built into that container is now a **plugin**.
 | `rbxts-transformer-flamework` | `@flamework-experimental/transformer` (step 1) |
 | `@Service()` / `@Controller()` | `@Provider()` on both realms |
 | `Flamework.addPaths("src/services")` | `.registerProviders("src/services")`; like v1, it finds the classes a module defines whether it exports them or not |
-| `Flamework.addPaths(...)` to load a folder for what its modules do as they load | `requireModulesInPath` in a macro of your own; see [Macros › Paths](07-macros.md#paths) |
+| `Flamework.addPaths(...)` to load a folder for what its modules do as they load | `requireModules("src/server/commands")`, built into core; nothing for a folder inside a registered folder, which registration already loads (step 8) |
 | `Flamework.addPathsGlob("src/**/services")` | `.registerProvidersGlob("src/**/services")` / `ComponentPlugin.fromGlob(...)` |
 | `@Optional()` / `includeOptionalClass` | `@Provider({ lazy: true })`, constructed when first resolved |
 | `flamework.json` `profiling` | `flamework.config.json` `core.profiling`, or `createLifecyclePlugin({ profiling })` per module |
@@ -79,8 +79,10 @@ releases depend on each other. Then:
   file rejects keys it does not know. Nothing reads `flamework.json` any more. If you have no
   `flamework.config.json` yet and `tsconfig.json` is at the package root, the first build creates
   one with just a `$schema` line, so your editor lists every option.
-- **Rojo.** Where the project file maps `node_modules/@flamework`, map each runtime package under
-  `@flamework-experimental` instead. Don't map the whole folder, which holds the transformer too. See
+- **Rojo.** Where the project file maps `node_modules/@flamework`, map
+  `node_modules/@flamework-experimental` instead. That one line needs the transformer
+  2.0.0-alpha.5 or later, which maps itself to an empty Folder. With an older transformer, map each
+  runtime package by name, or the transformer's files reach the place. See
   [Getting started › Rojo](01-getting-started.md#rojo).
 - **Build output.** Delete `out/` before the first v2 build. The roblox-ts template builds
   incrementally, with its `tsbuildinfo` in `out/`. An incremental build would start from v1's
@@ -175,8 +177,25 @@ nothing else:
 See [Providers](03-providers.md#asking-for-something-that-is-not-a-provider).
 
 v1's `Flamework.resolveDependency(id)` took the id as a string, and libraries built on v1 call it:
-`useFlameworkDependency` in `@rbxts/flamework-react-utils`, for one. In v2 the id is `Dependency`'s
-second argument. `Dependency<T>(undefined, id)` answers from the default module, and
+`useFlameworkDependency` in `@rbxts/flamework-react-utils`, for one. In game code, a plain
+`Dependency<T>()` is the whole replacement. Call it where you called the hook, in the component
+body:
+
+```ts
+// v1
+const economy = useFlameworkDependency<Economy>();
+
+// v2
+const economy = Dependency<Economy>();
+```
+
+For a class provider, the usual kind, this is a cached lookup once the provider exists: it allocates
+nothing, and every render gets the same object, so it needs no `useMemo`. A function provider is
+different: its callback runs on every `Dependency` call, so each render gets what the callback
+returns then.
+
+The id form is for code that has the id as a string, such as a library. The id is `Dependency`'s
+second argument: `Dependency<T>(undefined, id)` answers from the default module, and
 `module.resolveDependency<T>(id)` from a module you hold. A macro of your own gets the id of a type
 argument with `Modding.Target.Id<T>`:
 
@@ -303,7 +322,11 @@ export class Lobby implements OnStart {
 **Components: ask `Components`.** Its polymorphic methods take an interface and answer at any time.
 `getAllComponents<T>()` gives the components that exist now. `onComponentAdded<T>(cb)` and
 `onComponentRemoved<T>(cb)` report the ones that come and go. Unlike v1's `onListenerAdded`,
-`onComponentAdded` does not replay the ones that already exist, so read those first:
+`onComponentAdded` does not replay the ones that already exist.
+
+In an eager provider's `onStart`, subscribing is enough. Tagged instances get their components
+after every provider's `onStart` (step 6), so no tagged instance has its component yet, and
+`onComponentAdded` hears about each one as it is built:
 
 ```ts
 @Provider()
@@ -311,7 +334,6 @@ export class PriceTags implements OnStart {
     constructor(private readonly components: Components) {}
 
     public onStart() {
-        for (const tag of this.components.getAllComponents<ShowsPrice>()) this.show(tag);
         this.components.onComponentAdded<ShowsPrice>((tag) => this.show(tag));
         this.components.onComponentRemoved<ShowsPrice>((tag) => this.hide(tag));
     }
@@ -319,6 +341,15 @@ export class PriceTags implements OnStart {
     private show(tag: ShowsPrice) {}
     private hide(tag: ShowsPrice) {}
 }
+```
+
+Read the existing ones first when you subscribe after ignition: from a `@Provider({ lazy: true })`
+first resolved later, after a yield in `onStart`, or from an event handler. By then components
+exist, and only `getAllComponents<T>()` gives them:
+
+```ts
+for (const tag of this.components.getAllComponents<ShowsPrice>()) this.show(tag);
+this.components.onComponentAdded<ShowsPrice>((tag) => this.show(tag));
 ```
 
 A generic helper of your own (an `onListenerAdded<T>` kept for the old call sites, say) is a macro.
@@ -371,8 +402,12 @@ of your own so callers can pass `"src/server/commands"`; [Macros › Paths](07-m
 one.
 
 Some folders were loaded in v1 with `Flamework.addPaths` only for what their ModuleScripts do as
-they load: modules that register themselves with a library, say. For those, use
-`requireModulesInPath` behind the same kind of macro.
+they load: modules that register themselves with a library, say. Load those with
+`requireModules("src/server/commands")`, which core has built in; see
+[Macros › Paths](07-macros.md#paths). A folder inside a folder you register needs nothing:
+registration already requires every ModuleScript under it (see
+[Providers › How it actually works](03-providers.md#how-it-actually-works)). That was true in v1 too:
+once `addPaths` had loaded the outer folder, an `addPaths` of a folder inside it did nothing.
 
 Property and method decorators work the same way, with
 `Reflect.defineMetadata(ctor, key, value, propertyName)`.
@@ -524,8 +559,9 @@ values are as they were. Middleware, connections and handlers changed ([step 10]
 - Did anything count on a networking handler going away with the script that connected it?
   Handlers are no longer tied to that script's lifetime; a roblox-ts project does not destroy its
   scripts, so nothing changes for a normal project.
-- Is the whole `node_modules/@flamework-experimental` folder mapped in your Rojo project? Map the
-  runtime packages one by one, or ignore the transformer.
+- Is the whole `node_modules/@flamework-experimental` folder mapped in your Rojo project, with a
+  transformer older than 2.0.0-alpha.5? Map the runtime packages one by one, or update the
+  transformer.
 - Do any constructors yield? v1 tolerated that; now it stalls ignition.
 - Is there exactly one `ignite()` per realm? Two containers do not share providers, and
   `Dependency<T>()` answers from the first.

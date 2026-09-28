@@ -131,33 +131,69 @@ keysOf<{ a: 1; b: 2 }>(); // { "a", "b" }
 
 ### Paths
 
-A macro can take a source path, the way `registerProviders` does. Give it a parameter typed
+Core has one path macro built in besides `registerProviders`: `requireModules`. It requires every
+ModuleScript in a folder, for what the modules do as they load. This is what v1's
+`Flamework.addPaths` did for a folder of modules that register themselves with a library, such as
+commands:
+
+```ts
+import { requireModules } from "@flamework-experimental/core";
+
+requireModules("src/server/commands");
+```
+
+```lua
+requireModules("src/server/commands", { "ServerScriptService", "TS", "commands" })
+```
+
+- It takes the same source paths as `registerProviders`, and works in any module of your game: an
+  entry point, a provider's `onStart`.
+- It requires the ModuleScripts at and under the folder, in tree order. It returns what they
+  export, leaving out the ones that export nothing.
+- Each module runs once. Calling it again returns the same exports.
+- A folder inside a folder that `registerProviders` registers needs no call: registration already
+  requires every ModuleScript under it.
+- A folder that is not in the place raises `requireModules("..."): the folder is not in the place`,
+  and the message names the part of the path that is missing. The folder gets five seconds to
+  appear first, once the place has loaded.
+- A folder of the other realm raises at once and says so: a server folder required on a client, or
+  a client folder required on the server.
+
+A macro of your own can take a source path too. Give it a parameter typed
 `Modding.Intrinsic<"path", [T], string[]>`. That parameter receives the folder the caller's string
 literal `T` names, as a Rojo path: an array of instance names from the root of the tree.
 
-To use the path, core exports the functions `registerProviders` is built on:
+To use the path, core exports the functions `registerProviders` and `requireModules` are built on:
 
 - `requireModulesInPath(path)` requires every ModuleScript at and under the path, and returns what
   they export.
 - `getClassesInPath(path)` returns the Flamework classes those ModuleScripts define.
 
+This macro finds the command classes in a folder by metadata of your own (see
+[custom decorators](10-migrating-from-v1.md#8-custom-decorators)):
+
 ```ts
-import { getClassesInGlob, Modding, requireModulesInPath } from "@flamework-experimental/core";
+import { getClassesInGlob, getClassesInPath, Modding, Reflect } from "@flamework-experimental/core";
 
 /**
- * Requires every ModuleScript under a source folder, for what they do as they load.
+ * The classes under a source folder that carry a command name, by name.
  *
  * @metadata macro
  */
-export function loadFolder<T extends string>(_path: T, path?: Modding.Intrinsic<"path", [T], string[]>) {
-    return requireModulesInPath(path!);
+export function commandsIn<T extends string>(_path: T, path?: Modding.Intrinsic<"path", [T], string[]>) {
+    const commands = new Map<string, object>();
+    for (const ctor of getClassesInPath(path!)) {
+        const name = Reflect.getOwnMetadata<string>(ctor, "myGame:command");
+        if (name !== undefined) commands.set(name, ctor);
+    }
+    return commands;
 }
 
-loadFolder("src/server/commands");
+commandsIn("src/server/commands");
 ```
 
 ```lua
-loadFolder("src/server/commands", { "ServerScriptService", "TS", "commands" })
+commandsIn("src/server/commands", { "ServerScriptService", "TS", "commands" })
 ```
 
 `Modding.Intrinsic<"pathglob", [T], string>` does the same for a glob. The glob is matched against
@@ -188,6 +224,11 @@ The rules are the same as for `registerProviders`:
   Rojo path.
 - A `path` folder must be in your Rojo project. Otherwise you get
   `Could not find Rojo data for '...'`.
+- A `path` is resolved in the project that compiles the call, with that project's Rojo file. So a
+  path macro called inside a published package (`requireModules`, `registerProviders`, one of your own)
+  gets a path in the package's own project, such as `{ "out", "commands" }`. A game's place has no
+  such path, so the call fails when it runs. A package without a Rojo project fails to build
+  instead, with `No Rojo project file was found`.
 - What a glob matched is written to `include/flamework/globs.json`, which only a game project gets.
   So a glob macro called from a published package raises
   `Flamework has no paths for the glob '...'` when it runs.

@@ -3,11 +3,14 @@ import {
 	Flamework,
 	Reflect,
 	getClassesInPath,
+	requireModules,
 	requireModulesInPath,
 	resolveRbxPath,
 } from "@flamework-experimental/core";
+import { RunService } from "@rbxts/services";
 import { ExportedProvider } from "../fixtures/discovery/exported";
 import { hiddenIds, makeLocalProvider } from "../fixtures/discovery/hidden";
+import { requiredLog } from "../fixtures/requiredLog";
 import { expectDefined, expectEqual, expectFalse, expectThrows, expectTrue, suite } from "../testkit";
 
 /** Internal and stripped from the package's types, so reached through a cast, as `ignite` is. */
@@ -23,6 +26,19 @@ const DISCOVERY = ["fixtures", "discovery"];
 
 function underSpecs<T>(callback: () => T): T {
 	harness.__setPathRoot(SPECS_OUT);
+	try {
+		return callback();
+	} finally {
+		harness.__setPathRoot(undefined);
+	}
+}
+
+/**
+ * The specs package's own node, the root of its Rojo project, which a path the transformer builds from
+ * a source path (`requireModules("src/...")`) starts at: `{ "out", ... }`.
+ */
+function underPackage<T>(callback: () => T): T {
+	harness.__setPathRoot(SPECS_OUT.Parent);
 	try {
 		return callback();
 	} finally {
@@ -133,6 +149,79 @@ export = suite("paths", [
 				loaded.some((value) => (value as { ExportedProvider?: object }).ExportedProvider === ExportedProvider),
 				"the exported module's exports",
 			);
+		},
+	],
+	[
+		// core's built-in macro for v1's `Flamework.addPaths` on a folder that holds no providers. The
+		// transformer turns the source path into the folder's Rojo path, as it does here.
+		"requireModules requires every module under a folder once, and returns what they export",
+		() => {
+			const loaded = underPackage(() => requireModules("src/fixtures/required"));
+
+			// In tree order: first, then nested/deep, then silent, which exports nothing.
+			expectEqual(requiredLog.join(", "), "first, deep, silent", "every module ran, in tree order");
+			expectEqual(loaded.size(), 2, "one value per module that exports something");
+			expectEqual((loaded[0] as { first?: string }).first, "first", "the first module's exports");
+			expectEqual((loaded[1] as { deep?: string }).deep, "deep", "the nested module's exports");
+
+			// Through the module cache: a second call returns the same exports and runs nothing again.
+			const again = underPackage(() => requireModules("src/fixtures/required"));
+			expectEqual(requiredLog.join(", "), "first, deep, silent", "no module ran twice");
+			expectTrue(again[0] === loaded[0] && again[1] === loaded[1], "the same exports");
+		},
+	],
+	[
+		"requireModules raises on a folder that is not in the place, naming the missing part",
+		() => {
+			const message = expectThrows(
+				() => underPackage(() => requireModules("src/fixtures/notThere")),
+				"a folder that is not there",
+			);
+			expectTrue(
+				contains(message, `requireModules("src/fixtures/notThere"): the folder is not in the place`),
+				message,
+			);
+			expectTrue(contains(message, "The build put it at out/fixtures/notThere"), message);
+			expectTrue(contains(message, "has no child named 'notThere'"), message);
+		},
+	],
+	[
+		// A folder only the other realm can require raises at once and says so, rather than timing
+		// out on a server container the client cannot see, or failing inside the path walk. Paths
+		// under `game`, passed as the transformer would generate them.
+		"requireModules says when a folder belongs to the other realm",
+		() => {
+			if (RunService.IsClient()) {
+				const message = expectThrows(
+					() => requireModules("src/server/commands", ["ServerScriptService", "TS", "commands"] as never),
+					"a server folder on a client",
+				);
+				expectTrue(
+					contains(
+						message,
+						`requireModules("src/server/commands"): the folder is in ServerScriptService, which does not replicate to clients. Call requireModules for it on the server.`,
+					),
+					message,
+				);
+			} else {
+				const message = expectThrows(
+					() =>
+						requireModules("src/client/commands", [
+							"StarterPlayer",
+							"StarterPlayerScripts",
+							"TS",
+							"commands",
+						] as never),
+					"a client folder on the server",
+				);
+				expectTrue(
+					contains(
+						message,
+						`requireModules("src/client/commands"): the folder is in StarterPlayer/StarterPlayerScripts, which only a client requires from`,
+					),
+					message,
+				);
+			}
 		},
 	],
 	[

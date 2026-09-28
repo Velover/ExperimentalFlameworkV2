@@ -14,11 +14,13 @@
   },
   "scripts": {
     "build": "rbxtsc",
-    "watch": "rbxtsc -w"
+    "watch": "rbxtsc -w",
+    "prepack": "node ../../scripts/copy-readme.mjs && node ../../scripts/copy-docs.mjs"
   },
   "files": [
     "out",
-    "flamework.build"
+    "flamework.build",
+    "docs"
   ],
   "publishConfig": {
     "access": "public"

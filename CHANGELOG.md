@@ -5,6 +5,51 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ## Unreleased
 
+### core
+
+#### Added
+
+- `requireModules("src/server/commands")`, a built-in macro for v1's `Flamework.addPaths` on a folder
+  of modules that do their work as they load, such as commands that register themselves with a
+  library. It requires every ModuleScript at and under the folder, in tree order, and returns what
+  they export, leaving out the ones that export nothing; each module runs once, however often it is
+  required. It takes the same source paths as `registerProviders` and works in any module of a game.
+  A folder inside a registered folder needs no call: registration already requires every
+  ModuleScript under it. A folder missing from the place raises
+  `requireModules("..."): the folder is not in the place`, naming the part of the path that is
+  missing, after waiting five seconds once the place has loaded; a folder of the other realm (a
+  server folder on a client, a client folder on the server) raises at once and says which realm to
+  call it from.
+- The guide ships in the package, for the installed version: `docs/README.md` (the index) and
+  `docs/guide/*.md`. Links between the pages stay relative; links to the rest of the repository
+  (reference, testing docs, changelog, packages) point at GitHub. core's `prepack` makes the copy,
+  so every `npm pack`, `bun pm pack` and publish carries the docs as they are. Rojo skips the
+  Markdown, and a place gets two empty Folders for it, `core.docs` and `core.docs.guide`.
+
+### transformer, transformer-plugin
+
+#### Added
+
+- Each package ships a `default.project.json` that maps it to an empty Folder, so a game can map the
+  whole `node_modules/@flamework-experimental` folder in one line
+  (`"@flamework-experimental": { "$path": "node_modules/@flamework-experimental" }`): the
+  transformer's three JSON schemas no longer arrive in the place as ModuleScripts. With an older
+  transformer, keep mapping the runtime packages by name.
+
+### transformer
+
+#### Changed
+
+- `Could not find Rojo data for '...'` adds what the path compiles to and that no `$path` in the Rojo
+  project covers it, or that no Rojo project file was found.
+
+### core, components, networking, transformer, transformer-plugin
+
+#### Changed
+
+- The README each package ships points its links to files the package does not ship at GitHub, so
+  they work from `node_modules` and on npm; core's link to its own `docs/README.md` stays relative.
+
 ### core, components, networking, testing, transformer, transformer-plugin
 
 #### Changed

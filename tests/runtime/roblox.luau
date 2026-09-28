@@ -267,6 +267,13 @@ function roblox.create(initialRealm: "Server" | "Client")
 
 	game.Workspace = Workspace
 
+	--- As the engine answers in a running place: `true` on a client once its initial replication is done,
+	--- which is before a client's entry point runs, and `false` on the server, where it stays `false`
+	--- (measured in Play Solo at script start, after 10 s and after 87 s).
+	function game:IsLoaded()
+		return realm == "Client"
+	end
+
 	env.game = game
 
 	--- A lazily-populated `Enum` global. Enum items only need identity and a name here, which is

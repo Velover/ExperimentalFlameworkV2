@@ -40,7 +40,7 @@ Everything is a method on `target`, and everything registers into the module bei
 | `provideInstance(value)` | Hands the module an object under its type's id. Providers inject it; `resolveDependency` finds it. |
 | `registerClassProvider(Class, options?)` | Registers a provider, exactly as the module builder would. |
 | `registerProvider<T>(config)` | The same, for a function or alias provider. |
-| `registerProviders(path, options?)` / `registerProvidersGlob(glob, options?)` | Registers every `@Provider()` class the ModuleScripts under a folder define, exported or not, as the module builder does. How a plugin ships a folder of providers. When the options' scope condition does not hold, the folder is not looked up at all. |
+| `registerProviders(path, options?)` / `registerProvidersGlob(glob, options?)` | Registers every `@Provider()` class the ModuleScripts under a folder define, exported or not, as the module builder does. How a plugin in your game's source ships a folder of providers: the path is resolved in the project that compiles the plugin, so a plugin published as a package cannot use it ([Macros › Paths](07-macros.md#paths)). When the options' scope condition does not hold, the folder is not looked up at all. |
 | `includePlugin(plugin, options?)` | Includes another plugin, set up now, before this one continues. |
 | `onPreIgnite(cb, options?)` | Runs `cb` before the module's providers are constructed. |
 | `onPostIgnite(cb, options?)` | Runs `cb` after every provider has been constructed. |

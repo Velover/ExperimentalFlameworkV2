@@ -56,8 +56,8 @@ register from have to be in the project file. A default roblox-ts project maps a
 covers them.
 
 The packages are ModuleScripts like any `@rbxts` package. They live next to the `@rbxts` packages,
-under `ReplicatedStorage.rbxts_include.node_modules`. Map each runtime package you installed there,
-by name:
+under `ReplicatedStorage.rbxts_include.node_modules`. Map the whole `@flamework-experimental` folder
+there, in one line:
 
 ```json
 {
@@ -74,12 +74,7 @@ by name:
         "node_modules": {
           "$className": "Folder",
           "@rbxts": { "$path": "node_modules/@rbxts" },
-          "@flamework-experimental": {
-            "$className": "Folder",
-            "core": { "$path": "node_modules/@flamework-experimental/core" },
-            "components": { "$path": "node_modules/@flamework-experimental/components" },
-            "networking": { "$path": "node_modules/@flamework-experimental/networking" }
-          }
+          "@flamework-experimental": { "$path": "node_modules/@flamework-experimental" }
         }
       },
       "TS": { "$path": "out/shared" }
@@ -93,23 +88,35 @@ by name:
 }
 ```
 
-`core` is always needed. Add `components`, `networking` and `testing` when you install them, and
-leave out the ones you do not use. Two entries are the same as in the roblox-ts template:
+Each package you install arrives in the place with its `out` folder: `core`, and `components`,
+`networking` and `testing` when you install them. `core` also ships this guide, as Markdown, which
+Rojo skips; its two folders arrive as empty Folders, `core.docs` and `core.docs.guide`. The
+transformer is installed in the same folder, and it arrives as one empty Folder: it ships a
+`default.project.json`, which Rojo uses in place of the package's folder. Two entries are the same as
+in the roblox-ts template:
 
 - `include` holds the roblox-ts runtime and the files Flamework generates when you build
   (`include/flamework`).
 - `globIgnorePaths` stops each package's `package.json` from becoming a ModuleScript.
 
-**Do not map the whole `node_modules/@flamework-experimental` folder.** The transformer is installed
-there too, so Rojo would copy it into `ReplicatedStorage`, which replicates to every client. Rojo
-skips its JavaScript, but its folders arrive as empty Folders and its three JSON schemas arrive as
-ModuleScripts (`flamework-schema`, `flamework.config.schema`, `rojo-schema`). In v1 this was
-harmless, because v1's transformer, `rbxts-transformer-flamework`, was outside the `@flamework`
-scope. If you would rather map the whole folder, leave the transformer out of it:
+**The one line needs `@flamework-experimental/transformer` 2.0.0-alpha.5 or later.** An older
+transformer ships no `default.project.json`, so Rojo would copy it into `ReplicatedStorage`, which
+replicates to every client. Rojo skips its JavaScript, but its folders arrive as empty Folders and
+its three JSON schemas arrive as ModuleScripts (`flamework-schema`, `flamework.config.schema`,
+`rojo-schema`). With an older transformer, map each runtime package by name instead. This form works
+with every version:
 
 ```json
-"globIgnorePaths": ["**/package.json", "**/tsconfig.json", "node_modules/@flamework-experimental/transformer"]
+"@flamework-experimental": {
+  "$className": "Folder",
+  "core": { "$path": "node_modules/@flamework-experimental/core" },
+  "components": { "$path": "node_modules/@flamework-experimental/components" },
+  "networking": { "$path": "node_modules/@flamework-experimental/networking" }
+}
 ```
+
+`core` is always needed. Add `components`, `networking` and `testing` when you install them, and
+leave out the ones you do not use.
 
 If a folder you register from is not in the project file, the build fails with `Could not find Rojo
 data for 'src/...'`. If a package your code imports is not mapped, roblox-ts fails the build with
@@ -213,6 +220,10 @@ Or wrap it in a plugin that both include; see [Plugins](08-plugins.md).
   `Path is invalid, expected string literal`.
 - **The path is a source path, not a Rojo path.** Write `"src/server/services"`, not
   `"ServerScriptService/TS/services"`.
+- **The path is resolved in the project that compiles the call**, with that project's Rojo file. So
+  a published package cannot register its own folders: its `registerProviders("src/...")` gets a path
+  in the package's project, which a game's place does not have, and fails at runtime. In a package,
+  register classes one by one with `registerClassProvider`.
 - **Providers are found where they are defined.** Registration requires each ModuleScript under the
   folder. It takes every class the ModuleScript defines at its top level, exported or not, as v1
   did. A class declared inside a function is found only if its file exports it.
@@ -229,7 +240,8 @@ Or wrap it in a plugin that both include; see [Plugins](08-plugins.md).
 | `class 'X' is missing the @Provider() decorator` | `registerClassProvider`/`registerProvider` was given an undecorated class. |
 | `class 'X' is missing the @Provider() decorator: it inherits one from a parent class` | The class extends a provider but is not decorated itself. |
 | `Flamework has no paths for the glob '...'` | A glob registration (`registerProvidersGlob`, `ComponentPlugin.fromGlob`, ...) in a package, the include directory not in the Rojo project, a string passed to `getGlobPaths`/`getClassesInGlob` that no glob macro made, or a `globs.json` from another build. A glob that matches no files does not raise this. It registers nothing, and the build prints a warning where it is used. |
-| `ServerScriptService.TS.services.X failed to load (Nms): ...` | A ModuleScript under a registered path raised an error while being required. |
+| `ServerScriptService.TS.services.X failed to load (Nms): ...` | A ModuleScript under a registered path, or under a folder given to `requireModules`, raised an error while being required. |
+| `requireModules("..."): the folder is not in the place` | The folder has no modules, so roblox-ts emitted nothing for it; or it was moved or renamed after the build; or the Rojo project the place was built from leaves it out. The message names the part of the path that is missing. See [Macros › Paths](07-macros.md#paths). |
 | `module '...' has been extinguished, cannot ...` | Something resolved from, or created an instance on, a module after `extinguish()`. |
 | `provider ID was registered more than once: ...` | The same class was registered twice, often by two overlapping `registerProviders` paths. Raised at ignition. |
 | `could not resolve dependency '...': it is registered but inactive` | The class is tied to a [scope](11-scopes.md) that this build does not have active. |

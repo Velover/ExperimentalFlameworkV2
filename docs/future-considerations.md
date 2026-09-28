@@ -508,3 +508,15 @@ Edge cases found and deliberately left alone, because the fix would cost more th
   `"table"`; `GetAttribute` returns the same handle each read; a `task.defer` chain outside a deferred
   batch is not capped at 80.
 - **docs:** the harness sections of `docs/reference/internals.md` still describe the old harness.
+- **core, `requireModules`:** from a StarterCharacterScripts folder the server's message names the
+  client, but a client refuses that folder too ("StarterPlayer only supports StarterPlayerScripts").
+  The other-realm check and `findRbxPath` branch on `IsClient()` alone, which is also true in Studio's
+  Run mode; core never loads there today, because roblox-ts's `TS.getModule` waits on `game.Loaded`.
+  `findRbxPath`'s own `game.Loaded` wait cannot be reached from game code for the same reason.
+- **core's shipped docs:** links to the rest of the repository point at `blob/HEAD`, not at the
+  installed version, so they can drift after a release. `scripts/links.mjs` does not treat `\r\n\r\n`
+  as a paragraph end, treats 4-space indented code as prose, and knows only inline links; the docs
+  use none of these. Repacking core from `node_modules` fails on its `prepack` (`../../scripts` is not
+  there; `--ignore-scripts` works), and core was never installable from git (no `out/` in git).
+- **harness:** `WaitForChild` with a timeout returns nil at once instead of yielding up to the
+  timeout for a child that appears meanwhile.

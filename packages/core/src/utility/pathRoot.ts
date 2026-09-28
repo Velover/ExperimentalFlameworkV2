@@ -46,12 +46,16 @@ export function getPathRoot(): Instance {
 }
 
 /**
- * Walks a compile-time path from {@link getPathRoot}, waiting for each child in turn.
+ * Walks a compile-time path from {@link getPathRoot}, asking `child` for each segment in turn, and
+ * stops at the first segment it has no instance for.
  *
  * Under `game` the first segment names a service, and `StarterPlayer/StarterPlayerScripts` is
  * answered from the local player's `PlayerScripts`, which is where that content actually runs.
  */
-export function resolveRbxPath(rbxPath: readonly string[]): Instance {
+function walkRbxPath(
+	rbxPath: readonly string[],
+	child: (parent: Instance, name: string) => Instance | undefined,
+): { found: Instance; missing?: string } {
 	// Copied so that a generated path literal is not consumed by this call.
 	const path = [...rbxPath];
 
@@ -70,10 +74,47 @@ export function resolveRbxPath(rbxPath: readonly string[]): Instance {
 	}
 
 	for (const segment of path) {
-		node = node.WaitForChild(segment);
+		const found = child(node, segment);
+		if (found === undefined) {
+			return { found: node, missing: segment };
+		}
+
+		node = found;
 	}
 
-	return node;
+	return { found: node };
+}
+
+/**
+ * Walks a compile-time path from {@link getPathRoot}, waiting for each child in turn.
+ *
+ * Under `game` the first segment names a service, and `StarterPlayer/StarterPlayerScripts` is
+ * answered from the local player's `PlayerScripts`, which is where that content actually runs.
+ */
+export function resolveRbxPath(rbxPath: readonly string[]): Instance {
+	return walkRbxPath(rbxPath, (parent, name) => parent.WaitForChild(name)).found;
+}
+
+/**
+ * Walks a compile-time path as {@link resolveRbxPath} does, but gives up on a child that is not
+ * there instead of waiting for it forever. A client still loading the place waits for it to load
+ * first, since the place's content arrives as it loads; after that, a missing child is given
+ * `timeout` seconds to appear.
+ *
+ * Returns the instance the path names, or the deepest instance it found and the name missing below
+ * it.
+ */
+export function findRbxPath(rbxPath: readonly string[], timeout: number) {
+	return walkRbxPath(rbxPath, (parent, name) => {
+		const child = parent.FindFirstChild(name);
+		if (child !== undefined) return child;
+
+		if (RunService.IsClient() && !game.IsLoaded()) {
+			game.Loaded.Wait();
+		}
+
+		return parent.WaitForChild(name, timeout);
+	});
 }
 
 /**

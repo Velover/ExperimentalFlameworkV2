@@ -161,10 +161,12 @@ function methods:FindFirstAncestorOfClass(className: string): Instance?
 	return nil
 end
 
---- Non-yielding: the specs build their trees up front, so a missing child is a spec bug.
-function methods:WaitForChild(name: string): Instance
+--- Non-yielding: the specs build their trees up front, so a missing child is a spec bug -- unless
+--- the caller gave a timeout, which is a caller ready for it not to come: `nil` at once, as the
+--- engine returns `nil` once the timeout is up.
+function methods:WaitForChild(name: string, timeout: number?): Instance?
 	local child = self:FindFirstChild(name)
-	if not child then
+	if not child and timeout == nil then
 		error(`harness: WaitForChild('{name}') on '{self:GetFullName()}' has no such child`, 0)
 	end
 	return child

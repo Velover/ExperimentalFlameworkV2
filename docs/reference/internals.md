@@ -397,6 +397,15 @@ identifier and was not among them (`export =`, a re-export, a class compiled by 
 wrote no record), each class once. `requireModulesInPath` is the loading half and still returns
 exports only.
 
+`requireModules` is the game-facing macro over that half: a free function in core's exports whose
+`@metadata macro` tag reaches the transformer through core's declarations, as `Dependency`'s does.
+It walks the path with `findRbxPath` rather than `resolveRbxPath`: `FindFirstChild` first, then,
+once the place has loaded (`game.Loaded` on a client still loading), `WaitForChild` with a
+five-second timeout, and a missing segment raises with the source path, the Rojo path and the
+instance that lacks the child. Before walking, a path under `game` into the other realm's
+containers (`ServerScriptService`/`ServerStorage` on a client, `StarterPlayer` on the server) raises
+at once, naming the realm to call it from.
+
 Every path and glob registration form first asks `holdsCondition` of its own options: the module
 builder's, a plugin target's and `ComponentPlugin`'s. When the condition does not hold, it records a
 `LeftOutRegistration` and returns before `getClassesInPath` or `getClassesInGlob`. The scopes are
@@ -1084,6 +1093,14 @@ it before it ends.
 - There is no v1 → v2 migration codemod; see [migrating from v1](../guide/10-migrating-from-v1.md).
 - `scripts/copy-readme.mjs` copies the root README into every package at publish time, and the root
   README now documents the monorepo's development workflow rather than the framework.
+  `scripts/copy-docs.mjs` (`bun run prepare:docs`, part of `prepare:publish`, and core's own
+  `prepack`, which `npm pack`/`bun pm pack` and the publishes run) copies `docs/README.md` and
+  `docs/guide` into `packages/core/docs`. Both scripts point every link to a file the package does
+  not ship at GitHub, and leave code fences and code spans alone (`scripts/links.mjs`). core ships
+  no Rojo project file, so a place maps its whole folder: the docs arrive as two empty Folders, and a
+  nested `node_modules` (npm and bun nest core's `@rbxts/t` there when the game's own is older than
+  3.1.0) reaches the place, where the guards the transformer routes through `core/out/prelude` find
+  core's own `t`.
 - The plugin host loads plugins with `require` at transform time. A plugin that throws takes the
   build with it, which is intended, but there is no isolation if one misbehaves.
 - **The harness announces a tag's removal after the instance has left, where the engine announces

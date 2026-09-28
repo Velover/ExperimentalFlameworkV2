@@ -17,7 +17,8 @@
     "test:place": "bun run ./scripts/test-place.mjs",
     "dev:link": "node ./scripts/link-all.mjs",
     "prepare:readme": "node ./scripts/copy-readme.mjs",
-    "prepare:publish": "bun run prepare:readme && bun run build"
+    "prepare:docs": "node ./scripts/copy-docs.mjs",
+    "prepare:publish": "bun run prepare:readme && bun run prepare:docs && bun run build"
   },
   "devDependencies": {
     "@eslint/compat": "^1.1.1",

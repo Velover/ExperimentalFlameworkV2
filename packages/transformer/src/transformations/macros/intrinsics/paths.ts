@@ -70,7 +70,14 @@ export function buildPathIntrinsic(state: TransformState, node: ts.Node, pathTyp
 	const outputPath = state.pathTranslator.getOutputPath(pathType.value);
 	const rbxPath = state.rojoResolver?.getRbxPathFromFilePath(outputPath);
 	if (!rbxPath) {
-		Diagnostics.error(node, `Could not find Rojo data for '${pathType.value}'`);
+		const output = path.relative(state.currentDirectory, outputPath).replace(/\\/g, "/");
+		Diagnostics.error(
+			node,
+			`Could not find Rojo data for '${pathType.value}'`,
+			state.rojoResolver
+				? `It compiles to '${output}', and no $path in your Rojo project covers that. Give the source path of a folder the project maps, relative to the project, such as "src/server/commands".`
+				: "No Rojo project file was found, so a source path cannot be turned into a Rojo path.",
+		);
 	}
 
 	return f.array(rbxPath.map(f.string));

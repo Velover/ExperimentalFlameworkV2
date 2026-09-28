@@ -90,9 +90,10 @@ function nodeMethods.FindFirstChild(node: any, name: string): any
 	return map and map[name] or nil
 end
 
-function nodeMethods.WaitForChild(node: any, name: string): any
+--- With a timeout, a missing child is `nil` at once, as it is on the engine once the timeout is up.
+function nodeMethods.WaitForChild(node: any, name: string, timeout: number?): any
 	local child = nodeMethods.FindFirstChild(node, name)
-	if not child then
+	if not child and timeout == nil then
 		error("harness: '" .. node.__path .. "' has no child '" .. name .. "'", 2)
 	end
 	return child
@@ -320,6 +321,10 @@ end
 
 -- Module graphs ----------------------------------------------------------------------------------
 
+--- What a module that returned `nil` is cached as: Roblox's `require` runs a module once, whatever it
+--- returned, and a roblox-ts module with no exports returns `nil`.
+local NOTHING = table.freeze({})
+
 --- Creates an independent module graph: its own module cache, globals and Promise.
 function harness.create()
 	local context = {}
@@ -513,7 +518,7 @@ function harness.create()
 		end
 
 		if loaded[file] ~= nil then
-			return loaded[file]
+			return if loaded[file] == NOTHING then nil else loaded[file]
 		end
 
 		-- Reserve the slot before evaluating so that a cyclic import sees a partial module rather
@@ -535,7 +540,7 @@ function harness.create()
 		})
 
 		local result = chunk()
-		loaded[file] = result
+		loaded[file] = if result == nil then NOTHING else result
 
 		return result
 	end

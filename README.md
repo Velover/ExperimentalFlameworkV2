@@ -15,6 +15,11 @@ material:
 | [Internals](docs/reference/internals.md) | What the transformer does to your code and what the runtime does with the result. |
 | [Transformer plugins](docs/reference/transformer-plugins.md) | Adding macro types of your own. |
 
+The guide also ships inside the core package, for the version you installed:
+`node_modules/@flamework-experimental/core/docs/README.md` is its index, and the pages are in
+`node_modules/@flamework-experimental/core/docs/guide/`. Instructions for a coding assistant can
+point there, so that it reads the docs for your version.
+
 The Flamework website documents v1, most of which no longer applies:
 
 https://flamework.fireboltofdeath.dev/docs/introduction
