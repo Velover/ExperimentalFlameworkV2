@@ -10,7 +10,8 @@ import { ReplicatedStorage } from "@rbxts/services";
  */
 
 /** What a client may ask the server to send it, each answering a case of the suite. */
-export type SpecRequest = "broadcast" | "list" | "except" | "tick" | "raw" | "malformed";
+export type SpecRequest =
+	"broadcast" | "list" | "except" | "tick" | "raw" | "malformed" | "late" | "listenLate" | "burst";
 
 export interface SpecServerEvents {
 	setScore(score: number): void;
@@ -33,6 +34,20 @@ export interface SpecServerEvents {
 	 */
 	sortA(value: string | number): void;
 	sortB(value: number | string): void;
+
+	/**
+	 * Sent before anything on the server listens to them: the server only connects these when asked
+	 * (`listenLate`), and reports what they delivered with `lateHeard`.
+	 */
+	lateUp(value: number): void;
+	lateUpUnreliable: Networking.Unreliable<(value: number) => void>;
+
+	/**
+	 * Sent together, the reliable one first: the server starts listening to the unreliable one from
+	 * the reliable one's handler, and reports what it heard with `burstHeard`.
+	 */
+	burstUp(value: number): void;
+	burstUpUnreliable: Networking.Unreliable<(value: number) => void>;
 }
 
 export interface SpecClientEvents {
@@ -54,6 +69,23 @@ export interface SpecClientEvents {
 
 	/** The server's answer to `sortA` and `sortB`: which event, and the value as it decoded it. */
 	sorted(entry: string): void;
+
+	/** Sent when asked (`late`), before anything on the client listens to them. */
+	late(value: number): void;
+	lateUnreliable: Networking.Unreliable<(value: number) => void>;
+
+	/** The server's answer to `listenLate`: what `lateUp` and `lateUpUnreliable` delivered once it listened. */
+	lateHeard(reliable: number[], unreliable: number[]): void;
+
+	/** Sent together when asked (`burst`), the reliable one first. */
+	burst(value: number): void;
+	burstUnreliable: Networking.Unreliable<(value: number) => void>;
+
+	/**
+	 * The server's answer to `burstUp`: what `burstUpUnreliable` delivered to a handler connected
+	 * from `burstUp`'s, and how many messages a plain `OnServerEvent` connection made there saw.
+	 */
+	burstHeard(delivered: number[], onRemote: number): void;
 }
 
 export const SpecEvents = Networking.createEvent<SpecServerEvents, SpecClientEvents>();

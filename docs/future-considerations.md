@@ -520,3 +520,21 @@ Edge cases found and deliberately left alone, because the fix would cost more th
   there; `--ignore-scripts` works), and core was never installable from git (no `out/` in git).
 - **harness:** `WaitForChild` with a timeout returns nil at once instead of yielding up to the
   timeout for a child that appears meanwhile.
+- **transformer, serialization:**
+  - The ambiguity warning is keyed on TypeScript's union type, so the same union spelled through
+    another alias or a generic is warned again. It can also warn when a third member takes the
+    values of the two it names whole.
+  - An `f32` member takes any number in its range and rounds it (a whole number above 2^24, or 0.1).
+  - -0 in an integer or `varint` member arrives as 0.
+  - A `string8` member's length limit is not part of the ordering, so a long string meant for a
+    `string` member can raise.
+  - A discriminant is tested before collections, so a map that happens to hold the discriminant key
+    is taken for the object.
+  - A class-instance blob next to an all-optional object is sent as `{}`.
+  - A recursive interface as a guard-checked union member overflows the stack in
+    `buildGuardFromType`.
+  - A payload nested about 20,000 levels deep raises "stack overflow" (caught) instead of
+    "malformed payload".
+  - Two Luau limits, neither reported by rbxtsc:
+    - about 100 hoisted-type fields in one object's read function run out of Luau's registers;
+    - about 100 distinct literal unions or guards in one file pass its 200 locals.

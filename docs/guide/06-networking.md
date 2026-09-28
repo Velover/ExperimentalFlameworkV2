@@ -237,7 +237,10 @@ buffer a fixed-width length instead.
 
 Each union value carries a one-byte tag: its member's position as written. In
 `{ Coins: number } | { Items: string[] }`, Coins is 0 and Items is 1. In `number | string`, the
-number is 0.
+number is 0. A union with `number` has one more tag, after its members, for a whole number from 0
+up to 2^35 - 1, which is then sent as a varint. So in `number | string`, 3 is the tag 2 and one
+byte, and 2.5 is the tag 0 and eight bytes. Array indices sent as `string | number` map keys stay
+small that way. A `number` that is not in a union is always eight bytes.
 
 "As written" means at the declaration the value is reached through: the parameter, property, return
 type or tuple element, including inside arrays, sets, maps and Promises. So `a(x: string | number)`
@@ -250,6 +253,30 @@ to you, declare an alias for it.
 Object members of a union are told apart by a shared discriminant (`kind: "a"` against
 `kind: "b"`) or by a key only one of them has, so no guard is generated for them. A union with more
 than 255 members travels whole, as a blob (see below).
+
+The written order numbers the members. It is also the order most members are tried in, with these
+exceptions:
+
+- Members with a test of their own go first: a type, a literal, a discriminant or a key only they
+  have. A branded number member (`Serialization.u16`) only takes a number that fits its width, so
+  70000 in `u16 | number` is sent as the `number`. An integer width checks the range and that the
+  number is whole; `f32` checks the range only, and rounds what it takes.
+- The other members are checked by a guard: arrays, sets, maps, tuples, and objects without a key
+  of their own. A guard checks a value's shape, but not the keys an object does not declare, at any
+  depth. So one member can take another member's value and send it without those keys. Flamework
+  compares the members' types, nested ones included, and tries a member that would do that after
+  the member whose values it would take. So `Point | Map<string, number>` sends
+  `{ x: 1, y: 2, z: 3 }` as the map, which keeps `z`.
+- When two members would each take part of the other's values, the written order stands, and
+  objects whose fields are all optional go last. The build warns, once for each union in a file (a
+  union spelled through another alias or a generic is warned again): a value that fits both may be
+  sent as the first, without what only the other declares. A third member that takes such values
+  whole can make the warning more cautious than needed.
+- A blob that takes anything, such as `unknown`, goes last.
+
+So `Partial<Crate> | None` sends a `None` as `None` whichever way round it is written. When the last
+member tried is an object or a collection without a test of its own, it is only checked to be a
+table.
 
 Values that have no buffer representation travel next to the buffer, in a **blob list**. These are
 Instances, `unknown`, `object`, `defined`, class instances, EnumItems, and the Roblox datatypes
@@ -280,8 +307,23 @@ bytes, than the buffer could hold is refused before anything is allocated. Eleme
 bytes (a lone literal, `undefined`, an object of only literals) cannot be limited that way, so a
 payload may announce at most 65535 of them in total, however they are nested.
 
-Sending a value that does not match its declared type raises an error at the sender. That is a bug
-in the caller, not in the peer.
+Nothing checks a value before it is sent: it is written as its declared type says. Most values that
+do not match raise an error at the sender while they are written, such as a table where a number
+was declared, or a value that fits no member of a union. Some do not:
+
+- A string that Luau reads as a number (`"5"`, `"0x10"`) is written as that number.
+- A `boolean` is written as whether the value is truthy.
+- An object is written field by field, so the fields its type does not declare are dropped. Any
+  table fits an object whose fields are all optional.
+- The last member tried in a union may only be checked to be a table (see above). A table of the
+  wrong shape is then written as that member as far as it goes: a set sends every value as
+  `true`, and a tuple drops what is past its length.
+- An array with holes is written without an error. The receiver then rejects the payload as
+  malformed.
+- A guard rejects NaN in a `number` field, so in a union such a value can pass to a later member:
+  `{ v: number } | { v: boolean }` sends `{ v = NaN }` as `{ v = false }`.
+
+A value that does not match its type is a bug in the caller, not in the peer.
 
 ### Opting out per event
 
@@ -396,7 +438,8 @@ logging. Game rules belong in the handler, where you can test them.
 - **The first `createServer`/`createClient` call wins.** The handler is cached per network object.
   Later calls return the same one and ignore their config, so configure it once.
 - **Guards are incoming-only.** Nothing checks what you send, only what you receive. With
-  serialization on, the generated encoder does refuse a value that does not match its type.
+  serialization on, most values that do not match their type raise while they are written; see
+  [Payloads that cannot be decoded](#payloads-that-cannot-be-decoded) for the ones that do not.
 - **Serialization is all or nothing per project.** Both realms build from the same
   `flamework.config.json`, so they always agree on the wire format. A client built without it cannot
   talk to a server built with it.
@@ -404,8 +447,14 @@ logging. Game rules belong in the handler, where you can test them.
 - **An event uses one remote for both directions; a function uses two.** In ReplicatedStorage, a
   function's two remotes share a name and differ only by their `id` attribute (`$name` for one
   direction, `@name` for the other).
-- **Remote wiring is deferred by one frame.** Connecting and firing right away, in the same frame,
-  can miss.
+- **Unreliable events can be missed by a late listener.** Flamework listens to a remote from the
+  first `connect` on, a moment later (a `task.defer`), so every handler connected in that moment
+  gets what was waiting. The engine keeps reliable events for a remote nothing listens to yet, up
+  to a limit, and hands them to the first connection; past the limit it drops them. It drops
+  unreliable ones outright. So an unreliable event sent before the first `connect` is lost. Under
+  `Immediate` signal behaviour, so is one that arrives right behind the event whose handler makes
+  that first `connect`. Connect handlers for unreliable events before the other side
+  can send them.
 - **Remote folder names are stable across builds, unless obfuscation is on.** Each network object's
   folder in ReplicatedStorage is named by a callsite id taken from the file and the declaration.
   Without obfuscation, two builds of the same source produce the same tree, so committed output

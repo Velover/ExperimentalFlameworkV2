@@ -66,6 +66,39 @@ export interface Placement {
 	readonly Surfaced: boolean;
 }
 
+/** charm-sync's removal marker, next to a patch whose fields are all optional. */
+interface None {
+	readonly __none: "__none";
+}
+
+interface Crate {
+	n: string;
+	at: number;
+	s?: boolean;
+}
+
+/** Written with the patch first: None is still tested first, and the patch then only has to be a table. */
+type PatchOrNone = Partial<Crate> | None;
+
+/** Two patches that no field tells apart: the build warns where they are serialized. */
+type Ambiguous = Partial<{ a: number }> | Partial<{ b: string }>;
+
+/** A recursive type with no name of its own, hoisted like a named one. */
+type NodePatch<T> = T extends object ? { [K in keyof T]?: NodePatch<T[K]> } : T;
+
+/** Shapes that differ a level down: the holder is tried before the map, whichever is written first. */
+interface Holder {
+	pos: { x: number; y: number; z: number };
+}
+
+type MapOrHolder = Map<string, { x: number }> | Holder;
+
+/** One unnamed type reached twice, whose functions both places share. */
+interface Lists {
+	a: string[];
+	b: string[];
+}
+
 export const payloadSerializer = Flamework.createSerializer<Payload>();
 export const nodeSerializer = Flamework.createSerializer<Node>();
 export const pairSerializer = Flamework.createSerializer<[number, string?, ...boolean[]]>();
@@ -73,6 +106,15 @@ export const walletSerializer = Flamework.createSerializer<Wallet>();
 export const crazySerializer = Flamework.createSerializer<Crazy>();
 export const thingSerializer = Flamework.createSerializer<Thing>();
 export const markersSerializer = Flamework.createSerializer<Array<Array<Marker>>>();
+export const patchOrNoneSerializer = Flamework.createSerializer<PatchOrNone>();
+export const ambiguousSerializer = Flamework.createSerializer<Ambiguous>();
+/** The same union again: the build warns once, where it is first written. */
+export const ambiguousAgainSerializer = Flamework.createSerializer<Ambiguous>();
+export const mapOrHolderSerializer = Flamework.createSerializer<MapOrHolder>();
+/** A branded width next to a plain number. */
+export const narrowNumberSerializer = Flamework.createSerializer<Serialization.u16 | number>();
+export const nodePatchSerializer = Flamework.createSerializer<NodePatch<Node>>();
+export const listsSerializer = Flamework.createSerializer<Lists>();
 
 interface ServerEvents {
 	ping(value: number, where: Vector3): void;

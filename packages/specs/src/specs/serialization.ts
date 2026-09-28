@@ -111,6 +111,80 @@ interface Header {
 
 const NONE: None = { __none: "__none" };
 
+/**
+ * What charm-sync sends to patch an object: every field optional. Its guard accepts any table, the
+ * removal marker included, so which member a value is written as must not depend on which of the
+ * two is written first.
+ */
+interface Crate {
+	readonly n: string;
+	readonly t: number;
+	readonly s?: boolean;
+}
+
+type NoneThenPatch = None | Partial<Crate>;
+type PatchThenNone = Partial<Crate> | None;
+
+/** A list next to a patch, which would otherwise take the list and write none of it. */
+type ListThenPatch = string[] | Partial<Crate>;
+type PatchThenList = Partial<Crate> | string[];
+
+/** A map next to an object it can hold: the map keeps every key, the object only its own. */
+type ScoresThenPoint = ReadonlyMap<string, number> | Point;
+type PointThenScores = Point | ReadonlyMap<string, number>;
+
+/** An object whose fields include another's: the wider one keeps a value's extra field. */
+interface Narrow {
+	readonly a: number;
+}
+
+interface Wide {
+	readonly a: number;
+	readonly b?: string;
+}
+
+type NarrowThenWide = Narrow | Wide;
+type WideThenNarrow = Wide | Narrow;
+
+/** An object next to a patch that declares more than it: the object's guard would drop `b`. */
+type NarrowThenPatch = Narrow | Partial<Wide>;
+type PatchThenNarrow = Partial<Wide> | Narrow;
+
+/**
+ * Shapes that differ a level down. A guard only checks the keys an object declares, at every depth:
+ * the map's guard takes a `Holder` and drops `y` and `z` from it, and so does `Flat`'s guard.
+ */
+interface Holder {
+	readonly pos: { readonly x: number; readonly y: number; readonly z: number };
+}
+
+type HolderThenMap = Holder | ReadonlyMap<string, { readonly x: number }>;
+type MapThenHolder = ReadonlyMap<string, { readonly x: number }> | Holder;
+
+interface Flat {
+	readonly pos: { readonly x: number; readonly y: number };
+	readonly label?: string;
+}
+
+type FlatThenHolder = Flat | Holder;
+type HolderThenFlat = Holder | Flat;
+
+/** A branded width next to a plain number: the width only takes what fits it. */
+type NarrowNumber = Serialization.u16 | number;
+
+/**
+ * A recursive type with no name of its own: a conditional type's instance, the way charm-sync-style
+ * patch types are built. Written out in place, it never ended; it is hoisted like a named one.
+ */
+type NodePatch<T> = T extends object ? { [K in keyof T]?: NodePatch<T[K]> } : T;
+
+/** One unnamed type reached from several places, which share its functions. */
+interface Lists {
+	readonly a: string[];
+	readonly b: string[];
+	readonly byName: ReadonlyMap<string, string[]>;
+}
+
 /** An element that takes no bytes at all: a collection of these is nothing but its count. */
 interface Marker {
 	readonly type: "marker";
@@ -154,6 +228,28 @@ const slotMapSerializer = Flamework.createSerializer<ReadonlyMap<string, Slot>>(
 const headerSerializer = Flamework.createSerializer<Header>();
 const bytesSerializer = Flamework.createSerializer<buffer>();
 const markersSerializer = Flamework.createSerializer<Array<Array<Marker>>>();
+const noneThenPatchSerializer = Flamework.createSerializer<NoneThenPatch>();
+const patchThenNoneSerializer = Flamework.createSerializer<PatchThenNone>();
+const noneThenPatchMapSerializer = Flamework.createSerializer<ReadonlyMap<string, None | Partial<Crate>>>();
+const patchThenNoneMapSerializer = Flamework.createSerializer<ReadonlyMap<string, Partial<Crate> | None>>();
+const listThenPatchSerializer = Flamework.createSerializer<ListThenPatch>();
+const patchThenListSerializer = Flamework.createSerializer<PatchThenList>();
+const scoresThenPointSerializer = Flamework.createSerializer<ScoresThenPoint>();
+const pointThenScoresSerializer = Flamework.createSerializer<PointThenScores>();
+const narrowThenWideSerializer = Flamework.createSerializer<NarrowThenWide>();
+const wideThenNarrowSerializer = Flamework.createSerializer<WideThenNarrow>();
+const narrowThenPatchSerializer = Flamework.createSerializer<NarrowThenPatch>();
+const patchThenNarrowSerializer = Flamework.createSerializer<PatchThenNarrow>();
+const holderThenMapSerializer = Flamework.createSerializer<HolderThenMap>();
+const mapThenHolderSerializer = Flamework.createSerializer<MapThenHolder>();
+const flatThenHolderSerializer = Flamework.createSerializer<FlatThenHolder>();
+const holderThenFlatSerializer = Flamework.createSerializer<HolderThenFlat>();
+const narrowNumberSerializer = Flamework.createSerializer<NarrowNumber>();
+const textOrNumberSerializer = Flamework.createSerializer<string | number>();
+const indexMapSerializer = Flamework.createSerializer<ReadonlyMap<string | number, string>>();
+const plainNumberSerializer = Flamework.createSerializer<number>();
+const nodePatchSerializer = Flamework.createSerializer<NodePatch<Node>>();
+const listsSerializer = Flamework.createSerializer<Lists>();
 
 /** Whether decoding raises, which is how a malformed payload is reported. */
 function rejects(run: () => unknown): boolean {
@@ -257,6 +353,27 @@ export = suite("serialization", [
 			);
 			expectEqual(roundTrip(mixedSerializer, "text"), "text", "primitive member");
 			expectTrue(deepEquals(roundTrip(mixedSerializer, { x: 1, y: 2 }), { x: 1, y: 2 }), "object member");
+		},
+	],
+	[
+		"shares the code of a type with no name that is reached more than once, recursive ones included",
+		() => {
+			const patch: NodePatch<Node> = {
+				value: 1,
+				children: [{ value: 2, children: [] }, { children: [{ value: 4 }] }],
+			};
+			expectTrue(deepEquals(roundTrip(nodePatchSerializer, patch), patch), "recursive patch");
+			expectTrue(deepEquals(roundTrip(nodePatchSerializer, {}), {}), "empty patch");
+
+			const lists: Lists = {
+				a: ["x"],
+				b: [],
+				byName: new Map([["k", ["y", "z"]]]),
+			};
+			const [payload] = listsSerializer.serialize(lists);
+			// Each list is a count and its strings; the map adds its count and the key.
+			expectEqual(buffer.len(payload), 1 + 2 + 1 + (1 + 2 + (1 + 2 + 2)), "the bytes are unchanged");
+			expectTrue(deepEquals(listsSerializer.deserialize(payload), lists), "lists");
 		},
 	],
 	[
@@ -597,6 +714,210 @@ export = suite("serialization", [
 			// The same at the top level, where the string that follows makes the layout variable.
 			const header: Header = { v: NONE, s: "tail" };
 			expectTrue(deepEquals(roundTrip(headerSerializer, header), header), "union before a string");
+		},
+	],
+	[
+		// Regression: members were tested in the order they were written, and a patch whose fields
+		// are all optional has only a guard that ignores keys it does not declare, so it accepted
+		// any table. Written first, it took every removal marker after it: `Partial<Crate> | None`
+		// wrote a None as an empty patch, and the receiver kept the crate.
+		"tells a removal marker from a patch whose fields are all optional, in either written order",
+		() => {
+			const values: Array<None | Partial<Crate>> = [NONE, { n: "reef", t: 5, s: true }, { s: false }, {}];
+			for (const [name, serializer] of [
+				["None first", noneThenPatchSerializer],
+				["patch first", patchThenNoneSerializer],
+			] as const) {
+				for (const value of values) {
+					expectTrue(deepEquals(roundTrip(serializer, value), value), `${name}: round trip`);
+				}
+
+				// A patch is the only member left once None is ruled out, so it only has to be a table;
+				// anything else is still refused where it is sent.
+				expectTrue(
+					rejects(() => serializer.serialize("text" as never)),
+					`${name}: a string is refused`,
+				);
+			}
+
+			// The tag is still the member's position as written.
+			expectEqual(buffer.readu8(noneThenPatchSerializer.serialize(NONE)[0], 0), 0, "None written first");
+			expectEqual(buffer.readu8(patchThenNoneSerializer.serialize(NONE)[0], 0), 1, "None written second");
+			expectEqual(buffer.len(patchThenNoneSerializer.serialize(NONE)[0]), 1, "a None is only its tag");
+
+			const entries = new Map<string, None | Partial<Crate>>([
+				["picked", NONE],
+				["surfaced", { s: true }],
+				["placed", { n: "reef", t: 7 }],
+				["unchanged", {}],
+			]);
+			for (const [name, serializer] of [
+				["None first", noneThenPatchMapSerializer],
+				["patch first", patchThenNoneMapSerializer],
+			] as const) {
+				expectTrue(deepEquals(roundTrip(serializer, entries), entries), `${name}: map of patches`);
+			}
+		},
+	],
+	[
+		"tests the members that keep a whole value before the ones that keep only their own fields",
+		() => {
+			// A list next to a patch whose fields are all optional: the list is tested first.
+			for (const [name, serializer] of [
+				["list first", listThenPatchSerializer],
+				["patch first", patchThenListSerializer],
+			] as const) {
+				const list = ["a", "b"];
+				expectTrue(deepEquals(roundTrip(serializer, list), list), `${name}: list`);
+				expectTrue(deepEquals(roundTrip(serializer, { n: "x" }), { n: "x" }), `${name}: patch`);
+			}
+
+			// A map next to an object it can hold: the map keeps every key of a value it accepts.
+			for (const [name, serializer] of [
+				["map first", scoresThenPointSerializer],
+				["object first", pointThenScoresSerializer],
+			] as const) {
+				const scores = new Map([
+					["x", 1],
+					["y", 2],
+					["z", 3],
+				]);
+				expectTrue(deepEquals(roundTrip(serializer, scores), scores), `${name}: map with the object's keys`);
+				expectTrue(deepEquals(roundTrip(serializer, { x: 4, y: 5 }), { x: 4, y: 5 }), `${name}: object`);
+			}
+
+			// An object whose fields include another's: the wider one is tested first.
+			for (const [name, serializer] of [
+				["narrow first", narrowThenWideSerializer],
+				["wide first", wideThenNarrowSerializer],
+			] as const) {
+				expectTrue(deepEquals(roundTrip(serializer, { a: 1, b: "x" }), { a: 1, b: "x" }), `${name}: wide`);
+				expectTrue(deepEquals(roundTrip(serializer, { a: 2 }), { a: 2 }), `${name}: narrow`);
+			}
+
+			// An object with a required field next to a patch that declares more: the patch goes first.
+			for (const [name, serializer] of [
+				["object first", narrowThenPatchSerializer],
+				["patch first", patchThenNarrowSerializer],
+			] as const) {
+				expectTrue(deepEquals(roundTrip(serializer, { a: 1, b: "x" }), { a: 1, b: "x" }), `${name}: patch`);
+				expectTrue(deepEquals(roundTrip(serializer, { a: 2 }), { a: 2 }), `${name}: object`);
+			}
+		},
+	],
+	[
+		// Regression: a guard checks only the keys an object declares, at every depth, so a map of
+		// `{ x }` took a `{ pos: { x, y, z } }` and wrote it without `y` and `z`, and so did an object
+		// whose `pos` is `{ x, y }`. The members are compared a level down too now.
+		"tries a member that would drop part of another's value after it, however deep the part is",
+		() => {
+			const holder: Holder = { pos: { x: 1, y: 2, z: 3 } };
+			for (const [name, serializer] of [
+				["object first", holderThenMapSerializer],
+				["map first", mapThenHolderSerializer],
+			] as const) {
+				expectTrue(deepEquals(roundTrip(serializer, holder), holder), `${name}: object`);
+				const map = new Map([["k", { x: 5 }]]);
+				expectTrue(deepEquals(roundTrip(serializer, map), map), `${name}: map`);
+			}
+
+			for (const [name, serializer] of [
+				["flat first", flatThenHolderSerializer],
+				["deep first", holderThenFlatSerializer],
+			] as const) {
+				expectTrue(deepEquals(roundTrip(serializer, holder), holder), `${name}: deep`);
+				const flat: Flat = { pos: { x: 1, y: 2 }, label: "l" };
+				expectTrue(deepEquals(roundTrip(serializer, flat), flat), `${name}: flat`);
+			}
+		},
+	],
+	[
+		// Regression: `u16 | number` wrote 70000 as a u16, which arrived as 4464.
+		"gives a branded number member only the numbers that fit its width",
+		() => {
+			const cases: Array<[value: number, bytes: number]> = [
+				[3, 3],
+				[65535, 3],
+				[65536, 4],
+				[70000, 4],
+				[2.5, 9],
+				[-1, 9],
+			];
+			for (const [value, bytes] of cases) {
+				const [payload] = narrowNumberSerializer.serialize(value as NarrowNumber);
+				expectEqual(buffer.len(payload), bytes, `${value}: bytes`);
+				expectEqual(narrowNumberSerializer.deserialize(payload), value, `${value}: round trip`);
+			}
+			expectEqual(
+				buffer.readu8(narrowNumberSerializer.serialize(3 as NarrowNumber)[0], 0),
+				0,
+				"a u16 is the u16",
+			);
+		},
+	],
+	[
+		// A number in a union with `number` used to be its tag and an f64, nine bytes even for an
+		// array index sent as a `string | number` map key, which is how charm-sync sends array
+		// changes. A whole number a varint holds now has a tag of its own, after the members.
+		"writes whole numbers in a union with `number` as a varint under a tag of their own",
+		() => {
+			const cases: Array<[value: number, bytes: number]> = [
+				[0, 2],
+				[1, 2],
+				[127, 2],
+				[128, 3],
+				[2 ** 31, 6],
+				[2 ** 35 - 1, 6],
+				[2 ** 35, 9],
+				[2 ** 53, 9],
+				[-1, 9],
+				[0.5, 9],
+				[-0, 9],
+				[0 / 0, 9],
+				[math.huge, 9],
+				[-math.huge, 9],
+			];
+			for (const [value, bytes] of cases) {
+				const [payload] = textOrNumberSerializer.serialize(value);
+				expectEqual(buffer.len(payload), bytes, `${value}: bytes`);
+				const back = textOrNumberSerializer.deserialize(payload) as number;
+				const same = value !== value ? back !== back : back === value && 1 / back === 1 / value;
+				expectTrue(same, `${value}: round trip, -0 keeping its sign`);
+			}
+
+			expectEqual(buffer.readu8(textOrNumberSerializer.serialize(3)[0], 0), 2, "a whole number's own tag");
+			expectEqual(buffer.readu8(textOrNumberSerializer.serialize(0.5)[0], 0), 1, "any other number's tag");
+			expectEqual(buffer.readu8(textOrNumberSerializer.serialize("s")[0], 0), 0, "the string's tag");
+			expectEqual(textOrNumberSerializer.deserialize(textOrNumberSerializer.serialize("s")[0]), "s", "string");
+
+			const keys = new Map<string | number, string>([
+				[0, "a"],
+				[1, "b"],
+				[127, "c"],
+				[128, "d"],
+				[2 ** 31, "e"],
+				[2 ** 53, "f"],
+				[-1, "g"],
+				[0.5, "h"],
+				[math.huge, "i"],
+				[-math.huge, "j"],
+				["name", "k"],
+			]);
+			expectTrue(deepEquals(roundTrip(indexMapSerializer, keys), keys), "as map keys");
+			for (const [key] of roundTrip(indexMapSerializer, new Map<string | number, string>([[-0, "z"]]))) {
+				expectEqual(1 / (key as number), -math.huge, "-0 as a map key");
+			}
+
+			// Three array indices: a count, then per entry a one-byte tag, a one-byte varint and a
+			// two-byte string, where each key was a tag and an f64 before.
+			const indices = new Map<string | number, string>([
+				[1, "a"],
+				[2, "b"],
+				[3, "c"],
+			]);
+			expectEqual(buffer.len(indexMapSerializer.serialize(indices)[0]), 1 + 3 * (2 + 2), "array indices as keys");
+
+			expectEqual(buffer.len(plainNumberSerializer.serialize(3)[0]), 8, "a plain number stays an f64");
 		},
 	],
 	[

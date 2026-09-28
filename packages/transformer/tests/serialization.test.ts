@@ -1,4 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import fs from "fs";
+import path from "path";
 import { compileFixture, compileProbe, emitted } from "./compile";
 
 beforeAll(() => {
@@ -57,12 +59,22 @@ describe("Flamework.createSerializer", () => {
 	});
 
 	test("hoists variable-size named types into size, write and read functions that may recurse", () => {
-		expect(source()).toMatch(/local s_Payload\w*\s*local w_Payload\w*\s*local r_Payload\w*/);
-		expect(source()).toMatch(/size\w* \+= s_Node\w*\(item\w*\)/);
-		expect(source()).toMatch(/o\w* = w_Node\w*\(buf\w*, o\w*, item\w*\)/);
-		expect(source()).toMatch(/local value\w*, o\w* = r_Node\w*\(buf\w*, o\w*\)/);
+		expect(source()).toMatch(/codec\.s_Payload = function\(v\w*\)/);
+		expect(source()).toMatch(/codec\.w_Payload = function\(buf\w*, o\w*, v\w*, blobs\w*\)/);
+		expect(source()).toMatch(/codec\.r_Payload = function\(buf\w*, o\w*, blobs\w*\)/);
+		expect(source()).toMatch(/size\w* \+= codec\.s_Node\(item\w*\)/);
+		expect(source()).toMatch(/o\w* = codec\.w_Node\(buf\w*, o\w*, item\w*\)/);
+		expect(source()).toMatch(/local value\w*, o\w* = codec\.r_Node\(buf\w*, o\w*\)/);
 		// The top level calls them directly: no position variable of its own.
-		expect(source()).toMatch(/w_Payload\w*\(buf\w*, 0, v\w*, blobs\w*\)/);
+		expect(source()).toMatch(/codec\.w_Payload\(buf\w*, 0, v\w*, blobs\w*\)/);
+	});
+
+	test("keeps every hoisted function in one table, so a file with many of them still loads", () => {
+		// Regression: each hoisted type took three locals at the top of the file, and Luau allows 200
+		// in a function, the file's main chunk included: past about 66 hoisted types a file compiled
+		// but no longer loaded.
+		expect(source().match(/^local codec\w* = \{\}$/gm)).toHaveLength(1);
+		expect(source()).not.toMatch(/^local [srw]_\w+$/m);
 	});
 
 	test("encodes tuples with optional and rest elements", () => {
@@ -79,7 +91,9 @@ describe("Flamework.createSerializer", () => {
 		expect(source()).toMatch(/if tag\w* == 0 then\s*local Coins\w* = buffer\.readf64/);
 		expect(source()).not.toMatch(/t\.interface\(\{\s*Coins/);
 		// `number | string` as written: the number first. Primitives are tested with `type`, the fast path.
-		expect(source()).toMatch(/if type\(v\w*\) == "number" then\s*buffer\.writeu8\(buf\w*, o\w*, 0\)/);
+		expect(source()).toMatch(
+			/if type\(v\w*\) == "number" then\s*if [^\n]*then\s*buffer\.writeu8\(buf\w*, o\w*, 2\)[\s\S]*?else\s*buffer\.writeu8\(buf\w*, o\w*, 0\)/,
+		);
 		expect(source()).toMatch(/elseif type\(v\w*\) == "string" then\s*buffer\.writeu8\(buf\w*, o\w*, 1\)/);
 	});
 
@@ -151,12 +165,88 @@ describe("Flamework.createSerializer", () => {
 		const sender = emitted("spelling");
 		const sendB = sender.slice(sender.indexOf("local function sendB"), sender.indexOf("local function sendA"));
 		const sendA = sender.slice(sender.indexOf("local function sendA"));
-		expect(sendB).toMatch(/if type\(v\w*\) == "number" then\s*buffer\.writeu8\(buf\w*, o\w*, 0\)/);
+		// A whole number gets the tag after the members, 2 either way; any other number the member's own.
+		const numberThen = (tag: number) =>
+			new RegExp(
+				`if type\\(v\\w*\\) == "number" then\\s*if [^\\n]*then\\s*buffer\\.writeu8\\(buf\\w*, o\\w*, 2\\)[\\s\\S]*?else\\s*buffer\\.writeu8\\(buf\\w*, o\\w*, ${tag}\\)`,
+			);
+		expect(sendB).toMatch(numberThen(0));
 		expect(sendB).toMatch(/elseif type\(v\w*\) == "string" then\s*buffer\.writeu8\(buf\w*, o\w*, 1\)/);
 		expect(sendA).toMatch(/if type\(v\w*\) == "string" then\s*buffer\.writeu8\(buf\w*, o\w*, 0\)/);
-		expect(sendA).toMatch(/elseif type\(v\w*\) == "number" then\s*buffer\.writeu8\(buf\w*, o\w*, 1\)/);
+		expect(sendA).toMatch(numberThen(1));
+	});
+
+	test("tests a removal marker before a patch whose fields are all optional, whatever order they are written in", () => {
+		// Regression: members were tested in written order, and the patch's guard, which ignores keys it
+		// does not declare, accepts any table: `Partial<Crate> | None` wrote every None as an empty
+		// patch. None is tested first now, and its tag is still its written index, 1. The patch, the
+		// only member left, is only checked to be a table, so it has no guard at all.
+		expect(source()).toMatch(
+			/codec\.w_PatchOrNone = function\(buf\w*, o\w*, v\w*\)\s*local v\w* = v\w*\s*if v\w*\.__none ~= nil then\s*buffer\.writeu8\(buf\w*, o\w*, 1\)\s*o\w* \+= 1\s*elseif type\(v\w*\) == "table" then\s*buffer\.writeu8\(buf\w*, o\w*, 0\)\s*o\w* = codec\.w_Partial\w*\(/,
+		);
+		expect(source()).not.toMatch(/t\w*\.interface\(\{\s*n = t\w*\.optional\(t\w*\.string\)/);
+	});
+
+	test("warns where a union has object members that a value cannot tell apart", () => {
+		const output = compileFixture().output.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(output).toContain(
+			`src/serialization.ts:${locate("ambiguousSerializer")} - the union 'Ambiguous' has members a value cannot tell apart: 'Partial<{ a: number; }>', 'Partial<{ b: string; }>'.`,
+		);
+		// Once, where the union is first written, though `ambiguousAgainSerializer` writes it too; and
+		// only there: a removal marker and a patch are told apart, and so are `{ Coins } | { Items }`.
+		expect(output.match(/cannot tell apart/g)).toHaveLength(1);
+	});
+
+	test("tries a member whose guard would drop part of another's value after it, a level down too", () => {
+		// `Map<string, { x: number }> | Holder`: the map's guard would take a Holder and drop `pos.y`
+		// and `pos.z`, while Holder's guard takes no map of `{ x }`. So Holder, written second (tag 1),
+		// is tried first, by its guard, and the map is only checked to be a table.
+		expect(source()).toMatch(
+			/codec\.w_MapOrHolder = function\(buf\w*, o\w*, v\w*\)\s*local v\w* = v\w*\s*if guard\w*\(v\w*\) then\s*buffer\.writeu8\(buf\w*, o\w*, 1\)[\s\S]*?elseif type\(v\w*\) == "table" then\s*buffer\.writeu8\(buf\w*, o\w*, 0\)/,
+		);
+	});
+
+	test("gives a branded number member of a union only the numbers that fit its width", () => {
+		// Regression: `u16 | number` wrote 70000 as a u16, which arrived as 4464.
+		expect(source()).toMatch(
+			/if type\(v\w*\) == "number" and \(v\w* >= 0 and v\w* <= 65535 and v\w* % 1 == 0\) then\s*buffer\.writeu8\(buf\w*, o\w*, 0\)\s*buffer\.writeu16/,
+		);
+	});
+
+	test("hoists a type with no name of its own once it is reached more than once", () => {
+		// `string[]` is reached twice in `Lists`: both fields call the same functions.
+		expect(source()).toMatch(/codec\.s_stringArray = function/);
+		expect(source()).toMatch(
+			/o\w* = codec\.w_stringArray\(buf\w*, o\w*, v\w*\.a\)\s*o\w* = codec\.w_stringArray\(buf\w*, o\w*, v\w*\.b\)/,
+		);
+		// A recursive one, which written out in place never ended, is named after how it is written.
+		expect(source()).toMatch(/codec\.w_NodePatch_Node = function/);
+		expect(source()).toMatch(/if item\w* ~= nil then\s*o\w* = codec\.w_NodePatch_Node\(buf\w*, o\w*, item\w*\)/);
+	});
+
+	test("writes a whole number in a union with `number` as a varint under the tag after the members", () => {
+		// `sortOf: number | string`: 1 / n keeps -0 out, which a varint would read back as 0.
+		expect(source()).toMatch(
+			/size\w* \+= if v\w* < 34359738368 and 1 \/ v\w* > 0 and v\w* % 1 == 0 then vsize\(v\w*\) else 8/,
+		);
+		expect(source()).toMatch(
+			/if v\w* < 34359738368 and 1 \/ v\w* > 0 and v\w* % 1 == 0 then\s*buffer\.writeu8\(buf\w*, o\w*, 2\)\s*o\w* = vwrite\(buf\w*, o\w* \+ 1, v\w*\)\s*else\s*buffer\.writeu8\(buf\w*, o\w*, 0\)\s*buffer\.writef64\(buf\w*, o\w* \+ 1, v\w*\)/,
+		);
+		expect(source()).toMatch(
+			/elseif tag\w* == 2 then\s*local n\w*, o\w* = vread\(buf\w*, o\w*\)\s*value\w* = n\w*/,
+		);
+		// A plain `number` field is still an f64: `Point` is two of them at fixed offsets.
+		expect(source()).not.toMatch(/if v\w*\.x < 34359738368/);
 	});
 });
+
+/** Where the fixture's serialization.ts builds `name`: the line and column of its `createSerializer` call. */
+function locate(name: string): string {
+	const text = fs.readFileSync(path.join(import.meta.dir, "fixture", "src", "serialization.ts"), "utf8");
+	const lines = text.split(/\r?\n/);
+	const index = lines.findIndex((line) => line.includes(`export const ${name} =`));
+	return `${index + 1}:${lines[index].indexOf("Flamework.createSerializer") + 1}`;
+}
 
 describe("networking serialization", () => {
 	test("keeps only decoders in the handler metadata", () => {

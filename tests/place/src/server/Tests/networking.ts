@@ -99,6 +99,35 @@ export class NetworkingTests implements OnStart {
 			task.defer(() => server.bumped.fire(player, bumps, bumpArguments));
 		});
 
+		// The reliable half of a pair the client sends together: the unreliable half is only listened
+		// to from here, through the handler and straight on the remote, and what each saw is reported.
+		const bursting = new Set<Player>();
+		server.burstUp.connect((player) => {
+			if (!fromPlayer(player) || bursting.has(player)) return;
+			bursting.add(player);
+
+			const delivered = new Array<number>();
+			let onRemote = 0;
+			const remote = findSpecRemote("unreliable:burstUpUnreliable");
+			const connections: Array<{ Disconnect(): void }> = [
+				server.burstUpUnreliable.connect((sender, value) => {
+					if (sender === player) delivered.push(value);
+				}),
+			];
+			if (remote) {
+				connections.push(
+					remote.OnServerEvent.Connect((sender) => {
+						if (sender === player) onRemote += 1;
+					}),
+				);
+			}
+			task.delay(1, () => {
+				for (const connection of connections) connection.Disconnect();
+				bursting.delete(player);
+				server.burstHeard.fire(player, delivered, onRemote);
+			});
+		});
+
 		server.ask.connect((player, request, value) => {
 			if (!fromPlayer(player)) return;
 			if (request === "broadcast") {
@@ -116,6 +145,29 @@ export class NetworkingTests implements OnStart {
 				// number, then the value itself the proper way.
 				findSpecRemote("scoreChanged")?.FireClient(player, ...onWire(wire.text, "not a number"));
 				server.scoreChanged.fire(player, value);
+			} else if (request === "burst") {
+				server.burst.fire(player, value);
+				server.burstUnreliable.fire(player, value);
+			} else if (request === "late") {
+				// Nothing on the client listens to these yet: the case connects once they are sent.
+				server.late.fire(player, value);
+				server.lateUnreliable.fire(player, value);
+			} else if (request === "listenLate") {
+				// The client sent `lateUp` and `lateUpUnreliable` before anything here listened to them.
+				const reliable = new Array<number>();
+				const unreliable = new Array<number>();
+				const connections = [
+					server.lateUp.connect((sender, got) => {
+						if (sender === player) reliable.push(got);
+					}),
+					server.lateUpUnreliable.connect((sender, got) => {
+						if (sender === player) unreliable.push(got);
+					}),
+				];
+				task.delay(1, () => {
+					for (const connection of connections) connection.Disconnect();
+					server.lateHeard.fire(player, reliable, unreliable);
+				});
 			}
 		});
 

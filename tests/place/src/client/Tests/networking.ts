@@ -11,6 +11,7 @@ import {
 	test,
 } from "@flamework-experimental/testing";
 import { carried, findSpecRemote, onWire, SERIALIZED, SpecEvents, SpecRequest, wire } from "shared/Tests/networkSpec";
+import { signalsAreDeferred } from "shared/Tests/signalBehavior";
 
 type SpecClient = ReturnType<typeof SpecEvents.createClient>;
 
@@ -303,6 +304,101 @@ export class NetworkingClientTests implements OnStart {
 				eventually(() => answers.size() >= 4, "the server's answers");
 				task.wait(0.3);
 				expectArrayEqual(answers, ["sortB:b", "sortA:7", "sortB:3", "sortA:a"], "events the server received");
+			});
+
+			test("keeps a reliable message sent before the client listens, and drops an unreliable one", () => {
+				// The engine keeps a reliable message for a remote nothing listens to and hands it to the
+				// first connection; an unreliable one is dropped. Flamework connects the remote a moment
+				// after the first `connect`, so the handlers connected in that same moment all get what
+				// was waiting.
+				ask("late", 5);
+				task.wait(1);
+
+				const reliable = new Array<number>();
+				const unreliable = new Array<number>();
+				const connections = [
+					handler().late.connect((value) => reliable.push(value)),
+					handler().late.connect((value) => reliable.push(-value)),
+					handler().lateUnreliable.connect((value) => unreliable.push(value)),
+				];
+				defer(() => connections.forEach((connection) => connection.Disconnect()));
+
+				eventually(() => reliable.size() >= 2, "the reliable message, for both handlers");
+				task.wait(0.5);
+				expectTrue(
+					reliable.size() === 2 && reliable.includes(5) && reliable.includes(-5),
+					"the reliable message",
+				);
+				expectArrayEqual(unreliable, [], "the unreliable message");
+			});
+
+			test("misses an unreliable message sent right behind the one whose handler connects to it", () => {
+				// Flamework listens to a remote a moment after the first `connect` (`task.defer`). Under
+				// Immediate signals, a handler connected from the handler of a reliable message misses an
+				// unreliable one sent right behind it, which a plain connection made there still gets.
+				// Under Deferred signals, the engine has dropped it before either handler runs.
+				const remote = expectDefined(findSpecRemote("unreliable:burstUnreliable"), "the unreliable remote");
+				const delivered = new Array<number>();
+				let onRemote = 0;
+				const connections = new Array<{ Disconnect(): void }>();
+				connections.push(
+					handler().burst.connect(() => {
+						if (connections.size() > 1) return;
+						connections.push(handler().burstUnreliable.connect((value) => delivered.push(value)));
+						connections.push(
+							remote.OnClientEvent.Connect(() => {
+								onRemote += 1;
+							}),
+						);
+					}),
+				);
+				defer(() => connections.forEach((connection) => connection.Disconnect()));
+
+				ask("burst", 9);
+				eventually(() => connections.size() > 1, "the reliable message");
+				task.wait(1);
+				expectEqual(
+					onRemote,
+					signalsAreDeferred() ? 0 : 1,
+					"messages a plain connection made in the handler saw",
+				);
+				expectArrayEqual(delivered, [], "what the handler connected there was given");
+			});
+
+			test("the server misses an unreliable message sent right behind the one whose handler connects to it", () => {
+				const heard = new Array<[number[], number]>();
+				const connection = handler().burstHeard.connect((delivered, onRemote) =>
+					heard.push([delivered, onRemote]),
+				);
+				defer(() => connection.Disconnect());
+
+				handler().burstUp.fire(3);
+				handler().burstUpUnreliable.fire(3);
+
+				eventually(() => heard.size() > 0, "the server's report");
+				expectEqual(
+					heard[0][1],
+					signalsAreDeferred() ? 0 : 1,
+					"messages a plain connection made in the handler saw",
+				);
+				expectArrayEqual(heard[0][0], [], "what the handler connected there was given");
+			});
+
+			test("the server keeps a reliable message sent before it listens, and drops an unreliable one", () => {
+				const heard = new Array<[number[], number[]]>();
+				const connection = handler().lateHeard.connect((reliable, unreliable) =>
+					heard.push([reliable, unreliable]),
+				);
+				defer(() => connection.Disconnect());
+
+				handler().lateUp.fire(6);
+				handler().lateUpUnreliable.fire(6);
+				task.wait(1);
+				ask("listenLate", 0);
+
+				eventually(() => heard.size() > 0, "the server's report");
+				expectArrayEqual(heard[0][0], [6], "the reliable message");
+				expectArrayEqual(heard[0][1], [], "the unreliable message");
 			});
 		});
 	}

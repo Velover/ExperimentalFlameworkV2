@@ -1,5 +1,6 @@
 import ts from "typescript";
 import { Diagnostics } from "../../classes/diagnostics";
+import { Logger } from "../../classes/logger";
 import { TransformState } from "../../classes/transformState";
 import { f } from "../factory";
 import {
@@ -30,14 +31,18 @@ import { isArrayType, isTupleType } from "./isTupleType";
  * - arrays, sets, maps and tuple rest elements: varint count + elements
  * - unions: u8 member index + the member, members numbered in the order they were written, so
  *   `number | string` is 0 for the number and 1 for the string; past 255 members the union is a
- *   blob. Objects: fields in declaration order, nothing spent on names
+ *   blob. A plain `number` member gives the whole numbers from 0 to 2^35 - 1 a tag of their own,
+ *   one past the written members, and writes them as a varint: `number | string` sends 3 as tag 2
+ *   and one byte. Which member a value is written as is decided by `evaluation`, not by the written
+ *   order alone. Objects: fields in declaration order, nothing spent on names
  * - Vector3 12, Vector2 8, Vector3int16 6, Vector2int16 4, Color3 12, UDim 8, UDim2 16, NumberRange 8,
  *   Rect 16, BrickColor 2, CFrame 48 (its twelve components), EnumItems 2 (their `Value`), blobs 4
  *
  * A varint is 1 byte below 128, 2 below 16384, and so on up to 5; the three helpers that handle it
- * are hoisted once per file. Named types with a variable size are hoisted into `s_` (size), `w_`
- * (write) and `r_` (read) functions ahead of the statement, once per statement, which is also how
- * recursive types work. Fixed-size types are always inlined.
+ * are hoisted once per file. A named object, union or tuple with a variable size, and any other
+ * variable-size structured type a file reaches more than once (see `hoist`), gets `s_` (size), `w_`
+ * (write) and `r_` (read) functions, kept in one table per file ahead of the statement that first
+ * needs them; that is also how recursive types work. Fixed-size types are always inlined.
  *
  * What goes in the blob list: everything declared by roblox-ts's Roblox types (Instances, EnumItem,
  * Font, RBXScriptSignal, ...) unless it has a layout above, anything with a `_nominal_` marker,
@@ -64,6 +69,8 @@ const BUFFER_BRANDS: Record<string, LengthWidth> = { u16_buffer: "u16", u32_buff
 /** A blob's 1-based index in the blob list, 0 for nil. */
 const BLOB_SIZE = 4;
 const VARINT_MAX_BYTES = 5;
+/** What a varint of `VARINT_MAX_BYTES` holds: the whole numbers below 2^35. */
+const VARINT_LIMIT = 128 ** VARINT_MAX_BYTES;
 /**
  * Counts of zero-size elements cannot be bounded by the bytes left, so a payload gets a plain cap on
  * how many of them it may hold in all. Per payload rather than per collection: a cap per collection
@@ -155,7 +162,13 @@ type Kind =
 	| { kind: "map"; key: Shape; value: Shape }
 	| { kind: "list"; elements: Shape[]; rest?: Shape }
 	| { kind: "object"; fields: Array<{ name: string; shape: Shape }> }
-	| { kind: "union"; alternatives: Alternative[] };
+	| {
+			kind: "union";
+			alternatives: Alternative[];
+			type?: ts.Type;
+			/** The plain `number` member, whose whole values are a varint under the tag after the members. */
+			whole?: number;
+	  };
 
 type Shape = ts.Type | Kind;
 type ListKind = Extract<Kind, { kind: "list" }>;
@@ -164,6 +177,55 @@ type ObjectKind = Extract<Kind, { kind: "object" }>;
 
 /** Kinds whose values are Luau tables, which can be indexed without a `typeof` check first. */
 const TABLE_KINDS = new Set<Kind["kind"]>(["object", "map", "array", "set", "list"]);
+
+/** Kinds whose code is worth a function of its own; see `hoist`. */
+const HOISTABLE = new Set<Kind["kind"]>(["object", "union", "list", "array", "set", "map"]);
+
+/**
+ * How a union member is picked out when a value is written:
+ * - `exact`: a test only the member's own values pass: a `type` or `typeof` check (a branded number
+ *   also has to fit its width), a literal, a discriminant (`v.kind == "a"`) or a required key no other
+ *   member declares (`v.Coins ~= nil`);
+ * - `guard`: the member's `t` guard: an object, a collection, or anything else without a test of
+ *   its own. A guard checks a value's shape but ignores the keys an object does not declare, at any
+ *   depth, so it can take another member's values and write them without those keys;
+ * - `partial`: the guard of an object whose fields are all optional, which accepts nearly any table;
+ * - `anything`: a blob with no `typeof` name to test, which takes whatever is left.
+ */
+type Test = "exact" | "guard" | "partial" | "anything";
+
+/**
+ * What the guard and the writer of one shape do with the values of another, over all of them: no
+ * value passes the guard, every value that passes is written whole, or some value that passes is
+ * written without part of it.
+ */
+type Fit = "none" | "whole" | "lossy";
+const FIT_RANK: Record<Fit, number> = { none: 0, whole: 1, lossy: 2 };
+const worse = (a: Fit, b: Fit): Fit => (FIT_RANK[a] >= FIT_RANK[b] ? a : b);
+
+/** The whole numbers each integer width holds, and the largest finite `f32`. */
+const WIDTH_RANGE: Partial<Record<Width, [number, number]>> = {
+	u8: [0, 0xff],
+	i8: [-0x80, 0x7f],
+	u16: [0, 0xffff],
+	i16: [-0x8000, 0x7fff],
+	u32: [0, 0xffffffff],
+	i32: [-0x80000000, 0x7fffffff],
+};
+const F32_MAX = 3.4028234663852886e38;
+
+/** A set's values, seen as a map's. */
+const TRUE: Kind = { kind: "constant", value: ts.factory.createTrue() };
+
+/** The order a union's members are tested in when a value is written; see `evaluation`. */
+interface Evaluation {
+	order: number[];
+	/**
+	 * The member tested last when it has no exact test. Every other member has been ruled out by
+	 * then, so the value is only checked to be a table: its guard would walk the whole value again.
+	 */
+	tableOnly: number | undefined;
+}
 
 /** A union member; `type` is set when the member is a real type, which a guard may be built from. */
 interface Alternative {
@@ -198,12 +260,13 @@ interface Ctx {
 	out: ts.Statement[];
 }
 
+/** A hoisted type: its functions are `s_<name>`, `w_<name>` and `r_<name>` in the file's table. */
 interface Hoisted {
-	size: ts.Identifier;
-	write: ts.Identifier;
-	read: ts.Identifier;
+	name: string;
 	layout: Layout;
 }
+
+type HoistedRole = "s" | "w" | "r";
 
 /** The per-file varint helpers: `vsize(n)`, `vwrite(buf, o, n) -> o` and `vread(buf, o) -> n, o`. */
 interface Varint {
@@ -502,10 +565,24 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	let emitted = [0, 0, 0];
 
 	const hoisted = new Map<ts.Type, Hoisted>();
+	const hoistedNames = new Set<string>();
+	let functionTable: ts.Identifier | undefined;
 	const guards = new Map<ts.Type, ts.Identifier>();
 	const enumTables = new Map<string, ts.Identifier>();
 	const literalTables = new Map<Kind, { list: ts.Identifier; index: ts.Identifier }>();
 	const discriminants = new Map<UnionKind, string | undefined>();
+	const evaluations = new Map<UnionKind, Evaluation>();
+	/** `fit`'s results, by the kind whose guard is asked and then the kind of the values. */
+	const fits = new Map<Kind, Map<Kind, Fit>>();
+	/** The unions warned about in this file: once each, where first written. */
+	const warnedUnions = new Set<unknown>();
+	/** Warnings already given for this file. */
+	const warned = new Set<string>();
+	/** How many times each shape is reached from the values built so far; see `countUses`. */
+	const uses = new Map<Shape, number>();
+	const walked = new Set<Shape>();
+	/** A name for an unnamed type's hoisted functions: how it was written, or the property it was reached through. */
+	const hints = new Map<ts.Type, string>();
 	/** A union's members as alternatives, shared by every spelling of it so a literal group is one table. */
 	const unionAlternatives = new Map<ts.UnionType, { isOptional: boolean; alternatives: Alternative[] }>();
 	let varint: Varint | undefined;
@@ -567,6 +644,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	function buildSerializer(type: Shape): ts.Expression {
 		const layout = layoutOf(type);
+		countUses(type);
 		const value = parameter("v");
 		const serialize = f.arrowFunction(f.block(encodeBody(type, layout, value)), [
 			f.parameterDeclaration(value, T.unknown()),
@@ -595,6 +673,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		if (carriesNothing(list)) return;
 
 		const layout = layoutOf(list);
+		countUses(list);
 		const buf = uid("buf");
 		const blobs = layout.blobs ? uid("blobs") : undefined;
 		const body = new Array<ts.Statement>();
@@ -625,6 +704,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		if (carriesNothing(list)) return { statements: [], payload: undefined, blobs: undefined };
 
 		const layout = layoutOf(list);
+		countUses(list);
 		const statements = new Array<ts.Statement>();
 		if (!Array.isArray(values)) {
 			const { buf, blobs } = encodeInto(list, layout, values.table, statements);
@@ -634,6 +714,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const elementValue = (index: number) => values[index] ?? f.nil();
 		const rest = values.slice(list.elements.length);
 		if (rest.length > 0 && !list.rest) fail("more arguments than the list has elements");
+		// Each rest argument is packed on its own, so the rest element is reached once per argument.
+		for (let i = 1; i < rest.length; i++) countUses(list.rest!);
 
 		// The rest count is known here, so its varint is a constant: literal bytes, no helper call.
 		const countBytes = staticVarint(rest.length);
@@ -735,7 +817,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		const top = isKind(shape) ? undefined : hoist(shape);
 		if (top) {
-			body.push(f.statement(f.call(top.write, blobs ? [buf, num(0), value, blobs] : [buf, num(0), value])));
+			body.push(f.statement(callHoisted(top, "w", blobs ? [buf, num(0), value, blobs] : [buf, num(0), value])));
 		} else {
 			const variable = layout.size === undefined ? uid("o") : undefined;
 			if (variable) body.push(letDecl(variable, num(0)));
@@ -765,7 +847,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			body.push(
 				constDecl(
 					f.arrayBindingDeclaration([value, end]),
-					f.call(top.read, blobs ? [buf, num(0), blobs] : [buf, num(0)]),
+					callHoisted(top, "r", blobs ? [buf, num(0), blobs] : [buf, num(0)]),
 				),
 			);
 			body.push(
@@ -820,7 +902,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		if (isConditionalType(type)) {
 			const branches = [type.resolvedTrueType!, type.resolvedFalseType!];
-			return { kind: "union", alternatives: branches.map((branch) => ({ shape: branch, type: branch })) };
+			return unionKind(
+				branches.map((branch) => ({ shape: branch, type: branch })),
+				type,
+			);
 		}
 
 		if ((type.flags & ts.TypeFlags.TypeVariable) !== 0) {
@@ -852,6 +937,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		if (isArrayType(state, type) || typeChecker.isArrayType(type)) {
 			const element = typeChecker.getTypeArguments(type as ts.TypeReference)[0];
 			if (!element) fail("an array without an element type");
+			inheritHint(type, element);
 			return { kind: "array", element };
 		}
 
@@ -864,12 +950,14 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		if (symbol === resolve("Map") || symbol === resolve("ReadonlyMap")) {
 			const [key, value] = typeChecker.getTypeArguments(type as ts.TypeReference);
 			if (!key || !value) fail("a Map without key and value types");
+			inheritHint(type, value);
 			return { kind: "map", key, value };
 		}
 
 		if (symbol === resolve("Set") || symbol === resolve("ReadonlySet")) {
 			const [element] = typeChecker.getTypeArguments(type as ts.TypeReference);
 			if (!element) fail("a Set without an element type");
+			inheritHint(type, element);
 			return { kind: "set", element };
 		}
 
@@ -917,16 +1005,34 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		if (type === typeChecker.getBooleanType()) return { kind: "boolean" };
 
 		const { isOptional, alternatives } = alternativesOf(type);
+		for (const alternative of alternatives) inheritHint(type, alternative.type);
 
 		let inner: Shape;
 		if (alternatives.length === 0) inner = { kind: "nothing" };
 		else if (alternatives.length === 1) inner = alternatives[0].shape;
 		// A one-byte tag numbers at most 256 members; past that the value travels whole.
 		else if (alternatives.length > 0xff) inner = { kind: "blob" };
-		else inner = { kind: "union", alternatives: orderAlternatives(alternatives, node ?? aliasNode(type)) };
+		else inner = unionKind(orderAlternatives(alternatives, node ?? aliasNode(type)), type);
 
 		if (isOptional) return { kind: "optional", inner };
 		return describe(inner);
+	}
+
+	/**
+	 * A union of ordered members. A plain `number` among them also gets the tag after the members, for
+	 * the whole numbers a varint holds: array indices, counts and ids, sent as `string | number` map
+	 * keys for one, take one to five bytes that way instead of eight. A branded width is left alone.
+	 */
+	function unionKind(alternatives: Alternative[], type: ts.Type): UnionKind {
+		const whole = alternatives.findIndex(
+			(alternative) => alternative.type !== undefined && (alternative.type.flags & ts.TypeFlags.Number) !== 0,
+		);
+		return {
+			kind: "union",
+			alternatives,
+			type,
+			whole: whole >= 0 && alternatives.length <= 0xff ? whole : undefined,
+		};
 	}
 
 	function alternativesOf(type: ts.UnionType): { isOptional: boolean; alternatives: Alternative[] } {
@@ -1033,6 +1139,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 */
 	function spell(node: ts.TypeNode | undefined, type: ts.Type): Shape {
 		if (!node) return type;
+		nameAfter(node, type);
 		if (ts.isParenthesizedTypeNode(node)) return spell(node.type, type);
 		if (ts.isTypeOperatorNode(node) && node.operator === ts.SyntaxKind.ReadonlyKeyword) {
 			return spell(node.type, type);
@@ -1042,10 +1149,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			return type.isUnion() ? classifyUnion(type, node) : type;
 		}
 
+		// A spelling that changes nothing inside keeps the type itself, which hoisting can key on.
 		if (ts.isArrayTypeNode(node)) {
 			const kind = describe(type);
 			if (kind.kind !== "array" || isKind(kind.element)) return type;
-			return { kind: "array", element: spell(node.elementType, kind.element) };
+			const element = spell(node.elementType, kind.element);
+			return element === kind.element ? type : { kind: "array", element };
 		}
 
 		if (ts.isTypeReferenceNode(node) && node.typeArguments) {
@@ -1058,10 +1167,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 			const kind = describe(type);
 			if ((kind.kind === "array" || kind.kind === "set") && args.length === 1 && !isKind(kind.element)) {
-				return { kind: kind.kind, element: spell(args[0], kind.element) };
+				const element = spell(args[0], kind.element);
+				return element === kind.element ? type : { kind: kind.kind, element };
 			}
 			if (kind.kind === "map" && args.length === 2 && !isKind(kind.key) && !isKind(kind.value)) {
-				return { kind: "map", key: spell(args[0], kind.key), value: spell(args[1], kind.value) };
+				const key = spell(args[0], kind.key);
+				const value = spell(args[1], kind.value);
+				return key === kind.key && value === kind.value ? type : { kind: "map", key, value };
 			}
 			return type;
 		}
@@ -1187,6 +1299,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			const propertyType = typeChecker.getTypeOfPropertyOfType(type, property.name)!;
 			if (propertyType.getCallSignatures().length > 0) fail(`property '${property.name}' is a function`);
 			const written = spell(declaredTypeNode(property.valueDeclaration), propertyType);
+			if (!isKind(written) && !hints.has(written)) hints.set(written, property.name);
 
 			const optional = (property.flags & ts.SymbolFlags.Optional) !== 0 && !hasUndefined(propertyType);
 			const shape: Shape = optional ? { kind: "optional", inner: written } : written;
@@ -1298,6 +1411,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				return sumLayouts(kind.fields.map((field) => layoutOf(field.shape)));
 			case "union": {
 				const members = kind.alternatives.map((alternative) => layoutOf(alternative.shape));
+				// A whole number is a varint of its own.
+				if (kind.whole !== undefined) members.push({ size: undefined, min: 1, blobs: false, zeros: false });
 				const sizes = new Set(members.map((member) => member.size));
 				const size = sizes.size === 1 && !sizes.has(undefined) ? 1 + members[0].size! : undefined;
 				return {
@@ -1327,46 +1442,46 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	// --- hoisting ------------------------------------------------------------------------------------
 
-	/** Named object-like types with a variable size get their own functions; everything else inlines. */
+	/**
+	 * Variable-size types that get their own size, write and read functions, called wherever the type
+	 * is reached, instead of being written out in place:
+	 * - a named object, union or tuple, always;
+	 * - any other object, union, tuple, array, set or map that the values built so far in the file
+	 *   reach more than once: a mapped or conditional type's instance, an object literal type,
+	 *   `string[]`, `Map<string, number>`. Written out in place, each of those is emitted three times
+	 *   (size, write, read) at every place it is reached, and every type inside it with it.
+	 * A recursive type reaches itself, so it is hoisted with or without a name, which is what lets
+	 * its code refer to itself. A type reached once stays in place: its code is emitted once either
+	 * way, while functions cost their own headers and a call per value. A fixed-size type always stays
+	 * in place. The functions live in one table per file (see {@link hoistedTable}).
+	 */
 	function hoist(type: ts.Type): Hoisted | undefined {
 		const existing = hoisted.get(type);
 		if (existing) return existing;
 
-		const name = hoistName(type);
-		if (name === undefined) return;
+		if (!canHoist(type)) return;
 
 		const layout = layoutOf(type);
-		if (layout.size !== undefined) return;
-
-		// Only structured types are worth a function; a named alias of a string or an array inlines.
 		const structure = describe(type).kind;
-		if (structure !== "object" && structure !== "union" && structure !== "list") return;
+		const named = hoistName(type);
+		const isCollection = structure === "array" || structure === "set" || structure === "map";
+		const name =
+			named !== undefined && !isCollection
+				? named
+				: (uses.get(type) ?? 0) > 1
+					? generatedName(type, structure)
+					: undefined;
+		if (name === undefined) return;
 
-		const info: Hoisted = { size: uid(`s_${name}`), write: uid(`w_${name}`), read: uid(`r_${name}`), layout };
+		let unique = name;
+		for (let suffix = 1; hoistedNames.has(unique); suffix++) unique = `${name}_${suffix}`;
+		hoistedNames.add(unique);
+
+		const info: Hoisted = { name: unique, layout };
 		hoisted.set(type, info);
 
-		const withBlobs = <U>(list: U[], entry: U) => (layout.blobs ? [...list, entry] : list);
-		const blobsParameter: [string, ts.TypeNode] = ["blobs", T.blobs()];
-		const writeParameters: Array<[string, ts.TypeNode]> = [
-			["buf", T.buffer()],
-			["o", T.number()],
-			["v", T.unknown()],
-		];
-		const readParameters: Array<[string, ts.TypeNode]> = [
-			["buf", T.buffer()],
-			["o", T.number()],
-		];
-		declarations.push(letDecl(info.size, undefined, T.fn([["v", T.unknown()]], T.number())));
-		declarations.push(letDecl(info.write, undefined, T.fn(withBlobs(writeParameters, blobsParameter), T.number())));
-		declarations.push(
-			letDecl(
-				info.read,
-				undefined,
-				T.fn(withBlobs(readParameters, blobsParameter), T.tuple([T.unknown(), T.number()])),
-			),
-		);
-
-		// The bodies are built after the identifiers exist, which is what lets a type refer to itself.
+		// The functions are looked up in the table when called, which is what lets a type refer to
+		// itself, and their bodies can be built now.
 		const kind = describe(type);
 		trail.push(type);
 
@@ -1374,12 +1489,20 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const sizeBody = new Array<ts.Statement>();
 		const size = emitSize(kind, value, sizeBody);
 		sizeBody.push(f.returnStatement(size));
-		definitions.push(assign(info.size, f.arrowFunction(f.block(sizeBody), [f.parameterDeclaration(value)])));
+		definitions.push(
+			assign(
+				hoistedField(info, "s"),
+				f.arrowFunction(f.block(sizeBody), [f.parameterDeclaration(value, T.unknown())]),
+			),
+		);
 
 		const buf = uid("buf");
 		const o = uid("o");
 		const blobs = layout.blobs ? uid("blobs") : undefined;
-		const parameters = (...names: ts.Identifier[]) => names.map((id) => f.parameterDeclaration(id));
+		const typed = (list: Array<[ts.Identifier, ts.TypeNode]>) =>
+			list.map(([id, type]) => f.parameterDeclaration(id, type));
+		const withBlobs = (list: Array<[ts.Identifier, ts.TypeNode]>) =>
+			typed(blobs ? [...list, [blobs, T.blobs()]] : list);
 
 		const writeBody = new Array<ts.Statement>();
 		const writeCtx: Ctx = { buf, blobs, cursor: { variable: o, base: o, offset: 0 }, out: writeBody };
@@ -1387,7 +1510,17 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		sync(writeCtx);
 		writeBody.push(f.returnStatement(o));
 		definitions.push(
-			assign(info.write, f.arrowFunction(f.block(writeBody), parameters(...withBlobs([buf, o, value], blobs!)))),
+			assign(
+				hoistedField(info, "w"),
+				f.arrowFunction(
+					f.block(writeBody),
+					withBlobs([
+						[buf, T.buffer()],
+						[o, T.number()],
+						[value, T.unknown()],
+					]),
+				),
+			),
 		);
 
 		const readBody = new Array<ts.Statement>();
@@ -1397,11 +1530,131 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		sync(readCtx);
 		readBody.push(f.returnStatement(f.call("$tuple", [bound, o])));
 		definitions.push(
-			assign(info.read, f.arrowFunction(f.block(readBody), parameters(...withBlobs([buf, o], blobs!)))),
+			assign(
+				hoistedField(info, "r"),
+				f.arrowFunction(
+					f.block(readBody),
+					withBlobs([
+						[buf, T.buffer()],
+						[o, T.number()],
+					]),
+				),
+			),
 		);
 
 		trail.pop();
 		return info;
+	}
+
+	/**
+	 * The file's table of hoisted functions, declared ahead of the first. One local holds them all:
+	 * Luau allows 200 locals in a function, the file's main chunk included, and three per hoisted
+	 * type ran a file with about 66 of them past it, where it compiled but no longer loaded.
+	 */
+	function hoistedTable(): ts.Identifier {
+		if (!functionTable) {
+			functionTable = uid("codec");
+			declarations.push(
+				constDecl(
+					functionTable,
+					f.object([]),
+					f.referenceType("Record", [T.string(), f.referenceType("Callback")]),
+				),
+			);
+		}
+
+		return functionTable;
+	}
+
+	function hoistedField(info: Hoisted, role: HoistedRole): ts.Expression {
+		return prop(hoistedTable(), `${role}_${info.name}`);
+	}
+
+	/** A call of a hoisted function, typed as it is so the call's result has the right type. */
+	function callHoisted(info: Hoisted, role: HoistedRole, args: ts.Expression[]): ts.Expression {
+		const blobs: Array<[string, ts.TypeNode]> = info.layout.blobs ? [["blobs", T.blobs()]] : [];
+		const type =
+			role === "s"
+				? T.fn([["v", T.unknown()]], T.number())
+				: role === "w"
+					? T.fn([["buf", T.buffer()], ["o", T.number()], ["v", T.unknown()], ...blobs], T.number())
+					: T.fn([["buf", T.buffer()], ["o", T.number()], ...blobs], T.tuple([T.unknown(), T.number()]));
+		return f.call(f.as(hoistedField(info, role), type), args);
+	}
+
+	/**
+	 * Counts how many times each shape is reached from `root`, adding to the counts of the values
+	 * built before it in the file. The contents of a type that can be hoisted are walked the first
+	 * time only, since its body is emitted once however many times it is reached; anything else is
+	 * written out wherever it is reached, and so is everything inside it. Every cycle in a type goes
+	 * through one that can be hoisted, so the walk ends.
+	 */
+	function countUses(root: Shape) {
+		uses.set(root, (uses.get(root) ?? 0) + 1);
+		if (!isKind(root) && canHoist(root)) {
+			if (walked.has(root)) return;
+			walked.add(root);
+		}
+
+		const kind = describe(root);
+		switch (kind.kind) {
+			case "optional":
+				countUses(kind.inner);
+				break;
+			case "array":
+			case "set":
+				countUses(kind.element);
+				break;
+			case "map":
+				countUses(kind.key);
+				countUses(kind.value);
+				break;
+			case "list":
+				kind.elements.forEach(countUses);
+				if (kind.rest) countUses(kind.rest);
+				break;
+			case "object":
+				for (const field of kind.fields) countUses(field.shape);
+				break;
+			case "union":
+				for (const alternative of kind.alternatives) countUses(alternative.shape);
+				break;
+		}
+	}
+
+	/** A variable-size object, union, tuple or collection type: one whose code a function can hold. */
+	function canHoist(type: ts.Type): boolean {
+		if ((type.flags & (ts.TypeFlags.Object | ts.TypeFlags.UnionOrIntersection)) === 0) return false;
+		return layoutOf(type).size === undefined && HOISTABLE.has(describe(type).kind);
+	}
+
+	/**
+	 * A name for the functions of a type hoisted without a name of its own: its alias, or how
+	 * TypeScript prints it (`ReadonlyMap<string, number>`), cut short; a type printed as an object
+	 * literal is named after the property it was first reached through instead.
+	 */
+	function generatedName(type: ts.Type, structure: Kind["kind"]): string {
+		const printed = type.aliasSymbol?.name ?? typeChecker.typeToString(type);
+		const text = printed.includes("{") ? (hints.get(type) ?? structure) : printed;
+		const words = text
+			.replace(/\[\]/g, "Array")
+			.replace(/\W+/g, "_")
+			.replace(/^_+|_+$/g, "");
+		const name = words.length > 40 ? words.slice(0, 40).replace(/_[^_]*$/, "") : words;
+		return name === "" ? structure : name;
+	}
+
+	/** Names a type after how it is written (`Patch<Tree>`), unless it is written out as an object literal. */
+	function nameAfter(node: ts.TypeNode, type: ts.Type) {
+		if (hints.has(type) || node.pos < 0) return;
+		const text = node.getText();
+		if (!text.includes("{")) hints.set(type, text);
+	}
+
+	/** Names an unnamed part of `parent` after it, unless something named it first. */
+	function inheritHint(parent: ts.Type, child: Shape | undefined) {
+		const hint = hints.get(parent);
+		if (hint !== undefined && child !== undefined && !isKind(child) && !hints.has(child)) hints.set(child, hint);
 	}
 
 	function hoistName(type: ts.Type): string | undefined {
@@ -1569,6 +1822,54 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return varint;
 	}
 
+	/**
+	 * Whether a number is one a branded width writes as it is: `n >= min and n <= max and n % 1 == 0`
+	 * for an integer width or a varint, and for `f32` any number but a finite one past its range
+	 * (`not (math.abs(n) > max and math.abs(n) < math.huge)`), since infinities and NaN survive.
+	 */
+	function fitsRange(n: ts.Expression, [minimum, maximum, whole]: [number, number, boolean]): ts.Expression {
+		const and = (left: ts.Expression, right: ts.Expression) =>
+			f.binary(left, ts.SyntaxKind.AmpersandAmpersandToken, right);
+		if (!whole) {
+			const magnitude = () => f.call(prop("math", "abs"), [n]);
+			return factory.createPrefixUnaryExpression(
+				ts.SyntaxKind.ExclamationToken,
+				factory.createParenthesizedExpression(
+					and(
+						f.binary(magnitude(), ts.SyntaxKind.GreaterThanToken, num(maximum)),
+						f.binary(magnitude(), ts.SyntaxKind.LessThanToken, prop("math", "huge")),
+					),
+				),
+			);
+		}
+
+		const bound = (value: number) =>
+			value < 0 ? factory.createPrefixUnaryExpression(ts.SyntaxKind.MinusToken, num(-value)) : num(value);
+		return and(
+			and(
+				f.binary(n, ts.SyntaxKind.GreaterThanEqualsToken, bound(minimum)),
+				f.binary(n, ts.SyntaxKind.LessThanEqualsToken, bound(maximum)),
+			),
+			equals(f.binary(n, ts.SyntaxKind.PercentToken, num(1)), num(0)),
+		);
+	}
+
+	/**
+	 * Whether a number is whole and a varint holds it: `n < 2^35 and 1 / n > 0 and n % 1 == 0`.
+	 * `1 / n > 0` rules out negatives, NaN and -0, which a varint would read back as 0.
+	 */
+	function isWhole(n: ts.Expression): ts.Expression {
+		const and = (left: ts.Expression, right: ts.Expression) =>
+			f.binary(left, ts.SyntaxKind.AmpersandAmpersandToken, right);
+		return and(
+			and(
+				f.binary(n, ts.SyntaxKind.LessThanToken, num(VARINT_LIMIT)),
+				f.binary(f.binary(num(1), ts.SyntaxKind.SlashToken, n), ts.SyntaxKind.GreaterThanToken, num(0)),
+			),
+			equals(f.binary(n, ts.SyntaxKind.PercentToken, num(1)), num(0)),
+		);
+	}
+
 	/** `o = vwrite(buf, o, n)`: the cursor re-bases on the position variable. */
 	function writeVarint(ctx: Ctx, n: ts.Expression) {
 		const variable = ctx.cursor.variable;
@@ -1629,29 +1930,110 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	// --- unions --------------------------------------------------------------------------------------
 
 	/**
-	 * The order the members are tested in when encoding: every member with a test of its own first,
-	 * a blob that matches anything last. The tag written is still the member's own index.
+	 * The order the members are tested in when a value is written; the tag written is still the
+	 * member's own index.
+	 * - Members with an exact test come first, in written order: they only take their own values.
+	 * - Members checked by a guard come next. A guard ignores the keys an object does not declare,
+	 *   at any depth, so one member's guard can take another member's values and write them without
+	 *   those keys; {@link fit} works out through the nested shapes which member would do that to
+	 *   which. A member that would goes after the member whose values it would take, unless that
+	 *   member would do the same to it. Otherwise the written order stands, with objects whose fields
+	 *   are all optional after the others. Where a loss remains, the build warns.
+	 * - A blob that takes anything comes last.
+	 * `Partial<Crate> | None` therefore sends a `None` as `None` in either written order: `None` has a
+	 * test of its own, and the patch, the only member left, is only checked to be a table.
 	 */
-	function evaluationOrder(union: UnionKind): number[] {
-		const catchAll = (index: number) => {
-			const kind = describe(union.alternatives[index].shape);
-			return kind.kind === "blob" && kind.typeofName === undefined ? 1 : 0;
-		};
+	function evaluation(union: UnionKind): Evaluation {
+		let entry = evaluations.get(union);
+		if (entry) return entry;
 
-		return union.alternatives.map((_, index) => index).sort((a, b) => catchAll(a) - catchAll(b));
+		const indices = union.alternatives.map((_, index) => index);
+		const tests = indices.map((index) => testOf(union, index));
+		const shapeAt = (index: number) => union.alternatives[index].shape;
+		const takes = (a: number, b: number) => fit(shapeAt(a), shapeAt(b)) === "lossy";
+
+		const guarded = [
+			...indices.filter((index) => tests[index] === "guard"),
+			...indices.filter((index) => tests[index] === "partial"),
+		];
+		const remaining = [...guarded];
+		const ordered = new Array<number>();
+		while (remaining.length > 0) {
+			const loses = (a: number) => remaining.some((b) => b !== a && takes(a, b) && !takes(b, a));
+			const next = remaining.find((a) => !loses(a)) ?? remaining[0];
+			ordered.push(next);
+			remaining.splice(remaining.indexOf(next), 1);
+		}
+
+		const order = [
+			...indices.filter((index) => tests[index] === "exact"),
+			...ordered,
+			...indices.filter((index) => tests[index] === "anything"),
+		];
+
+		const last = order[order.length - 1];
+		const loose = tests[last] === "guard" || tests[last] === "partial";
+		const tableOnly = loose && TABLE_KINDS.has(describe(shapeAt(last)).kind) ? last : undefined;
+
+		entry = { order, tableOnly };
+		evaluations.set(union, entry);
+
+		// A member ahead of another that it would still take values from and write without part of them.
+		const involved = new Set<number>();
+		ordered.forEach((earlier, position) => {
+			for (const later of ordered.slice(position + 1)) {
+				if (takes(earlier, later)) {
+					involved.add(earlier);
+					involved.add(later);
+				}
+			}
+		});
+		if (involved.size > 0) {
+			warnIndistinct(
+				union,
+				ordered.filter((index) => involved.has(index)),
+			);
+		}
+
+		return entry;
+	}
+
+	function testOf(union: UnionKind, index: number): Test {
+		const kind = describe(union.alternatives[index].shape);
+		switch (kind.kind) {
+			case "blob":
+				return kind.typeofName === undefined ? "anything" : "exact";
+			case "object":
+				if (objectKey(union, kind)) return "exact";
+				return kind.fields.some((field) => isRequired(field.shape)) ? "guard" : "partial";
+			case "array":
+			case "set":
+			case "map":
+			case "list":
+			case "optional":
+			case "union":
+				return "guard";
+			default:
+				return "exact";
+		}
+	}
+
+	function isRequired(shape: Shape): boolean {
+		const kind = describe(shape).kind;
+		return kind !== "optional" && kind !== "nothing";
 	}
 
 	/**
-	 * A cheap test for an object member of a union: its discriminant compared (`v.kind == "a"`), or
-	 * else the presence of a required key no other object member has (`v.Coins ~= nil`). Neither
-	 * leaves a guard in the output; a member with no such test falls back to one.
+	 * The field that tells an object member of a union apart without a guard: the union's
+	 * discriminant, compared (`v.kind == "a"`), or else a required field no other object member
+	 * declares, whose presence is enough (`v.Coins ~= nil`).
 	 */
-	function objectTest(union: UnionKind, kind: ObjectKind, record: ts.Expression): ts.Expression | undefined {
+	function objectKey(union: UnionKind, kind: ObjectKind): { name: string; value?: ts.Expression } | undefined {
 		const discriminant = discriminantOf(union);
 		const field = discriminant !== undefined ? kind.fields.find((field) => field.name === discriminant) : undefined;
 		if (field) {
 			const constant = describe(field.shape) as Extract<Kind, { kind: "constant" }>;
-			return equals(fieldAccess(record, field.name), constant.value);
+			return { name: field.name, value: constant.value };
 		}
 
 		// A collection among the members could hold any key, so presence is only trusted when the
@@ -1659,14 +2041,337 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const others = union.alternatives.map((other) => describe(other.shape)).filter((other) => other !== kind);
 		if (others.some((other) => TABLE_KINDS.has(other.kind) && other.kind !== "object")) return;
 
-		const unique = kind.fields.find((candidate) => {
-			const shape = describe(candidate.shape);
-			if (shape.kind === "optional" || shape.kind === "nothing") return false;
-			return others.every(
-				(other) => other.kind !== "object" || !other.fields.some((field) => field.name === candidate.name),
+		const unique = kind.fields.find(
+			(candidate) =>
+				isRequired(candidate.shape) &&
+				others.every(
+					(other) => other.kind !== "object" || !other.fields.some((field) => field.name === candidate.name),
+				),
+		);
+		if (unique) return { name: unique.name };
+	}
+
+	/**
+	 * Warns, once per union in a file and where it is first written, about members that a value cannot
+	 * tell apart: one tried earlier whose guard takes some of a later one's values and writes them
+	 * without part of them. Telling such members apart at runtime would mean matching every key of the
+	 * value against each of them, so the build says so instead.
+	 */
+	function warnIndistinct(union: UnionKind, members: number[]) {
+		const key = union.type ?? union;
+		if (warnedUnions.has(key)) return;
+		warnedUnions.add(key);
+
+		const name = (index: number) => `'${alternativeName(union.alternatives[index])}'`;
+		const written = union.type?.aliasSymbol
+			? typeChecker.typeToString(union.type)
+			: union.alternatives.map((alternative) => alternativeName(alternative)).join(" | ");
+		warn(
+			`the union '${written}' has members a value cannot tell apart: ${members.map(name).join(", ")}. ` +
+				`A value that fits more than one is written as the first of them in this order, without the parts only the others declare`,
+		);
+	}
+
+	/** A member as TypeScript prints it, or its literals. */
+	function alternativeName(alternative: Alternative): string {
+		if (alternative.type) return typeChecker.typeToString(alternative.type);
+		const kind = describe(alternative.shape);
+		if (kind.kind === "constant") return literalKey(kind.value);
+		if (kind.kind === "literals") return kind.values.map(literalKey).join(" | ");
+		if (kind.kind === "enum") return `Enum.${kind.name}`;
+		return kind.kind;
+	}
+
+	/** A literal as text, telling enum items apart too (`Enum.KeyCode.A`). */
+	function literalKey(expression: ts.Expression): string {
+		if (ts.isPropertyAccessExpression(expression))
+			return `${literalKey(expression.expression)}.${expression.name.text}`;
+		if (ts.isIdentifier(expression)) return expression.text;
+		return printLiteral(expression);
+	}
+
+	/**
+	 * What the guard and the writer of `a` do with the values of `b`, taken as the types say: no value
+	 * of `b` passes `a`'s guard, every one that passes is written whole, or some value that passes
+	 * is written without part of it. It follows the guard: an object's checks only the fields it
+	 * declares, at every depth, a collection's every key and value, a union's any of its members.
+	 * Recursive types are assumed to fit where they meet themselves again.
+	 */
+	function fit(a: Shape, b: Shape): Fit {
+		if (a === b) return "whole";
+		const left = describe(a);
+		const right = describe(b);
+		if (left === right) return "whole";
+
+		let row = fits.get(left);
+		if (!row) fits.set(left, (row = new Map()));
+		const known = row.get(right);
+		if (known !== undefined) return known;
+
+		row.set(right, "whole");
+		const result = computeFit(left, right);
+		row.set(right, result);
+		return result;
+	}
+
+	function computeFit(a: Kind, b: Kind): Fit {
+		// A nil of `b` passes an optional `a` whole; `a`'s guard sees the rest as they are.
+		if (b.kind === "optional") {
+			const present = fit(a, b.inner);
+			return a.kind === "optional" || a.kind === "nothing" ? worse(present, "whole") : present;
+		}
+		if (b.kind === "nothing") return a.kind === "optional" || a.kind === "nothing" ? "whole" : "none";
+		if (a.kind === "optional") return fit(a.inner, b);
+
+		// Any member of `b` may be the value. `a` a union: the value goes to one of its members;
+		// the worst any of them does is what can happen.
+		if (b.kind === "union") {
+			return b.alternatives.reduce<Fit>(
+				(result, alternative) => worse(result, fit(a, alternative.shape)),
+				"none",
 			);
-		});
-		if (unique) return notNil(fieldAccess(record, unique.name));
+		}
+		if (a.kind === "union") {
+			return a.alternatives.reduce<Fit>(
+				(result, alternative) => worse(result, fit(alternative.shape, b)),
+				"none",
+			);
+		}
+
+		// A blob keeps the value itself; a value that could be anything could carry more than a table
+		// type writes.
+		if (a.kind === "blob") return a.typeofName === undefined || b.kind === "blob" ? "whole" : "none";
+		if (b.kind === "blob") return TABLE_KINDS.has(a.kind) ? "lossy" : "whole";
+
+		const primitive = primitiveFit(a, b);
+		if (primitive !== undefined) return primitive;
+
+		// Tables. A set is a map from its elements to `true`.
+		const asMap = (kind: Kind): Extract<Kind, { kind: "map" }> | undefined =>
+			kind.kind === "map"
+				? kind
+				: kind.kind === "set"
+					? { kind: "map", key: kind.element, value: TRUE }
+					: undefined;
+		const mapA = asMap(a);
+		const mapB = asMap(b);
+
+		if (a.kind === "object") {
+			if (b.kind === "object") return objectFit(a, b);
+			if (mapB) {
+				// A map value holds any of its keys, so it can always hold one the object does not declare.
+				for (const field of a.fields) {
+					if (!isRequired(field.shape)) continue;
+					if (!keyFits(mapB.key, field.name) || fit(field.shape, mapB.value) === "none") return "none";
+				}
+				return "lossy";
+			}
+			// An array or tuple has no named keys: only an object that requires none takes it, empty.
+			return a.fields.some((field) => isRequired(field.shape)) ? "none" : "lossy";
+		}
+
+		if (mapA) {
+			if (b.kind === "object") {
+				let result: Fit = "whole";
+				for (const field of b.fields) {
+					const value = keyFits(mapA.key, field.name) ? fit(mapA.value, field.shape) : "none";
+					if (value === "none") {
+						if (isRequired(field.shape)) return "none";
+						continue;
+					}
+					result = worse(result, value);
+				}
+				return result;
+			}
+			if (mapB) return atLeastEmpty(worst([fit(mapA.key, mapB.key), fit(mapA.value, mapB.value)]));
+			if (b.kind === "array") {
+				return keyFits(mapA.key, 1) ? atLeastEmpty(fit(mapA.value, b.element)) : "whole";
+			}
+			if (b.kind === "list") return keyFits(mapA.key, 1) ? listInto(b, () => mapA.value) : "none";
+			return "none";
+		}
+
+		if (a.kind === "array") {
+			if (b.kind === "array") return atLeastEmpty(fit(a.element, b.element));
+			if (b.kind === "list") return listInto(b, () => a.element);
+			if (mapB) return keyFits(mapB.key, 1) ? atLeastEmpty(fit(a.element, mapB.value)) : "whole";
+			if (b.kind === "object") return b.fields.some((field) => isRequired(field.shape)) ? "none" : "whole";
+			return "none";
+		}
+
+		if (a.kind === "list") {
+			if (b.kind === "list") {
+				if (b.elements.length !== a.elements.length || (a.rest === undefined) !== (b.rest === undefined)) {
+					return "none";
+				}
+				const elements = a.elements.map((element, index) => fit(element, b.elements[index]));
+				if (a.rest && b.rest) elements.push(atLeastEmpty(fit(a.rest, b.rest)));
+				return elements.includes("none") ? "none" : worst(elements);
+			}
+			if (b.kind === "array") {
+				const elements = a.elements.map((element) => fit(element, b.element));
+				return elements.includes("none") ? "none" : worst(elements);
+			}
+			return "none";
+		}
+
+		return "none";
+	}
+
+	/** An object's guard over another object's values: its fields, and the fields only the other has. */
+	function objectFit(a: ObjectKind, b: ObjectKind): Fit {
+		let result: Fit = "whole";
+		for (const field of a.fields) {
+			const other = b.fields.find((candidate) => candidate.name === field.name);
+			if (!other) {
+				if (isRequired(field.shape)) return "none";
+				continue;
+			}
+
+			const value = fit(field.shape, other.shape);
+			if (value === "none") return "none";
+			result = worse(result, value);
+		}
+
+		// A field only `b` declares is dropped, whenever a value carries it.
+		for (const field of b.fields) {
+			if (describe(field.shape).kind === "nothing") continue;
+			if (!a.fields.some((candidate) => candidate.name === field.name)) return "lossy";
+		}
+
+		return result;
+	}
+
+	/** A tuple's values as a collection whose element is `element()`: each position has to pass it. */
+	function listInto(list: ListKind, element: () => Shape): Fit {
+		const elements = list.elements.map((shape) => fit(element(), shape));
+		if (list.rest) elements.push(atLeastEmpty(fit(element(), list.rest)));
+		return elements.includes("none") ? "none" : worst(elements);
+	}
+
+	/** An empty collection always passes and is written whole. */
+	function atLeastEmpty(value: Fit): Fit {
+		return value === "none" ? "whole" : value;
+	}
+
+	function worst(values: Fit[]): Fit {
+		return values.reduce<Fit>((result, value) => worse(result, value), "whole");
+	}
+
+	/** Whether a map whose keys are `key` can hold the field name or array index `name`. */
+	function keyFits(key: Shape, name: string | number): boolean {
+		const kind = describe(key);
+		switch (kind.kind) {
+			case "string":
+				return typeof name === "string";
+			case "number":
+			case "varint":
+				return typeof name === "number";
+			case "constant":
+				return literalKey(kind.value) === (typeof name === "string" ? JSON.stringify(name) : `${name}`);
+			case "literals":
+				return kind.values.some(
+					(value) => literalKey(value) === (typeof name === "string" ? JSON.stringify(name) : `${name}`),
+				);
+			case "optional":
+				return keyFits(kind.inner, name);
+			case "union":
+				return kind.alternatives.some((alternative) => keyFits(alternative.shape, name));
+			case "blob":
+				return kind.typeofName === undefined;
+			default:
+				return false;
+		}
+	}
+
+	/**
+	 * Two primitive kinds: `none` when no value is both, `whole` when `a` keeps every value of `b` its
+	 * guard accepts, `lossy` when a number of `b` can be out of `a`'s width. `undefined` when either
+	 * side is not a primitive; a primitive against a table is `none`.
+	 */
+	function primitiveFit(a: Kind, b: Kind): Fit | undefined {
+		const left = primitiveType(a);
+		const right = primitiveType(b);
+		if (left === undefined && right === undefined) return;
+		if (left === undefined || right === undefined || left !== right) return "none";
+
+		const values = (kind: Kind) =>
+			kind.kind === "constant" ? [kind.value] : kind.kind === "literals" ? kind.values : undefined;
+		const leftValues = values(a);
+		const rightValues = values(b);
+		if (leftValues && rightValues) {
+			const keys = new Set(leftValues.map(literalKey));
+			return rightValues.some((value) => keys.has(literalKey(value))) ? "whole" : "none";
+		}
+		if (leftValues) return "whole";
+		if (a.kind === "enum" && b.kind === "enum") return a.name === b.name ? "whole" : "none";
+		if (a.kind === "datatype" && b.kind === "datatype") return a.name === b.name ? "whole" : "none";
+
+		const holds = numberRange(a);
+		if (holds) {
+			const range = rightValues ? literalRange(rightValues) : numberRange(b);
+			if (!range) return "lossy";
+			const [minimum, maximum, whole] = range;
+			return minimum >= holds[0] && maximum <= holds[1] && (whole || !holds[2]) ? "whole" : "lossy";
+		}
+
+		return "whole";
+	}
+
+	/** The values a number kind writes exactly: `[min, max, whole numbers only]`, or nothing for `f64`. */
+	function numberRange(kind: Kind): [number, number, boolean] | undefined {
+		if (kind.kind === "varint") return [0, VARINT_LIMIT - 1, true];
+		if (kind.kind !== "number" || kind.width === "f64") return;
+		if (kind.width === "f32") return [-F32_MAX, F32_MAX, false];
+		const [minimum, maximum] = WIDTH_RANGE[kind.width]!;
+		return [minimum, maximum, true];
+	}
+
+	function literalRange(values: ts.Expression[]): [number, number, boolean] | undefined {
+		const numbers = values.map((value) => Number(literalKey(value)));
+		if (numbers.some((value) => Number.isNaN(value))) return;
+		return [Math.min(...numbers), Math.max(...numbers), numbers.every((value) => Number.isInteger(value))];
+	}
+
+	/** What `typeof` says about every value of a primitive kind; nothing for the others. */
+	function primitiveType(kind: Kind): string | undefined {
+		switch (kind.kind) {
+			case "number":
+			case "varint":
+				return "number";
+			case "string":
+			case "boolean":
+			case "buffer":
+				return kind.kind;
+			case "datatype":
+				return kind.name;
+			case "cframe":
+				return "CFrame";
+			case "enum":
+				return "EnumItem";
+			case "literals":
+				return primitiveType({ kind: "constant", value: kind.values[0] });
+			case "constant": {
+				const value = kind.value;
+				if (f.is.string(value)) return "string";
+				if (f.is.number(value) || ts.isPrefixUnaryExpression(value)) return "number";
+				if (value.kind === ts.SyntaxKind.TrueKeyword || value.kind === ts.SyntaxKind.FalseKeyword)
+					return "boolean";
+				return "EnumItem";
+			}
+		}
+	}
+
+	/** A build warning at the value being serialized, in the form the empty-glob warning takes. */
+	function warn(message: string) {
+		const node = ts.getParseTreeNode(diagnosticNode);
+		const position = node && node.pos >= 0 ? node.getStart(file) : 0;
+		const { line, character } = file.getLineAndCharacterOfPosition(position);
+		const text = `${state.getFileId(file)}:${line + 1}:${character + 1} - ${message}`;
+		if (warned.has(text)) return;
+
+		warned.add(text);
+		Logger.warn(text);
 	}
 
 	/**
@@ -1807,7 +2512,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		if (!isKind(shape)) {
 			const info = hoist(shape);
-			if (info) return f.call(info.size, [value]);
+			if (info) return callHoisted(info, "s", [value]);
 		}
 
 		const kind = describe(shape);
@@ -1910,11 +2615,20 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				out.push(letDecl(total, num(1)));
 
 				let chain: ts.Statement | undefined;
-				for (const i of evaluationOrder(kind).reverse()) {
+				for (const i of [...evaluation(kind).order].reverse()) {
 					const alternative = kind.alternatives[i];
 					const layout = layoutOf(alternative.shape);
 					const body = new Array<ts.Statement>();
-					const size = layout.size !== undefined ? num(layout.size) : emitSize(alternative.shape, v, body);
+					const size =
+						kind.whole === i
+							? conditional(
+									isWhole(f.as(v, T.number())),
+									f.call(varintHelpers().size, [f.as(v, T.number())]),
+									num(8),
+								)
+							: layout.size !== undefined
+								? num(layout.size)
+								: emitSize(alternative.shape, v, body);
 					if (!(f.is.number(size) && size.text === "0")) body.push(addAssign(total, size));
 					if (body.length === 0 && chain === undefined) continue;
 					chain = ifStatement(discriminate(kind, i, v), body, chain);
@@ -1936,7 +2650,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			if (info) {
 				const args = [ctx.buf, at(ctx), value];
 				if (info.layout.blobs) args.push(ctx.blobs!);
-				ctx.out.push(assign(ctx.cursor.variable!, f.call(info.write, args)));
+				ctx.out.push(assign(ctx.cursor.variable!, callHoisted(info, "w", args)));
 				ctx.cursor.base = ctx.cursor.variable;
 				ctx.cursor.offset = 0;
 				return;
@@ -2129,12 +2843,33 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				const isFixedLayout = ctx.cursor.variable === undefined;
 				const start = ctx.cursor.offset;
 				let chain: ts.Statement = f.block([raise("value matches none of the union's members")]);
-				for (const i of evaluationOrder(kind).reverse()) {
-					const alternative = kind.alternatives[i];
+				const writeMember = (child: Ctx, i: number) => {
+					child.out.push(f.statement(bufferCall("writeu8", [child.buf, at(child), num(i)])));
+					child.cursor.offset += 1;
+					emitWrite(kind.alternatives[i].shape, v, child);
+				};
+
+				for (const i of [...evaluation(kind).order].reverse()) {
 					const body = branch(ctx, (child) => {
-						child.out.push(f.statement(bufferCall("writeu8", [child.buf, at(child), num(i)])));
-						child.cursor.offset += 1;
-						emitWrite(alternative.shape, v, child);
+						if (kind.whole !== i) return writeMember(child, i);
+
+						const n = f.as(v, T.number());
+						const whole = branch(child, (inner) => {
+							inner.out.push(
+								f.statement(
+									bufferCall("writeu8", [inner.buf, at(inner), num(kind.alternatives.length)]),
+								),
+							);
+							inner.cursor.offset += 1;
+							writeVarint(inner, n);
+						});
+						child.out.push(
+							ifStatement(
+								isWhole(n),
+								whole,
+								branch(child, (inner) => writeMember(inner, i)),
+							),
+						);
 					});
 					chain = ifStatement(discriminate(kind, i, v), body, chain);
 				}
@@ -2191,12 +2926,18 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	/** The test that tells member `index` of `union` apart from the others, given a value. */
 	function discriminate(union: UnionKind, index: number, value: ts.Expression): ts.Expression {
+		// The last member left once the others are ruled out only has to be a table: anything else
+		// still falls through to the error.
+		if (evaluation(union).tableOnly === index) return typeOfIs(value, "table");
+
 		const alternative = union.alternatives[index];
 		const kind = describe(alternative.shape);
 
 		if (kind.kind === "object") {
-			const test = objectTest(union, kind, f.as(value, T.record()));
-			if (test) {
+			const key = objectKey(union, kind);
+			if (key) {
+				const field = fieldAccess(f.as(value, T.record()), key.name);
+				const test = key.value ? equals(field, key.value) : notNil(field);
 				// Indexing is only safe once the value is known to be a table.
 				const tables = union.alternatives.every((other) => TABLE_KINDS.has(describe(other.shape).kind));
 				return tables ? test : f.binary(typeOfIs(value, "table"), ts.SyntaxKind.AmpersandAmpersandToken, test);
@@ -2205,8 +2946,17 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		switch (kind.kind) {
 			case "number":
-			case "varint":
-				return typeOfIs(value, "number");
+			case "varint": {
+				// A branded width only takes a number it writes as it is, so one that does not fit goes
+				// to the next member: 70000 in `u16 | number` is the number, not 4464.
+				const range = numberRange(kind);
+				if (!range) return typeOfIs(value, "number");
+				return f.binary(
+					typeOfIs(value, "number"),
+					ts.SyntaxKind.AmpersandAmpersandToken,
+					fitsRange(f.as(value, T.number()), range),
+				);
+			}
 			case "string":
 				return typeOfIs(value, "string");
 			case "boolean":
@@ -2252,7 +3002,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				if (info.layout.blobs) args.push(ctx.blobs!);
 				const value = uid("value");
 				const next = uid("o");
-				ctx.out.push(constDecl(f.arrayBindingDeclaration([value, next]), f.call(info.read, args)));
+				ctx.out.push(constDecl(f.arrayBindingDeclaration([value, next]), callHoisted(info, "r", args)));
 				ctx.cursor.base = next;
 				ctx.cursor.offset = 0;
 				return value;
@@ -2455,6 +3205,11 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				ctx.out.push(letDecl(value, undefined, T.unknown()));
 
 				let chain: ts.Statement = f.block([raise(MALFORMED)]);
+				if (kind.whole !== undefined) {
+					const body = branch(ctx, (child) => child.out.push(assign(value, readVarint(child))));
+					chain = ifStatement(equals(tag, num(kind.alternatives.length)), body, chain);
+				}
+
 				for (let i = kind.alternatives.length - 1; i >= 0; i--) {
 					const alternative = kind.alternatives[i];
 					const body = branch(ctx, (child) =>

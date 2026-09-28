@@ -885,8 +885,25 @@ of that spelling's own (`spell`), since TypeScript's own order is by internal ty
 one type for every spelling of `string | number`. A union that reaches the generator with no
 spelling of its own (through a generic's type argument) keeps TypeScript's order, which is the same
 in every file of a program. The order used to be keyed on the type, first spelling wins, which
-made a sender in one file and a receiver in another disagree on the tags. Result decoders take the
-function type (`network-result-decoder`) so the declared return type node is available for that.
+made a sender in one file and a receiver in another disagree on the tags. Which member a value is
+written as is `evaluation`'s. Exact tests go first, in written order: a `type`/`typeof` check (for a
+branded number, also that the value fits its width: range and wholeness for an integer width,
+range only for `f32`), a literal, a discriminant, a required key no
+other member has. The members checked by a `t` guard follow. A guard ignores keys an object does
+not declare at any depth, so `fit` compares the members' kinds, nested ones included, and a member
+whose guard would take another's values and write them with a loss goes after it, unless the other
+would do the same. The written order stands otherwise, with all-optional objects last, and a loss
+that remains gets one build warning per union type per file (each alias or generic instantiation is
+a type of its own) through `Logger.warn`, in the empty-glob
+warning's form. Catch-all blobs go last. When the last member is a guard-checked table kind, it is
+only checked to be a table. A plain `number` member also owns the tag after the members, under which
+a whole number below 2^35 travels as a varint. Named variable-size objects, unions and tuples get
+`s_`/`w_`/`r_` functions; so does any other variable-size structured type that the values built so
+far in the file reach more than once (`countUses`), which is also what hoists a recursive type with
+no name of its own. The functions are fields of one table per file (`hoistedTable`): three locals
+per type ran a file with about 66 hoisted types past Luau's 200 locals, and it no longer loaded.
+Result decoders take the function type (`network-result-decoder`), so the declared return type
+node is available for that.
 A count of elements that take no bytes cannot be checked against what is left, so such counts are
 tallied in a per-file variable that every decode resets on entry (decoding never yields) and the
 tally is capped at 65535, so nesting cannot multiply what one count may announce.

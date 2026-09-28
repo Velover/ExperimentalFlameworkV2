@@ -5,6 +5,13 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ## Unreleased
 
+### Upgrade notes
+
+- **A union with `number` has a new tag for whole numbers.** In such a union, a value from 0 to
+  2^35 - 1 is written as a varint under a tag after the members. Both realms are built together, so
+  remotes need nothing. A buffer that `Flamework.createSerializer` writes in this release raises
+  "malformed payload" when an older build reads it. Buffers written by earlier releases still read.
+
 ### core
 
 #### Added
@@ -38,10 +45,61 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ### transformer
 
+#### Added
+
+- A build warning when a union has members a value cannot tell apart: two members that could each
+  take part of the other's values, such as two patches whose fields are all optional. It is given
+  once per union type and file, where the union is first written, in the empty-glob warning's form,
+  and names the union and the members. A union spelled through another alias or a generic is warned
+  again. A value that fits both may be written as the first of them in the warning's order, without
+  the parts only the others declare.
+
 #### Changed
 
+- Serialization: which union member a value is written as no longer depends on the written order
+  alone. The members are tried in this order:
+  - Members with a test of their own go first, in written order: a type, a literal, a discriminant,
+    a key only they have.
+  - The members checked by a guard follow. A member whose guard would take another member's value
+    and write it without part of it (a key it does not declare, at any depth) goes after that member.
+    Where two would each do that to the other, the written order stands, with objects whose fields
+    are all optional last, and the build warns.
+  - A blob that takes anything goes last.
+
+  The tag is still the member's written position. When the last member tried is an object or a
+  collection without a test of its own, it is only checked to be a table. So a charm-sync patch no
+  longer walks its guard: a small patch serializes in about 5.5 µs instead of 10.
+- Serialization: a branded number member of a union (`Serialization.u16` and the other widths, and
+  `varint`) only takes a number that fits its width: in range and whole for an integer width, in
+  range for `f32`. Any other number goes to the next member.
+- Serialization: in a union with `number`, a whole number from 0 to 2^35 - 1 is a varint under a tag
+  of its own, after the members. So 3 in `string | number` takes 2 bytes instead of 9, and so do
+  array indices sent as map keys. Other numbers, and a `number` outside a union, stay f64.
+- Serialization: a type with no name of its own that a file's values reach more than once now gets
+  size, write and read functions, as a named type does, instead of being written out at every place.
+  This covers objects, unions, tuples, arrays, sets and maps: a mapped or conditional type's instance,
+  an object literal type, `string[]`, `Map<string, number>`. The bytes sent are the same. A
+  charm-sync payload modelled on Dive In's went from 5,277 lines (166 KB) to 3,367 lines (108 KB).
+- Serialization: the size, write and read functions of every hoisted type in a file are fields of one
+  table, `codec`, instead of three locals each.
 - `Could not find Rojo data for '...'` adds what the path compiles to and that no `$path` in the Rojo
   project covers it, or that no Rojo project file was found.
+
+#### Fixed
+
+- Serialization: `Partial<Crate> | None` wrote every removal as an empty patch, so the receiver kept
+  what was removed. The patch, whose fields are all optional, was written ahead of charm-sync's
+  removal marker. A union member written ahead of another whose values its guard accepts lost data
+  the same way:
+  - a list or a map taken by a patch;
+  - a map's value taken by an object;
+  - `{ pos: { x, y, z } }` taken by `{ pos: { x, y } }` or by a map of `{ x }`;
+  - `{ a, b }` taken by `{ a }`.
+- Serialization: `u16 | number` wrote 70000 as a u16, which arrived as 4464.
+- Serialization: a file with more than about 66 hoisted types compiled but did not load, because it
+  went past Luau's limit of 200 locals.
+- Serialization: a recursive type with no name of its own, such as a conditional patch type over a
+  recursive interface, overflowed the stack at build time.
 
 ### core, components, networking, transformer, transformer-plugin
 
@@ -56,6 +114,27 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 - Each package.json links this repository, with the package's folder, plus its homepage and issues, so
   npm shows them on the package page. core and transformer pointed at the original v1 repositories.
+
+### Docs
+
+- Guide 06:
+  - how the union member a value is sent as is chosen, and when the build warns;
+  - branded number members;
+  - whole numbers in a union with `number`;
+  - which wrong values raise at the sender and which do not: numeric strings, booleans, undeclared
+    keys, a table sent as a union's last member, an array with holes, and NaN in a guarded number
+    field;
+  - in place of "Remote wiring is deferred by one frame", what a late listener misses:
+    - a reliable event only past the engine's queue limit;
+    - an unreliable one sent before the first `connect`;
+    - under `Immediate` signals, one arriving right behind the event whose handler makes that first
+      `connect`.
+
+### Tests
+
+- The Studio place pins what a late listener misses, in both directions and under every project:
+  reliable events wait for the first connection, unreliable ones are dropped, and one more is missed
+  because Flamework starts listening a moment late under `Immediate` signals.
 
 ## 2026-09-27: core, components, networking and testing 2.0.0-alpha.3; transformer 2.0.0-alpha.4; transformer-plugin 2.0.0-alpha.2
 
