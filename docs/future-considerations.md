@@ -166,6 +166,56 @@ byte-identical to today's `true`; the ids follow `idGenerationMode` when it is s
 stable across plain builds with networking off and everything else on; Studio round trips on both
 realms with networking obfuscated.
 
+## Later: batching event calls into one send per frame
+
+**The idea.** A game that fires the same event many times a frame (a fast gun's shots, hit markers,
+particles, many entities' state) makes one remote call per fire. Batching queues those calls and
+sends them once per frame, as one remote call per player: the packed payloads back to back, each
+tagged with its member. As far as we know, Roblox doesn't hold remote calls for a fixed tick (a call
+goes out with the next network send; confirm it in Studio), so a batch flushed on Heartbeat adds at
+most one frame of delay.
+
+**What it would save** (not measured yet):
+- the engine's per-call overhead: every remote call carries its own header, and a batch pays it once;
+- work on the receiving side: one engine event instead of N, where v2 also runs each handler on its
+  own thread;
+- bytes, through compression: Zstd over N similar records shrinks far more than over one at a time,
+  so batching pairs with `Networking.Compressed*`.
+
+Zap, Blink and ByteNet all batch per frame, which suggests the gain is real for this kind of traffic.
+
+**How a game would ask for it** (to decide; it should be explicit):
+- a marker per member, in the family of `Raw`, `Serialized` and `Compressed`:
+  `Networking.BatchedReliable<Fn>` / `Networking.BatchedUnreliable<Fn>`. Every fire of that member
+  goes through the batch, and the wire format stays fixed per member;
+- or a method at the call site, `Events.shot.queue(...)` next to `.fire(...)`. One member can then be
+  sent either way, but the receiver has to accept both forms.
+
+Either way it builds on the packed-buffer path that `Networking.Serialized` adds.
+
+**What must hold.**
+- Order: calls in one batch arrive in the order they were queued. A batched call and an unbatched
+  one from the same frame can arrive in either order; the guide has to say so.
+- Unreliable batches: a lost packet loses every call in it, and a batch is split to stay under the
+  unreliable payload limit.
+- Batches from clients are untrusted: a cap on the calls in one batch, and every call still goes
+  through its guards and middleware, so a rate limit still counts each call.
+- The server keeps a queue per player. `broadcast` and `except` feed every queue they reach, and one
+  flush per frame sends them all.
+- Events only: a function's caller waits for its answer, so batching functions buys little.
+
+**What a game can do today:** one event that takes an array (`shots(list: Shot[])`), filled during
+the frame and fired once. With serialization on, the array is packed tightly. Batching would make
+that automatic for any member.
+
+**Measure before building,** in Studio: N small fires in one frame against one fire carrying an
+N-item array, for bytes sent (`Stats`) and receive time, reliable and unreliable, with and without
+serialization and compression; and when remote calls actually leave, frame by frame.
+
+**Tests:** order within a batch; `broadcast` and `except`; the cap per batch; an oversized
+unreliable batch being split; guards and middleware per call; Studio round trips on both realms;
+the measurements above.
+
 ## 1. Performance and memory cost of each feature
 
 The table below started as an estimate from reading the code (September 2026). The rows this release
