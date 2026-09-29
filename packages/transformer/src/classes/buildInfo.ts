@@ -23,11 +23,33 @@ export interface GlobUse {
 	column: number;
 }
 
+/**
+ * One use of a path macro in a file, kept so that a source path with nothing the build emits under
+ * it can be reported where it is written.
+ */
+export interface PathUse {
+	/** The source path as written, such as `src/server/services`. */
+	path: string;
+
+	/** The call the path was given to, as written: `registerProviders`, `ComponentPlugin.fromPath`. */
+	macro: string;
+
+	/** Where the macro is called (a method call at the method's name), both one-based. */
+	line: number;
+	column: number;
+
+	/** Whether the call raises when the folder is not there, as core's `requireModules` does after five seconds, rather than waiting. */
+	raises?: boolean;
+}
+
 interface FlameworkMetadata {
 	globs?: {
 		paths?: Record<string, string[]>;
 		origins?: Record<string, string[]>;
 		uses?: Record<string, GlobUse[]>;
+	};
+	paths?: {
+		uses?: Record<string, PathUse[]>;
 	};
 }
 
@@ -270,6 +292,28 @@ export class BuildInfo {
 			this.buildInfo.metadata.globs.uses ??= {};
 			this.buildInfo.metadata.globs.uses[origin] ??= [];
 			this.buildInfo.metadata.globs.uses[origin].push(use);
+		}
+	}
+
+	/**
+	 * Records a use of a path macro, which the build checks against the source tree once it is done
+	 * (see `TransformState.warnEmptyPaths`).
+	 */
+	addPathUse(origin: string, use: PathUse) {
+		this.buildInfo.metadata ??= {};
+		this.buildInfo.metadata.paths ??= {};
+		this.buildInfo.metadata.paths.uses ??= {};
+		this.buildInfo.metadata.paths.uses[origin] ??= [];
+		this.buildInfo.metadata.paths.uses[origin].push(use);
+	}
+
+	/**
+	 * Removes every path macro use recorded for this file, which is about to be compiled again.
+	 */
+	invalidatePathUses(origin: string) {
+		const uses = this.buildInfo.metadata?.paths?.uses;
+		if (uses) {
+			delete uses[origin];
 		}
 	}
 

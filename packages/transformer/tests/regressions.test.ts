@@ -1,6 +1,9 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "child_process";
 import fs from "fs";
+import os from "os";
 import path from "path";
+import ts from "typescript";
 import {
 	compileFixture,
 	compileFixtureFresh,
@@ -382,6 +385,254 @@ describe("a glob that matches no files", () => {
 			if (restored.status !== 0) {
 				throw new Error(`fixture failed to restore:\n${restored.output}`);
 			}
+		}
+	});
+});
+
+describe("a path macro whose source path holds no module", () => {
+	// The path still compiles to a Rojo path, but the place has nothing there, or nothing but an empty
+	// folder, and the call waits for it at runtime (requireModules raises after five seconds); the
+	// build says so where the path is used, without failing. fixture/src/pathWarnings.ts has three
+	// such paths, one misspelled module, one that holds modules and a folder of JSON modules.
+	const plain = (output: string) => output.replace(/\x1b\[[0-9;]*m/g, "");
+
+	test("is warned about where it is used, naming the call and the path, and the build still passes", () => {
+		const result = compileFixture();
+		const output = plain(result.output);
+
+		expect(result.status).toBe(0);
+		expect(output).toContain(
+			`src/pathWarnings.ts:8:3 - registerProviders("src/missing"): there is no such file or folder, so the place will not have it, and the call waits for it at runtime`,
+		);
+		expect(output).toContain(
+			`src/pathWarnings.ts:12:33 - ComponentPlugin.fromPath("src/missing/components"): there is no such file or folder`,
+		);
+	});
+
+	test("names what is on disk when only the case differs, since the place keeps the case", () => {
+		const output = plain(compileFixture().output);
+
+		expect(output).toContain(
+			`src/pathWarnings.ts:9:3 - registerProviders("src/Glob"): there is no such file or folder; on disk it is 'src/glob', and the place names it as the disk does`,
+		);
+		expect(output).toContain(
+			`src/pathWarnings.ts:16:9 - requireModules("src/glob/Target"): there is no such file or folder; on disk it is 'src/glob/target.ts'`,
+		);
+	});
+
+	test("says that requireModules raises, where registration waits", () => {
+		const output = plain(compileFixture().output);
+
+		expect(output).toContain(
+			`requireModules("src/glob/Target"): there is no such file or folder; on disk it is 'src/glob/target.ts', and the place names it as the disk does, so the call raises at runtime after waiting five seconds for a name the place does not have`,
+		);
+		expect(output).toContain(
+			`registerProviders("src/Glob"): there is no such file or folder; on disk it is 'src/glob', and the place names it as the disk does, so the call waits at runtime for a name the place does not have`,
+		);
+	});
+
+	test("says when the folder is there but nothing in it compiles to a module", () => {
+		expect(plain(compileFixture().output)).toContain(
+			`src/pathWarnings.ts:10:3 - registerProviders("src/typesOnly"): nothing in that folder compiles to a module`,
+		);
+	});
+
+	test("is not warned about for a folder or a module that is there", () => {
+		const output = plain(compileFixture().output);
+
+		expect(output).not.toContain(`registerProviders("src/glob")`);
+		expect(output).not.toContain(`requireModules("src/glob")`);
+		expect(output).not.toContain(`requireModules("src/glob/target")`);
+		expect(output).not.toContain(`requireModules("src/jsonOnly")`);
+		expect(output.match(/ - [\w.]+\("[^"]*"\): (there is no such|nothing in that folder)/g)).toHaveLength(5);
+	});
+
+	test("still compiles to the Rojo path", () => {
+		const source = normalize(emitted("pathWarnings"));
+		expect(source).toContain('registerProviders("src/missing", nil, { "out", "missing" })');
+		expect(source).toContain('requireModules("src/glob/Target", { "out", "glob", "Target" })');
+	});
+});
+
+describe("an incremental build without a tsBuildInfoFile", () => {
+	// TypeScript builds such a project incrementally into its default tsbuildinfo, beside the config,
+	// and recompiles only the files that changed. Flamework went by `tsBuildInfoFile` alone, took every
+	// such build for a clean one and made a fresh flamework.build, so a recompiled file named the class
+	// of a file left alone by a new id in the short, tiny and obfuscated modes: a dependency that never
+	// resolves. The build info has to be reused whenever TypeScript's own tsbuildinfo is there.
+	const probe = path.join(FIXTURE, "tsconfig.incremental-probe.json");
+	const alphaFile = path.join(FIXTURE, "src", "incrementalAlpha.ts");
+	const betaFile = path.join(FIXTURE, "src", "incrementalBeta.ts");
+	const RBXTSC = path.resolve(import.meta.dir, "../../../node_modules/roblox-ts/out/CLI/cli.js");
+
+	const compile = () => {
+		const result = spawnSync("node", [RBXTSC, "-p", probe], {
+			cwd: FIXTURE,
+			encoding: "utf8",
+			env: { ...process.env, FLAMEWORK_FIXTURE_IDMODE: "short" },
+		});
+		const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+		expect({ status: result.status, output }).toMatchObject({ status: 0 });
+	};
+	const read = (file: string) => fs.readFileSync(path.join(FIXTURE, "out", file), "utf8");
+	const declared = () => read("incrementalAlpha.luau").match(/"identifier", "([^"]+)"/)![1];
+	const named = () => read("incrementalBeta.luau").match(/"flamework:parameters", \{ "([^"]+)" \}/)![1];
+	const salt = () => JSON.parse(fs.readFileSync(path.join(FIXTURE, "flamework.build"), "utf8")).salt as string;
+
+	test("reuses flamework.build once the tsbuildinfo is there, and starts afresh without it", () => {
+		const { config } = ts.readConfigFile(path.join(FIXTURE, "tsconfig.json"), ts.sys.readFile);
+		config.compilerOptions.incremental = true;
+		const buildInfoFile = ts.getTsBuildInfoEmitOutputFilePath(
+			ts.parseJsonConfigFileContent(config, ts.sys, FIXTURE, undefined, probe).options,
+		)!;
+		const leftovers = [probe, buildInfoFile, alphaFile, betaFile];
+		const cleanUp = () => leftovers.forEach((file) => fs.rmSync(file, { force: true }));
+
+		cleanUp();
+		fs.writeFileSync(probe, JSON.stringify(config, undefined, "\t"));
+		fs.writeFileSync(
+			alphaFile,
+			`import { Provider } from "@flamework-experimental/core";\n\n@Provider()\nexport class IncrementalAlpha {}\n`,
+		);
+		fs.writeFileSync(
+			betaFile,
+			`import { Provider } from "@flamework-experimental/core";\nimport { IncrementalAlpha } from "./incrementalAlpha";\n\n@Provider()\nexport class IncrementalBeta {\n\tconstructor(private readonly alpha: IncrementalAlpha) {}\n}\n`,
+		);
+
+		try {
+			// With no tsbuildinfo yet: a clean build, a flamework.build of its own.
+			compile();
+			expect(fs.existsSync(buildInfoFile)).toBe(true);
+			const first = { declared: declared(), salt: salt(), alpha: read("incrementalAlpha.luau") };
+			expect(named()).toBe(first.declared);
+
+			// Only beta changes, so only beta is compiled again: it must name alpha as alpha still says.
+			fs.appendFileSync(betaFile, "\n// changed\n");
+			compile();
+			expect(read("incrementalAlpha.luau")).toBe(first.alpha);
+			expect(named()).toBe(first.declared);
+			expect(salt()).toBe(first.salt);
+
+			// A genuinely clean build still starts afresh: a new salt, and every file compiled again.
+			fs.rmSync(buildInfoFile, { force: true });
+			compile();
+			expect(salt()).not.toBe(first.salt);
+			expect(named()).toBe(declared());
+		} finally {
+			cleanUp();
+			const restored = compileFixtureFresh();
+			if (restored.status !== 0) {
+				throw new Error(`fixture failed to restore:\n${restored.output}`);
+			}
+		}
+	}, 600_000);
+});
+
+describe("findSourcePath", () => {
+	// What the path warning is judged on, against a folder of its own.
+	const load = async () => (await import("../out/util/functions/findSourcePath.js")).findSourcePath;
+
+	test("matches names exactly, maps a module to its instance name and looks through folders", async () => {
+		const findSourcePath = await load();
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "fw-source-path-"));
+		try {
+			for (const file of [
+				"src/server/commands/kick.ts",
+				"src/server/main.server.ts",
+				"src/shared/types/shapes.d.ts",
+				"src/shared/nested/deep/module.luau",
+				"src/shared/withPackages/node_modules/x/index.ts",
+			]) {
+				fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+				fs.writeFileSync(path.join(root, file), "");
+			}
+			fs.mkdirSync(path.join(root, "src/shared/empty"), { recursive: true });
+
+			expect(findSourcePath(root, "src/server/commands")).toEqual({ kind: "modules" });
+			expect(findSourcePath(root, "src/server/commands/kick")).toEqual({ kind: "modules" });
+			expect(findSourcePath(root, "src/server/main")).toEqual({ kind: "modules" });
+			expect(findSourcePath(root, "src/shared/nested")).toEqual({ kind: "modules" });
+			expect(findSourcePath(root, "./src/server/../server/commands")).toEqual({ kind: "modules" });
+
+			expect(findSourcePath(root, "src/shared/types")).toEqual({ kind: "empty" });
+			expect(findSourcePath(root, "src/shared/empty")).toEqual({ kind: "empty" });
+			expect(findSourcePath(root, "src/shared/withPackages")).toEqual({ kind: "empty" });
+
+			expect(findSourcePath(root, "src/server/nope")).toEqual({ kind: "missing" });
+			expect(findSourcePath(root, "src/server/Commands")).toEqual({
+				kind: "missing",
+				actual: "src/server/commands",
+			});
+			expect(findSourcePath(root, "src/Server/commands/Kick")).toEqual({
+				kind: "missing",
+				actual: "src/server/commands/kick.ts",
+			});
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("findPlaceSource", () => {
+	// The same judgement, made the way Rojo builds the place: from the deepest `$path` that covers the
+	// Rojo path, which is the sources for a folder inside `out`, and the disk for a `$path` of its own.
+	const load = async () => (await import("../out/util/functions/findSourcePath.js")).findPlaceSource;
+
+	test("follows the project's $paths, Rojo's modules, and exact names below the $path", async () => {
+		const findPlaceSource = await load();
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "fw-place-source-"));
+		try {
+			for (const file of [
+				"src/server/services2/thing.ts",
+				"src/shared/json/a.json",
+				"src/shared/toml/a.toml",
+				"src/shared/yaml/a.yml",
+				"src/shared/model/a.rbxm",
+				"src/shared/text/a.txt",
+				"src/shared/types/a.d.ts",
+				"extra2/mod.luau",
+				"extra2/config.json",
+			]) {
+				fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+				fs.writeFileSync(path.join(root, file), "");
+			}
+
+			const at = (...parts: string[]) => path.join(root, ...parts);
+			// As the Rojo resolver lists them: a nested `$path` inside the out-mapped TS folder, and the
+			// folder itself.
+			const partitions = [
+				{ rbxPath: ["ServerScriptService", "TS", "Nested"], fsPath: at("extra2") },
+				{ rbxPath: ["ServerScriptService", "TS"], fsPath: at("out", "server") },
+				{ rbxPath: ["ReplicatedStorage", "TS"], fsPath: at("out", "shared") },
+			];
+			const directories = { rootDir: at("src"), outDir: at("out") };
+			const find = (...rbxPath: string[]) => findPlaceSource(rbxPath, partitions, directories, root);
+
+			// A `$path` nested in an out-mapped folder is what the place has there, and its modules count.
+			expect(find("ServerScriptService", "TS", "Nested")).toEqual({ kind: "modules" });
+			expect(find("ServerScriptService", "TS", "Nested", "mod")).toEqual({ kind: "modules" });
+			expect(find("ServerScriptService", "TS", "Nested", "config")).toEqual({ kind: "modules" });
+			expect(find("ServerScriptService", "TS", "Nested", "nope")).toEqual({ kind: "missing" });
+
+			// Inside out, the sources: exact below the $path, and a case difference is named.
+			expect(find("ServerScriptService", "TS", "services2")).toEqual({ kind: "modules" });
+			expect(find("ServerScriptService", "TS", "Services2")).toEqual({
+				kind: "missing",
+				actual: "src/server/services2",
+			});
+
+			// JSON, TOML, YAML and model files are modules to Rojo; text and declarations are not.
+			for (const folder of ["json", "toml", "yaml", "model"]) {
+				expect(find("ReplicatedStorage", "TS", folder)).toEqual({ kind: "modules" });
+			}
+			expect(find("ReplicatedStorage", "TS", "json", "a")).toEqual({ kind: "modules" });
+			expect(find("ReplicatedStorage", "TS", "text")).toEqual({ kind: "empty" });
+			expect(find("ReplicatedStorage", "TS", "types")).toEqual({ kind: "empty" });
+
+			// No $path covers it: the caller falls back to the source path.
+			expect(find("Workspace", "Thing")).toBeUndefined();
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 });

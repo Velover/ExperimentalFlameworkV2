@@ -238,6 +238,31 @@ describe("Flamework.createSerializer", () => {
 		// A plain `number` field is still an f64: `Point` is two of them at fixed offsets.
 		expect(source()).not.toMatch(/if v\w*\.x < 34359738368/);
 	});
+
+	test("writes the elements after a tuple's rest element after the rest, and reads them back there", () => {
+		const serializer = (name: string) => {
+			const match = source().match(
+				new RegExp(`local ${name} = Flamework\\.createSerializer\\([\\s\\S]*?\\n\\}\\)\\n`),
+			);
+			if (!match) throw new Error(`no ${name} in the emit`);
+			return match[0];
+		};
+
+		// `[number, ...string[], boolean]`: the rest count leaves out both, and the boolean is the last value.
+		const middle = serializer("restMiddleSerializer");
+		expect(middle).toMatch(/local count\w* = math\.max\(#v\w* - 2, 0\)/);
+		expect(middle).toMatch(/local _value\w* = v\w*\[count\w* \+ 2\]\s*buffer\.writeu8\(/);
+		expect(middle).toMatch(
+			/end\s*local arg\w* = buffer\.readu8\(buf\w*, o\w*\) ~= 0\s*list\w*\[count\w* \+ 2\] = arg\w*/,
+		);
+		expect(middle).not.toMatch(/local _value\w* = v\w*\[2\]/);
+
+		// `[...string[], boolean]`: nothing before the rest.
+		const first = serializer("restFirstSerializer");
+		expect(first).toMatch(/local count\w* = math\.max\(#v\w* - 1, 0\)/);
+		expect(first).toMatch(/local _value\w* = v\w*\[count\w* \+ 1\]/);
+		expect(first).toMatch(/list\w*\[count\w* \+ 1\] = arg\w*/);
+	});
 });
 
 /** Where the fixture's serialization.ts builds `name`: the line and column of its `createSerializer` call. */

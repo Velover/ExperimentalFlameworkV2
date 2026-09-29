@@ -7,7 +7,9 @@
 		"optimizations": { "guardGenerationDedupLimit": "${FLAMEWORK_FIXTURE_DEDUP:-3}" },
 		"plugins": [{ "path": "./fieldInfoPlugin.cjs", "options": { "prefix": "fx" } }]
 	},
-	"networking": { "serialization": true },
+	"networking": {
+		"serialization": "${FLAMEWORK_FIXTURE_SERIALIZATION:-true}"
+	},
 	"components": { "warningTimeout": 2, "watchRenames": true },
 	"scopes": { "active": "${FLAMEWORK_FIXTURE_SCOPES:-unset}" },
 	"testing": { "enabled": "${FLAMEWORK_FIXTURE_TESTS:-false}", "entry": "src/env" },

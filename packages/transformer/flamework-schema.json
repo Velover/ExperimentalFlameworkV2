@@ -44,6 +44,29 @@
 				}
 			}
 		},
+		"paths": {
+			"$id": "paths",
+			"type": "object",
+			"properties": {
+				"uses": {
+					"type": "object",
+					"additionalProperties": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"required": ["path", "macro", "line", "column"],
+							"properties": {
+								"path": { "type": "string" },
+								"macro": { "type": "string" },
+								"line": { "type": "number" },
+								"column": { "type": "number" },
+								"raises": { "type": "boolean" }
+							}
+						}
+					}
+				}
+			}
+		},
 		"buildInfo": {
 			"$id": "buildInfo",
 			"required": ["version", "flameworkVersion", "identifiers"],
@@ -84,6 +107,9 @@
 					"properties": {
 						"globs": {
 							"$ref": "globs"
+						},
+						"paths": {
+							"$ref": "paths"
 						}
 					}
 				}

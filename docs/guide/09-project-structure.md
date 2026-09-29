@@ -51,6 +51,15 @@ Flamework.createModule()
 `services` and `controllers` are only folder names: v2 has no `@Service`/`@Controller` distinction.
 Keeping the folders separate is what keeps server code off the client.
 
+Register only the folders you have. A registered folder that does not exist is not in the place,
+and the call waits for it at runtime, warning after five seconds with its own name. One that holds
+no module yet (a new game's `shared/components`, say) is copied into the place empty and registers
+nothing, but git keeps no empty folder, so a fresh clone has no such folder and waits the same way.
+The build warns about both where the path is written
+([Getting started › Rojo](01-getting-started.md#rojo)). Add the `fromPath` line with the first
+component, or leave a module in the folder. `plugins/` and `types/` are not registered, so they need
+nothing.
+
 Each entry point includes two `ComponentPlugin`s. They share the module's one `Components`, so a
 server component can link to a shared one ([Components](05-components.md)).
 
@@ -105,7 +114,6 @@ package has its own section in the file. The only entry `tsconfig.json` needs is
 {
   "$schema": "./node_modules/@flamework-experimental/transformer/flamework.config.schema.json",
   "transformer": {
-    "hashPrefix": "g",
     "obfuscation": false,
     "idGenerationMode": "short",
     "optimizations": { "guardGenerationDedupLimit": 5 },
@@ -120,7 +128,7 @@ package has its own section in the file. The only entry `tsconfig.json` needs is
 
 | Section | Key | Effect |
 |---|---|---|
-| `transformer` | `hashPrefix` | Prefix for generated ids. Defaults to the package name in a package, and to none in a game; set a short one in a game. It cannot start with `$`, which Flamework's own packages use. |
+| `transformer` | `hashPrefix` | Prefix for generated ids. Defaults to the package name in a package, and to none in a game. A game needs none: every package id starts with its package's prefix and a colon (`$c:components@Components`, or the package's name for a package of someone else's), which none of a game's own ids starts with, so they cannot collide. A game may still set one, to mark its ids; the ids change with it, so change it with a plain build. It cannot start with `$`, which Flamework's own packages use. |
 | | `obfuscation` | Obfuscates identifiers: random remote names, shuffled metadata, short ids, all different on every plain build. Game projects only; see [obfuscation](#obfuscation). |
 | | `idGenerationMode` | `"full"`, `"short"`, `"tiny"` or `"obfuscated"`. Defaults to `"obfuscated"` with obfuscation on, else `"full"`. Only shorten in a game. |
 | | `plugins` | Transformer plugins; see [transformer plugins](../reference/transformer-plugins.md). |
@@ -188,9 +196,10 @@ Two things keep names the same across builds, and the transformer warns about bo
 
 - **`transformer.salt`**, which fixes the hash the class ids come from. Leave it unset with
   obfuscation on.
-- **An incremental build** (`incremental` with a `tsBuildInfoFile`). It reuses the previous
-  `flamework.build`, so that the files it does not recompile still match. Delete the tsbuildinfo
-  before a release build.
+- **An incremental build** (`incremental`, with a `tsBuildInfoFile` or TypeScript's default,
+  which is `tsconfig.tsbuildinfo` beside `tsconfig.json` when `rootDir` is `src`). It reuses the
+  previous `flamework.build`, so that the files it does not recompile still match. Delete the
+  tsbuildinfo before a release build; the warning names it.
 
 Without obfuscation the names are stable across builds, which is what you want while debugging.
 
@@ -204,7 +213,10 @@ Any string in the file can use environment variables:
 
 The variables come from `.env` and `.env.local` next to `flamework.config.json`, and from the
 process environment. A shell variable wins over `.env.local`, which wins over `.env`. Commit `.env`
-with the defaults, and git-ignore `.env.local` for personal overrides.
+with the defaults, and git-ignore `.env.local` for personal overrides. `.env.local` is read by every
+build on your machine, the ones you ship included, so a scope that adds test or debug code does not
+belong there when you build a place to publish; give it to the one build that needs it instead
+([Testing in the place › Setting up](12-testing.md#setting-up)).
 
 A variable is always a string. Where the file expects a boolean, a number or a list, the string is
 converted: `"obfuscation": "${OBFUSCATE:-false}"` becomes a boolean, and
@@ -237,7 +249,39 @@ Under `rbxtsc -w`, a change to `flamework.config.json`, `.env` or `.env.local` i
 next rebuild and reported: `flamework.config.json or .env changed since the watcher started`. The
 watcher keeps using the values it started with until you restart it. A plain build reads everything
 fresh. Changing `idGenerationMode` or `obfuscation` also regenerates every identifier, which the
-next full build does on its own.
+next plain build does on its own.
+
+## What to commit
+
+What a game commits and what it ignores. The build creates `flamework.config.json` once, when it is
+missing, and that file is yours from then on: commit it. Everything else the build writes is
+written again by every plain build (`rbxtsc`), so none of it is committed:
+
+| File | Commit | Why |
+|---|---|---|
+| `flamework.config.json` | yes | Your settings. The `$schema` line in it is a relative path into `node_modules`, the same on every machine, so it goes with the file. |
+| `.env` | yes | The defaults the config reads, with nothing secret in it. Leave build switches such as `FLAMEWORK_SCOPES` empty here: every plain build, the release one included, reads this file. |
+| `.env.local` | no | Your own overrides, and secrets such as `ROBLOX_API_KEY`. It wins over `.env`. |
+| `flamework.build` | no | The ids, the hash salt and the build seed. Every plain build writes it anew; only an incremental build or a watcher reads the old one. |
+| `include/`, `include/flamework/` | no | roblox-ts copies its runtime into `include/` on every build, and the transformer writes `include/flamework/` (paths, globs, the runtime config) on every build of a game. roblox-ts's template already ignores `/include`. |
+| `out/`, `*.tsbuildinfo` | no | The compiled Luau, and an incremental build's record. |
+| Place files the build makes (`rojo build -o place.rbxl`, and the `place.patched.rbxl` or `place.<project>.rbxl` that `flamework-test` writes beside it) | no | Rebuilt from the sources. Ignore `/*.rbxl` at the root rather than every `*.rbxl`, so a place you keep in a folder on purpose, such as a test place saved from Studio, can still be committed. |
+| `*.rbxl.lock`, `*.rbxlx.lock` | no | Studio's lock beside a place it has open. `flamework-test` removes the lock of a window it ends; one left by a Studio closed any other way stays behind. |
+| `build/` | no | `flamework-test` records the version it published in `build/version.json`: `cloud publish` does, and so `cloud test` and `test --cloud`. |
+
+```gitignore
+/node_modules
+/out
+/include
+/flamework.build
+*.tsbuildinfo
+.env.local
+/*.rbxl
+/*.rbxlx
+*.rbxl.lock
+*.rbxlx.lock
+/build
+```
 
 ## Testing
 
@@ -321,7 +365,9 @@ in every roblox-ts template.
   ignition. A registration whose own scope condition does not hold skips its folder instead
   ([Scopes](11-scopes.md)).
 - **Every registered folder must be mapped in Rojo**, or the build fails with
-  `Could not find Rojo data`.
+  `Could not find Rojo data`. It must also exist under its exact name and hold a module, or the
+  build warns: a folder the place lacks is waited for at runtime, and an empty one registers
+  nothing.
 - **`ModuleDefinition`s in a registered folder get built as a side effect.** Keep them out of
   `services`.
 - **The entry point should be the only file that ignites.** A second `ignite()` elsewhere builds a

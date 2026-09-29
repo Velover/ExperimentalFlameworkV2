@@ -155,7 +155,8 @@ requireModules("src/server/commands", { "ServerScriptService", "TS", "commands" 
   requires every ModuleScript under it.
 - A folder that is not in the place raises `requireModules("..."): the folder is not in the place`,
   and the message names the part of the path that is missing. The folder gets five seconds to
-  appear first, once the place has loaded.
+  appear first, once the place has loaded. A misspelled path, a name that differs in case from the
+  folder on disk, and a folder without a module are warned about when you build, where the call is.
 - A folder of the other realm raises at once and says so: a server folder required on a client, or
   a client folder required on the server.
 
@@ -163,11 +164,16 @@ A macro of your own can take a source path too. Give it a parameter typed
 `Modding.Intrinsic<"path", [T], string[]>`. That parameter receives the folder the caller's string
 literal `T` names, as a Rojo path: an array of instance names from the root of the tree.
 
+The build checks the caller's path as it checks `registerProviders`'s: a path with no module at or
+under it is warned about at the call, named after your macro (`commandsIn("src/server/Commands")`).
+
 To use the path, core exports the functions `registerProviders` and `requireModules` are built on:
 
 - `requireModulesInPath(path)` requires every ModuleScript at and under the path, and returns what
   they export.
-- `getClassesInPath(path)` returns the Flamework classes those ModuleScripts define.
+- `getClassesInPath(path, caller?)` returns the Flamework classes those ModuleScripts define.
+  `caller`, such as `` `commandsIn("${_path}")` ``, names the call in the warning a folder that is
+  still missing after five seconds gets; without it, the warning names no call.
 
 This macro finds the command classes in a folder by metadata of your own (see
 [custom decorators](10-migrating-from-v1.md#8-custom-decorators)):

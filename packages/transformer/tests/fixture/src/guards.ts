@@ -9,3 +9,9 @@ export const cframeGuard = Flamework.createGuard<CFrame>();
 // More than two members: `t` has a hard argument limit, so these must use the `*List` variants.
 export const literalListGuard = Flamework.createGuard<"a" | "b" | "c" | "d" | "e">();
 export const unionListGuard = Flamework.createGuard<string | number | Vector3>();
+
+// A rest element is any number of elements after the fixed ones, not one more element.
+export const restTupleGuard = Flamework.createGuard<[number, ...string[]]>();
+export const optionalRestTupleGuard = Flamework.createGuard<[number, string?, ...boolean[]]>();
+export const middleRestTupleGuard = Flamework.createGuard<[number, ...string[], boolean]>();
+export const fixedTupleGuard = Flamework.createGuard<[number, string?]>();

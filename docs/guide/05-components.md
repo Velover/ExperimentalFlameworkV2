@@ -74,10 +74,48 @@ even with `disableDefaultLifecycle()`. In order:
 | attached | `getComponent` answers, links resolve to it, added listeners fire. |
 | `onStart()` | Runs on its own thread, after the component is attached, and not before ignition has finished. So a component built from a provider's `onInit` starts once every provider has started. A component that removes itself here is announced as added and then as removed, and no `waitForComponent` is resolved with it. |
 | per-frame events | From the module's lifecycle plugin. |
-| `destroy()` | When the component is removed. |
+| `destroy()` | When the component is removed. `BaseComponent`'s own releases only the `onAttributeChanged` handlers; see [Cleaning up](#cleaning-up). |
 
 Put the setup that anything else may rely on in `onInit`. Another component that links to this one
 (see [Links](#links)) receives it already initialised, whichever of the two was tagged first.
+
+**Tagged instances get their components once the module has ignited**, after every provider's
+`onStart` has been called and has run up to its first yield: the plugin starts watching tags in its
+`onIgnited` hook, after the lifecycle plugin has started the providers. So a provider's `onStart`
+finds none of them with `getAllComponents<T>()` or `getComponents<T>(instance)`, and
+`onComponentAdded<T>(cb)` connected there hears about each one as it is built. That listener never
+replays components that already exist, so a listener connected later (after a yield, from a lazy
+provider, from an event handler) reads `getAllComponents<T>()` first. `getComponent` is the
+exception: it builds a qualifying component on demand, at any time. See
+[Lifecycle events › Components](04-lifecycle-events.md#components).
+
+### Cleaning up
+
+`BaseComponent.destroy()` releases only what Flamework connected for the component, the handlers
+behind `onAttributeChanged`. Removing the tag, or `removeComponent`, leaves the instance where it
+is, so a connection of your own keeps firing into a component that has gone. Disconnect it in
+`destroy`, and call `super.destroy()`:
+
+```ts
+@Component({ tag: "Coin" })
+export class Coin extends BaseComponent<{}, BasePart> implements OnStart {
+    private touched?: RBXScriptConnection;
+
+    public onStart() {
+        this.touched = this.instance.Touched.Connect((part) => this.collect(part));
+    }
+
+    public override destroy() {
+        this.touched?.Disconnect();
+        super.destroy();
+    }
+
+    private collect(part: BasePart) {}
+}
+```
+
+`destroy` also runs for every component when the module extinguishes. A `destroy` that raises does
+not hold up the teardown (see [Caveats](#caveats)).
 
 **Removing the component from its own constructor or `onInit`** undoes the construction as it
 finishes. This covers `removeComponent`, and taking its tag away where the place delivers signals
@@ -641,7 +679,12 @@ export class VehicleService {
 | `onComponentRemoved<T>(cb)` | Fires after the component has left the lookups: before `destroy` where the place delivers signals immediately, after it where they are deferred. |
 
 `getComponent` needs the exact class. The polymorphic ones (`getComponents`, `getAllComponents`,
-and both listeners) accept a superclass or an interface:
+and both listeners) accept an interface the component implements, or a superclass that is itself
+decorated with `@Component()` (an abstract base with no `tag`, say). The ids a component answers to
+are read from Flamework's metadata, which only a decorated class carries. So a base class without
+its own decorator is not looked up: asking for it finds nothing, and so does asking for an
+interface only such a base class declares. The same rule decides which `implements` clauses count
+for lifecycle events ([Lifecycle events](04-lifecycle-events.md#the-events)).
 
 ```ts
 // every component on this instance that implements OnTick

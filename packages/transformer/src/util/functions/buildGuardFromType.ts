@@ -294,6 +294,17 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 
 		if (typeChecker.isTupleType(type)) {
 			const typeArgs = (type as ts.TypeReference).resolvedTypeArguments ?? [];
+			const flags = (type as ts.TupleTypeReference).target.elementFlags;
+			const restIndex = flags.findIndex((flag) => (flag & ts.ElementFlags.Rest) !== 0);
+			if (restIndex !== -1) {
+				return buildRestTupleGuard(
+					typeArgs.slice(0, restIndex),
+					typeArgs[restIndex],
+					typeArgs.slice(restIndex + 1),
+					(type as ts.TupleTypeReference).target.minLength,
+				);
+			}
+
 			return f.call(
 				f.field(tId, "strictArray"),
 				typeArgs.map((x) => buildGuard(x)),
@@ -424,6 +435,151 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 		}
 
 		fail(`An unknown type was encountered: ${typeChecker.typeToString(type)}`);
+	}
+
+	/**
+	 * A tuple with a rest element, `[A, B?, ...C[], D]`: a table whose keys are whole numbers from 1,
+	 * with the elements before the rest in their places (an optional one may be nil), at least
+	 * `minLength` of them in all, the ones after the rest at the end, and every one in between a rest
+	 * element. `t.strictArray` would treat the rest element as one element, refusing `[a]` and
+	 * `[a, c, c]` for `[A, ...C[]]`.
+	 *
+	 * The element guards are built once, as the arguments of a function that returns the check.
+	 */
+	function buildRestTupleGuard(
+		leading: readonly ts.Type[],
+		rest: ts.Type,
+		trailing: readonly ts.Type[],
+		minLength: number,
+	): ts.Expression {
+		const checks = [...leading, rest, ...trailing].map((type) => buildGuard(type));
+		const names = checks.map((_, index) =>
+			f.identifier(index < leading.length ? "element" : index === leading.length ? "rest" : "last", true),
+		);
+
+		const value = f.identifier("value", true);
+		const key = f.identifier("key", true);
+		const size = f.identifier("size", true);
+		const list = f.identifier("list", true);
+		const index = f.identifier("index", true);
+		const reject = () => f.returnStatement(f.bool(false));
+		const failUnless = (condition: ts.Expression) =>
+			ts.factory.createIfStatement(ts.factory.createLogicalNot(condition), f.block([reject()]));
+		const check = (name: ts.Identifier, at: ts.Expression) =>
+			failUnless(f.call(name, [f.elementAccessExpression(list, at)]));
+		const binary = (left: ts.Expression, operator: ts.BinaryOperator, right: ts.Expression) =>
+			f.binary(left, operator, right);
+		const typeIs = (expression: ts.Expression, name: string) => f.call("typeIs", [expression, f.string(name)]);
+
+		const body = new Array<ts.Statement>();
+		body.push(failUnless(typeIs(value, "table")));
+
+		// The highest key, and every key a whole number from 1: `#` is unreliable around nils.
+		body.push(f.variableStatement(size, f.number(0), undefined, true));
+		body.push(
+			ts.factory.createForOfStatement(
+				undefined,
+				ts.factory.createVariableDeclarationList(
+					[ts.factory.createVariableDeclaration(f.arrayBindingDeclaration([key]))],
+					ts.NodeFlags.Const,
+				),
+				f.call("pairs", [
+					f.as(
+						value,
+						f.referenceType("Map", [
+							f.keywordType(ts.SyntaxKind.UnknownKeyword),
+							f.keywordType(ts.SyntaxKind.UnknownKeyword),
+						]),
+					),
+				]),
+				f.block([
+					ts.factory.createIfStatement(
+						binary(
+							binary(
+								ts.factory.createLogicalNot(typeIs(key, "number")),
+								ts.SyntaxKind.BarBarToken,
+								binary(key, ts.SyntaxKind.LessThanToken, f.number(1)),
+							),
+							ts.SyntaxKind.BarBarToken,
+							binary(
+								binary(key, ts.SyntaxKind.PercentToken, f.number(1)),
+								ts.SyntaxKind.ExclamationEqualsEqualsToken,
+								f.number(0),
+							),
+						),
+						f.block([reject()]),
+					),
+					ts.factory.createIfStatement(
+						binary(key, ts.SyntaxKind.GreaterThanToken, size),
+						f.block([f.statement(binary(size, ts.SyntaxKind.EqualsToken, key))]),
+					),
+				]),
+			),
+		);
+
+		if (minLength > 0) {
+			body.push(
+				ts.factory.createIfStatement(
+					binary(size, ts.SyntaxKind.LessThanToken, f.number(minLength)),
+					f.block([reject()]),
+				),
+			);
+		}
+
+		body.push(
+			f.variableStatement(
+				list,
+				f.as(value, f.referenceType("Array", [f.keywordType(ts.SyntaxKind.UnknownKeyword)])),
+			),
+		);
+
+		// The elements before the rest, in their places.
+		leading.forEach((_, position) => body.push(check(names[position], f.number(position))));
+
+		// The rest, between them and the ones after it: `list[index - 1]` is Luau's `list[index]`.
+		body.push(
+			ts.factory.createForOfStatement(
+				undefined,
+				ts.factory.createVariableDeclarationList(
+					[ts.factory.createVariableDeclaration(index)],
+					ts.NodeFlags.Const,
+				),
+				f.call("$range", [
+					f.number(leading.length + 1),
+					trailing.length > 0 ? binary(size, ts.SyntaxKind.MinusToken, f.number(trailing.length)) : size,
+				]),
+				f.block([check(names[leading.length], binary(index, ts.SyntaxKind.MinusToken, f.number(1)))]),
+			),
+		);
+
+		// The ones after the rest, at the end.
+		trailing.forEach((_, position) =>
+			body.push(
+				check(
+					names[leading.length + 1 + position],
+					binary(size, ts.SyntaxKind.MinusToken, f.number(trailing.length - position)),
+				),
+			),
+		);
+
+		body.push(f.returnStatement(f.bool(true)));
+
+		const guard = f.arrowFunction(
+			f.block(body),
+			[f.parameterDeclaration(value, f.keywordType(ts.SyntaxKind.UnknownKeyword))],
+			undefined,
+			ts.factory.createTypePredicateNode(undefined, value, f.keywordType(ts.SyntaxKind.UnknownKeyword)),
+		);
+
+		return f.call(
+			ts.factory.createParenthesizedExpression(
+				f.arrowFunction(
+					guard,
+					names.map((name) => f.parameterDeclaration(name)),
+				),
+			),
+			checks,
+		);
 	}
 
 	function buildUnionGuard(type: ts.UnionType) {

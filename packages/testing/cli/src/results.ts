@@ -115,8 +115,42 @@ function duration(ms: number | undefined): string {
 	return ms === undefined ? "" : ` (${Math.round(ms)}ms)`;
 }
 
+/**
+ * How a realm's result is judged when it is one of several realms run with the same filter: a
+ * filter entry only the other realm has is not a miss, so it does not fail this one; an entry no
+ * realm has (`missed`, see {@link missedEverywhere}) fails every realm it was given to.
+ */
+export interface RealmOfSeveral {
+	realmOfSeveral: true;
+	/** The filter entries that no realm matched. */
+	missed?: readonly string[];
+}
+
+/**
+ * Whether a result passes: every test, and every filter entry naming something, in this realm
+ * alone or, of several, in any of them.
+ */
+export function resultPassed(result: RunResult, options?: RealmOfSeveral): boolean {
+	if (!options?.realmOfSeveral) return result.ok;
+	return result.failed === 0 && !result.unknown.some((entry) => options.missed?.includes(entry) === true);
+}
+
+/** The filter entries none of the realms' results matched, in the order the first result lists them. */
+export function missedEverywhere(results: readonly RunResult[]): string[] {
+	const [first, ...others] = results;
+	if (first === undefined) return [];
+	return first.unknown.filter((entry) => others.every((other) => other.unknown.includes(entry)));
+}
+
+/** The line that lists a result's unmatched filter entries. */
+function missLine(result: RunResult, options?: RealmOfSeveral): string {
+	return options?.realmOfSeveral
+		? `not among the ${result.realm}'s sections: ${result.unknown.join(", ")}`
+		: `MISS matched nothing: ${result.unknown.join(", ")}`;
+}
+
 /** The per-section / per-failure summary printed after a run. */
-export function formatSummary(result: RunResult): string[] {
+export function formatSummary(result: RunResult, options?: RealmOfSeveral): string[] {
 	const lines: string[] = [];
 
 	for (const section of result.sections) {
@@ -132,7 +166,7 @@ export function formatSummary(result: RunResult): string[] {
 	}
 
 	if (result.unknown.length > 0) {
-		lines.push(`MISS matched nothing: ${result.unknown.join(", ")}`);
+		lines.push(missLine(result, options));
 	}
 
 	if (result.sections.length === 0 && result.unknown.length === 0) {
@@ -142,12 +176,12 @@ export function formatSummary(result: RunResult): string[] {
 	lines.push("");
 	const where = result.project === undefined ? result.realm : `${result.realm}, project ${result.project}`;
 	lines.push(`${result.passed} passed, ${result.failed} failed in ${Math.round(result.durationMs)}ms (${where})`);
-	lines.push(result.ok ? "PASS" : "FAIL");
+	lines.push(resultPassed(result, options) ? "PASS" : "FAIL");
 	return lines;
 }
 
 /** What `--list` prints: every section with its test names. */
-export function formatList(result: RunResult): string[] {
+export function formatList(result: RunResult, options?: RealmOfSeveral): string[] {
 	const lines: string[] = [];
 	let count = 0;
 	for (const section of result.sections) {
@@ -158,7 +192,7 @@ export function formatList(result: RunResult): string[] {
 		}
 	}
 	if (result.unknown.length > 0) {
-		lines.push(`MISS matched nothing: ${result.unknown.join(", ")}`);
+		lines.push(missLine(result, options));
 	}
 	lines.push("");
 	lines.push(`${result.sections.length} sections, ${count} tests`);

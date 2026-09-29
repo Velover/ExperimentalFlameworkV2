@@ -178,7 +178,7 @@ export class ComponentPlugin {
 			return this;
 		}
 
-		return this.registerComponentClasses(getClassesInPath(path), options);
+		return this.registerComponentClasses(getClassesInPath(path, call), options);
 	}
 
 	/** `registerComponentsGlob`, named in messages as `call`. */

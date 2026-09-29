@@ -16,6 +16,7 @@ import {
 import {
 	defer,
 	defineTests,
+	eventually,
 	expectDefined,
 	expectEqual,
 	expectFalse,
@@ -23,7 +24,7 @@ import {
 	expectTrue,
 	test,
 } from "@flamework-experimental/testing";
-import { ServerScriptService, Workspace } from "@rbxts/services";
+import { LogService, ServerScriptService, Workspace } from "@rbxts/services";
 import { DiscoveryExported } from "server/Discovery/exported";
 import { discoveryIds, makeDiscoveryLocal } from "server/Discovery/hidden";
 import { deepIds } from "server/Discovery/nested/deep";
@@ -72,6 +73,16 @@ function contains(message: string, text: string) {
 	return message.find(text, 1, true)[0] !== undefined;
 }
 
+/** The warnings this realm prints from now until the case ends. */
+function watchWarnings() {
+	const warnings = new Array<string>();
+	const connection = LogService.MessageOut.Connect((message, kind) => {
+		if (kind === Enum.MessageType.MessageWarning) warnings.push(message);
+	});
+	defer(() => connection.Disconnect());
+	return warnings;
+}
+
 /** A module of the case's own, extinguished once the case is over. */
 function caseModule(module: Module) {
 	defer(() => {
@@ -111,9 +122,9 @@ export class PathTests implements OnStart {
 			});
 
 			test("a path that names nothing yields instead of failing, so a typo stalls rather than raises", () => {
-				// resolveRbxPath walks with WaitForChild and no timeout: a segment that never
-				// appears waits forever. Worth knowing, since it is a registered path's failure
-				// mode -- ignition hangs with an "Infinite yield possible" warning and no error.
+				// resolveRbxPath waits for each segment with no limit, since content may arrive late: a
+				// segment that never appears waits forever. After five seconds it warns, naming the
+				// call that gave the path (the case below), and the build warns where the path is used.
 				let finished = false;
 				task.spawn(() => {
 					pcall(() => resolveRbxPath(["ServerScriptService", "TS", "NoSuchFolder"]));
@@ -122,6 +133,72 @@ export class PathTests implements OnStart {
 
 				task.wait(0.5);
 				expectTrue(!finished, "still waiting on a segment that will never arrive");
+			});
+
+			// A registration's folder is waited for without a limit, so that content still loading is
+			// not a failure; once the wait is past five seconds it is warned about by the registration's
+			// own name, where the engine's "Infinite yield possible" named neither the call nor the path.
+			test("a registration whose folder is late warns once, naming itself, then registers from it", () => {
+				const name = `FwLateFolder${math.random(1, 1e9)}`;
+				const warnings = watchWarnings();
+				const folder = new Instance("Folder");
+				folder.Name = name;
+				defer(() => folder.Destroy());
+				task.delay(6.5, () => (folder.Parent = Workspace));
+
+				const started = os.clock();
+				// The path given by hand, as the transformer would give it for a folder at Workspace.<name>.
+				const module = caseModule(
+					Flamework.createModule()
+						.registerProviders(`src/server/${name}`, undefined, ["Workspace", name] as never)
+						.ignite(),
+				);
+				const waited = os.clock() - started;
+
+				expectTrue(module.isIgnited(), "the registration finished once the folder arrived");
+				expectTrue(waited >= 6, `it waited for the folder: ${waited}s`);
+				const named = (message: string) => contains(message, `registerProviders("src/server/${name}")`);
+				eventually(() => warnings.some(named), "the warning");
+				const warning = warnings.find(named)!;
+				expectTrue(
+					contains(
+						warning,
+						`registerProviders("src/server/${name}") is still waiting for its folder: the build put it at Workspace/${name}, and Workspace has no child named '${name}' after 5 seconds.`,
+					),
+					warning,
+				);
+				expectTrue(contains(warning, "misspelled or differ in case"), warning);
+				expectEqual(warnings.filter((message) => contains(message, name)).size(), 1, "warned once");
+			});
+
+			// Once per path, however many of its folders are late: the second one to arrive late is the
+			// same wait, and a second warning would only repeat the first.
+			test("a path whose folders arrive late one after another is warned about once", () => {
+				const name = `FwLaterFolder${math.random(1, 1e9)}`;
+				const warnings = watchWarnings();
+				const outer = new Instance("Folder");
+				outer.Name = name;
+				defer(() => outer.Destroy());
+				const inner = new Instance("Folder");
+				inner.Name = "Inner";
+				task.delay(6.5, () => (outer.Parent = Workspace));
+				task.delay(13, () => (inner.Parent = outer));
+
+				const started = os.clock();
+				const classes = getClassesInPath(
+					["Workspace", name, "Inner"],
+					`registerProviders("src/server/${name}/Inner")`,
+				);
+				const waited = os.clock() - started;
+
+				expectEqual(classes.size(), 0, "an empty folder holds no class");
+				expectTrue(waited >= 12.5, `it waited for both folders: ${waited}s`);
+				task.wait(0.5);
+				// Flamework's own warnings only: the engine may add its "Infinite yield possible".
+				const ours = warnings.filter(
+					(message) => contains(message, name) && contains(message, "is still waiting for its folder"),
+				);
+				expectEqual(ours.size(), 1, `warned once: ${ours.join(" | ")}`);
 			});
 
 			test("requireModulesInPath loads every module under a folder, through the module cache", () => {

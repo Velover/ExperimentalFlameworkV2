@@ -1,4 +1,4 @@
-import { Components } from "@flamework-experimental/components";
+import { ComponentPlugin, Components } from "@flamework-experimental/components";
 import {
 	Flamework,
 	Module,
@@ -20,7 +20,7 @@ import {
 	expectTrue,
 	test,
 } from "@flamework-experimental/testing";
-import { Players, ReplicatedStorage, RunService, Workspace } from "@rbxts/services";
+import { LogService, Players, ReplicatedStorage, RunService, Workspace } from "@rbxts/services";
 import { Events, Functions } from "client/Core/network";
 
 /**
@@ -69,6 +69,43 @@ export class ClientTests implements OnStart, OnRender, OnTick {
 					message,
 				);
 				expectTrue(os.clock() - started < 1, "without waiting for the folder");
+			});
+
+			// A client may still be receiving the place, so a registration's folder is waited for
+			// without a limit; past five seconds the wait is warned about by the registration's name.
+			test("a component folder that is late is warned about by its registration, then registered", () => {
+				const name = `FwLateComponents${math.random(1, 1e9)}`;
+				const warnings = new Array<string>();
+				const connection = LogService.MessageOut.Connect((message, kind) => {
+					if (kind === Enum.MessageType.MessageWarning) warnings.push(message);
+				});
+				defer(() => connection.Disconnect());
+
+				const folder = new Instance("Folder");
+				folder.Name = name;
+				defer(() => folder.Destroy());
+				task.delay(6.5, () => (folder.Parent = Workspace));
+
+				const started = os.clock();
+				// The path given by hand, as the transformer would give it for a folder at Workspace.<name>.
+				const plugin = ComponentPlugin.fromPath(`src/client/${name}`, undefined, ["Workspace", name] as never);
+				const waited = os.clock() - started;
+
+				expectDefined(plugin, "the plugin, built once the folder arrived");
+				expectTrue(waited >= 6, `it waited for the folder: ${waited}s`);
+				const named = (message: string) =>
+					message.find(`ComponentPlugin.fromPath("src/client/${name}")`, 1, true)[0] !== undefined;
+				eventually(() => warnings.some(named), "the warning");
+				const warning = warnings.find(named)!;
+				expectTrue(
+					warning.find(
+						`ComponentPlugin.fromPath("src/client/${name}") is still waiting for its folder: the build put it at Workspace/${name}, and Workspace has no child named '${name}' after 5 seconds.`,
+						1,
+						true,
+					)[0] !== undefined,
+					warning,
+				);
+				expectEqual(warnings.filter(named).size(), 1, "warned once");
 			});
 
 			test("onRender fires on the client, where the server sees nothing", () => {

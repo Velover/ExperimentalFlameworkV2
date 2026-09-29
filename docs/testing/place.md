@@ -22,7 +22,9 @@ the cloud route below.
 `test <file>` launches Roblox Studio on the file, waits for the window to connect, starts a play
 session, invokes `Workspace.FlameworkTests` in the server's data model and then in the client's,
 prints each realm's summary, stops the session and closes the window. Every realm runs even when
-one fails; the exit code is the worst of them. Nothing is uploaded and no account is involved:
+one fails, its tests or the call itself; the exit code is the worst of them. A `--sections` entry
+only one realm has does not fail the other; one no realm has fails the run. Nothing is uploaded and
+no account is involved:
 the place runs itself, exactly as a Play in Studio would, and the client's sections run too, which
 the cloud cannot do.
 
@@ -34,18 +36,23 @@ bunx flamework-test test place.rbxl --keep                 # leave Studio and th
 ```
 
 It needs Studio installed with "MCP server" enabled in its Assistant settings, which is what lets
-the CLI drive a window; a window with it disabled is invisible to it. The place has to be built
-with the `testing` scope active (`FLAMEWORK_SCOPES=testing` in `.env`), or the test providers are
-not registered and `Workspace.FlameworkTests` never appears.
+the CLI drive a window; a window with it disabled is invisible to it. The CLI runs on Bun, however
+the package was installed. The place has to be built with the `testing` scope active
+(`FLAMEWORK_SCOPES=testing` for that build, as guide 12's
+[test script](../guide/12-testing.md#setting-up) sets it, never in `.env` or `.env.local`, which
+every build reads), or the test providers are not registered and `Workspace.FlameworkTests` never
+appears.
 
 A window whose title shows that very file (Studio titles a local file's window with its full
 path) is from an earlier build and would test stale code, so `test` closes it before opening the
-fresh file. The title alone decides: a window started on the file and since saved elsewhere or
-published shows its new name, and one whose title has changed is not certainly that file, so both
-are left open, as is every window of another file, whatever its name. The window `test` opens is
-known by the process it started, and that process is what it closes: politely first, then by
-ending the process when a save prompt holds it up, and a window is only reported closed once its
-process is gone. One that is still running after both fails the run, named by its PID and title.
+fresh file: it asks that window to close, and ends it after ten seconds. The title alone decides.
+Windows of other files are never touched, whatever their names, and neither is a window started on
+the file and since saved elsewhere or published (it shows its new name) or one whose title has
+changed (it is not certainly that file). The window `test` opens is known by the process it
+started, and that process is what it closes, by ending it without asking: Studio marks a place file
+as changed as soon as it has loaded it, so asking only raises its save prompt (measured on
+2026-09-28 with a window that had done nothing but load). A window is only reported closed once its
+process is gone. One that is still running after that fails the run, named by its PID and title.
 A window the run gives up on, one that never connected to the proxy, say, is closed the same way.
 `--keep` leaves the window and the session for a look around; the next `test` closes it. The
 proxy lists a local file's window by its file name alone, so runs of same-named files started at
@@ -323,7 +330,8 @@ without running it, `place.deferred.rbxl`, to open in Studio and look at.
 |---|---|
 | `RobloxStudioBeta.exe was not found` | Studio is not installed here; set `ROBLOX_STUDIO_EXE`, or run with `--cloud`. |
 | `... never showed up on the MCP proxy` | The window opened but "MCP server" is disabled in Studio's Assistant settings. |
-| `Workspace.FlameworkTests did not appear` | The build was made without the `testing` scope active (`FLAMEWORK_SCOPES` in `.env`), so the plugin stayed inert. |
+| `the server's run failed: Workspace.FlameworkTests did not appear` | The build was made without the `testing` scope active (`FLAMEWORK_SCOPES=testing` for that build), so the plugin stayed inert. The client's run follows, and says the same. |
+| `MISS matched nothing in any realm: ...` | A `--sections` entry named no section or test in any realm that ran. |
 | `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started. The next line names the last test that reported in Studio's output; the one after it in that section is the hanging one. |
 | `lune is needed to set the properties of the project ...` | A chosen `--project` sets its `$properties` on a copy of the build under Lune; install it or set `LUNE_EXE`. |
 | `the Rojo project ... does not exist` / `two projects are both named ...` | A `--project` or `ROJO_PROJECT` entry names no file, or two files share a name; both are checked before the first run. |

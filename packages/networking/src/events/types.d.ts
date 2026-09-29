@@ -2,10 +2,11 @@ import {
 	FunctionParameters,
 	IntrinsicTupleGuards,
 	IntrinsicNetworkDecoder,
+	IntrinsicNetworkUnreliable,
 	IntrinsicObfuscate,
+	IsRawMember,
 	NetworkingObfuscationMarker,
-	NetworkRaw,
-	NetworkUnreliable,
+	NetworkPacking,
 	ObfuscateNames,
 } from "../types";
 import { EventNetworkingEvents } from "../handlers";
@@ -17,8 +18,11 @@ import { Modding } from "@flamework-experimental/core";
  * A sender declared `Networking.RawReliable` / `RawUnreliable`: its arguments travel as they are.
  * Without the hidden marker below, no call site packs them and the peer runs no decoder.
  */
-export interface RawServerSender<I extends unknown[]> {
+export interface RawServerSender<I extends unknown[], M = "raw"> {
 	(player: Player | Player[], ...args: I): void;
+
+	/** @hidden How the member is packed (see `NetworkPacking`), which keeps differently packed members apart in a union. */
+	readonly _flamework_packing?: M;
 
 	/**
 	 * Sends this request to the specified player(s).
@@ -38,9 +42,12 @@ export interface RawServerSender<I extends unknown[]> {
 	broadcast(...args: I): void;
 }
 
-export interface ServerSender<I extends unknown[]> extends RawServerSender<I> {
+export interface ServerSender<I extends unknown[], F = unknown, M = NetworkPacking<F>> extends RawServerSender<I, M> {
 	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
 	readonly _flamework_send?: I;
+
+	/** @hidden The declared member, whose markers (`Serialized`) say whether its call sites pack. */
+	readonly _flamework_fn?: F;
 
 	/** @hidden Sends an argument list the transformer already packed; nothing when the list carries nothing. */
 	_fire(players: Player | Player[], payload?: buffer, blobs?: Array<defined>): void;
@@ -70,8 +77,11 @@ export interface ServerReceiver<I extends unknown[]> extends RawServerReceiver<I
 	readonly _flamework_receive?: I;
 }
 
-export interface RawClientSender<I extends unknown[]> {
+export interface RawClientSender<I extends unknown[], M = "raw"> {
 	(...args: I): void;
+
+	/** @hidden How the member is packed (see `NetworkPacking`), which keeps differently packed members apart in a union. */
+	readonly _flamework_packing?: M;
 
 	/**
 	 * Sends this request to the server.
@@ -79,9 +89,12 @@ export interface RawClientSender<I extends unknown[]> {
 	fire(...args: I): void;
 }
 
-export interface ClientSender<I extends unknown[]> extends RawClientSender<I> {
+export interface ClientSender<I extends unknown[], F = unknown, M = NetworkPacking<F>> extends RawClientSender<I, M> {
 	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
 	readonly _flamework_send?: I;
+
+	/** @hidden The declared member, whose markers (`Serialized`) say whether its call sites pack. */
+	readonly _flamework_fn?: F;
 
 	/** @hidden Sends an argument list the transformer already packed; nothing when the list carries nothing. */
 	_fire(payload?: buffer, blobs?: Array<defined>): void;
@@ -106,11 +119,11 @@ export interface ClientReceiver<I extends unknown[]> extends RawClientReceiver<I
 }
 
 export type ServerHandler<E, R> = NetworkingObfuscationMarker & {
-	[k in keyof Events<E>]: E[k] extends NetworkRaw<unknown>
+	[k in keyof Events<E>]: IsRawMember<E[k]> extends true
 		? RawServerSender<FunctionParameters<E[k]>>
-		: ServerSender<FunctionParameters<E[k]>>;
+		: ServerSender<FunctionParameters<E[k]>, E[k]>;
 } & {
-	[k in keyof Events<R>]: R[k] extends NetworkRaw<unknown>
+	[k in keyof Events<R>]: IsRawMember<R[k]> extends true
 		? RawServerReceiver<FunctionParameters<R[k]>>
 		: ServerReceiver<FunctionParameters<R[k]>>;
 } & {
@@ -120,11 +133,11 @@ export type ServerHandler<E, R> = NetworkingObfuscationMarker & {
 };
 
 export type ClientHandler<E, R> = NetworkingObfuscationMarker & {
-	[k in keyof Events<E>]: E[k] extends NetworkRaw<unknown>
+	[k in keyof Events<E>]: IsRawMember<E[k]> extends true
 		? RawClientSender<FunctionParameters<E[k]>>
-		: ClientSender<FunctionParameters<E[k]>>;
+		: ClientSender<FunctionParameters<E[k]>, E[k]>;
 } & {
-	[k in keyof Events<R>]: R[k] extends NetworkRaw<unknown>
+	[k in keyof Events<R>]: IsRawMember<R[k]> extends true
 		? RawClientReceiver<FunctionParameters<R[k]>>
 		: ClientReceiver<FunctionParameters<R[k]>>;
 } & {
@@ -185,23 +198,22 @@ export type NamespaceMetadata<R, S> = Modding.Emit<{
 	incomingIds: ObfuscateNames<keyof Events<R>>;
 	incoming: IntrinsicObfuscate<{ [k in keyof Events<R>]: IntrinsicTupleGuards<Parameters<Events<R>[k]>> }>;
 	incomingUnreliable: IntrinsicObfuscate<{
-		[k in keyof Events<R>]: R[k] extends NetworkUnreliable<unknown> ? true : undefined;
+		[k in keyof Events<R>]: IntrinsicNetworkUnreliable<R[k], k>;
 	}>;
 
 	outgoingIds: ObfuscateNames<keyof Events<S>>;
 	outgoingUnreliable: IntrinsicObfuscate<{
-		[k in keyof Events<S>]: S[k] extends NetworkUnreliable<unknown> ? true : undefined;
+		[k in keyof Events<S>]: IntrinsicNetworkUnreliable<S[k], k>;
 	}>;
 
 	/**
-	 * Decoders for each incoming event's argument list, present only with `networking.serialization`
-	 * on, and absent for raw events and for lists that carry nothing. Outgoing lists are packed
-	 * inline where they are fired; nothing here can encode.
+	 * Decoders for each incoming event's argument list, present for the events that are packed (all of
+	 * them with `networking.serialization` on, else the serialized ones) and absent for raw events and
+	 * for lists that carry nothing. Outgoing lists are packed inline where they are fired; nothing here
+	 * can encode.
 	 */
 	incomingSerializers: IntrinsicObfuscate<{
-		[k in keyof Events<R>]: R[k] extends NetworkRaw<unknown>
-			? undefined
-			: IntrinsicNetworkDecoder<Parameters<Events<R>[k]>>;
+		[k in keyof Events<R>]: IntrinsicNetworkDecoder<Parameters<Events<R>[k]>, R[k], k>;
 	}>;
 
 	namespaceIds: ObfuscateNames<keyof EventNamespaces<R> | keyof EventNamespaces<S>>;

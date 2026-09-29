@@ -97,3 +97,105 @@ export function drain() {
 
 	return entries;
 }
+
+/*
+ * Members that opt into packing one by one: round trips in both directions, events reliable and
+ * unreliable, function requests and results, with an Instance next to the buffer. They are packed
+ * whether or not the project turns `networking.serialization` on.
+ */
+interface Item {
+	id: number;
+	name: string;
+	count: number;
+}
+
+interface ModeServerEvents {
+	serializedReport: Networking.SerializedReliable<(items: Item[], where: Instance) => void>;
+	serializedBump: Networking.SerializedReliable<() => void>;
+	serializedMove: Networking.SerializedUnreliable<(value: number) => void>;
+	serializedStep: Networking.Unreliable<Networking.Serialized<(items: Item[]) => void>>;
+}
+
+interface ModeClientEvents {
+	serializedPush: Networking.SerializedReliable<(items: Item[], where: Instance) => void>;
+	serializedTick: Networking.Serialized<Networking.Unreliable<(value: number) => void>>;
+}
+
+interface ModeServerFunctions {
+	serializedLookup: Networking.Serialized<(ids: number[], where: Instance) => [Item[], Instance]>;
+	serializedNothing: Networking.Serialized<() => void>;
+}
+
+interface ModeClientFunctions {
+	serializedAsk: Networking.Serialized<(question: string) => Item[]>;
+}
+
+const ModeEvents = Networking.createEvent<ModeServerEvents, ModeClientEvents>();
+const ModeFunctions = Networking.createFunction<ModeServerFunctions, ModeClientFunctions>();
+
+function makeItems(count: number, name: string) {
+	const items = new Array<Item>();
+	for (const id of $range(1, count)) items.push({ id, name, count: id * 2 });
+	return items;
+}
+
+/** `name:count:lastId:lastCount@where` */
+function describeItems(items: Item[], where?: Instance) {
+	const last = items[items.size() - 1];
+	const tail = last !== undefined ? `${last.id}:${last.count}` : "none";
+	return `${items[0]?.name ?? "none"}:${items.size()}:${tail}${where !== undefined ? `@${where.Name}` : ""}`;
+}
+
+export function setupModeServer() {
+	const events = ModeEvents.createServer({});
+	events.serializedReport.connect((_player, items, where) =>
+		log.push(`serializedReport:${describeItems(items, where)}`),
+	);
+	events.serializedBump.connect(() => log.push("serializedBump"));
+	events.serializedMove.connect((_player, value) => log.push(`serializedMove:${value}`));
+	events.serializedStep.connect((_player, items) => log.push(`serializedStep:${describeItems(items)}`));
+
+	const functions = ModeFunctions.createServer({});
+	functions.serializedLookup.setCallback((_player, ids, where) => [
+		makeItems(ids.size(), `for-${where.Name}`),
+		where,
+	]);
+	functions.serializedNothing.setCallback(() => {});
+}
+
+export function setupModeClient() {
+	const events = ModeEvents.createClient({});
+	events.serializedPush.connect((items, where) => log.push(`serializedPush:${describeItems(items, where)}`));
+	events.serializedTick.connect((value) => log.push(`serializedTick:${value}`));
+
+	const functions = ModeFunctions.createClient({});
+	functions.serializedAsk.setCallback((question) => makeItems(3, question));
+}
+
+/** The client's sends: every event it has. */
+export function fireModeClient(count: number, where: Instance) {
+	const events = ModeEvents.createClient({});
+	events.serializedReport.fire(makeItems(count, "serialized"), where);
+	events.serializedBump.fire();
+	events.serializedMove.fire(count);
+	events.serializedStep.fire(makeItems(count, "stepped"));
+}
+
+export function fireModeServer(count: number, where: Instance) {
+	const events = ModeEvents.createServer({});
+	events.serializedPush.broadcast(makeItems(count, "pushed"), where);
+	events.serializedTick.broadcast(count);
+}
+
+export function invokeModeServer(where: Instance) {
+	const functions = ModeFunctions.createClient({});
+	return Promise.all([
+		functions.serializedLookup.invoke([1, 2, 3, 4], where).then(([items, back]) => describeItems(items, back)),
+		functions.serializedNothing.invoke().then((value) => `nothing:${value === undefined}`),
+	]);
+}
+
+export function invokeModeClient(player: Player) {
+	const functions = ModeFunctions.createServer({});
+	return functions.serializedAsk.invoke(player, "why").then((items) => describeItems(items));
+}

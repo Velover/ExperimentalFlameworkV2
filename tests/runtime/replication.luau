@@ -19,6 +19,7 @@ local process = require("@lune/process")
 
 local bridge = require("./bridge")
 local harness = require("./harness")
+local instances = require("./instance")
 local roblox = require("./roblox")
 
 local function createGraph(realm: "Server" | "Client")
@@ -84,6 +85,31 @@ local function assertEmpty(list: { any }, what: string)
 	end
 end
 
+--- The remote with this id in one graph's tree.
+local function findRemote(env, id: string): any
+	for _, remote in env.remotes() do
+		if remote:GetAttribute("id") == id then
+			return remote
+		end
+	end
+	error("no remote " .. id, 0)
+end
+
+--- The arguments of the last message a remote sent.
+local function lastSent(remote: any): { n: number, [number]: any }
+	local sent = instances.sent(remote)
+	assertTrue(#sent > 0, `{remote:GetAttribute("id")} sent something`)
+	return sent[#sent].args
+end
+
+--- Every entry of `actual` equals `expected`, in order.
+local function assertList(actual: { string }, expected: { string }, what: string)
+	assertEqual(#actual, #expected, what .. " count")
+	for index, value in expected do
+		assertEqual(actual[index], value, `{what} #{index}`)
+	end
+end
+
 local function remoteIds(env): { string }
 	local ids = {}
 	for _, remote in env.remotes() do
@@ -96,9 +122,11 @@ end
 -- Setup ------------------------------------------------------------------------------------------
 
 server.setupServer()
+server.setupModeServer()
 flush()
 
 client.setupClient()
+client.setupModeClient()
 flush()
 
 -- Cases ------------------------------------------------------------------------------------------
@@ -204,6 +232,71 @@ local cases: { { name: string, run: () -> () } } = {
 			local received = client.drain()
 			assertEqual(#received, 1, "events delivered after the drop")
 			assertEqual(received[1], "tick:3", "payload")
+		end,
+	},
+	{
+		-- Serialized members are packed whether or not the project serializes, with the Instance next
+		-- to the buffer in the blob list.
+		name = "serialized events cross from the client, with an Instance next to the buffer",
+		run = function()
+			local where = instances.new("Folder")
+			where.Name = "Where"
+			client.fireModeClient(3, where)
+			flush()
+
+			assertList(server.drain(), {
+				"serializedReport:serialized:3:3:6@Where",
+				"serializedBump",
+				"serializedMove:3",
+				"serializedStep:stepped:3:3:6",
+			}, "events the server received")
+
+			local report = lastSent(findRemote(clientEnv, "serializedReport"))
+			assertTrue(type(report[1]) == "buffer", "a packed payload")
+			assertEqual(report[2][1], where, "the Instance in the blob list")
+			assertEqual(lastSent(findRemote(clientEnv, "serializedBump")).n, 0, "arguments of an empty list")
+			assertTrue(type(lastSent(findRemote(clientEnv, "unreliable:serializedStep"))[1]) == "buffer", "a packed unreliable payload")
+			assertEqual(findRemote(serverEnv, "unreliable:serializedStep").ClassName, "UnreliableRemoteEvent", "unreliable channel")
+		end,
+	},
+	{
+		name = "serialized events cross from the server",
+		run = function()
+			local where = instances.new("Folder")
+			where.Name = "Box"
+			server.fireModeServer(2, where)
+			flush()
+
+			assertList(client.drain(), {
+				"serializedPush:pushed:2:2:4@Box",
+				"serializedTick:2",
+			}, "events the client received")
+
+			assertTrue(type(lastSent(findRemote(serverEnv, "serializedPush"))[1]) == "buffer", "a packed payload")
+			assertTrue(type(lastSent(findRemote(serverEnv, "unreliable:serializedTick"))[1]) == "buffer", "a packed unreliable payload")
+		end,
+	},
+	{
+		name = "serialized function requests and results cross both ways",
+		run = function()
+			local where = instances.new("Folder")
+			where.Name = "Crate"
+			local status, results = client.invokeModeServer(where):awaitStatus()
+			assertEqual(status, "Resolved", "client-to-server requests")
+			assertList(results, { "for-Crate:4:4:8@Crate", "nothing:true" }, "results")
+
+			-- The client sends on `$name` and the server answers on the same remote.
+			local request = lastSent(findRemote(clientEnv, "$serializedLookup"))
+			assertTrue(type(request[2]) == "buffer", "a packed request")
+			assertEqual(request[3][1], where, "the request's Instance next to it")
+			local response = lastSent(findRemote(serverEnv, "$serializedLookup"))
+			assertEqual(response[2], true, "a successful response")
+			assertTrue(type(response[3]) == "buffer", "a packed result")
+
+			local status2, answer = server.invokeModeClient(link.serverPlayer):awaitStatus()
+			assertEqual(status2, "Resolved", "server-to-client requests")
+			assertEqual(answer, "why:3:3:6", "result")
+			assertTrue(type(lastSent(findRemote(clientEnv, "@serializedAsk"))[3]) == "buffer", "a packed result from the client")
 		end,
 	},
 	{

@@ -45,7 +45,7 @@
 				},
 				"hashPrefix": {
 					"type": "string",
-					"description": "Prefix for generated ids. It cannot start with $, which Flamework's own packages use. Default: the package name in a package, and no prefix in a game. A game can set a short one to keep its ids distinct from any package's."
+					"description": "Prefix for generated ids. It cannot start with $, which Flamework's own packages use. Default: the package name in a package, and no prefix in a game, which needs none: every package id starts with its package's prefix and a colon, which none of a game's own ids starts with, so the two cannot collide. A game may still set one, to mark its ids; the ids then change, so change it with a plain build."
 				},
 				"obfuscation": {
 					"type": "boolean",
@@ -90,7 +90,7 @@
 			"properties": {
 				"serialization": {
 					"type": "boolean",
-					"description": "Serialises every event and function payload into a buffer, with encode and decode code generated from the event's parameter types at each createServer/createClient call site. Values that cannot live in a buffer (Instances, unknown) travel alongside it. Default: false.",
+					"description": "Serialises every event and function payload into a buffer, with encode and decode code generated from the event's parameter types at each createServer/createClient call site. Values that cannot live in a buffer (Instances, unknown) travel alongside it. Networking.Serialized* members are packed whatever this says, and Networking.Raw* members never are. Default: false.",
 					"default": false
 				}
 			}

@@ -1,13 +1,14 @@
 import ts from "typescript";
 import path from "path";
 import { transformFile } from "./transformations/transformFile";
-import { TransformState } from "./classes/transformState";
+import { buildInfoFileName, TransformState } from "./classes/transformState";
 import type { TransformerEntry } from "./util/projectConfig";
 import { Logger } from "./classes/logger";
 import { f } from "./util/factory";
 import chalk from "chalk";
 import { emitTypescriptMismatch } from "./util/functions/emitTypescriptMismatch";
 import { PKG_VERSION } from "./util/constants";
+import { getTsBuildInfoPath } from "./util/functions/isCleanBuildDirectory";
 
 // TypeScript 5.9 stopped exporting its own `isDiagnosticWithLocation`; this is the same check.
 function isDiagnosticWithLocation(diagnostic: ts.Diagnostic): diagnostic is ts.DiagnosticWithLocation {
@@ -26,9 +27,16 @@ export default function (program: ts.Program, entry?: TransformerEntry) {
 		const state = new TransformState(program, context, entry ?? {});
 		const projectFlameworkVersion = state.buildInfo.getFlameworkVersion();
 		if (projectFlameworkVersion !== PKG_VERSION) {
+			// Only an incremental build reuses the previous flamework.build, and it compiles only the
+			// files that changed, so the others would keep what the previous version emitted. roblox-ts
+			// picks those files from the tsbuildinfo before it loads the transformer, so a fresh build
+			// cannot be started from here; deleting the tsbuildinfo makes the next build compile them all.
+			const buildInfoFile = getTsBuildInfoPath(state.options);
 			Logger.writeLine(
 				`${chalk.red("Project was compiled on different version of Flamework.")}`,
-				`Please recompile by deleting the ${path.relative(state.currentDirectory, state.outDir)} directory`,
+				buildInfoFile !== undefined
+					? `This is an incremental build, which recompiles only the files that changed. Delete ${buildInfoFileName(state.currentDirectory, state.options)} and build again: the next build compiles every file.`
+					: `Please recompile by deleting the ${path.relative(state.currentDirectory, state.outDir).replace(/\\/g, "/")} directory`,
 				`Current Flamework Version: ${chalk.yellow(PKG_VERSION)}`,
 				`Previous Flamework Version: ${chalk.yellow(projectFlameworkVersion)}`,
 			);

@@ -115,6 +115,9 @@ export const mapOrHolderSerializer = Flamework.createSerializer<MapOrHolder>();
 export const narrowNumberSerializer = Flamework.createSerializer<Serialization.u16 | number>();
 export const nodePatchSerializer = Flamework.createSerializer<NodePatch<Node>>();
 export const listsSerializer = Flamework.createSerializer<Lists>();
+/** A rest element first and in the middle: the elements after it come after it on the wire too. */
+export const restFirstSerializer = Flamework.createSerializer<[...string[], boolean]>();
+export const restMiddleSerializer = Flamework.createSerializer<[number, ...string[], boolean]>();
 
 interface ServerEvents {
 	ping(value: number, where: Vector3): void;

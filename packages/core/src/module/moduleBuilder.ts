@@ -126,7 +126,7 @@ export class ModuleBuilder {
 			return this;
 		}
 
-		return this.registerProviderClasses(getClassesInPath(path), options);
+		return this.registerProviderClasses(getClassesInPath(path, `registerProviders("${_stringPath}")`), options);
 	}
 
 	/**

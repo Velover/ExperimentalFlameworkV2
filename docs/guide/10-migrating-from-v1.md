@@ -87,7 +87,9 @@ releases depend on each other. Then:
 - **Build output.** Delete `out/` before the first v2 build. The roblox-ts template builds
   incrementally, with its `tsbuildinfo` in `out/`. An incremental build would start from v1's
   `flamework.build`, which the transformer refuses: `Project was compiled on different version of
-  Flamework. Please recompile by deleting the out directory`.
+  Flamework`, naming the tsbuildinfo to delete. The same happens after every later Flamework
+  upgrade while `incremental` is on; see
+  [Getting started › Incremental builds and upgrades](01-getting-started.md#incremental-builds-and-upgrades).
 
 A library built on v1 imports `@flamework/core`, so it does not work with v2 until it is ported. For
 example, `@rbxts/flamework-react-utils` calls `Flamework.resolveDependency`, whose replacement is in

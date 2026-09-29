@@ -12,6 +12,7 @@ import {
 	isLocalFileWindow,
 	isPlaying,
 	parseClosedWindows,
+	luauErrorMessage,
 	placeNameOf,
 	renderStudioRun,
 	runCloseScript,
@@ -78,6 +79,22 @@ describe("studio helpers", () => {
 		expect(unquoteLuauResult('"{\\"ok\\":true}"')).toBe('{"ok":true}');
 		expect(unquoteLuauResult("2")).toBe("2");
 	});
+
+	test("an execute_luau error loses the Assistant's own locations, and keeps the snippet's message", () => {
+		const assistant =
+			"execute_luau: sabuiltin_Assistant.rbxm.Assistant.Packages._Index.AssistantUI.AssistantUI.Tools.ExecuteLuauTool:66: sabuiltin_Assistant.rbxm.Assistant.Packages._Index.AssistantUI.AssistantUI.Util.CommandExecution:54: ";
+		expect(luauErrorMessage(new Error(`${assistant}AssistantCommand:2: host missing`))).toBe("host missing");
+		expect(
+			luauErrorMessage(new Error(`${assistant}Script that implemented this callback has been destroyed`)),
+		).toBe("Script that implemented this callback has been destroyed");
+		// A location of the game's own is part of its message.
+		expect(luauErrorMessage(new Error(`${assistant}ServerScriptService.TS.main:4: boom`))).toBe(
+			"ServerScriptService.TS.main:4: boom",
+		);
+		expect(luauErrorMessage("list_roblox_studios timed out after 15000ms")).toBe(
+			"list_roblox_studios timed out after 15000ms",
+		);
+	});
 });
 
 describe("closing a window", () => {
@@ -96,6 +113,11 @@ describe("closing a window", () => {
 		// The run's own process may be confirmed by the command line it was started with; any other
 		// window only by its title.
 		expect(byPid).toContain("$_.Id -eq $wantPid -and (HasFile $_ $true)");
+		// A run's own window is ended without asking: Studio answers the ask with a save prompt for
+		// every place file it opened. Any other window is asked first.
+		expect(byPid).toContain("CloseOne $p ($wantPid -le 0)");
+		expect(byPid).toContain("if ($ask) { try { $asked = $p.CloseMainWindow() } catch { } }");
+		expect(byPid).toContain("$(if ($ask) { 'forced' } else { 'ended' })");
 		expect(byPid).toContain("$_.Id -ne $wantPid -and (HasFile $_ $false)");
 		expect(byPid).toContain("$act = @($procs | Where-Object { HasFile $_ $false })");
 		// A failed Stop-Process is caught and reported, and a window is only reported gone once it is.
@@ -196,9 +218,9 @@ $cases = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64Stri
 			// Started on "<file>.bak": the file's name is only part of it.
 			expect(runCloseScript({ pid: similar.pid, file }, processName)).toEqual([]);
 
-			// The process given, by the file on its command line: no window to ask, so it is ended at once.
+			// The process given, by the file on its command line: a run's own process is ended without asking.
 			const closed = runCloseScript({ pid: own.pid, file }, processName);
-			expect(closed).toEqual([{ pid: own.pid, title: "", outcome: "forced" }]);
+			expect(closed).toEqual([{ pid: own.pid, title: "", outcome: "ended" }]);
 			expect(await exits(own)).toBe(true);
 			expect(other.exitCode).toBeNull();
 
@@ -455,6 +477,54 @@ describe("studio commands", () => {
 
 		const nothing = await runCli(["studio", "exec"], { studio: { studios: [TESTING_STUDIO] } });
 		expect(nothing.code).toBe(2);
+	});
+
+	test("a window named with --studio, or the only local file, needs no testing place configured", async () => {
+		const exec = await runCli(["studio", "exec", "--code", "return 1", "--studio", "Other Place"], {
+			env: {},
+			studio: { studios: [OTHER_STUDIO, LOCAL_STUDIO], answers: { execute_luau: "1" } },
+		});
+		expect(exec.code).toBe(0);
+		expect(exec.studioCalls[0]!.args.studio_id).toBe("studio-2");
+
+		const close = await runCli(["studio", "close", "--studio", "place.patched.rbxl"], {
+			env: {},
+			studio: { studios: [OTHER_STUDIO, LOCAL_STUDIO] },
+			windows: [{ pid: 3000, title: "C:\\a\\place.patched.rbxl - Roblox Studio" }],
+		});
+		expect(close.code).toBe(0);
+		expect(close.closedWindows).toEqual(["place.patched.rbxl"]);
+
+		const local = await runCli(["studio", "status"], {
+			env: {},
+			studio: { studios: [OTHER_STUDIO, LOCAL_STUDIO], answers: { get_studio_state: EDITING } },
+		});
+		expect(local.code).toBe(0);
+		expect(local.studioCalls[0]!.args.studio_id).toBe("studio-3");
+
+		const none = await runCli(["studio", "status"], { env: {}, studio: { studios: [OTHER_STUDIO] } });
+		expect(none.code).toBe(1);
+		expect(none.err).toContain(
+			"no single Studio window has a local place file open, and no testing place is configured",
+		);
+		expect(none.err).not.toContain("no testing universe");
+	});
+
+	test("exec reports the snippet's error without the Assistant's wrapping", async () => {
+		const run = await runCli(["studio", "exec", "--code", "error('nope')"], {
+			studio: {
+				studios: [TESTING_STUDIO],
+				answers: {
+					execute_luau: () => {
+						throw new Error(
+							"execute_luau: sabuiltin_Assistant.rbxm.Assistant.Tools.ExecuteLuauTool:66: AssistantCommand:1: nope",
+						);
+					},
+				},
+			},
+		});
+		expect(run.code).toBe(1);
+		expect(run.err).toContain("error: the Luau failed in Edit: nope");
 	});
 
 	test("run starts a play session when there is none, runs the tests, prints the summary and stops it", async () => {

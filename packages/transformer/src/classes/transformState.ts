@@ -2,6 +2,7 @@ import ts from "typescript";
 import fs from "fs";
 import crypto from "crypto";
 import path from "path";
+import chalk from "chalk";
 import Hashids from "hashids";
 import { transformNode } from "../transformations/transformNode";
 import { Cache } from "../util/cache";
@@ -10,7 +11,7 @@ import { BuildInfo } from "./buildInfo";
 import { Logger } from "./logger";
 import { f } from "../util/factory";
 import { isPathDescendantOf } from "../util/functions/isPathDescendantOf";
-import { isCleanBuildDirectory } from "../util/functions/isCleanBuildDirectory";
+import { getTsBuildInfoPath, isCleanBuildDirectory } from "../util/functions/isCleanBuildDirectory";
 import { parseCommandLine } from "../util/functions/parseCommandLine";
 import { createPathTranslator } from "../util/functions/createPathTranslator";
 import { arePathsEqual } from "../util/functions/arePathsEqual";
@@ -33,6 +34,7 @@ import {
 import type { Env } from "../util/env";
 import { Diagnostics } from "./diagnostics";
 import { FLAMEWORK_SCOPE, CORE_PACKAGE } from "../util/packages";
+import { findPlaceSource, findSourcePath, type SourcePathState } from "../util/functions/findSourcePath";
 
 /**
  * The transformer's options: the `transformer` section of `flamework.config.json`, the only place
@@ -60,8 +62,9 @@ export interface TransformerConfig {
 	salt?: string;
 
 	/**
-	 * This can be used to lower collision chance with packages.
-	 * Defaults to the package name in a package; a game has no prefix unless it sets one.
+	 * A package's ids carry it, so that they cannot collide with another package's or a game's.
+	 * Defaults to the package name in a package; a game has no prefix unless it sets one, and needs
+	 * none, since none of its own ids starts with a package's `prefix:`.
 	 */
 	hashPrefix?: string;
 
@@ -90,6 +93,17 @@ export interface TransformerConfig {
 		 */
 		guardGenerationDedupLimit?: number;
 	};
+}
+
+/**
+ * The tsbuildinfo, relative to the project and with forward slashes on every platform, as the
+ * messages that ask for it to be deleted name it.
+ */
+export function buildInfoFileName(currentDirectory: string, options: ts.CompilerOptions) {
+	const buildInfoFile = getTsBuildInfoPath(options);
+	return buildInfoFile !== undefined
+		? path.relative(currentDirectory, buildInfoFile).replace(/\\/g, "/")
+		: "the tsbuildinfo";
 }
 
 export class TransformState {
@@ -125,10 +139,14 @@ export class TransformState {
 	private setupBuildInfo() {
 		let baseBuildInfo = BuildInfo.fromDirectory(this.currentDirectory);
 		if (!baseBuildInfo || (Cache.isInitialCompile && isCleanBuildDirectory(this.options))) {
-			if (this.options.incremental && this.options.tsBuildInfoFile) {
-				if (ts.sys.fileExists(this.options.tsBuildInfoFile)) {
-					throw new Error(`Flamework cannot be built in a dirty environment, please delete your tsbuildinfo`);
-				}
+			const buildInfoFile = getTsBuildInfoPath(this.options);
+			if (buildInfoFile !== undefined && ts.sys.fileExists(buildInfoFile)) {
+				// Said and stopped as the version check stops, without a stack: nothing here is a bug.
+				Logger.writeLine(
+					chalk.red("Flamework cannot be built in a dirty environment."),
+					`This incremental build has no flamework.build to match the files it does not recompile. Delete ${buildInfoFileName(this.currentDirectory, this.options)} and build again.`,
+				);
+				process.exit(1);
 			}
 			baseBuildInfo = new BuildInfo(path.join(this.currentDirectory, "flamework.build"));
 		} else if (Cache.isInitialCompile) {
@@ -279,6 +297,77 @@ export class TransformState {
 		}
 	}
 
+	/**
+	 * Warns at every use of a path macro whose Rojo path the place will not have, or will have with no
+	 * module under it: judged from what Rojo builds the place from (see `findPlaceSource`), the sources
+	 * for a folder inside `out`, and the disk for a `$path` of the project's own. A path that names
+	 * nothing compiles all the same, and `registerProviders`, `ComponentPlugin.fromPath` or a macro of
+	 * the game's own waits for it at runtime, while `requireModules` raises after five seconds. A
+	 * folder with no module is copied into the place empty and registers nothing, and is not in a
+	 * clone at all, since git keeps no empty folder. Names below the `$path` are matched exactly: Rojo
+	 * names every instance as the file or folder is named on disk, so a path that differs only in case
+	 * there finds nothing in the place, whatever the file system allows. A warning, like the empty
+	 * glob's, since the build cannot know what the place will hold.
+	 *
+	 * Judged here, once the build is done, for the reason `warnEmptyGlobs` gives.
+	 */
+	private warnEmptyPaths() {
+		const uses = this.buildInfo.getMetadata("paths")?.uses;
+		if (!uses) {
+			return;
+		}
+
+		// Source paths are resolved against the working directory, as the path translator resolves them.
+		const base = process.cwd();
+		const states = new Map<string, SourcePathState>();
+		const lookUp = (sourcePath: string): SourcePathState => {
+			// Judged where the place gets the path from: the deepest `$path` of the Rojo project that
+			// covers the Rojo path it compiled to, which may be a folder mapped by a `$path` of its own.
+			const rbxPath = this.rojoResolver?.getRbxPathFromFilePath(this.pathTranslator.getOutputPath(sourcePath));
+			const inPlace =
+				rbxPath !== undefined && this.rojoResolver !== undefined
+					? findPlaceSource(
+							rbxPath,
+							this.rojoResolver.getPartitions(),
+							{ rootDir: this.pathTranslator.rootDir, outDir: this.pathTranslator.outDir },
+							base,
+						)
+					: undefined;
+			return inPlace ?? findSourcePath(base, sourcePath);
+		};
+
+		for (const [origin, fileUses] of Object.entries(uses)) {
+			// A file deleted under a watcher is never compiled again, so its entry outlives it.
+			if (!fs.existsSync(path.join(this.rootDirectory, origin))) {
+				continue;
+			}
+
+			// In the order they are written: a chain of calls is transformed from its last call.
+			const ordered = [...fileUses].sort((a, b) => a.line - b.line || a.column - b.column);
+			for (const use of ordered) {
+				let state = states.get(use.path);
+				if (state === undefined) {
+					state = lookUp(use.path);
+					states.set(use.path, state);
+				}
+
+				// `requireModules` raises once it has waited five seconds; everything else waits on.
+				const call = `${origin}:${use.line}:${use.column} - ${use.macro}("${use.path}")`;
+				if (state.kind === "empty") {
+					Logger.warn(
+						`${call}: nothing in that folder compiles to a module, so the call finds nothing there, and in a place without the folder (git keeps no empty folder) ${use.raises ? "it raises at runtime after waiting five seconds for it" : "it waits for it at runtime"}`,
+					);
+				} else if (state.kind === "missing") {
+					Logger.warn(
+						state.actual === undefined
+							? `${call}: there is no such file or folder, so the place will not have it, and ${use.raises ? "the call raises at runtime after waiting five seconds for it" : "the call waits for it at runtime"}`
+							: `${call}: there is no such file or folder; on disk it is '${state.actual}', and the place names it as the disk does, so ${use.raises ? "the call raises at runtime after waiting five seconds for a name the place does not have" : "the call waits at runtime for a name the place does not have"}`,
+					);
+				}
+			}
+		}
+	}
+
 	private convertGlobs(
 		globs: Record<string, string[]> | undefined,
 		luaOut: Map<string, Array<ReadonlyArray<string>>>,
@@ -389,7 +478,7 @@ export class TransformState {
 				Logger.warn(
 					"obfuscated ids were kept from the previous build",
 					"This is an incremental build, so files that do not recompile keep their ids and the rest have to match.",
-					`Delete ${this.options.tsBuildInfoFile ?? "the tsbuildinfo"} before a release build to rotate every id.`,
+					`Delete ${buildInfoFileName(this.currentDirectory, this.options)} before a release build to rotate every id.`,
 				);
 			}
 		}
@@ -515,6 +604,7 @@ export class TransformState {
 		// Printed last: the verbose message above clears the line it takes to be the watcher's blank
 		// one, which would be the last warning if the warnings came first.
 		this.warnEmptyGlobs();
+		this.warnEmptyPaths();
 	}
 
 	isUserMacro(symbol: ts.Symbol) {

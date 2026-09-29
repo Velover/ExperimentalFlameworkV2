@@ -1,0 +1,9 @@
+{
+	"name": "testing",
+	"tree": {
+		"$className": "Folder",
+		"out": {
+			"$path": "out"
+		}
+	}
+}

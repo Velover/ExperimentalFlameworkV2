@@ -26,6 +26,31 @@ export type NetworkUnreliable<T> = T & { _flamework_unreliable: never };
  */
 export type NetworkRaw<T> = T & { _flamework_raw: never };
 
+/**
+ * Marks an event or function whose values are packed into a buffer whether or not the project turns
+ * `networking.serialization` on: the call sites encode and the metadata decodes, exactly as the switch
+ * would have them do.
+ */
+export type NetworkSerialized<T> = T & { _flamework_serialized: never };
+
+/**
+ * A member declared raw and nothing else. One that is also serialized gets the marked handler
+ * instead, so that the transformer sees it where it is used and reports the conflict.
+ */
+export type IsRawMember<T> =
+	T extends NetworkRaw<unknown> ? (T extends NetworkSerialized<unknown> ? false : true) : false;
+
+/**
+ * How the member `F` is packed. Each sender and function receiver takes it as a type argument of its
+ * own and carries it as the hidden `_flamework_packing`, so members that are packed differently have
+ * unrelated handler types. (Worked out from `F` inside the interface, it would be compared through
+ * `F`, which a `Serialized` member's type extends.) A union of them, from a conditional or a helper
+ * that returns one of several members, then keeps every one of them rather than reducing to the one
+ * the others extend, and the transformer refuses a call that cannot pack for all of them.
+ */
+export type NetworkPacking<F> =
+	IsRawMember<F> extends true ? "raw" : F extends NetworkSerialized<unknown> ? "serialized" : "plain";
+
 export interface NetworkingObfuscationMarker {
 	/**
 	 * An internal marker type used to signify to Flamework to obfuscate access expressions.
@@ -53,26 +78,42 @@ export type IntrinsicObfuscateArray<T, V = T> = Modding.Intrinsic<"shuffle-array
 export type IntrinsicTupleGuards<T> = Modding.Intrinsic<"tuple-guards", [T], GuardType>;
 
 /**
- * Decode code for the argument list `T`, generated only when the project's flamework.config.json
- * enables `networking.serialization`; `undefined` otherwise, which passes values through as they
- * are. The matching encoding is generated inline at every call site, so no encoder exists at runtime.
+ * Decode code for the argument list `T` of the member `F`, generated when the member is packed: with
+ * the project's `networking.serialization` on (unless `F` is raw), or when `F` is serialized.
+ * `undefined` otherwise, which passes values through as they are. `K` is the member's name, for the
+ * transformer's messages. The matching encoding is generated inline at every call site, so no encoder
+ * exists at runtime.
  * @hidden Intrinsic feature not intended for users
  */
-export type IntrinsicNetworkDecoder<T extends Array<unknown>> = Modding.Intrinsic<
+export type IntrinsicNetworkDecoder<T extends Array<unknown>, F = unknown, K = unknown> = Modding.Intrinsic<
 	"network-decoder",
-	[T],
+	[T, F, K],
 	Serialization.Decoder<T> | undefined
 >;
 
 /**
  * Decode code for the result of the function type `F`, carried as a one-element list. Takes the
- * function type rather than its return type so that the return type as declared is known.
+ * function type rather than its return type so that the return type as declared is known, and so
+ * that its markers are; see {@link IntrinsicNetworkDecoder} for `K`.
  * @hidden Intrinsic feature not intended for users
  */
-export type IntrinsicNetworkResultDecoder<F> = Modding.Intrinsic<
+export type IntrinsicNetworkResultDecoder<F, K = unknown> = Modding.Intrinsic<
 	"network-result-decoder",
-	[F],
+	[F, K],
 	Serialization.Decoder | undefined
 >;
 
-type GuardType = [t.check<unknown>[], t.check<unknown> | undefined];
+/**
+ * `true` for a member declared unreliable, `undefined` otherwise. An intrinsic rather than a
+ * conditional type so that every member of an event network, in both directions, passes through the
+ * transformer's check of its markers wherever a handler is created.
+ * @hidden Intrinsic feature not intended for users
+ */
+export type IntrinsicNetworkUnreliable<F, K = unknown> = Modding.Intrinsic<
+	"network-unreliable",
+	[F, K],
+	true | undefined
+>;
+
+/** The guards of the arguments before a rest parameter, of the rest, and of any after it (`[A, ...B[], C]`). */
+type GuardType = [t.check<unknown>[], t.check<unknown> | undefined, t.check<unknown>[]?];

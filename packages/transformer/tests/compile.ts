@@ -7,7 +7,15 @@ const FIXTURE = path.resolve(import.meta.dir, "fixture");
 
 // What `compileWithEntry` and projectConfig.test.ts's `$schema` build write into the fixture. Both
 // remove it when they finish; a run killed halfway leaves it behind, so it goes before anything compiles.
-for (const leftover of ["tsconfig.entry-probe.json", "probe-config"]) {
+for (const leftover of [
+	"tsconfig.entry-probe.json",
+	"probe-config",
+	// regressions.test.ts's incremental build.
+	"tsconfig.incremental-probe.json",
+	"tsconfig.incremental-probe.tsbuildinfo",
+	"src/incrementalAlpha.ts",
+	"src/incrementalBeta.ts",
+]) {
 	fs.rmSync(path.join(FIXTURE, leftover), { recursive: true, force: true });
 }
 
@@ -131,6 +139,41 @@ export function compileProbe(name: string, source: string): CompileResult {
 	} finally {
 		fs.rmSync(file, { force: true });
 		fs.rmSync(path.join(FIXTURE, "out", `${name}.luau`), { force: true });
+	}
+}
+
+/**
+ * Compiles the fixture with several extra source files, with extra environment variables for its
+ * `flamework.config.json`, and returns what rbxtsc said and the Luau emitted for those files (none
+ * when any file fails, since rbxtsc then emits nothing). The files are removed again afterwards; the
+ * rest of `out` is left as this compilation wrote it, and the cached result is left alone.
+ */
+export function compileProbes(sources: Record<string, string>, env: Record<string, string> = {}): CompileResult {
+	const names = Object.keys(sources);
+	for (const name of names) {
+		fs.rmSync(path.join(FIXTURE, "out", `${name}.luau`), { force: true });
+		fs.writeFileSync(path.join(FIXTURE, "src", `${name}.ts`), sources[name]);
+	}
+
+	try {
+		const result = spawnSync("node", [RBXTSC], {
+			cwd: FIXTURE,
+			encoding: "utf8",
+			env: { ...process.env, ...env },
+		});
+
+		const files = new Map<string, string>();
+		for (const name of names) {
+			const emittedFile = path.join(FIXTURE, "out", `${name}.luau`);
+			if (fs.existsSync(emittedFile)) files.set(name, fs.readFileSync(emittedFile, "utf8"));
+		}
+
+		return { files, output: `${result.stdout ?? ""}${result.stderr ?? ""}`, status: result.status ?? 1 };
+	} finally {
+		for (const name of names) {
+			fs.rmSync(path.join(FIXTURE, "src", `${name}.ts`), { force: true });
+			fs.rmSync(path.join(FIXTURE, "out", `${name}.luau`), { force: true });
+		}
 	}
 }
 

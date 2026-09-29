@@ -13,6 +13,7 @@ export function createGuards(
 	name: string,
 	fixedParameters: t.check<unknown>[],
 	restParameter: t.check<unknown> | undefined,
+	parametersAfterRest: t.check<unknown>[] | undefined,
 	networkInfo: NetworkInfo,
 	warnOnInvalid: boolean,
 	signals: SignalContainer<EventNetworkingEvents>,
@@ -20,6 +21,7 @@ export function createGuards(
 	return {
 		fixed: fixedParameters,
 		rest: restParameter,
+		after: parametersAfterRest,
 		reject: (player, index, value) => {
 			if (warnOnInvalid) {
 				if (player) {

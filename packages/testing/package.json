@@ -25,6 +25,7 @@
   "files": [
     "out",
     "flamework.build",
+    "default.project.json",
     "cli/src",
     "cli/tasks",
     "cli/types.d.ts"

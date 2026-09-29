@@ -6,7 +6,9 @@ import { buildGuardFromType } from "../../../util/functions/buildGuardFromType";
 import { isArrayType, isTupleType } from "../../../util/functions/isTupleType";
 
 /**
- * This intrinsic generates an array of element guards along with a rest guard for a tuple type.
+ * This intrinsic generates an array of element guards along with a rest guard for a tuple type, and,
+ * for a tuple with elements after its rest (`[A, ...B[], C]`), the guards of those as a third entry:
+ * `[[A], B, [C]]`. The runtime checks them against the last arguments.
  *
  * Whilst this is possible in TypeScript, it requires either slightly complex types or additional metadata.
  * This serves as a simple fast path.
@@ -25,7 +27,8 @@ export function buildTupleGuardsIntrinsic(state: TransformState, node: ts.Node, 
 	}
 
 	const guards = new Array<ts.Expression>();
-	let restGuard: ts.Expression = f.nil();
+	let restGuard: ts.Expression | undefined;
+	const afterGuards = new Array<ts.Expression>();
 	for (let i = 0; i < tupleType.typeArguments.length; i++) {
 		const element = tupleType.typeArguments[i];
 		const declaration = tupleType.target.labeledElementDeclarations?.[i];
@@ -33,10 +36,13 @@ export function buildTupleGuardsIntrinsic(state: TransformState, node: ts.Node, 
 
 		if (tupleType.target.elementFlags[i] & ts.ElementFlags.Rest) {
 			restGuard = guard;
+		} else if (restGuard) {
+			afterGuards.push(guard);
 		} else {
 			guards.push(guard);
 		}
 	}
 
-	return f.array([f.array(guards), restGuard]);
+	if (afterGuards.length > 0) return f.array([f.array(guards), restGuard ?? f.nil(), f.array(afterGuards)]);
+	return f.array([f.array(guards), restGuard ?? f.nil()]);
 }

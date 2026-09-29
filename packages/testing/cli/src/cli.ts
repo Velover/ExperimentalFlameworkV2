@@ -11,7 +11,7 @@
  * a file system, a Studio or a real API key.
  */
 import { spawn } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 
@@ -42,7 +42,16 @@ import {
 import PATCH_TASK from "../tasks/patch-place.lune" with { type: "text" };
 import PROBE_TASK from "../tasks/probe.lune" with { type: "text" };
 import RUN_TESTS_TASK from "../tasks/run-tests.lune" with { type: "text" };
-import { formatList, formatSummary, parseRunResult, ResultParseError } from "./results.ts";
+import {
+	formatList,
+	formatSummary,
+	missedEverywhere,
+	parseRunResult,
+	resultPassed,
+	ResultParseError,
+	type RealmOfSeveral,
+	type RunResult,
+} from "./results.ts";
 import {
 	claimWindowName,
 	connectStudio,
@@ -52,6 +61,7 @@ import {
 	findStudioMcp,
 	isPlaying,
 	listStudioWindows,
+	luauErrorMessage,
 	placeNameOf,
 	renderStudioRun,
 	runCloseScript,
@@ -77,6 +87,8 @@ export const STUDIO_OPEN_TIMEOUT = "180s";
 export const CLAIM_TIMEOUT_MS = 600_000;
 /** How long a play session is waited for once started. */
 export const PLAY_START_TIMEOUT_MS = 90_000;
+/** How often Studio's lock beside a place is tried to be removed, half a second apart, once its process has been ended. */
+export const LOCK_REMOVAL_ATTEMPTS = 20;
 export const POLL_INTERVAL_MS = 2500;
 /** How long past the task's own timeout we keep polling before giving up. */
 export const QUEUE_SLACK_MS = 300_000;
@@ -410,6 +422,16 @@ export interface CliDeps {
 	error?: (message: string) => void;
 	env?: Record<string, string | undefined>;
 	cwd?: string;
+	/**
+	 * Makes a folder of its own for the files one patch needs while it runs (its plan and its Lune
+	 * task), so that nothing but the places a run makes lands in the project, and two runs at once
+	 * never read each other's plan. By default a new folder of the system's temp directory.
+	 */
+	makeTempDir?: () => Promise<string>;
+	/** Removes a folder and everything in it; the patch's own folder once it is done. */
+	removeDir?: (path: string) => Promise<void>;
+	/** Removes a file; Studio's lock beside a place whose window a run ended. */
+	removeFile?: (path: string) => Promise<void>;
 	now?: () => Date;
 	/** Reads the `cloud` section of the nearest flamework.config.json. */
 	loadSettings?: (cwd: string, env: Record<string, string | undefined>) => CloudSettings;
@@ -421,6 +443,7 @@ interface Io extends Required<Omit<CliDeps, "fetch">> {
 
 function resolveDeps(deps: CliDeps): Io {
 	const env = deps.env ?? (process.env as Record<string, string | undefined>);
+	const cwd = deps.cwd ?? process.cwd();
 	return {
 		fetch: deps.fetch,
 		sleep: deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
@@ -475,7 +498,10 @@ function resolveDeps(deps: CliDeps): Io {
 		log: deps.log ?? ((message) => console.log(message)),
 		error: deps.error ?? ((message) => console.error(message)),
 		env,
-		cwd: deps.cwd ?? process.cwd(),
+		cwd,
+		makeTempDir: deps.makeTempDir ?? (() => mkdtemp(join(tmpdir(), "flamework-test-"))),
+		removeDir: deps.removeDir ?? ((path) => rm(path, { recursive: true, force: true })),
+		removeFile: deps.removeFile ?? ((path) => rm(path, { force: true })),
 		now: deps.now ?? (() => new Date()),
 		loadSettings: deps.loadSettings ?? loadCloudSettings,
 	};
@@ -515,6 +541,14 @@ function makeClient(flags: Flags, io: Io): OpenCloudClient {
 		sleep: io.sleep,
 		readFile: io.readFile,
 	});
+}
+
+/**
+ * The testing place's id when one is configured anywhere, for finding its Studio window; a window
+ * named with `--studio`, or the only local-file window, needs none.
+ */
+function testingPlaceIdIfAny(flags: Flags, io: Io): string | undefined {
+	return flags["testing-place"] ?? envOf(io, "TESTING_PLACE_ID") ?? settingsOf(io).testingPlaceId;
 }
 
 /** The testing place: never the original, which is why every name here says so. */
@@ -665,25 +699,33 @@ async function patchPlace(
 	const rojo = await readProject(project, io);
 
 	const out = resolve(io.cwd, flags.out ?? patchedPathFor(built, project));
-	const planPath = resolve(io.cwd, "build", "patch-plan.json");
-	const plan: PatchPlan = { project: project.name, ops: planPatch(rojo) };
-	await io.writeTextFile(planPath, JSON.stringify(plan));
 
-	// Lune runs a file, so the task ships as text and is written out beside the plan.
-	const taskPath = resolve(io.cwd, "build", "patch-place.luau");
-	await io.writeTextFile(taskPath, PATCH_TASK);
+	// Only the patch reads these, so they go to a folder of this run's own rather than into the
+	// game's: a folder shared by runs let two patches started together read each other's plan.
+	const workDir = await io.makeTempDir();
+	try {
+		const planPath = join(workDir, "patch-plan.json");
+		const plan: PatchPlan = { project: project.name, ops: planPatch(rojo) };
+		await io.writeTextFile(planPath, JSON.stringify(plan));
 
-	if (original !== undefined) {
-		io.log(`patching a copy of ${original} with ${built}, following ${project.path}`);
-	} else {
-		io.log(`setting the properties of ${project.path} on ${built}`);
-	}
-	const code = await io.spawn(
-		patchCommand(lune, taskPath, { original: original ?? builtPath, built: builtPath, out, plan: planPath }),
-		io.cwd,
-	);
-	if (code !== 0) {
-		throw new CliError(`the patch failed (lune exited ${code})`, "nothing was run or uploaded");
+		// Lune runs a file, so the task ships as text and is written out beside the plan.
+		const taskPath = join(workDir, "patch-place.luau");
+		await io.writeTextFile(taskPath, PATCH_TASK);
+
+		if (original !== undefined) {
+			io.log(`patching a copy of ${original} with ${built}, following ${project.path}`);
+		} else {
+			io.log(`setting the properties of ${project.path} on ${built}`);
+		}
+		const code = await io.spawn(
+			patchCommand(lune, taskPath, { original: original ?? builtPath, built: builtPath, out, plan: planPath }),
+			io.cwd,
+		);
+		if (code !== 0) {
+			throw new CliError(`the patch failed (lune exited ${code})`, "nothing was run or uploaded");
+		}
+	} finally {
+		await io.removeDir(workDir);
 	}
 
 	io.log(`wrote ${out}`);
@@ -908,30 +950,39 @@ function printTaskFailure(task: LuauTask, io: Io): void {
 }
 
 function printRunResult(results: string[], flags: Flags, io: Io): number {
-	let result;
+	const result = readRunResult(results, io);
+	if (result === undefined) return 1;
+
+	printResult(result, results, flags, io);
+	return resultPassed(result) ? 0 : 1;
+}
+
+/** A run's result, or nothing when it cannot be read, which is reported. */
+function readRunResult(results: string[], io: Io): RunResult | undefined {
 	try {
-		result = parseRunResult(results);
+		return parseRunResult(results);
 	} catch (error) {
 		if (error instanceof ResultParseError) {
 			io.error(error.message);
 			io.error(
 				"the shim returns whatever @flamework-experimental/testing's cloud runner returns; it must be a JSON string",
 			);
-			return 1;
+			return undefined;
 		}
 		throw error;
 	}
+}
 
+/** Prints a result as `--json`, `--list` or the summary ask; `options` when it is one realm of several. */
+function printResult(result: RunResult, results: string[], flags: Flags, io: Io, options?: RealmOfSeveral): void {
 	if (flags.json) {
 		io.log(JSON.stringify(JSON.parse(results[0]!), null, 2));
 	} else {
 		io.log("");
-		for (const line of flags.list ? formatList(result) : formatSummary(result)) {
+		for (const line of flags.list ? formatList(result, options) : formatSummary(result, options)) {
 			io.log(line);
 		}
 	}
-
-	return result.ok ? 0 : 1;
 }
 
 function printProbe(raw: string | undefined, flags: Flags, io: Io): number {
@@ -1004,13 +1055,18 @@ async function cloudTestProject(flags: Flags, io: Io, project: ProjectChoice): P
 
 // ------------------------------------------------------------------ studio
 
-/** The connected proxy and the window with the testing place open; refuses clearly when there is none. */
+/**
+ * The connected proxy and the window to drive: the one `--studio` names, else the one with the
+ * testing place open, else the only one with a local place file open. Only the second needs the
+ * testing place's id, so a window found either other way is driven without one. Refuses clearly
+ * when nothing matches.
+ */
 async function withStudio<T>(
 	flags: Flags,
 	io: Io,
 	body: (client: StudioClient, studio: StudioEntry) => Promise<T>,
 ): Promise<T> {
-	const { placeId } = resolveIds(flags, io);
+	const placeId = flags.studio === undefined ? testingPlaceIdIfAny(flags, io) : undefined;
 	const client = await io.connectStudio();
 	try {
 		const studios = await client.studios();
@@ -1020,8 +1076,10 @@ async function withStudio<T>(
 			throw new CliError(
 				flags.studio !== undefined
 					? `no Studio window is named "${flags.studio}"; listed: ${listed || "none"}`
-					: `no Studio window has the testing place ${placeId} open${listed ? `; listed: ${listed}` : ""}`,
-				'open it with `flamework-test studio open`, and check that "MCP server" is enabled in Studio\'s Assistant settings; a window that has it disabled is not listed',
+					: placeId !== undefined
+						? `no Studio window has the testing place ${placeId} open, and no single window has a local place file open${listed ? `; listed: ${listed}` : ""}`
+						: `no single Studio window has a local place file open, and no testing place is configured to look for${listed ? `; listed: ${listed}` : ""}`,
+				'name the window with --studio <name|id>, or open it with `flamework-test studio open`; check that "MCP server" is enabled in Studio\'s Assistant settings, since a window that has it disabled is not listed',
 			);
 		}
 		return await body(client, studio);
@@ -1148,18 +1206,24 @@ function describeWindow(window: ClosedWindow): string {
 /**
  * Closes the windows a target matches and logs what became of each. The close only reports a
  * window closed once its process is gone, asking first and ending the process when asking is not
- * enough; a window still running after both throws, naming it. Returns everything matched,
- * `untouched` windows included, for the caller to judge.
+ * enough -- or, for the process a run started, ending it at once, since Studio answers the ask with
+ * a save prompt for every place file (see `closeWindowScript`); a window still running after that
+ * throws, naming it. Returns everything matched, `untouched` windows included, for the caller to judge.
  */
 async function closeWindows(target: CloseTarget, label: string, io: Io): Promise<ClosedWindow[]> {
 	const windows = await io.closeWindow(target);
 	for (const window of windows) {
-		if (window.outcome === "closed") {
+		if (window.outcome === "closed" || window.outcome === "ended") {
 			io.log(`closed ${label} (PID ${window.pid})`);
 		} else if (window.outcome === "forced") {
 			io.log(
 				`closed ${label} (PID ${window.pid}) by ending its process: it did not close when asked (a save prompt, usually; nothing a run makes is kept)`,
 			);
+		}
+
+		// A Studio that is ended leaves the lock it keeps beside a place file it has open.
+		if ((window.outcome === "ended" || window.outcome === "forced") && "file" in target) {
+			await removeStudioLock(target.file, window.pid, io);
 		}
 	}
 
@@ -1175,13 +1239,42 @@ async function closeWindows(target: CloseTarget, label: string, io: Io): Promise
 }
 
 /**
+ * Removes Studio's lock beside a place file (`place.rbxl.lock`) once the process that wrote it has
+ * been ended, which gives Studio no chance to remove it itself. Only a lock that names that process
+ * on its first line: a lock of another Studio is left alone.
+ */
+async function removeStudioLock(file: string, pid: number, io: Io): Promise<void> {
+	const lock = `${file}.lock`;
+	try {
+		if (!(await io.exists(lock))) return;
+		const holder = (await io.readTextFile(lock)).split(/\r?\n/)[0]?.trim();
+		if (holder !== String(pid)) return;
+	} catch {
+		return;
+	}
+
+	// Windows can hold the file for a moment after the process has gone, and refuses to remove it
+	// meanwhile (measured: three locks of four were still there after a run), so it is tried again.
+	for (let attempt = 0; attempt < LOCK_REMOVAL_ATTEMPTS; attempt += 1) {
+		try {
+			await io.removeFile(lock);
+			if (!(await io.exists(lock))) return;
+		} catch {
+			// Still held: try again below.
+		}
+		await io.sleep(500);
+	}
+	// A lock that cannot be removed is left where it is: it only needs ignoring.
+}
+
+/**
  * Closes the window a run opened, by the process it started (the file alone when the launch could
  * not tell), and nothing else: another window with the same file open is named, not closed.
  */
 async function closeOwnWindow(pid: number | undefined, file: string, io: Io): Promise<void> {
 	const name = basename(file);
 	const windows = await closeWindows(pid !== undefined ? { pid, file } : { file }, name, io);
-	if (!windows.some((window) => window.outcome === "closed" || window.outcome === "forced")) {
+	if (!windows.some((window) => ["closed", "forced", "ended"].includes(window.outcome))) {
 		io.log(
 			pid !== undefined
 				? `${name} had already closed: the Studio this run started (PID ${pid}) no longer has it open`
@@ -1253,11 +1346,16 @@ async function cmdStudioExec(flags: Flags, io: Io): Promise<number> {
 	const dataModel = dataModelOf(flags.realm, "Edit");
 
 	return await withStudio(flags, io, async (client, studio) => {
-		const answer = await client.call(
-			"execute_luau",
-			{ studio_id: studio.id, datamodel_type: dataModel, code: raw.script },
-			parseDurationMs(flags.timeout ?? DEFAULT_TIMEOUT, 120_000),
-		);
+		let answer: string;
+		try {
+			answer = await client.call(
+				"execute_luau",
+				{ studio_id: studio.id, datamodel_type: dataModel, code: raw.script },
+				parseDurationMs(flags.timeout ?? DEFAULT_TIMEOUT, 120_000),
+			);
+		} catch (error) {
+			throw new CliError(`the Luau failed in ${dataModel}: ${luauErrorMessage(error)}`);
+		}
 		io.log(answer);
 		return 0;
 	});
@@ -1265,8 +1363,12 @@ async function cmdStudioExec(flags: Flags, io: Io): Promise<number> {
 
 /**
  * Runs the tests of each realm in a play session of the window, starting one when none is
- * running and stopping it afterwards unless `--keep`. Every realm is run even after one fails;
- * the exit code is the worst of them.
+ * running and stopping it afterwards unless `--keep`. Every realm is run even after one fails,
+ * whether its tests failed, it never answered, or the call itself failed (no test host, say); the
+ * exit code is the worst of them.
+ *
+ * With several realms, a `--sections` entry only one realm has is not a miss in the other: each
+ * realm's tests decide its own verdict, and an entry fails the run only when no realm matched it.
  */
 async function runRealms(
 	client: StudioClient,
@@ -1295,8 +1397,11 @@ async function runRealms(
 
 	try {
 		let code = 0;
+		const several = realms.length > 1;
+		const answered: Array<{ result: RunResult; results: string[] }> = [];
 		for (const dataModel of realms) {
-			io.log(`running the ${dataModel.toLowerCase()}'s tests in ${placeNameOf(studio.name)}...`);
+			const realm = dataModel.toLowerCase();
+			io.log(`running the ${realm}'s tests in ${placeNameOf(studio.name)}...`);
 			const timeout = flags.timeout ?? DEFAULT_TIMEOUT;
 
 			let answer: string;
@@ -1307,17 +1412,49 @@ async function runRealms(
 					parseDurationMs(timeout, 120_000),
 				);
 			} catch (error) {
-				if (!/timed out/.test(String(error))) throw error;
-
-				// Every test has `testing.timeout` of its own, so a realm that does not answer is
-				// stuck somewhere the runner cannot see: the last test that reported places it.
 				code = 1;
-				io.error(`the ${dataModel.toLowerCase()}'s run did not finish within ${timeout} (--timeout)`);
-				io.error(await describeHangingTest(client, studio, dataModel));
+				if (/timed out/.test(String(error))) {
+					// Every test has `testing.timeout` of its own, so a realm that does not answer is
+					// stuck somewhere the runner cannot see: the last test that reported places it.
+					io.error(`the ${realm}'s run did not finish within ${timeout} (--timeout)`);
+					io.error(await describeHangingTest(client, studio, dataModel));
+				} else {
+					io.error(`the ${realm}'s run failed: ${luauErrorMessage(error)}`);
+				}
 				continue;
 			}
 
-			code = Math.max(code, printRunResult([unquoteLuauResult(answer)], flags, io));
+			const results = [unquoteLuauResult(answer)];
+			const result = readRunResult(results, io);
+			if (result === undefined) {
+				code = 1;
+				continue;
+			}
+
+			if (!several) {
+				printResult(result, results, flags, io);
+				code = Math.max(code, resultPassed(result) ? 0 : 1);
+			} else {
+				answered.push({ result, results });
+			}
+		}
+
+		// With several realms, each realm's verdict waits for the others: an entry of the filter that
+		// no realm has fails every realm that was given it, and the run, and is known only once every
+		// realm has answered. A realm that did not answer has failed the run already.
+		if (several) {
+			const missed =
+				answered.length === realms.length ? missedEverywhere(answered.map(({ result }) => result)) : [];
+			const judged: RealmOfSeveral = { realmOfSeveral: true, missed };
+			for (const { result, results } of answered) {
+				printResult(result, results, flags, io, judged);
+				code = Math.max(code, resultPassed(result, judged) ? 0 : 1);
+			}
+			if (missed.length > 0) {
+				io.log("");
+				io.log(`MISS matched nothing in any realm: ${missed.join(", ")}`);
+				code = 1;
+			}
 		}
 		return code;
 	} finally {

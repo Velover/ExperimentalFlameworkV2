@@ -21,6 +21,7 @@ import {
 	buildSerializerFromType,
 } from "../util/functions/buildSerializerFromType";
 import { isTupleType } from "../util/functions/isTupleType";
+import { getNetworkMode, hasNetworkMarker, isPackedMode } from "../util/functions/networkMode";
 import { inlineMacroIntrinsic } from "./macros/intrinsics/inlining";
 import { addLeadingComment } from "../util/functions/addLeadingComment";
 import { transformComponentConfig } from "./macros/intrinsics/components";
@@ -409,22 +410,34 @@ function buildIntrinsicMacro(state: TransformState, node: ts.Node, macro: UserMa
 	}
 
 	// Networking metadata: the decoder for an argument list (or, given a function type, for its
-	// result), only built when the project enables serialization so it costs nothing otherwise. `nil`
-	// tells the runtime to pass values through. The matching encoding is generated at each call site
-	// (see transformNetworkingCall).
+	// result), only built for a member that is packed -- every one but the raw ones with the project's
+	// serialization on, the serialized ones otherwise -- so it costs nothing elsewhere.
+	// `nil` tells the runtime to pass values through. The matching encoding is generated at each call
+	// site (see transformNetworkingCall).
 	if (macro.id === "network-decoder" || macro.id === "network-result-decoder") {
+		const isResult = macro.id === "network-result-decoder";
 		const [type] = macro.inputs;
 		if (!type) {
 			throw new Error(`Invalid intrinsic usage`);
 		}
 
-		if (state.projectConfig.networking?.serialization !== true) {
+		// `[T, F?, K?]` for an argument list, `[F, K?]` for a result.
+		const [member, key] = isResult ? macro.inputs : macro.inputs.slice(1);
+		const mode = getNetworkMode(member, node, getLiteralText(key));
+		if (!isPackedMode(state, mode)) {
 			return f.nil();
 		}
 
-		return macro.id === "network-decoder"
-			? buildDecoderFromType(state, node, type)
-			: buildResultDecoderFromType(state, node, type);
+		return isResult ? buildResultDecoderFromType(state, node, type) : buildDecoderFromType(state, node, type);
+	}
+
+	// Networking metadata: whether an event is unreliable, and the one place every member of an event
+	// network passes through when a handler is created, in both directions, so its markers are checked.
+	if (macro.id === "network-unreliable") {
+		const [member, key] = macro.inputs;
+		getNetworkMode(member, node, getLiteralText(key));
+
+		return hasNetworkMarker(member, "unreliable") ? f.bool(true) : f.nil();
 	}
 
 	if (macro.id === "plugin") {
@@ -767,3 +780,8 @@ export type UserMacro =
 			type: ts.Type;
 			value: UserMacro;
 	  };
+
+/** The text of a string literal type (a member's key), or `undefined` for any other type. */
+function getLiteralText(type: ts.Type | undefined): string | undefined {
+	return type !== undefined && type.isStringLiteral() ? type.value : undefined;
+}

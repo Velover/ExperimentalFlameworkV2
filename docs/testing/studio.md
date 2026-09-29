@@ -241,9 +241,10 @@ registered by `ComponentPlugin.fromPath` in the two entry points). Keep names as
 
 ## Reading a failure
 
-- **No `[FWTEST]` lines at all**: ignition stalled. Look for "Infinite yield possible" (a module
-  waits for something the place lacks) or a red error from `getClassesInPath` naming the module that
-  failed to load.
+- **No `[FWTEST]` lines at all**: ignition stalled. Look for `is still waiting for its folder` (a
+  registration names a folder the place lacks), "Infinite yield possible" (a module waits for
+  something the place lacks) or a red error from `getClassesInPath` naming the module that failed
+  to load.
 - **Only server lines**: the client crashed or never started; the console shows the error.
 - **A `components` check with a `log:` detail**: `FwTestPartComponent.log` lists every construction
   (`+Name`) and destruction (`-Name`), which is how the stale-tag bug below was diagnosed.

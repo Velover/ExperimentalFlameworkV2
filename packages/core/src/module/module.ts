@@ -1004,7 +1004,10 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		registerProviders: (path, registrationOptions, resolved) => {
 			assert(resolved !== undefined);
 			if (holdsCondition(registrationOptions)) {
-				registerProviderClasses(getClassesInPath(resolved), registrationOptions);
+				registerProviderClasses(
+					getClassesInPath(resolved, `registerProviders("${path}")`),
+					registrationOptions,
+				);
 			} else {
 				leftOut.push(
 					leftOutRegistration(`registerProviders("${path}")`, registrationOptions!, { path: resolved }),

@@ -29,7 +29,7 @@ export function emitTypescriptMismatch(state: TransformState, baseMessage: strin
 	if (!robloxTsPath) {
 		messages.push(
 			"It is recommended that you use a local install of roblox-ts.",
-			`You can install a local version using ${chalk.green("npm install -D roblox-ts")}`,
+			`Add ${chalk.green("roblox-ts")} to your devDependencies and install again.`,
 		);
 		emitMessages(messages);
 	}
@@ -39,7 +39,7 @@ export function emitTypescriptMismatch(state: TransformState, baseMessage: strin
 		if (!isPathDescendantOf(require.main.filename, path.join(state.rootDirectory, "node_modules"))) {
 			messages.push(
 				"It appears you've run the transformer using a global install.",
-				`You can run using the locally installed version using ${chalk.green("npx rbxtsc")}`,
+				`Run the project's own ${chalk.green("rbxtsc")} instead, from a package.json script or your package manager's runner.`,
 			);
 			emitMessages(messages);
 		}
@@ -56,9 +56,9 @@ export function emitTypescriptMismatch(state: TransformState, baseMessage: strin
 				messages.push(
 					`Flamework is using TypeScript version ${ts.version}`,
 					`roblox-ts requires TypeScript version ${requiredVersion}`,
-					`You can fix this by setting your TypeScript version: ${chalk.green(
-						`npm install -D typescript@=${requiredVersion}`,
-					)}`,
+					`You can fix this by pinning that version in your devDependencies, ${chalk.green(
+						`"typescript": "${requiredVersion}"`,
+					)}, and installing again.`,
 				);
 			}
 		}

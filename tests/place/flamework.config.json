@@ -7,7 +7,7 @@
 		"profiling": true
 	},
 	"networking": {
-		"serialization": true
+		"serialization": "${FLAMEWORK_SERIALIZATION:-true}"
 	},
 	"components": {
 		"warningTimeout": 3

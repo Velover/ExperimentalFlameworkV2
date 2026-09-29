@@ -404,7 +404,10 @@ to get configuration into everything without a global.
   dependency. A registration whose own scope condition does not hold requires nothing.
 - **Subclasses need their own decorator.** `class Fake extends Economy {}` without `@Provider()` is
   not a provider; registering it explicitly raises, and path registration skips it.
-- **`WaitForChild` yields.** If the folder has not replicated yet, ignition waits.
+- **`WaitForChild` yields.** If the folder has not replicated yet, ignition waits. A folder that
+  never comes (missing or misspelled, or empty in a fresh clone, which git leaves without it) is
+  warned about when you build, where the path is written, and at runtime after five seconds, by the
+  registration's name; the wait goes on. An empty folder that is there registers nothing.
 - **Overlapping paths raise.** Registering `src/server` and `src/server/services` will hit
   `provider ID was registered more than once`.
 - **`@Injectable()` classes are not resolvable.** `resolveDependency<Session>()` will not find one.

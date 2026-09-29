@@ -1,5 +1,5 @@
 import { Flamework, Serialization } from "@flamework-experimental/core";
-import { expectEqual, expectTrue, suite } from "../testkit";
+import { expectEqual, expectFalse, expectTrue, suite } from "../testkit";
 
 /*
  * `Flamework.createSerializer<T>()` builds encode and decode code from the type at compile time:
@@ -250,6 +250,30 @@ const indexMapSerializer = Flamework.createSerializer<ReadonlyMap<string | numbe
 const plainNumberSerializer = Flamework.createSerializer<number>();
 const nodePatchSerializer = Flamework.createSerializer<NodePatch<Node>>();
 const listsSerializer = Flamework.createSerializer<Lists>();
+
+/** Tuples with a rest element: its guard takes the fixed elements and then any number of rest ones. */
+type RestTuple = [number, ...string[]];
+const restTupleGuard = Flamework.createGuard<RestTuple>();
+const optionalRestTupleGuard = Flamework.createGuard<[number, string?, ...boolean[]]>();
+const middleRestTupleGuard = Flamework.createGuard<[number, ...string[], boolean]>();
+const restTupleOrPatchSerializer = Flamework.createSerializer<RestTuple | Partial<{ a: number }>>();
+const patchOrRestTupleSerializer = Flamework.createSerializer<Partial<{ a: number }> | RestTuple>();
+
+/** A rest element anywhere: the elements before it, a count and the rest, then the ones after it. */
+const restLastSerializer = Flamework.createSerializer<RestTuple>();
+type RestFirst = [...string[], boolean];
+type RestMiddle = [number, ...string[], boolean];
+const restFirstSerializer = Flamework.createSerializer<RestFirst>();
+const restMiddleSerializer = Flamework.createSerializer<RestMiddle>();
+const restMiddleOrTextSerializer = Flamework.createSerializer<RestMiddle | string>();
+
+/** Something after the list, so reading it has to end where the list's last element does. */
+interface AroundRest {
+	entry: [boolean, ...number[], string];
+	after: string;
+}
+
+const aroundRestSerializer = Flamework.createSerializer<AroundRest>();
 
 /** Whether decoding raises, which is how a malformed payload is reported. */
 function rejects(run: () => unknown): boolean {
@@ -939,6 +963,101 @@ export = suite("serialization", [
 			expectEqual(decoded.size, value.size, "UDim2");
 			expectEqual(decoded.area, value.area, "Rect");
 			expectEqual(decoded.brick.Number, 1004, "BrickColor");
+		},
+	],
+	[
+		// Regression: the guard of a tuple with a rest element was `t.strictArray` of its element
+		// types, the rest counted as one more element, so `[1]` and `[1, "a", "b"]` were refused.
+		"guards a tuple with a rest element: the fixed elements, then any number of rest ones",
+		() => {
+			expectTrue(restTupleGuard([1]), "the fixed element alone");
+			expectTrue(restTupleGuard([1, "a"]), "one rest element");
+			expectTrue(restTupleGuard([1, "a", "b", "c"]), "several rest elements");
+			expectFalse(restTupleGuard([]), "nothing");
+			expectFalse(restTupleGuard(["a"]), "a wrong fixed element");
+			expectFalse(restTupleGuard([1, 2]), "a wrong rest element");
+			expectFalse(restTupleGuard([1, "a", undefined, "b"] as unknown[]), "a gap among the rest");
+			expectFalse(restTupleGuard({ [1]: 1, x: "a" }), "a key that is not an index");
+			expectFalse(restTupleGuard(1), "not a table");
+
+			expectTrue(optionalRestTupleGuard([1]), "without the optional element");
+			expectTrue(optionalRestTupleGuard([1, "a", true, false]), "with it and rest elements");
+			expectTrue(
+				optionalRestTupleGuard([1, undefined, true] as unknown[]),
+				"a nil optional element before rest ones",
+			);
+			expectFalse(optionalRestTupleGuard([1, 2]), "a wrong optional element");
+			expectFalse(optionalRestTupleGuard([1, "a", "b"]), "a wrong rest element after it");
+
+			expectTrue(middleRestTupleGuard([1, true]), "the elements around an empty rest");
+			expectTrue(middleRestTupleGuard([1, "a", "b", true]), "rest elements in the middle");
+			expectFalse(middleRestTupleGuard([1]), "too short");
+			expectFalse(middleRestTupleGuard([1, "a"]), "a wrong last element");
+		},
+	],
+	[
+		"round-trips tuples with a rest element first, last or in the middle",
+		() => {
+			expectTrue(deepEquals(roundTrip<RestTuple>(restLastSerializer, [1]), [1]), "[A, ...B[]]: an empty rest");
+			expectTrue(
+				deepEquals(roundTrip<RestTuple>(restLastSerializer, [1, "a", "b"]), [1, "a", "b"]),
+				"[A, ...B[]]",
+			);
+			expectTrue(
+				deepEquals(roundTrip<RestFirst>(restFirstSerializer, [true]), [true]),
+				"[...B[], A]: an empty rest",
+			);
+			expectTrue(
+				deepEquals(roundTrip<RestFirst>(restFirstSerializer, ["a", "b", false]), ["a", "b", false]),
+				"[...B[], A]",
+			);
+			expectTrue(
+				deepEquals(roundTrip<RestMiddle>(restMiddleSerializer, [1, true]), [1, true]),
+				"[A, ...B[], C]: an empty rest",
+			);
+			expectTrue(
+				deepEquals(roundTrip<RestMiddle>(restMiddleSerializer, [1, "a", "b", false]), [1, "a", "b", false]),
+				"[A, ...B[], C]",
+			);
+
+			// The element before the rest, the count, the rest, then the element after it.
+			const [payload] = restMiddleSerializer.serialize([2, "a", true]);
+			expectEqual(buffer.len(payload), 12, "8 + 1 + 2 + 1 bytes");
+			expectEqual(buffer.readf64(payload, 0), 2, "the element before the rest");
+			expectEqual(buffer.readu8(payload, 8), 1, "the rest count");
+			expectEqual(buffer.readstring(payload, 10, 1), "a", "the rest element");
+			expectEqual(buffer.readu8(payload, 11), 1, "the element after the rest, last");
+
+			const cut = buffer.create(11);
+			buffer.copy(cut, 0, payload, 0, 11);
+			expectTrue(
+				rejects(() => restMiddleSerializer.deserialize(cut)),
+				"a payload without the last element",
+			);
+
+			const around: AroundRest = { entry: [true, 1, 2.5, "x"], after: "tail" };
+			expectTrue(deepEquals(roundTrip(aroundRestSerializer, around), around), "a field after the list");
+			expectTrue(
+				deepEquals(roundTrip<RestMiddle | string>(restMiddleOrTextSerializer, [3, "b", false]), [
+					3,
+					"b",
+					false,
+				]),
+				"a union's tuple member",
+			);
+			expectEqual(roundTrip(restMiddleOrTextSerializer, "text"), "text", "a union's string member");
+		},
+	],
+	[
+		// Regression: next to a patch whose fields are all optional, the rest tuple's guard refused
+		// most of its own values, which then went out as the patch: `{}`.
+		"sends a tuple with a rest element as itself next to an all-optional object",
+		() => {
+			for (const serializer of [restTupleOrPatchSerializer, patchOrRestTupleSerializer]) {
+				expectTrue(deepEquals(roundTrip(serializer, [1]), [1]), "the fixed element alone");
+				expectTrue(deepEquals(roundTrip(serializer, [1, "a", "b"]), [1, "a", "b"]), "with rest elements");
+				expectTrue(deepEquals(roundTrip(serializer, { a: 2 }), { a: 2 }), "the object");
+			}
 		},
 	],
 ]);

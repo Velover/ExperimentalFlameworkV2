@@ -127,6 +127,17 @@ export function renderStudioRun(filter: string, options: string): string {
 	].join("\n");
 }
 
+/**
+ * The message of a failed call, without what Studio's Assistant wraps an `execute_luau` error in:
+ * the tool's name, then the `sabuiltin_Assistant…ExecuteLuauTool:66:` and `…CommandExecution:54:`
+ * locations of its own code and `AssistantCommand:2:`, the line of the snippet, before the message
+ * the snippet raised. Anything else is left as it is.
+ */
+export function luauErrorMessage(error: unknown): string {
+	const text = error instanceof Error ? error.message : String(error);
+	return text.replace(/^execute_luau:\s*/, "").replace(/^(?:sabuiltin_\S*?:\d+:\s*|AssistantCommand:\d+:\s*)+/, "");
+}
+
 /** Tidies what `execute_luau` returns: the proxy wraps a returned string in quotes. */
 export function unquoteLuauResult(text: string): string {
 	const trimmed = text.trim();
@@ -163,10 +174,11 @@ export interface ClosedWindow {
 	title: string;
 	/**
 	 * `closed`: it exited when asked. `forced`: it did not (a save prompt, usually) and its process
-	 * was ended. `open`: it is still running after both; `error` says why, when Windows said.
-	 * `untouched`: it matched, but is not certainly the window meant, so it was left alone.
+	 * was ended. `ended`: its process was ended without asking, as a run's own window is (see
+	 * {@link closeWindowScript}). `open`: it is still running after that; `error` says why, when
+	 * Windows said. `untouched`: it matched, but is not certainly the window meant, so it was left alone.
 	 */
-	outcome: "closed" | "forced" | "open" | "untouched";
+	outcome: "closed" | "forced" | "ended" | "open" | "untouched";
 	error?: string;
 }
 
@@ -187,6 +199,12 @@ function powershellString(value: string): string {
  * (`CloseMainWindow`), waits up to ten seconds, then ends the process, and then checks the process
  * is really gone: a window is only reported closed once it is. `processName` is for the tests,
  * which close processes of their own; the CLI only ever closes Roblox Studio.
+ *
+ * The process a run started (a `pid` target) is ended without asking. Asking never closes it: Studio
+ * marks a place file it opens from disk as changed the moment it loads it, before any play session
+ * or Luau, so the ask only raises "Save changes to place.rbxl?" and the close waited out its ten
+ * seconds on every run (measured 2026-09-28). Nothing a run makes is kept, and the prompt's buttons
+ * are not reachable from outside the window, so the wait bought nothing.
  */
 export function closeWindowScript(target: CloseTarget, processName = "RobloxStudioBeta"): string {
 	const pid = "pid" in target ? target.pid : 0;
@@ -220,16 +238,16 @@ function Gone($p) {
 function Report($p, [string]$seen, [string]$outcome, [string]$err) {
 	return [pscustomobject]@{ pid = [int]$p.Id; title = $seen; outcome = $outcome; error = $err }
 }
-function CloseOne($p) {
+function CloseOne($p, [bool]$ask) {
 	$seen = [string]$p.MainWindowTitle
 	$asked = $false
-	try { $asked = $p.CloseMainWindow() } catch { }
+	if ($ask) { try { $asked = $p.CloseMainWindow() } catch { } }
 	if ($asked) { for ($i = 0; $i -lt 20; $i++) { if (Gone $p) { break }; Start-Sleep -Milliseconds 500 } }
 	if (Gone $p) { return Report $p $seen 'closed' '' }
 	$err = ''
 	try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { $err = $_.Exception.Message }
 	for ($i = 0; $i -lt 30; $i++) { if (Gone $p) { break }; Start-Sleep -Milliseconds 500 }
-	if (Gone $p) { return Report $p $seen 'forced' $err }
+	if (Gone $p) { return Report $p $seen $(if ($ask) { 'forced' } else { 'ended' }) $err }
 	return Report $p $seen 'open' $err
 }
 $procs = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
@@ -246,7 +264,7 @@ if ($wantPid -gt 0) {
 	if ($act.Count -gt 1) { $leave = $act; $act = @() }
 }
 $out = @()
-foreach ($p in $act) { $out += CloseOne $p }
+foreach ($p in $act) { $out += CloseOne $p ($wantPid -le 0) }
 foreach ($p in $leave) { $out += Report $p ([string]$p.MainWindowTitle) 'untouched' '' }
 ${powershellString(CLOSE_MARKER)} + (ConvertTo-Json -InputObject @($out) -Compress)
 `;

@@ -9,71 +9,22 @@ The main concern behind all of them: **a game should not pay, in performance or 
 it does not use.** Runtime extinguishing, lazy providers, links and the like are rare in real games,
 yet several fixes made the common path do a little more work so those rare cases stay correct.
 
-## Top priority: `Networking.Serialized`, opting one member into serialization
+## Measured and dropped: compressing payloads with `EncodingService:CompressBuffer`
 
-**The gap.** Serialization is one switch for the whole game (`"networking": { "serialization": true }`
-in `flamework.config.json`, off by default). `Networking.Raw` / `RawReliable` / `RawUnreliable` opt a
-member *out* while it is on, but nothing opts a member *in* while it is off. A game that already ships
-with it off cannot pack only its heavy remotes: turning the switch on changes the wire format of every
-remote at once. Dive In is the case that raised it: about 90 remotes, serialization off, and the
-owner wants to pack only some of them.
+`Networking.Compressed*` was built, measured in Studio on 2026-09-28, and dropped. Roblox already
+compresses what a remote carries, buffers included. A 500-item inventory is 35.0 KB on the wire as
+plain tables and 3.1 KB serialized. Zstd over the packed buffer at its default level made it 3.2 KB,
+larger once the frame is counted. Across the payloads measured, Zstd at level 3 changed the bytes on
+the wire by -4% to +26% (the small event grew from 35 to 44 bytes), and it added 50 to 300 µs to
+each send and receive of a large payload. `Serialized` is where the size win is.
 
-**The proposal.** The mirror of `Raw`: `Networking.Serialized<T>`, `SerializedReliable<T>` and
-`SerializedUnreliable<T>` (the last on an `UnreliableRemoteEvent`, like `Unreliable`). With the switch
-off, a member marked this way is packed exactly as it would be with the switch on: the encoder at each
-call site, the decoder in the `createServer`/`createClient` metadata, the result packer for a
-function. With the switch on, the marker changes nothing, and `Raw` still opts out.
-
-**What it touches.**
-- The transformer: where it decides per member whether to generate the codec (today the global
-  switch minus `Raw`), it also reads the new marker. The generator itself is unchanged.
-- networking's types, next to `NetworkRaw`.
-- Guide 06 (Serialization, "Opting out per event" becomes "Opting in and out per event"), the
-  CHANGELOG and the migration notes.
-- Tests: the packed wire format of a marked member with the switch off equals the switch-on format;
-  unmarked members stay unpacked; `Raw` wins over the switch; events, functions and unreliable events;
-  Studio round trips on both realms.
-
-**Constraints.** Server and client must come from the same build, as for the switch itself.
-Changing a member's marker changes its wire format, so it is a coordinated deploy like any protocol
-change.
-
-**Not part of it:** compressing the bytes. That is the next item, and builds on this one.
-
-## Next: compressing payloads with `EncodingService:CompressBuffer`
-
-**The idea.** Serialization already writes a compact encoding (sized numbers, variable-length
-integers, no field names), but it does not compress. The engine now can: `EncodingService` has
-`CompressBuffer(input, algorithm, compressionLevel?)`, `DecompressBuffer(input, algorithm)` and
-`GetDecompressedBufferSize(input, algorithm)`, with `Enum.CompressionAlgorithm.Zstd` as the only
-algorithm so far. Networking could run a member's packed buffer through it before sending, and back
-after receiving, before the guards and middleware see the values.
-
-**How a game would ask for it** (to decide):
-- a marker per member, `Networking.Compressed<T>` (with reliable and unreliable forms), which implies
-  serialization for that member, since only a buffer can be compressed;
-- or a setting on `createServer`/`createClient` or in `flamework.config.json`, with a size threshold:
-  compress a payload only above N bytes, with a leading flag byte saying whether it was, so small
-  payloads don't grow by Zstd's frame overhead;
-- plus the compression level.
-
-**What must hold.**
-- Payloads from clients are untrusted. Before decompressing, check `GetDecompressedBufferSize` against
-  a limit and drop the payload when the size is unknown or too large, so a small request cannot
-  expand into a huge buffer or cost the server a lot of CPU. A payload that fails to decompress is
-  dropped like any malformed payload.
-- Values that cannot live in a buffer (Instances, `unknown`) keep travelling alongside it,
-  uncompressed.
-- Server and client come from the same build, and changing a member's compression changes its wire
-  format, as with serialization.
-
-**Worth it only where measured.** Zstd pays off on large or repetitive payloads (inventories, map or
-save data, long lists) and costs CPU on both ends. Measure bytes on the wire and time per send and
-receive in Studio before recommending it, and document the numbers.
-
-**Tests:** round trips for events, functions and unreliable events; the threshold's flag byte; the
-decompressed-size limit and a malformed or oversized compressed payload from a client; the
-before/after measurements.
+**What would bring it back:** a payload that is huge and sent rarely, such as a map or a save at
+join, with a high level chosen for that member alone (a per-member level, not a project-wide one).
+- At level 19, a 128 by 128 tile map was 50 KB instead of 67 KB serialized, and took 111 ms to
+  compress. Level 3 took 1.2 ms for 65 KB.
+- A server that accepts compressed payloads from clients also has to check the decompressed size in
+  the frame header before decompressing, and drop a frame of unknown size: 521 bytes can announce
+  and fill 16 MiB, 13 ms of work.
 
 ## Next: a presence bitmask for optional fields (and booleans)
 
@@ -179,13 +130,13 @@ most one frame of delay.
 - the engine's per-call overhead: every remote call carries its own header, and a batch pays it once;
 - work on the receiving side: one engine event instead of N, where v2 also runs each handler on its
   own thread;
-- bytes, through compression: Zstd over N similar records shrinks far more than over one at a time,
-  so batching pairs with `Networking.Compressed*`.
+- bytes: Roblox compresses what a remote carries, and N similar records in one call should compress
+  better than N separate calls (not measured).
 
 Zap, Blink and ByteNet all batch per frame, which suggests the gain is real for this kind of traffic.
 
 **How a game would ask for it** (to decide; it should be explicit):
-- a marker per member, in the family of `Raw`, `Serialized` and `Compressed`:
+- a marker per member, in the family of `Raw` and `Serialized`:
   `Networking.BatchedReliable<Fn>` / `Networking.BatchedUnreliable<Fn>`. Every fire of that member
   goes through the batch, and the wire format stays fixed per member;
 - or a method at the call site, `Events.shot.queue(...)` next to `.fire(...)`. One member can then be
@@ -210,7 +161,7 @@ that automatic for any member.
 
 **Measure before building,** in Studio: N small fires in one frame against one fire carrying an
 N-item array, for bytes sent (`Stats`) and receive time, reliable and unreliable, with and without
-serialization and compression; and when remote calls actually leave, frame by frame.
+serialization; and when remote calls actually leave, frame by frame.
 
 **Tests:** order within a batch; `broadcast` and `except`; the cap per batch; an oversized
 unreliable batch being split; guards and middleware per call; Studio round trips on both realms;
@@ -520,6 +471,43 @@ Edge cases found and deliberately left alone, because the fix would cost more th
   there; `--ignore-scripts` works), and core was never installable from git (no `out/` in git).
 - **harness:** `WaitForChild` with a timeout returns nil at once instead of yielding up to the
   timeout for a child that appears meanwhile.
+- **core, path registrations:**
+  - On a client, a first look that misses waits for `game.Loaded` before looking again, so in a big
+    place ignition can start later than the folder arrived.
+  - With `disableDefaultLifecycle()` and a lifecycle plugin included after the ComponentPlugin, tags
+    are watched before the providers start.
+- **transformer, the path warning:**
+  - A `$path` nested under an out-mapped folder whose key equals a source folder gives the place two
+    folders of that name. The warning judges only one of them.
+  - A project-only Folder (`$className`, no `$path`) under a `$path` is warned "no such file or
+    folder".
+  - Silent for a folder holding only a model without a ModuleScript, only a `package.json`, or only
+    `.server.ts`/`.client.ts` scripts, although the place gets no module there.
+  - A case-sensitive source folder holding both `Mods` and `mods` is merged by a case-insensitive
+    `out/`.
+- **testing CLI:**
+  - A window the user opened on the very place file a run builds is treated as left from an earlier
+    build: asked, then ended.
+  - `studio close --studio <name>` ends the window but leaves Studio's lock file beside the place.
+  - When one realm's call fails, the other realm is judged without the entries no realm matched.
+    The run still fails.
+- **docs:** guide 09's root-anchored `.gitignore` patterns assume the game is at the repository root.
+- **transformer, networking call sites:**
+  - A call through a generic whose constraint includes `undefined`, reached with `!`
+    (`s!.fire(v)`), is an intersection, so a mix of packings there is not refused.
+  - A cast that lies about the member's type (`client.serPing as typeof client.plainPing`) is sent
+    as the cast says, like a widened interface.
+  - An intersection of two members packs its list as a blob.
+  - An event and a function in one union, called directly, fail to build with a TypeScript error on
+    the generated code instead of the packing error.
+  - Same-mode argument lists that TypeScript reduces (`(v)` with `(v, extra?)`), and lists that
+    differ only in field order or written union order, are not caught.
+  - `readonly` against mutable arrays is refused as "argument lists differ", though both encode the
+    same.
+  - An argument list whose element after the rest may be `undefined` rejects a valid call that passes
+    `undefined` there, because the trailing nil is trimmed.
+  - A function whose argument list has elements after the rest has the result type `never`, so it
+    cannot be given a callback (as before).
 - **transformer, serialization:**
   - The ambiguity warning is keyed on TypeScript's union type, so the same union spelled through
     another alias or a generic is warned again. It can also warn when a third member takes the

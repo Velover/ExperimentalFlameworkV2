@@ -59,11 +59,15 @@ function loadModulesIn(root: Instance, visit: (moduleScript: ModuleScript, value
 
 /**
  * Requires every ModuleScript at and under a Rojo path, in tree order, handing each to `visit` with
- * what it exported.
+ * what it exported. `caller` names the call that gave the path, for the warning a slow wait gets.
  */
-function loadModulesInPath(rbxPath: readonly string[], visit: (moduleScript: ModuleScript, value?: defined) => void) {
+function loadModulesInPath(
+	rbxPath: readonly string[],
+	visit: (moduleScript: ModuleScript, value?: defined) => void,
+	caller?: string,
+) {
 	assert(rbxPath);
-	loadModulesIn(resolveRbxPath(rbxPath), visit);
+	loadModulesIn(resolveRbxPath(rbxPath, caller), visit);
 }
 
 /** What every ModuleScript at and under an instance exported, leaving out the ones that exported nothing. */
@@ -135,8 +139,9 @@ export function requireModules<T extends string>(
 		error(
 			`requireModules("${path}"): the folder is not in the place. The build put it at ${rbxPath.join("/")}, ` +
 				`and ${found.GetFullName()} has no child named '${missing}' after ${MISSING_FOLDER_TIMEOUT} seconds. ` +
-				"The folder has no modules, so roblox-ts emitted nothing for it; or it was moved or renamed after the build; " +
-				"or the Rojo project the place was built from leaves it out.",
+				"The path is misspelled or differs in case from the folder, or the folder is empty and missing from this " +
+				"clone, since git keeps no empty folder (the build warns about these where the path is used); or it was " +
+				"moved or renamed after the build; or the Rojo project the place was built from leaves it out.",
 			2,
 		);
 	}
@@ -158,8 +163,11 @@ export function requireModules<T extends string>(
  *
  * A module that fails to load raises, as it did in v1: a class that silently fails to register
  * would otherwise only show up later as an unresolvable dependency, far from the cause.
+ *
+ * The folder is waited for as {@link resolveRbxPath} waits: `caller`, the registration that gave the
+ * path (`registerProviders("src/server/services")`), is named in the warning a slow wait gets.
  */
-export function getClassesInPath(rbxPath: readonly string[]): Array<object> {
+export function getClassesInPath(rbxPath: readonly string[], caller?: string): Array<object> {
 	const foundClasses = new Array<object>();
 	const found = new Set<object>();
 
@@ -172,29 +180,33 @@ export function getClassesInPath(rbxPath: readonly string[]): Array<object> {
 		}
 	};
 
-	loadModulesInPath(rbxPath, (moduleScript, value) => {
-		const defined = getModuleClasses(moduleScript);
-		if (defined !== undefined) {
-			for (const value of defined) {
-				add(value);
+	loadModulesInPath(
+		rbxPath,
+		(moduleScript, value) => {
+			const defined = getModuleClasses(moduleScript);
+			if (defined !== undefined) {
+				for (const value of defined) {
+					add(value);
+				}
 			}
-		}
 
-		if (!typeIs(value, "table")) {
-			return;
-		}
+			if (!typeIs(value, "table")) {
+				return;
+			}
 
-		// This is an `export =` on a Flamework class.
-		if (Reflect.hasOwnMetadata(value, "identifier")) {
-			add(value);
-			return;
-		}
+			// This is an `export =` on a Flamework class.
+			if (Reflect.hasOwnMetadata(value, "identifier")) {
+				add(value);
+				return;
+			}
 
-		// This is an `export` on a Flamework class.
-		for (const [, member] of pairs(value)) {
-			add(member);
-		}
-	});
+			// This is an `export` on a Flamework class.
+			for (const [, member] of pairs(value)) {
+				add(member);
+			}
+		},
+		caller,
+	);
 
 	return foundClasses;
 }

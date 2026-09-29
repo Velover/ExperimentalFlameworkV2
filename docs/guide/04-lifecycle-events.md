@@ -307,6 +307,17 @@ disabled it, in which case components do not tick. `onInit` and `onStart` are th
 - `onStart` runs on its own thread once the component is attached, and not before ignition has
   finished. So a component built from a provider's `onInit` starts once every provider has started.
 
+**Tagged instances get their components after the providers start.** The component plugin starts
+watching tags once the module has ignited, in its `onIgnited` hook, which runs after the lifecycle
+plugin has started the providers: every provider's `onStart` has been called, whatever its
+`loadOrder`, and has run up to its first yield. So in a provider's `onStart`:
+
+- `getAllComponents<T>()` and `getComponents<T>(instance)` find none of the instances tagged before
+  ignition (`getComponent` still builds one on demand);
+- `onComponentAdded<T>(cb)` hears about each of them as it is built. It never replays components
+  that already exist, so connect it there, and read `getAllComponents<T>()` first only when you
+  subscribe later: after a yield, from a lazy provider, or from an event handler.
+
 See [Components](05-components.md#lifecycle).
 
 ## Profiling

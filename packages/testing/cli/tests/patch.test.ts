@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { defaultPatchedPath, patchedPathFor, planPatch, projectNameOf } from "../src/patch.ts";
-import { json, runCli } from "./harness.ts";
+import { FIXTURE_CWD, json, runCli } from "./harness.ts";
 
 const PROJECT = JSON.stringify({
 	tree: {
@@ -86,7 +86,7 @@ describe("patch", () => {
 		const task = run.spawned[1]!.map((part) => part.replaceAll("\\", "/"));
 		expect(task[0]).toBe("lune");
 		expect(task[1]).toBe("run");
-		expect(task[2]).toEndWith("build/patch-place.luau");
+		expect(task[2]).toEndWith("patch-place.luau");
 		expect(task[3]).toEndWith("original.rbxl");
 		expect(task[4]).toEndWith("place.rbxl");
 		expect(task[5]).toEndWith("place.patched.rbxl");
@@ -96,6 +96,38 @@ describe("patch", () => {
 		expect(plan.ops).toHaveLength(3);
 		expect(run.out).toContain("place.patched.rbxl");
 		expect(run.calls).toHaveLength(0);
+	});
+
+	test("the plan and the task go to a temp folder of the run's own, removed afterwards, so only the patched place lands in the project", async () => {
+		const run = await runCli(["patch", "place.rbxl", "--original", "original.rbxl"], {
+			files: { "place.rbxl": "built", "original.rbxl": "orig", "default.project.json": PROJECT },
+		});
+
+		expect(run.code).toBe(0);
+		const cwd = FIXTURE_CWD.replaceAll("\\", "/");
+		const written = Object.keys(run.written);
+		expect(written.map((path) => path.split("/").pop()).sort()).toEqual(["patch-place.luau", "patch-plan.json"]);
+		expect(run.madeDirs).toHaveLength(1);
+		for (const path of written) {
+			expect(path.startsWith(`${cwd}/`)).toBe(false);
+			expect(path.startsWith(`${run.madeDirs[0]}/`)).toBe(true);
+		}
+		expect(run.removedDirs).toEqual(run.madeDirs);
+		// The task runs from there, and writes the place beside the build.
+		const task = run.spawned[1]!.map((part) => part.replaceAll("\\", "/"));
+		expect(task[2]).toBe(written.find((path) => path.endsWith("patch-place.luau")));
+		expect(task[5]).toBe(`${cwd}/place.patched.rbxl`);
+	});
+
+	test("a patch's folder is removed even when the patch fails", async () => {
+		const failed = await runCli(["patch", "place.rbxl", "--original", "original.rbxl"], {
+			files: { "place.rbxl": "built", "original.rbxl": "orig", "default.project.json": PROJECT },
+			spawnCode: (command) => (command[1] === "run" ? 1 : 0),
+		});
+		expect(failed.code).toBe(1);
+		expect(failed.err).toContain("the patch failed (lune exited 1)");
+		expect(failed.madeDirs).toHaveLength(1);
+		expect(failed.removedDirs).toEqual(failed.madeDirs);
 	});
 
 	test("a chosen project without an original sets its properties on the build itself, into a file of its name", async () => {

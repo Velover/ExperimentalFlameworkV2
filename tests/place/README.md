@@ -53,7 +53,7 @@ are in [`packages/testing/README.md`](../../packages/testing/README.md) and
 | `src/*/Core/network.ts` | The `FwTest` events and functions the self-checks and the `client` section use. |
 | `default.project.json`, `tests/*.project.json` | The Rojo projects, see below. |
 | `flamework.config.json` | `networking.serialization` on, the `testing` scope from `FLAMEWORK_SCOPES`, `testing.entry`, and the `cloud` section. |
-| `.env` | `FLAMEWORK_SCOPES=testing`, `ORIGINAL_PLACE=original.rbxl`, `ROJO_PROJECT` (the four projects). No secrets. |
+| `.env` | `FLAMEWORK_SCOPES=testing`, `ORIGINAL_PLACE=original.rbxl`, `ROJO_PROJECT` (the four projects). No secrets. The scope is in the committed `.env` because this place exists only to run the suite and is never shipped. A game does the opposite and keeps the scope out of `.env` and `.env.local`, which every build reads; see [guide 12](../../docs/guide/12-testing.md#setting-up). |
 | `scripts/fabricate-original.luau` | Makes `original.rbxl` from a build: an `Assets` model, a `Sounds` folder, a marker in Workspace and a stale folder the patch has to replace, which is what the `assets` section checks. |
 
 ## One suite, four Rojo projects

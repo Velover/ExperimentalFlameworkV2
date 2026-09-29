@@ -179,7 +179,7 @@ dispatched on `macro.id`. They generate the argument:
 | `path` / `pathglob` | Rojo instance path segments for a string-literal directory, which is how `registerProviders("src/services")` finds classes. |
 | `obfuscate-obj` | An object whose keys are hashed under the given context. |
 | `shuffle-array` | An array with its order randomised at compile time. |
-| `tuple-guards` | The fixed and rest guards for a tuple, used for networking argument validation. |
+| `tuple-guards` | The fixed and rest guards for a tuple, and the guards of any elements after its rest, used for networking argument validation. |
 | `plugin` | Whatever a transformer plugin returns; see [The plugin host](#the-plugin-host). |
 
 **Declaration intrinsics** are written in the macro's JSDoc as
@@ -207,7 +207,7 @@ there (`getDeclarationUid`), so obfuscation leaves package ids as the package pu
 package's compiled code compares against those strings.
 
 **Guards** ([`src/util/functions/buildGuardFromType.ts`](../../packages/transformer/src/util/functions/buildGuardFromType.ts))
-compile a type into a `@rbxts/t` check. Unions become `t.union` (`t.unionList` past two members), tuples `t.strictArray`, arrays
+compile a type into a `@rbxts/t` check. Unions become `t.union` (`t.unionList` past two members), tuples `t.strictArray` (a tuple with a rest element gets a check of its own: the elements before the rest, then any number of rest elements, then the ones after it), arrays
 `t.array`, objects `t.interface`, literals `t.literal`, and Roblox datatypes map to their `t` alias.
 Types `t` has no alias for compile to `t.typeof("Name")` -- `RBX_TYPES_NEW` is that list, and a type
 missing from it silently falls through to the generic object branch and emits a table check, which
@@ -389,7 +389,27 @@ emitted code nor `globs.json` says which, so the runtime cannot start from `game
 `utility/pathRoot.ts` finds the root once by climbing that far from the `flamework` metadata
 folder's parent; with no metadata to climb from it is `game`. `resolveRbxPath` walks a path from
 there, with the `StarterPlayer` rewrite to `PlayerScripts` kept for the `game` case, and
-`getClassesInPath` and the glob runtime both go through it.
+`getClassesInPath` and the glob runtime both go through it. It waits for each child without a limit,
+as content still replicating to a client has to be waited for, but a child not there within five
+seconds (on a client, counted once the place has loaded) is warned about, once per path, naming the
+call that gave the path: the registration forms pass `getClassesInPath` their call as written
+(`registerProviders("src/shared/components")`, `ComponentPlugin.fromPath(...)`), which the warning
+starts with, where the engine's own infinite-yield warning named neither.
+
+The transformer checks the build side. `buildPathIntrinsic` records every use of the `path`
+intrinsic in `flamework.build` (`metadata.paths.uses`, per file, dropped when the file is compiled
+again, as glob uses are, with `raises` for core's `requireModules`), and `saveArtifacts` ends with
+`warnEmptyPaths`, which looks each path up on every build and rebuild with `findPlaceSource`, the
+way Rojo builds the place: it takes the deepest `$path` of the project that covers the Rojo path the
+macro compiled to (so a `$path` nested inside an out-mapped folder wins, as it does in the place),
+judges a `$path` inside `outDir` by the sources roblox-ts compiles into it and any other by the
+disk, and matches every name below the `$path` exactly, whatever the file system allows (Rojo names
+instances as the disk does), a last segment also matching a file by its instance name (`commands`
+for `commands.ts` or `commands.json`). What counts as a module is what Rojo makes one of: `.ts` and
+`.tsx` through roblox-ts, `.lua`, `.luau`, `.json`, `.toml`, `.yaml`, `.yml`, and the model files
+that may hold one. A path with nothing there, or a folder with no module at any depth, is warned
+about at the call; for a name that differs only in case, the warning gives the name on disk.
+Without a Rojo path to go by, `findSourcePath` looks the source path up by itself.
 
 `getClassesInPath` requires every ModuleScript under the path, in tree order, and takes from each
 the classes the module record holds for it, then whatever it exports that carries its own
@@ -833,12 +853,26 @@ Networking is two layers, and the split is deliberate:
 
 ### Serialization
 
-With `networking.serialization` enabled in the project config, sending and receiving are asymmetric
-on purpose. Sending is a call-site transform (`transformer/src/transformations/transformNetworkingCall.ts`):
+A packed member -- every member but the raw ones with `networking.serialization` enabled in the
+project config, the ones declared `Networking.Serialized*` otherwise -- is sent and received
+asymmetrically on purpose. Sending is a call-site transform (`transformer/src/transformations/transformNetworkingCall.ts`):
 a call to `fire`/`except`/`broadcast`/`invoke`/`invokeWithTimeout` (or the handler's call signature)
 on a member whose type carries the hidden `_flamework_send` marker has its argument list packed
 inline and is rewritten to the member's hidden `_fire`/`_invoke` counterpart with `(payload,
-blobs?)`. The packing goes ahead of the statement when that runs it exactly when the call would --
+blobs?)`. Senders carry the declared member as `_flamework_fn`, as function receivers do (an event
+receiver carries only `_flamework_receive`), and `getNetworkMode`
+(`transformer/src/util/functions/networkMode.ts`) reads its markers (`_flamework_raw`,
+`_flamework_serialized`) to decide whether the call packs: a plain member only with the switch on, a
+serialized one always, a raw one never. A member marked both raw and serialized is a build error
+that names it. A target typed as a union of members (a conditional, a helper that returns a member
+by name) is taken member by member: the call packs, as its first member would, when every member
+packs, and is left alone when none does. Members that disagree are a build error that names the
+call, and so are packed members whose argument lists (for `setCallback`, results) are not
+assignable both ways. For the union to still hold every member there, each sender and function
+receiver carries how it is packed as a type argument of its own (`_flamework_packing`, from
+`NetworkPacking<F>`): otherwise TypeScript's subtype reduction would keep only the member type the
+others extend, a plain member in place of a `Serialized` one and a `Raw` one in place of any.
+The packing goes ahead of the statement when that runs it exactly when the call would --
 once, unconditionally, after nothing with side effects; behind `&&`/`||`/`??` or a conditional, in
 a loop condition, after a sibling with side effects, or in an expression-bodied arrow, the call is
 wrapped in an immediately invoked function that holds it instead, so an untaken branch packs
@@ -854,12 +888,16 @@ to what the middleware chain returns (a Promise already followed), so middleware
 results, a value a middleware returns is packed like the callback's own, and `predict` resolves
 with the value itself. Receiving is metadata:
 the `network-decoder` intrinsic resolves to a decoder function per event and function (arguments,
-responses);
+responses), and to `nil` for a member that is not packed; it takes the member's type and name too,
+and checks the markers the same way. An event's unreliable flags come from a `network-unreliable`
+intrinsic for the same reason: every member of an event network, in both directions, passes that
+check wherever a handler of the network is created, including one the handler only sends;
 the receive pipeline decodes under `pcall` before the guards and the middleware chain, so they see
 plain values, and a decode failure is reported through `onMalformed`. Functions keep the request id and
 process result as plain arguments and pack only the payload after them. Apart from those result
-packers, no encoder exists as a runtime value; only decoders do, and a decoder is useless for
-forging traffic.
+packers, no encoder for an argument list exists as a runtime value. A file's table of hoisted
+functions (`codec`, below) still holds the `w_` writer of each type it hoists, even in a file that
+only decodes.
 
 The generator is `transformer/src/util/functions/buildSerializerFromType.ts`. It classifies a type
 into a kind (number with a width, string with a length prefix, object, union, ...), computes its
@@ -907,8 +945,10 @@ node is available for that.
 A count of elements that take no bytes cannot be checked against what is left, so such counts are
 tallied in a per-file variable that every decode resets on entry (decoding never yields) and the
 tally is capped at 65535, so nesting cannot multiply what one count may announce.
-Members declared `Networking.Raw*` get handler types without the hidden markers and `undefined`
-decoders through a type-level conditional. `core/src/serialization/types.ts` holds only types: the
+Members declared `Networking.Raw*` alone get handler types without the send and decode markers
+(they carry only `_flamework_packing`; `IsRawMember` gives a member also marked serialized the
+marked handler, so the transformer meets it and reports the conflict); the decoder intrinsics return `undefined` for them, and for plain
+members with the switch off. `core/src/serialization/types.ts` holds only types: the
 brands and the `Serializer`/`Decoder` shapes. `Flamework.createSerializer<T>()` exposes the same
 generator through the `serializer` intrinsic.
 
@@ -1126,8 +1166,10 @@ it before it ends.
   was. A real place is the other way round, which hid a components bug from every Lune spec until
   the in-place suite found it (see [testing in the place](../guide/12-testing.md)). Treat anything
   that reads instance state from inside a CollectionService handler as untested here.
-- `resolveRbxPath` walks with `WaitForChild` and no timeout, so a registered path naming a folder
-  that does not exist stalls ignition with an "Infinite yield possible" warning instead of raising.
+- `resolveRbxPath` waits for each child without a limit, so a registered path naming a folder that
+  does not exist stalls ignition instead of raising. The build warns where such a path is written,
+  and after five seconds the wait warns, naming the registration, but it keeps waiting: a client may
+  still be receiving the folder, and a registration that failed there would leave the client dead.
 - **Lune 0.10.5 does not reliably let go of a `task.wait` cancelled while it slept**, and holds a
   cancelled `task.delay` until its deadline. A thread parked in `task.wait` and then
   `task.cancel`led can leave the scheduler waiting forever, so the suite prints its summary and the

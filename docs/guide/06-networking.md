@@ -63,18 +63,48 @@ same argument values, not copies, so a decoded `Map` or `Set` arrives intact.
 `connect` returns a `Networking.Connection`, with `Connected`, `Disconnect()` and `Destroy()` (for
 maids and janitors). It is networking's own type, not an engine `RBXScriptConnection`.
 
-The usual shape is one provider per realm that holds the handler:
+### Where to create the handlers
+
+Create each realm's handlers once, in a `network.ts` of that realm, and import them where they are
+used. The first `createServer` or `createClient` call wins: later calls return the same handler and
+ignore their config, middleware included. A second call in some provider would drop its middleware
+without a word.
 
 ```ts
+// src/server/network.ts
+import { GlobalEvents, GlobalFunctions } from "shared/network";
+import { throttle } from "./middleware/throttle";
+
+export const Events = GlobalEvents.createServer({
+    middleware: { setReady: [throttle(1)] },
+});
+export const Functions = GlobalFunctions.createServer({});
+```
+
+```ts
+// src/client/network.ts
+import { GlobalEvents, GlobalFunctions } from "shared/network";
+
+export const Events = GlobalEvents.createClient({});
+export const Functions = GlobalFunctions.createClient({});
+```
+
+Providers import the realm's file and connect in `onStart`:
+
+```ts
+import { Events } from "server/network";
+
 @Provider()
 export class MatchService implements OnStart {
-    private events = GlobalEvents.createServer({});
-
     public onStart() {
-        this.events.setReady.connect((player, ready) => this.setReady(player, ready));
+        Events.setReady.connect((player, ready) => this.setReady(player, ready));
     }
 }
 ```
+
+Each realm's `createServer` or `createClient` call then sits in that realm's own file, where the
+wrong one (which returns nothing) stands out. `throttle` is the middleware from
+[Middleware](#middleware).
 
 ### Sending
 
@@ -196,14 +226,19 @@ and every function request and result, is packed into a `buffer` before it is se
 it arrives. The code that does it is plain buffer code, generated from the declared types. Nothing
 about the API changes, and the guards still run on the decoded values.
 
+The switch covers every member. A member can opt in or out on its own: see
+[Opting in and out per event](#opting-in-and-out-per-event).
+
 The encoding is generated **at each call site**. For example, `Events.X.fire(value, where)` compiles
 to `buffer.create(20)`, four writes at literal offsets and `Events.X._fire(payload)`, right where the
 call was. A function callback is registered with a generated packer for its result type. The packer
 runs after the middleware, so the result is sent packed.
 
-Apart from those result packers, no encoder exists as a value anywhere in the output. So an exploiter
-has nothing to call to forge a valid request or event payload: the only way to produce one is the
-code that legitimately sends it.
+Apart from those result packers and the code inlined at each call site, no function in the output
+encodes an event's or a request's argument list. A file's shared `codec` table does keep a writer for each named or repeated type the
+file reaches (`codec.w_Item`), even in a file that only decodes, and each writes one value into a
+buffer it is given. The format follows from the types, so a payload can be forged; the decoder and
+the guards are what check it.
 
 Decoding is generated once per event and function, into the `createServer` / `createClient`
 metadata, because a payload has to be unpacked before the guards and middleware see it. Nothing in
@@ -211,8 +246,11 @@ the output describes the type: there is no schema table and no runtime library.
 
 The transformer finds call sites by their type. Send and register callbacks through the handler's
 own type: `Events.X.fire(...)`, a typed reference to `Events.X`, or a helper generic over the event
-name. Don't go through a hand-written interface that widens `fire` to `(...args: unknown[])`. Such a
-call is left alone and sends unpacked values, which the peer drops as malformed. A handler reached
+name. Such a helper must not return members that are packed differently, such as a `Serialized`
+member and a plain one while `networking.serialization` is off, or a `Raw` member and a packed one:
+a call through it is packed one way, so the build refuses it. It refuses packed members whose
+argument lists differ for the same reason. Don't go through a hand-written interface that widens
+`fire` to `(...args: unknown[])`. Such a call is left alone and sends unpacked values, which the peer drops as malformed. A handler reached
 through `?.` (`this.events?.X.fire(...)`) is packed like any other, behind the same short-circuit.
 `predict` takes plain values and needs no typing, and `connect` is left as it is.
 
@@ -325,41 +363,137 @@ was declared, or a value that fits no member of a union. Some do not:
 
 A value that does not match its type is a bug in the caller, not in the peer.
 
-### Opting out per event
+### Opting in and out per event
+
+A marker on a member overrides the switch for that member alone. The plain name is for functions;
+the `Reliable` and `Unreliable` forms are for events.
+
+| Markers | Values travel |
+|---|---|
+| `Raw`, `RawReliable`, `RawUnreliable` | As they are, whatever the switch says. |
+| `Serialized`, `SerializedReliable`, `SerializedUnreliable` | Packed, whatever the switch says. |
 
 ```ts
+interface ServerEvents {
+    // Packed, even with networking.serialization off.
+    saveBuild: Networking.SerializedReliable<(build: BuildData) => void>;
+}
+
 interface ClientEvents {
     position: Networking.RawUnreliable<(position: Vector3) => void>;
     chat: Networking.RawReliable<(text: string) => void>;
+    // An unreliable event that is packed. These three spellings are one type:
+    snapshot: Networking.SerializedUnreliable<(state: State) => void>;
+    // snapshot: Networking.Unreliable<Networking.Serialized<(state: State) => void>>;
+    // snapshot: Networking.Serialized<Networking.Unreliable<(state: State) => void>>;
 }
 
 interface ServerFunctions {
     lookup: Networking.Raw<(id: string) => Entry | undefined>;
+    loadPlot: Networking.Serialized<(plotId: number) => PlotData>;
 }
 ```
 
+`SerializedUnreliable<T>` is `Unreliable<Serialized<T>>`, and the order does not matter. The same
+goes for `RawUnreliable`. The unreliable forms put the event on an `UnreliableRemoteEvent`, like
+`Unreliable`.
+
 A raw member's values are sent as they are, and the generated guards still run on arrival. Use it
 for an event whose payload is already a buffer of your own, or to compare the two formats on the
-wire. `RawUnreliable` also puts the event on an `UnreliableRemoteEvent`, like `Unreliable`.
+wire.
+
+A serialized member is packed exactly as the switch would pack it: the encoding at each call site,
+the decoding in the handler metadata, and a function's result after the middleware. With the switch
+on, `Serialized` changes nothing on the wire (its type still differs from a plain member's). With
+it off, it lets a game pack only its heavy remotes.
+
+`Raw` and `Serialized` on the same member is a build error, which names the member.
+
+Changing a member's marker changes its wire format. The server and the client must come from the
+same build, as they must for the switch.
+
+### Size on the wire
+
+Roblox already compresses what a remote carries, buffers included, so the size win is in packing.
+These are bytes per message, measured in Studio on 2026-09-28:
+
+| Payload | Plain tables | `Serialized` |
+|---|---|---|
+| A small event: a number, a `Vector3` and a boolean | 35 B | 35 B |
+| An inventory of 500 items (id, name, count, rarity, equipped) | 35.0 KB | 3.1 KB |
+| A 32 by 32 tile map, `Map<string, Tile>` | 46.7 KB | 3.4 KB |
+| A 128 by 128 tile map | 774 KB | 67 KB |
+
+Packed, the buffers are 21 B, 13.7 KB, 15.7 KB and 267 KB; the engine shrinks them from there.
+Packing was faster at both ends too: sending the inventory took 126 µs instead of 560, and receiving
+it 342 µs instead of 678. Compressing the packed buffer again with Zstd at level 3 saved at most 4%
+more, and made the small event, the inventory and the 32 by 32 map larger. Level 19 saved 26% on the
+128 by 128 map, and took 111 ms to compress it.
+
+**Unreliable events** drop a message whose payload is over about 1000 bytes, counted after the
+engine's compression. A buffer that does not compress arrives up to 996 bytes, or 988 with a blob
+list next to it. A packed list counts at its compressed size: 120 of the inventory's items went
+through, and 150 did not. As plain tables, 10 did.
 
 ## Middleware
 
 A middleware is a factory. It receives `processNext` (which calls the next link in the chain) and
 the event's info, and returns the handler for its own link.
 
-```ts
-const rateLimit = (perSecond: number): Networking.EventMiddleware<[ready: boolean]> => {
-    return (processNext, event) => {
-        return (player, ready) => {
-            if (isOverBudget(player, perSecond)) {
-                return; // not calling processNext drops the event
-            }
+Type it for any event with a type parameter, so one limiter serves every event:
 
-            return processNext(player, ready);
+```ts
+// src/server/middleware/throttle.ts
+import { Networking } from "@flamework-experimental/networking";
+import { Players } from "@rbxts/services";
+
+/** Whether a player's message may pass: false when it comes less than `seconds` after the last. */
+function createLimiter(seconds: number) {
+    const lastAccepted = new Map<Player, number>();
+    Players.PlayerRemoving.Connect((player) => lastAccepted.delete(player));
+
+    return (player: Player) => {
+        const now = os.clock();
+        const last = lastAccepted.get(player);
+        if (last !== undefined && now - last < seconds) return false;
+
+        lastAccepted.set(player, now);
+        return true;
+    };
+}
+
+/** Drops a player's event when it comes less than `seconds` after their last accepted one. */
+export function throttle<T extends unknown[]>(seconds: number): Networking.EventMiddleware<T> {
+    return (processNext) => {
+        const accept = createLimiter(seconds);
+        // Not calling processNext drops the event.
+        return (player, ...args) => {
+            if (player === undefined || accept(player)) return processNext(player, ...args);
         };
     };
-};
+}
 ```
+
+`player` may be `undefined` in the type because the client shares it. On the server there is always
+one.
+
+The same for a function returns `Networking.Skip` for a call it drops, and the caller's Promise then
+rejects with `Cancelled` at once:
+
+```ts
+export function throttleFunction<T extends unknown[], O>(seconds: number): Networking.FunctionMiddleware<T, O> {
+    return (processNext) => {
+        const accept = createLimiter(seconds);
+        return (player, ...args) => {
+            if (player === undefined || accept(player)) return processNext(player, ...args);
+            return Networking.Skip;
+        };
+    };
+}
+```
+
+Each goes in the `middleware` of the handler's config, as in [Where to create the
+handlers](#where-to-create-the-handlers): `getCoins: [throttleFunction(0.5)]`.
 
 Things to know:
 
@@ -402,8 +536,20 @@ In the earlier API, `processNext` returned a Promise, and a middleware used
 `processNext(...).andThen(f)`. That becomes `f(processNext(...))`. A middleware that only returns
 `processNext(...)` needs no change.
 
-`event`, the second factory argument, carries the event's `name`, `globalName` and `eventType`. With
-it you can write generic logging or metrics middleware.
+`event`, the second factory argument, is a `Networking.NetworkInfo`: the event's `name`,
+`globalName` and `eventType`. With it you can write generic logging or metrics middleware. A unit
+test can build one link by hand:
+
+```ts
+const info: Networking.NetworkInfo = { name: "spawnCoin", globalName: "test", eventType: "Event" };
+let passed = 0;
+const link = throttle<[]>(1)(() => {
+    passed += 1;
+}, info);
+
+link(player);
+link(player); // within the second: dropped, so `passed` is 1
+```
 
 ## Observing rejections
 
@@ -437,12 +583,13 @@ logging. Game rules belong in the handler, where you can test them.
 - **Config and middleware must be object literals.**
 - **The first `createServer`/`createClient` call wins.** The handler is cached per network object.
   Later calls return the same one and ignore their config, so configure it once.
-- **Guards are incoming-only.** Nothing checks what you send, only what you receive. With
-  serialization on, most values that do not match their type raise while they are written; see
+- **Guards are incoming-only.** Nothing checks what you send, only what you receive. For a packed
+  member, most values that do not match their type raise while they are written; see
   [Payloads that cannot be decoded](#payloads-that-cannot-be-decoded) for the ones that do not.
-- **Serialization is all or nothing per project.** Both realms build from the same
-  `flamework.config.json`, so they always agree on the wire format. A client built without it cannot
-  talk to a server built with it.
+- **The server and the client must come from the same build.** The switch is per project and the
+  markers are per member, and both realms read the same `flamework.config.json` and the same types,
+  so one build always agrees with itself. A client built without the switch, or with a member marked
+  differently, cannot talk to a server built with it.
 - **Unreliable events can be dropped.** Never make later messages depend on an earlier one.
 - **An event uses one remote for both directions; a function uses two.** In ReplicatedStorage, a
   function's two remotes share a name and differ only by their `id` attribute (`$name` for one

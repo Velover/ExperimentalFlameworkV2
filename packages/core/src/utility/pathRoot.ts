@@ -86,13 +86,60 @@ function walkRbxPath(
 }
 
 /**
+ * How long a child of a path is waited for before the wait is warned about, in seconds: when the
+ * engine would warn of an infinite yield, which names neither the call nor the source path.
+ */
+const MISSING_CHILD_WARNING = 5;
+
+/** A child that is there now, or once a client has loaded the place and `timeout` seconds more have passed. */
+function waitForChild(parent: Instance, name: string, timeout: number) {
+	const child = parent.FindFirstChild(name);
+	if (child !== undefined) return child;
+
+	// A client receives the place's content as it loads, so its time only starts once it has loaded.
+	if (RunService.IsClient() && !game.IsLoaded()) {
+		game.Loaded.Wait();
+	}
+
+	return parent.WaitForChild(name, timeout);
+}
+
+/**
  * Walks a compile-time path from {@link getPathRoot}, waiting for each child in turn.
  *
  * Under `game` the first segment names a service, and `StarterPlayer/StarterPlayerScripts` is
  * answered from the local player's `PlayerScripts`, which is where that content actually runs.
+ *
+ * A child that is not there within five seconds (on a client, once the place has loaded) is warned
+ * about, naming `caller` -- the call that gave the path, such as `registerProviders("src/shared/components")`
+ * -- and the child missing, and then waited for without a limit: content that arrives late still
+ * resolves, as it always has. The warning comes once per path: a child further down that is late
+ * too is the same wait, and is waited for without a second one.
  */
-export function resolveRbxPath(rbxPath: readonly string[]): Instance {
-	return walkRbxPath(rbxPath, (parent, name) => parent.WaitForChild(name)).found;
+export function resolveRbxPath(rbxPath: readonly string[], caller?: string): Instance {
+	let warned = false;
+	return walkRbxPath(rbxPath, (parent, name) => {
+		if (warned) return parent.WaitForChild(name);
+
+		const child = waitForChild(parent, name, MISSING_CHILD_WARNING);
+		if (child !== undefined) return child;
+
+		warned = true;
+		const waiting =
+			caller !== undefined
+				? `${caller} is still waiting for its folder`
+				: "Flamework is still waiting for a folder";
+		warn(
+			`${waiting}: the build put it at ${rbxPath.join("/")}, ` +
+				`and ${parent.GetFullName()} has no child named '${name}' after ${MISSING_CHILD_WARNING} seconds. ` +
+				"The path may be misspelled or differ in case from the folder, or the folder may be empty and missing from " +
+				"this clone, since git keeps no empty folder (the build warns about these where the path is used); or " +
+				"the folder was moved or renamed after the build, or the Rojo project the place was built from leaves it " +
+				"out. It keeps waiting.",
+		);
+
+		return parent.WaitForChild(name);
+	}).found;
 }
 
 /**
@@ -105,16 +152,7 @@ export function resolveRbxPath(rbxPath: readonly string[]): Instance {
  * it.
  */
 export function findRbxPath(rbxPath: readonly string[], timeout: number) {
-	return walkRbxPath(rbxPath, (parent, name) => {
-		const child = parent.FindFirstChild(name);
-		if (child !== undefined) return child;
-
-		if (RunService.IsClient() && !game.IsLoaded()) {
-			game.Loaded.Wait();
-		}
-
-		return parent.WaitForChild(name, timeout);
-	});
+	return walkRbxPath(rbxPath, (parent, name) => waitForChild(parent, name, timeout));
 }
 
 /**

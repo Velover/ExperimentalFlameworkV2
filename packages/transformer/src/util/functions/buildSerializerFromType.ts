@@ -28,7 +28,8 @@ import { isArrayType, isTupleType } from "./isTupleType";
  * - strings and buffers: varint length + bytes (a fixed 1 / 2 / 4 with the `u8_string` .. `u32_buffer` brands)
  * - literal unions: a 1-byte index (2 past 255 members); a single literal costs nothing
  * - optionals: 1 presence byte, then the value when present
- * - arrays, sets, maps and tuple rest elements: varint count + elements
+ * - arrays, sets, maps and tuple rest elements: varint count + elements. A tuple is the elements
+ *   before its rest, the rest, then the elements after it (`[A, ...B[], C]`)
  * - unions: u8 member index + the member, members numbered in the order they were written, so
  *   `number | string` is 0 for the number and 1 for the string; past 255 members the union is a
  *   blob. A plain `number` member gives the whole numbers from 0 to 2^35 - 1 a tag of their own,
@@ -160,7 +161,8 @@ type Kind =
 	| { kind: "array"; element: Shape }
 	| { kind: "set"; element: Shape }
 	| { kind: "map"; key: Shape; value: Shape }
-	| { kind: "list"; elements: Shape[]; rest?: Shape }
+	/** A tuple: `elements`, then any number of `rest` values, then `after` (only with a rest). */
+	| { kind: "list"; elements: Shape[]; rest?: Shape; after?: Shape[] }
 	| { kind: "object"; fields: Array<{ name: string; shape: Shape }> }
 	| {
 			kind: "union";
@@ -712,7 +714,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		}
 
 		const elementValue = (index: number) => values[index] ?? f.nil();
-		const rest = values.slice(list.elements.length);
+		// The elements after a rest are the last arguments; TypeScript requires every one of them.
+		const after = list.after ?? [];
+		const afterValues = after.length > 0 ? values.slice(-after.length) : [];
+		const rest = values.slice(list.elements.length, values.length - afterValues.length);
 		if (rest.length > 0 && !list.rest) fail("more arguments than the list has elements");
 		// Each rest argument is packed on its own, so the rest element is reached once per argument.
 		for (let i = 1; i < rest.length; i++) countUses(list.rest!);
@@ -725,6 +730,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		if (list.rest) {
 			total.add(countBytes.length);
 			for (const value of rest) total.add(emitSize(list.rest, value, statements));
+			after.forEach((element, index) => total.add(emitSize(element, afterValues[index], statements)));
 		}
 
 		const size = total.build();
@@ -744,6 +750,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				ctx.cursor.offset += 1;
 			}
 			for (const value of rest) emitWrite(list.rest, value, ctx);
+			after.forEach((element, index) => emitWrite(element, afterValues[index], ctx));
 		}
 
 		return { statements, payload: buf, blobs };
@@ -773,6 +780,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		const elements = new Array<Shape>();
 		let rest: Shape | undefined;
+		// TypeScript allows only required elements after a rest (`[A, ...B[], C]`), and one rest.
+		const after = new Array<Shape>();
 		const types = typeChecker.getTypeArguments(type);
 		for (let i = 0; i < types.length; i++) {
 			const element = unwrapPromise(state, types[i]);
@@ -784,6 +793,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			const shape = spellElement(written, element, isRest);
 			if (isRest) {
 				rest = shape;
+			} else if (rest) {
+				after.push(shape);
 			} else if (flags & ts.ElementFlags.Optional && !hasUndefined(element)) {
 				elements.push({ kind: "optional", inner: shape });
 			} else {
@@ -791,7 +802,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			}
 		}
 
-		return { kind: "list", elements, rest };
+		return after.length > 0 ? { kind: "list", elements, rest, after } : { kind: "list", elements, rest };
 	}
 
 	/**
@@ -1394,7 +1405,9 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				};
 			}
 			case "list": {
-				const layout = sumLayouts(kind.elements.map((element) => layoutOf(element)));
+				const layout = sumLayouts(
+					[...kind.elements, ...(kind.after ?? [])].map((element) => layoutOf(element)),
+				);
 				if (kind.rest) {
 					const rest = layoutOf(kind.rest);
 					return {
@@ -1612,6 +1625,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "list":
 				kind.elements.forEach(countUses);
 				if (kind.rest) countUses(kind.rest);
+				kind.after?.forEach(countUses);
 				break;
 			case "object":
 				for (const field of kind.fields) countUses(field.shape);
@@ -2200,16 +2214,23 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		}
 
 		if (a.kind === "list") {
+			const afterA = a.after ?? [];
 			if (b.kind === "list") {
-				if (b.elements.length !== a.elements.length || (a.rest === undefined) !== (b.rest === undefined)) {
+				const afterB = b.after ?? [];
+				if (
+					b.elements.length !== a.elements.length ||
+					(a.rest === undefined) !== (b.rest === undefined) ||
+					afterB.length !== afterA.length
+				) {
 					return "none";
 				}
 				const elements = a.elements.map((element, index) => fit(element, b.elements[index]));
 				if (a.rest && b.rest) elements.push(atLeastEmpty(fit(a.rest, b.rest)));
+				elements.push(...afterA.map((element, index) => fit(element, afterB[index])));
 				return elements.includes("none") ? "none" : worst(elements);
 			}
 			if (b.kind === "array") {
-				const elements = a.elements.map((element) => fit(element, b.element));
+				const elements = [...a.elements, ...afterA].map((element) => fit(element, b.element));
 				return elements.includes("none") ? "none" : worst(elements);
 			}
 			return "none";
@@ -2244,7 +2265,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	/** A tuple's values as a collection whose element is `element()`: each position has to pass it. */
 	function listInto(list: ListKind, element: () => Shape): Fit {
-		const elements = list.elements.map((shape) => fit(element(), shape));
+		const elements = [...list.elements, ...(list.after ?? [])].map((shape) => fit(element(), shape));
 		if (list.rest) elements.push(atLeastEmpty(fit(element(), list.rest)));
 		return elements.includes("none") ? "none" : worst(elements);
 	}
@@ -2578,7 +2599,14 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 				if (kind.rest) {
 					const rest = layoutOf(kind.rest);
-					const count = restCount(out, list, kind.elements.length);
+					const after = kind.after ?? [];
+					const count = restCount(out, list, kind.elements.length + after.length);
+					// The elements after the rest are at the end of the list, past `count` rest values.
+					after.forEach((element, index) => {
+						const at = add(count, kind.elements.length + index);
+						total.add(emitSize(element, f.elementAccessExpression(list, at), out));
+					});
+
 					const prefix = f.call(varintHelpers().size, [count]);
 					if (rest.size !== undefined) {
 						total.add(countedSize(prefix, count, rest.size));
@@ -2810,7 +2838,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				});
 
 				if (kind.rest) {
-					const count = restCount(ctx.out, list, kind.elements.length);
+					const after = kind.after ?? [];
+					const count = restCount(ctx.out, list, kind.elements.length + after.length);
 					writeVarint(ctx, count);
 					const index = uid("i");
 					const element = f.elementAccessExpression(list, f.binary(index, ts.SyntaxKind.MinusToken, num(1)));
@@ -2821,6 +2850,11 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 							branch(ctx, (child) => emitWrite(kind.rest!, element, child)),
 						),
 					);
+
+					after.forEach((shape, position) => {
+						const at = add(count, kind.elements.length + position);
+						emitWrite(shape, f.elementAccessExpression(list, at), ctx);
+					});
 				}
 				return;
 			}
@@ -3185,6 +3219,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 						}),
 					),
 				);
+
+				// The elements after the rest, in their places past it.
+				kind.after?.forEach((shape, position) => {
+					const element = readInto(shape, ctx, "arg");
+					const at = add(count, kind.elements.length + position);
+					ctx.out.push(assign(f.elementAccessExpression(list, at), element));
+				});
 				return list;
 			}
 			case "object": {

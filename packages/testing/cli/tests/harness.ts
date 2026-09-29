@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
 import { main, type CliDeps } from "../src/cli.ts";
@@ -55,6 +56,11 @@ export interface Harness {
 	windows: FakeWindow[];
 	/** Every window-name claim and release, with how many programs had been launched at that point. */
 	claims: string[];
+	/** The folders the run made for a patch's files, in order, and the ones it removed again. */
+	madeDirs: string[];
+	removedDirs: string[];
+	/** The files the run removed (Studio's lock files). */
+	removedFiles: string[];
 }
 
 /** A canned Studio: what the proxy lists, and what each tool answers. */
@@ -93,6 +99,8 @@ export async function runCli(
 		claimHolder?: number;
 		/** Runs when the CLI launches a program, with the command, so a fake Studio can start listing the window it opened. */
 		onLaunch?: (command: string[]) => void;
+		/** How many removals of a file fail first, as Windows refuses to remove a file an ended process still holds. */
+		removalsRefused?: number;
 	} = {},
 ): Promise<Harness> {
 	const out: string[] = [];
@@ -105,6 +113,10 @@ export async function runCli(
 	const closeTargets: string[] = [];
 	const closedWindows: string[] = [];
 	const claims: string[] = [];
+	const madeDirs: string[] = [];
+	const removedDirs: string[] = [];
+	const removedFiles: string[] = [];
+	let refusedRemovals = 0;
 	// The caller's own array, so a test can open or retitle a window mid-run.
 	const windows: FakeWindow[] = options.windows ?? [];
 	let clock = new Date("2026-09-11T12:00:00.000Z").getTime();
@@ -186,6 +198,26 @@ export async function runCli(
 		error: (message) => err.push(message),
 		env: options.env ?? ENV,
 		cwd: FIXTURE_CWD,
+		// A folder of its own per patch, as mkdtemp makes one; nothing is written to it for real.
+		makeTempDir: async () => {
+			const dir = `${tmpdir().replaceAll("\\", "/")}/flamework-test-fake${madeDirs.length + 1}`;
+			madeDirs.push(dir);
+			return dir;
+		},
+		removeDir: async (path) => {
+			removedDirs.push(path.replaceAll("\\", "/"));
+		},
+		removeFile: async (path) => {
+			const normalized = path.replaceAll("\\", "/");
+			if (refusedRemovals < (options.removalsRefused ?? 0)) {
+				refusedRemovals += 1;
+				throw Object.assign(new Error(`EBUSY: resource busy or locked, unlink '${path}'`), { code: "EBUSY" });
+			}
+			removedFiles.push(normalized);
+			for (const key of Object.keys(files)) {
+				if (normalized.endsWith(key)) delete files[key];
+			}
+		},
 		now: () => new Date(clock),
 		loadSettings: () => ({ env: {}, ...options.settings }),
 	};
@@ -217,7 +249,10 @@ export async function runCli(
 			if (act.length > 1) [leave, act] = [act, []];
 		}
 
-		const outcome = options.closeOutcome ?? "closed";
+		// The process a run started is ended without asking, as the real script does: what would be
+		// "closed" or "forced" for a window that was asked is "ended" for it.
+		const asked = options.closeOutcome ?? "closed";
+		const outcome = "pid" in target && asked !== "open" ? "ended" : asked;
 		const report: ClosedWindow[] = act.map((window) => ({
 			pid: window.pid,
 			title: window.title,
@@ -251,6 +286,9 @@ export async function runCli(
 		closedWindows,
 		windows,
 		claims,
+		madeDirs,
+		removedDirs,
+		removedFiles,
 	};
 }
 

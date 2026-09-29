@@ -60,6 +60,43 @@ describe("Rojo project files", () => {
 			expect(packed("core", packer)).not.toContain("default.project.json");
 		}
 	});
+
+	// The package also ships the CLI's sources, which a place has no use for: mapped as a folder, they
+	// arrived as empty Folders (`testing.cli`, `cli.src`, `cli.tasks`). Its project maps `out` alone.
+	test("testing ships one that maps its out folder alone", () => {
+		for (const packer of PACKERS) {
+			const files = packed("testing", packer);
+			expect(files).toContain("default.project.json");
+			expect(files.some((file) => file.startsWith("cli/src/"))).toBe(true);
+		}
+
+		const project = JSON.parse(
+			fs.readFileSync(path.join(ROOT, "packages", "testing", "default.project.json"), "utf8"),
+		);
+		expect(project).toEqual({ name: "testing", tree: { $className: "Folder", out: { $path: "out" } } });
+	});
+
+	// A nested node_modules is left out of the place, so its compiled code must reach nothing a
+	// conflicting install would nest there: only @rbxts/services, which answers the same in every
+	// version, and core, a peer, which is never nested.
+	test("testing's compiled code reaches only packages every place has at the top level", () => {
+		const reached = new Set<string>();
+		const visit = (dir: string) => {
+			for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+				const full = path.join(dir, entry.name);
+				if (entry.isDirectory()) visit(full);
+				else if (entry.name.endsWith(".luau")) {
+					const source = fs.readFileSync(full, "utf8");
+					for (const match of source.matchAll(/TS\.getModule\(script, "([^"]+)", "([^"]+)"\)/g)) {
+						reached.add(`${match[1]}/${match[2]}`);
+					}
+				}
+			}
+		};
+		visit(path.join(ROOT, "packages", "testing", "out"));
+
+		expect([...reached].sort()).toEqual(["@flamework-experimental/core", "@rbxts/services"]);
+	});
 });
 
 /**

@@ -33,6 +33,81 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   so every `npm pack`, `bun pm pack` and publish carries the docs as they are. Rojo skips the
   Markdown, and a place gets two empty Folders for it, `core.docs` and `core.docs.guide`.
 
+#### Changed
+
+- A path registration whose folder is not there after five seconds (on a client, once the place has
+  loaded) warns once per path, naming the registration and the missing child, and keeps waiting:
+  `registerProviders("src/shared/components") is still waiting for its folder: the build put it at
+  ReplicatedStorage/TS/components, and ReplicatedStorage.TS has no child named 'components' after 5
+  seconds. ...`. `ComponentPlugin.fromPath`, `registerComponents` and a plugin's
+  `registerProviders` name themselves the same way. `resolveRbxPath(path, caller?)` and
+  `getClassesInPath(path, caller?)` take the call's name for macros of your own; without it the
+  warning names no call.
+- `requireModules("..."): the folder is not in the place` also names a misspelled path, one that
+  differs in case from the folder, and an empty folder a clone does not have, as causes.
+
+### networking
+
+#### Added
+
+- `Networking.Serialized<T>` (functions), `SerializedReliable<T>` and `SerializedUnreliable<T>`
+  (events) pack one member into a buffer whatever `networking.serialization` says, exactly as the
+  switch would: the encoding at each call site, the decoding in the handler metadata, a function's
+  result after the middleware. With the switch on they change nothing on the wire.
+  `Unreliable<Serialized<T>>` and `Serialized<Unreliable<T>>` are `SerializedUnreliable<T>`.
+- `Networking.NetworkInfo`, the type of a middleware factory's second argument.
+
+#### Fixed
+
+- A call that may reach several members packed differently, through a helper that returns a member
+  by name or through a conditional, was sent unpacked with no build error, so the peer dropped it. A
+  function request was answered `BadRequest`, and a callback's result rejected with `InvalidResult`.
+  - This happened with a `Serialized` member next to a plain one while `networking.serialization`
+    was off, and with a packed member next to a `Raw` one, which also left the `Serialized` member
+    unpacked with the switch on.
+  - The cause: TypeScript reduced such a union to the one member type the others extend.
+  - Senders and function receivers now carry how they are packed as a type argument of their own
+    (the hidden `_flamework_packing`), so the union keeps each member and the transformer refuses
+    the call. Members packed the same way still pack as one.
+- An argument list with parameters after its rest (`(...args: [number, ...string[], boolean])`) was
+  guarded as if they came before it, so a valid call with a non-empty rest was rejected. The generated guards now carry
+  the parameters after the rest, and the runtime checks them against the last arguments.
+
+### testing
+
+#### Added
+
+- The package ships a `default.project.json` that maps its `out` folder alone, so the CLI's sources
+  it ships no longer arrive in every place as three empty Folders (`testing.cli`, `cli.src`,
+  `cli.tasks`), under the whole-scope mapping and the per-package one alike.
+
+#### Changed
+
+- `flamework-test test` judges `--sections` across the realms it runs: an entry only one realm has
+  no longer fails the other (`not among the client's sections: coin`), and an entry no realm has
+  fails every realm and the run (`MISS matched nothing in any realm: coins`). Each realm's summary
+  is printed once every realm has answered, so none says PASS for a run that then fails on its
+  filter. With `--realm`, the one realm judges alone, as before.
+- A realm whose call fails, such as a place without the test host, no longer stops the run: the
+  other realm still runs, as the README always said. The error is printed as the snippet raised it
+  (`the server's run failed: Workspace.FlameworkTests did not appear within 30 seconds: ...`),
+  without the Studio Assistant's own locations in front of it; `studio exec` prints errors the same
+  way.
+- The window a run opened is closed by ending its Studio process at once. Asking never closed it:
+  Studio marks a place file it opens as changed as soon as it has loaded it, so the ask only raised
+  its save prompt, and every run waited ten seconds and printed `did not close when asked`. A window
+  the run did not open (one left from an earlier build) is still asked first. Studio's lock file
+  beside the place (`place.rbxl.lock`), which an ended Studio cannot remove, is removed when it names
+  the process that was ended.
+- A patch's plan and its Lune task go to a folder of the system's temp directory made for that patch
+  alone and removed when it is done, instead of the game's `build/`: two patches started together in
+  one folder read each other's plan, and applied the wrong project's properties without a word.
+  What the CLI still writes into the project: the places it makes beside the build, and
+  `build/version.json` from `cloud publish` (and so `cloud test` and `test --cloud`).
+- `studio close`, `status`, `play`, `stop`, `exec` and `run` no longer demand the testing universe
+  and place ids when the window is named with `--studio`, or is the only one with a local place file
+  open.
+
 ### transformer, transformer-plugin
 
 #### Added
@@ -53,6 +128,31 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   and names the union and the members. A union spelled through another alias or a generic is warned
   again. A value that fits both may be written as the first of them in the warning's order, without
   the parts only the others declare.
+- A build warning at every path macro whose path the place will not have, or will have with no
+  module in it (`registerProviders`, `ComponentPlugin.fromPath`, `registerComponents`,
+  `requireModules`, a plugin's `registerProviders` and a game's own `Modding.Intrinsic<"path">`
+  macros). Such a path compiled all the same, and the call waited for it at runtime with only the
+  engine's "Infinite yield possible" to go on. The warning names the file, the line, the call and the
+  path: `src/server/main.server.ts:6:3 - registerProviders("src/shared/nothing-here"): there is no
+  such file or folder, so the place will not have it, and the call waits for it at runtime`, or, for
+  `requireModules`, that the call raises after waiting five seconds. It is judged the way Rojo builds
+  the place: from the deepest `$path` of the project that covers the path (a `$path` nested inside an
+  out-mapped folder included), by the sources for a folder inside `out`, with names matched exactly
+  below the `$path`, so a path that differs from the folder only in case is caught too and the
+  warning gives the name on disk. A folder whose files are none of the modules Rojo makes (`.ts`,
+  `.tsx`, `.lua`, `.luau`, `.json`, `.toml`, `.yaml`, `.yml`, model files) gets `nothing in that
+  folder compiles to a module`: it arrives in the place empty, and a clone, which has no empty
+  folder, lacks it. It is judged on every build and every rebuild of a watcher, as the empty-glob
+  warning is, and never fails the build.
+- A build error for a networking member declared both `Raw` and `Serialized`. It names the member,
+  and is given wherever the member is sent or its callback registered, and in the metadata of any
+  handler of its network.
+- A build error for a networking call that may reach members packed differently. That is:
+  - `Serialized` with plain, while `networking.serialization` is off;
+  - `Raw` with a packed member;
+  - packed members whose argument lists (for `setCallback`, whose results) are not the same type.
+
+  The error names the call.
 
 #### Changed
 
@@ -84,6 +184,16 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   table, `codec`, instead of three locals each.
 - `Could not find Rojo data for '...'` adds what the path compiles to and that no `$path` in the Rojo
   project covers it, or that no Rojo project file was found.
+- `TypeScript version differs` no longer tells you to run npm: it says to pin the version roblox-ts
+  uses in your devDependencies (`"typescript": "5.5.3"`). The messages of a TypeScript mismatch that
+  stops the build no longer name npm or npx either.
+- `Project was compiled on different version of Flamework` names the tsbuildinfo to delete
+  (`Delete out/tsconfig.tsbuildinfo and build again`) instead of the out directory, which did not
+  help when the tsbuildinfo lives elsewhere, with forward slashes on every platform.
+  `Flamework cannot be built in a dirty environment` names the file too, and is now a message like
+  the version check's rather than an uncaught error with a stack trace.
+- The `hashPrefix` description in the config schema says a game needs none: every package id starts
+  with its package's prefix and a colon, which none of a game's own ids starts with.
 
 #### Fixed
 
@@ -100,6 +210,23 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   went past Luau's limit of 200 locals.
 - Serialization: a recursive type with no name of its own, such as a conditional patch type over a
   recursive interface, overflowed the stack at build time.
+- An incremental build without a `tsBuildInfoFile` reuses `flamework.build`. TypeScript builds such a
+  project incrementally into its default tsbuildinfo (`tsconfig.tsbuildinfo` beside the config with
+  `"rootDir": "src"`), but Flamework only looked for `tsBuildInfoFile`, took every such build for a
+  clean one, and made a fresh `flamework.build`: in the `short`, `tiny` and `obfuscated` id modes, a
+  recompiled file then named a class of a file left alone by a new id (`alpha@Alpha{gj}` where
+  `alpha.luau` still declares `alpha@Alpha{b5}`), and the dependency never resolved. Such a build
+  now also stops after a Flamework upgrade, naming the tsbuildinfo to delete, as one with
+  `tsBuildInfoFile` does.
+- The guard of a tuple with a rest element, such as `[number, ...string[]]`, took the rest as one more
+  element (`t.strictArray`), so it refused `[1]` and `[1, "a", "b"]`: a networking parameter of that
+  type dropped valid calls, and next to an object whose fields are all optional in a serialized union
+  such a value was sent as `{}`. It now takes the elements before the rest, any number of rest
+  elements, and the ones after it.
+- A tuple with elements after its rest element (`[number, ...string[], boolean]`,
+  `[...string[], boolean]`) was serialized with those elements in the rest's place, and any non-empty
+  rest raised. This affected `Flamework.createSerializer` and packed networking calls. The tuple is
+  now written as the elements before the rest, then a count and the rest, then the elements after it.
 
 ### core, components, networking, transformer, transformer-plugin
 
@@ -118,6 +245,34 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 ### Docs
 
 - Guide 06:
+  - "Opting out per event" is "Opting in and out per event": the `Serialized` markers, their nested
+    forms, the conflict with `Raw`, and the same-build rule;
+  - size on the wire: Roblox already compresses what a remote carries, so packing is where the size
+    win is, with Studio measurements; the unreliable limit is counted after that compression;
+  - where to create the handlers: one `network.ts` per realm;
+  - a throttle middleware typed for any event, and its function form returning `Networking.Skip`;
+  - `Networking.NetworkInfo` in a middleware's unit test;
+  - a helper that returns one of several members must not mix members packed differently;
+  - which encoders the output holds (the `codec` table's writers).
+- Guides 01, 03, 04, 05, 07, 09, 10 and 12:
+  - when components attach (after every provider's `onStart`), and a component's own cleanup
+    (`override destroy()`);
+  - what a game commits and what it ignores;
+  - pinning TypeScript to the version roblox-ts uses, and incremental builds across Flamework
+    upgrades;
+  - bun and pnpm work too;
+  - a game needs no `hashPrefix`;
+  - lookups take a decorated superclass only;
+  - path registrations that wait or warn;
+  - guide 12's test setup: the test script sets the scope, never `.env`, and rebuilds without it
+    afterwards.
+- Internals:
+  - serialization per member and the marker check;
+  - union call sites and `_flamework_packing`;
+  - which receivers carry `_flamework_fn`;
+  - the `tuple-guards` entry for elements after a rest;
+  - the path checks, build info and the testing package.
+- Guide 06:
   - how the union member a value is sent as is chosen, and when the build warns;
   - branded number members;
   - whole numbers in a union with `number`;
@@ -132,6 +287,25 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ### Tests
 
+- `Serialized` members:
+  - in the Lune specs, in both builds of the specs (`FLAMEWORK_SPECS_SERIALIZATION`);
+  - round trips between two realms;
+  - the place's `packing` sections on both realms under every project.
+
+  The place's switch can be flipped for a run with `FLAMEWORK_SERIALIZATION=false`, and the
+  transformer fixture's with `FLAMEWORK_FIXTURE_SERIALIZATION=false`.
+- Union call sites, for every mix of Raw, plain and Serialized members, with the switch on and off.
+- Tuples with a rest element first, last and in the middle, round-tripped through `createSerializer`
+  and through networking members, as one argument and as the argument list, in both builds of the
+  specs.
+- Path warnings for missing, empty, types-only and wrong-case folders, and silence for valid setups:
+  - nested `$path`s;
+  - a prefix that differs only in case;
+  - JSON-only folders.
+- Late folders in Studio.
+- The incremental id fix.
+- The testing CLI's section filter, realm failures, window close, lock removal and per-patch temp
+  folders.
 - The Studio place pins what a late listener misses, in both directions and under every project:
   reliable events wait for the first connection, unreliable ones are dropped, and one more is missed
   because Flamework starts listening a moment late under `Immediate` signals.

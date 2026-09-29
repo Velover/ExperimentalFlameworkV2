@@ -43,9 +43,9 @@ Flamework.createModule()
 "scopes": { "active": "${FLAMEWORK_SCOPES:-}" }
 ```
 
-With `FLAMEWORK_SCOPES=testing` in `.env`, the test providers register like any other and define
-their sections as they start. The plugin creates `Workspace.FlameworkTests` and waits. Nothing runs
-until something invokes it:
+In a build with `FLAMEWORK_SCOPES=testing` (the test script below sets it), the test providers
+register like any other and define their sections as they start. The plugin creates
+`Workspace.FlameworkTests` and waits. Nothing runs until something invokes it:
 
 ```lua
 -- the Studio command bar, a debug UI, or `flamework-test` from a terminal
@@ -63,11 +63,22 @@ release place altogether is Rojo's job; see [shipping](#shipping).
 
 Everything a project needs, in the order it is needed:
 
-1. The package: `bun add @flamework-experimental/testing`. It brings the roblox-ts side and the
+1. The package: `npm install @flamework-experimental/testing`. It brings the roblox-ts side and the
    `flamework-test` CLI, nothing else. Map it in your Rojo project next to `core`
-   ([Getting started › Rojo](01-getting-started.md#rojo)).
-2. The switch: the `scopes` line above in `flamework.config.json`, and `FLAMEWORK_SCOPES=testing`
-   in `.env`. A release build leaves the variable out and gets no tests and no host.
+   ([Getting started › Rojo](01-getting-started.md#rojo)). The CLI runs on
+   [Bun](https://bun.sh), whatever installed it: npm's and pnpm's `flamework-test` command starts
+   `bun`, and without it on the `PATH` fails with `'"bun"' is not recognized`.
+2. The switch: the `scopes` line above in `flamework.config.json`, and the scope in neither `.env`
+   nor `.env.local`. Every build reads both files: `.env` is committed
+   ([Project structure › What to commit](09-project-structure.md#what-to-commit)), and `.env.local`
+   is read by every build on your machine, release builds included. A scope in either ships the
+   test host and its remote with those builds. Set the variable for the one build that needs it
+   instead, as the test script below does.
+
+   To have the tests in a place you sync with `rojo serve`, give the watcher the scope in its own
+   environment, and nothing else: a `watch:tests` script like the test script, which runs
+   `rbxtsc -w` with `FLAMEWORK_SCOPES: "testing"`. Once you stop it, `out/` still holds the test
+   host, so compile once without the scope (`npm run build`) before you build a place to ship.
 3. A `Tests` folder per realm, registered under the scope, and `TestingPlugin` in each realm's
    module. The server is shown above; the client is the same shape:
 
@@ -84,18 +95,54 @@ Everything a project needs, in the order it is needed:
    A shared folder registered by both modules gives sections that run in both realms, one copy in
    each. The component specs of this repository's test place,
    [`tests/place`](../../tests/place/README.md), live in such a folder.
-4. A script that builds the place and runs the tests, with `*.rbxl` in `.gitignore`:
+4. A script that compiles with the scope, builds the place, runs the tests, and then compiles again
+   without the scope, whatever happened, so that `out/` never keeps a build with the test host in
+   it. The rebuild sets the variable to nothing rather than leaving it out, so that a scope in
+   `.env.local` cannot come back through it. It exits with the tests' code:
+
+   ```js
+   // scripts/test.mjs: run it as `npm test` or `bun run test`, which put node_modules/.bin on the
+   // PATH (`bun scripts/test.mjs` on its own finds no rbxtsc). Arguments go to flamework-test.
+   function run(command, env = process.env) {
+       try {
+           return Bun.spawnSync(command, { env, stdio: ["inherit", "inherit", "inherit"] }).exitCode ?? 1;
+       } catch {
+           console.error(`${command[0]} could not be started: is it installed?`);
+           return 127;
+       }
+   }
+
+   let code = run(["rbxtsc"], { ...process.env, FLAMEWORK_SCOPES: "testing" });
+   if (code === 0) code = run(["rojo", "build", "-o", "test.rbxl"]);
+   if (code === 0) code = run(["flamework-test", "test", "test.rbxl", ...process.argv.slice(2)]);
+
+   console.log("rebuilding out/ without the testing scope...");
+   const rebuild = run(["rbxtsc"], { ...process.env, FLAMEWORK_SCOPES: "" });
+   process.exit(code !== 0 ? code : rebuild);
+   ```
 
    ```jsonc
    // package.json
-   "scripts": { "test": "rojo build -o place.rbxl && flamework-test test place.rbxl" }
+   "scripts": { "test": "bun scripts/test.mjs" }
    ```
 
+   `test.rbxl` has a name of its own, so the place a release is built into never holds the tests.
+   Ignore it with the other built places, `/*.rbxl` at the root. Besides the build, a run leaves:
+   - the places `flamework-test` makes beside the build (`test.patched.rbxl` with an original
+     place, `test.<project>.rbxl` under `--project`), which the same line covers;
+   - `build/version.json`, which `cloud publish` writes, and so `cloud test` and `test --cloud`;
+   - Studio's lock file beside a place it has open, `test.rbxl.lock`. `flamework-test` removes the
+     lock of a window it ends, but one left by a Studio closed any other way stays, so ignore
+     `*.rbxl.lock` too.
+
+   The files a patch needs while it runs go to a folder of the system's temp directory, one per
+   run, removed when the patch is done.
 5. Roblox Studio with "MCP server" enabled in its Assistant settings, which is what lets the CLI
    open a window, run the tests in it and close it again.
 
-`bun run test` then prints one summary per realm. That is the whole setup for Studio. Running in the
-cloud also needs an API key and a testing place; see [Running the tests](../testing/place.md).
+`npm test` (or `bun run test`) then prints one summary per realm. That is the whole setup for
+Studio. Running in the cloud also needs an API key and a testing place; see
+[Running the tests](../testing/place.md).
 
 ## Where tests live
 
@@ -167,23 +214,28 @@ error.
 
 | From | How |
 |---|---|
-| A terminal, in Studio on this machine | `rojo build -o place.rbxl && flamework-test test place.rbxl`: opens the build in Studio, runs both realms, closes it; see [Running the tests](../testing/place.md) |
-| A terminal, under another Rojo project | `flamework-test test place.rbxl --project tests/deferred.project.json`: the same, in a place with that project's `$properties` set, `Workspace.SignalBehavior` and the streaming radii included; one run per `--project`, see [Workspace settings no script can change](../testing/place.md#workspace-settings-no-script-can-change) |
-| A terminal, in the cloud | `flamework-test test place.rbxl --cloud`: publishes to a testing place and runs the server's sections in a real server; needs `testing.entry`, see below |
+| A terminal, in Studio on this machine | `npm test`, the script in [Setting up](#setting-up): its `flamework-test test test.rbxl` opens the build in Studio, runs both realms, closes it; see [Running the tests](../testing/place.md) |
+| A terminal, under another Rojo project | `npm test -- --project tests/deferred.project.json`: the same, in a place with that project's `$properties` set, `Workspace.SignalBehavior` and the streaming radii included; one run per `--project`, see [Workspace settings no script can change](../testing/place.md#workspace-settings-no-script-can-change) |
+| A terminal, in the cloud | `npm test -- --cloud`: publishes to a testing place and runs the server's sections in a real server; needs `testing.entry`, see below |
 | The realm's own code | `Testing.run(filter?)` and `Testing.list(filter?)` |
 | Anything with the DataModel | `Workspace.FlameworkTests:Invoke(filter?, options?)` |
 | A client, for the server's tests | `Testing.runOnServer(filter?)`, over `Workspace.FlameworkTestsServer` |
 | Start-up | `"autoRun": true` in the config runs everything right after ignition |
 
 A filter is nothing (every section), one section name, one `section/test` name, or a list of
-those. Passing `{ list = true }` as the options reports the selection without running it. The
-result is a plain table, the same whether it came back from an invoke, a remote or `Testing.run`:
+those; `--sections a,b` on the command line. Passing `{ list = true }` as the options reports the
+selection without running it. In one realm, an entry that names nothing there makes the run fail.
+When `flamework-test` runs both realms, an entry only one realm has is fine: the other realm lists it
+as `not among the client's sections: coin`, and the run fails only on an entry that no realm has
+(`MISS matched nothing in any realm: coins`). So `--sections coin` runs a server-only section without
+`--realm server`. The result is a plain table, the same whether it came back from an invoke, a
+remote or `Testing.run`:
 
 ```lua
 { ok = true, realm = "server", passed = 12, failed = 0, durationMs = 340,
   sections = { { name = "economy", passed = 12, failed = 0,
                  tests = { { name = "buying deducts the price", ok = true, durationMs = 3 }, ... } } },
-  unknown = {} }  -- filter entries that named nothing; any makes ok false
+  unknown = {} }  -- filter entries that named nothing in this realm; any makes ok false
 ```
 
 Every test also prints one line, such as
@@ -258,7 +310,10 @@ overrides them for one plugin, which is what a test harness of your own would us
 ## Shipping
 
 Never ship a build with tests on: the remote lets any client run the server's tests. Keep the
-`testing` scope out of the release `.env`.
+`testing` scope out of `.env` and `.env.local` altogether, since every build reads them; the test
+script in [Setting up](#setting-up) sets the scope for its own build and compiles again with it set
+to nothing afterwards, so `out/` is never left with the host in it. After a watcher that ran with
+the scope, compile once without it before you build a place to ship.
 
 Without the scope, the test files still compile and are still copied into the place. A `Tests`
 folder registered under the scope is never loaded, though. To leave the files out of the place as
@@ -279,7 +334,8 @@ condition on the registration, the folder is looked up in every build that runs 
 `registerProviders("src/server/Tests")` with the condition only on the classes, and
 `ComponentPlugin.fromPath` with the condition only on `includePlugin`. The transformer resolves the
 path against the project file without regard to `globIgnorePaths`, so a registered folder that is
-not in the place stalls ignition in `WaitForChild`.
+not in the place stalls ignition: the registration waits for it, and warns after five seconds that
+it is `still waiting for its folder`.
 
 ---
 

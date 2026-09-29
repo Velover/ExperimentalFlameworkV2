@@ -64,8 +64,8 @@ function hook() {
 		Logger.warn(
 			"TypeScript version differs",
 			`Flamework: v${flameworkTypeScript.version}, roblox-ts: v${robloxTsTypeScript.version}`,
-			`Flamework will switch to v${robloxTsTypeScript.version}, ` +
-				`but you can get rid of this warning by running: npm i -D typescript@${robloxTsTypeScript.version}`,
+			`Flamework will switch to v${robloxTsTypeScript.version}. To get rid of this warning, pin the version ` +
+				`roblox-ts uses in your devDependencies, "typescript": "${robloxTsTypeScript.version}", and install again.`,
 		);
 	}
 

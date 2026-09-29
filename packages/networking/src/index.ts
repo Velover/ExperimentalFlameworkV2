@@ -10,7 +10,7 @@ import {
 import { SignalConnection as _SignalConnection } from "./util/signal";
 import { createNetworkingEvent } from "./events/createNetworkingEvent";
 import { createNetworkingFunction } from "./functions/createNetworkingFunction";
-import { NetworkRaw, NetworkUnreliable } from "./types";
+import { NetworkInfo as _NetworkInfo, NetworkRaw, NetworkSerialized, NetworkUnreliable } from "./types";
 import type { Modding } from "@flamework-experimental/core";
 
 export namespace Networking {
@@ -61,6 +61,31 @@ export namespace Networking {
 	 * A function whose requests and results bypass serialization; see {@link RawReliable}.
 	 */
 	export type Raw<T> = NetworkRaw<T>;
+
+	/**
+	 * Packs this event's arguments into a buffer even when `networking.serialization` is off, exactly
+	 * as the switch would. With the switch on, it changes nothing.
+	 *
+	 * `Unreliable<Serialized<T>>` and `Serialized<Unreliable<T>>` are the same as `SerializedUnreliable<T>`.
+	 * It cannot be combined with `Raw`.
+	 */
+	export type SerializedReliable<T> = NetworkSerialized<T>;
+
+	/**
+	 * An unreliable event whose arguments are packed into a buffer; see {@link SerializedReliable}.
+	 */
+	export type SerializedUnreliable<T> = NetworkUnreliable<NetworkSerialized<T>>;
+
+	/**
+	 * A function whose requests and results are packed into a buffer; see {@link SerializedReliable}.
+	 */
+	export type Serialized<T> = NetworkSerialized<T>;
+
+	/**
+	 * What a middleware factory receives as its second argument: the event or function's `name`,
+	 * `globalName` and `eventType`.
+	 */
+	export type NetworkInfo = _NetworkInfo;
 
 	/**
 	 * A function that generates an event middleware.

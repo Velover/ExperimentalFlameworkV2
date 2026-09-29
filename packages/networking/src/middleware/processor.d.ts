@@ -15,6 +15,9 @@ export interface Guards {
 	/** Checks every argument past the fixed ones, for a rest parameter. */
 	rest: t.check<unknown> | undefined;
 
+	/** With a rest parameter, `after[i]` checks the argument `i` places after the rest (`(...args: [...B[], C])`). */
+	after?: ReadonlyArray<t.check<unknown>>;
+
 	/** Called with the first argument that failed, by its 0-based index. */
 	reject: (player: Player | undefined, index: number, value: unknown) => void;
 }

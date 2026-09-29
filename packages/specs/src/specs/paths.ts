@@ -16,6 +16,12 @@ import { expectDefined, expectEqual, expectFalse, expectThrows, expectTrue, suit
 /** Internal and stripped from the package's types, so reached through a cast, as `ignite` is. */
 const harness = core as unknown as { __setPathRoot: (root: Instance | undefined) => void };
 
+declare const __harness: {
+	/** Everything `warn` has been called with since the last `clearWarnings`. */
+	warnings: () => string[];
+	clearWarnings: () => void;
+};
+
 /**
  * The harness's module graph is the files on disk, and each module's `script` is its node in it: the
  * specs package's `out` folder is two above this module. Path registration walks that tree the way
@@ -90,6 +96,53 @@ export = suite("paths", [
 			}
 
 			expectThrows(() => resolveRbxPath([]), "an empty path under game names no service");
+		},
+	],
+	[
+		// A registration waits for its folder without a limit, since a place may still be loading;
+		// past five seconds it warns, naming the call that gave the path and the child missing. The
+		// harness does not yield: the timed wait answers at once, and the wait without a limit raises
+		// where the engine would wait on.
+		"a path whose folder does not come is warned about by the call that gave it",
+		() => {
+			const parent = folderIn(game.Workspace, "PathWaitTarget");
+			__harness.clearWarnings();
+			try {
+				expectThrows(
+					() =>
+						getClassesInPath(
+							["Workspace", "PathWaitTarget", "notThere"],
+							`registerProviders("src/server/notThere")`,
+						),
+					"the harness's wait without a limit",
+				);
+
+				const warning = __harness
+					.warnings()
+					.find((line) => contains(line, `registerProviders("src/server/notThere") is still waiting`));
+				expectDefined(warning, `the warning: ${__harness.warnings().join(" | ")}`);
+				expectTrue(
+					contains(
+						warning!,
+						"is still waiting for its folder: the build put it at Workspace/PathWaitTarget/notThere",
+					),
+					warning!,
+				);
+				expectTrue(contains(warning!, "has no child named 'notThere' after 5 seconds"), warning!);
+				expectTrue(contains(warning!, "misspelled or differ in case"), warning!);
+
+				// A lookup that names no call still says what it waits for.
+				__harness.clearWarnings();
+				expectThrows(() => resolveRbxPath(["Workspace", "PathWaitTarget", "notThere"]), "no caller");
+				expectTrue(
+					__harness
+						.warnings()
+						.some((line) => contains(line, "Flamework is still waiting for a folder: the build put it at")),
+					`the warning without a caller: ${__harness.warnings().join(" | ")}`,
+				);
+			} finally {
+				parent.Destroy();
+			}
 		},
 	],
 	[

@@ -13,6 +13,7 @@ import providers = require("./specs/providers");
 import regressions = require("./specs/regressions");
 import scopes = require("./specs/scopes");
 import serialization = require("./specs/serialization");
+import serializedMembers = require("./specs/serializedMembers");
 import testing = require("./specs/testing");
 
 /**
@@ -30,6 +31,7 @@ export const suites: TestSuite[] = [
 	networking,
 	functions,
 	middleware,
+	serializedMembers,
 	regressions,
 	serialization,
 	testing,

@@ -6,8 +6,9 @@ import {
 	IntrinsicNetworkDecoder,
 	IntrinsicNetworkResultDecoder,
 	IntrinsicObfuscate,
+	IsRawMember,
 	NetworkingObfuscationMarker,
-	NetworkRaw,
+	NetworkPacking,
 	ObfuscateNames,
 } from "../types";
 import { FunctionNetworkingEvents } from "../handlers";
@@ -19,8 +20,11 @@ import { Modding } from "@flamework-experimental/core";
  * A sender declared `Networking.Raw`: its arguments and the result travel as they are. Without the
  * hidden marker below, no call site packs them and the peer runs no decoder.
  */
-export interface RawServerSender<I extends unknown[], O> {
+export interface RawServerSender<I extends unknown[], O, M = "raw"> {
 	(player: Player, ...args: I): Promise<O>;
+
+	/** @hidden How the member is packed (see `NetworkPacking`), which keeps differently packed members apart in a union. */
+	readonly _flamework_packing?: M;
 
 	/**
 	 * Sends this request to the specified player.
@@ -36,9 +40,16 @@ export interface RawServerSender<I extends unknown[], O> {
 	invokeWithTimeout(player: Player, timeout: number, ...args: I): Promise<O>;
 }
 
-export interface ServerSender<I extends unknown[], O> extends RawServerSender<I, O> {
+export interface ServerSender<I extends unknown[], O, F = unknown, M = NetworkPacking<F>> extends RawServerSender<
+	I,
+	O,
+	M
+> {
 	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
 	readonly _flamework_send?: I;
+
+	/** @hidden The declared function type, whose markers (`Serialized`) say whether its call sites pack. */
+	readonly _flamework_fn?: F;
 
 	/** @hidden Sends an argument list the transformer already packed; nothing when the list carries nothing. */
 	_invoke(player: Player, payload?: buffer, blobs?: Array<defined>): Promise<O>;
@@ -47,7 +58,10 @@ export interface ServerSender<I extends unknown[], O> extends RawServerSender<I,
 	_invokeWithTimeout(player: Player, timeout: number, payload?: buffer, blobs?: Array<defined>): Promise<O>;
 }
 
-export interface RawServerReceiver<I extends unknown[], O> {
+export interface RawServerReceiver<I extends unknown[], O, M = "raw"> {
+	/** @hidden How the member is packed (see `NetworkPacking`), which keeps differently packed members apart in a union. */
+	readonly _flamework_packing?: M;
+
 	/**
 	 * Connect to a networking event.
 	 * @param event The event to connect to
@@ -62,19 +76,26 @@ export interface RawServerReceiver<I extends unknown[], O> {
 	predict(player: Player, ...args: I): Promise<O>;
 }
 
-export interface ServerReceiver<I extends unknown[], O, F = unknown> extends RawServerReceiver<I, O> {
+export interface ServerReceiver<I extends unknown[], O, F = unknown, M = NetworkPacking<F>> extends RawServerReceiver<
+	I,
+	O,
+	M
+> {
 	/** @hidden Marks a receiver for the transformer, which packs the callback's result at the call site. */
 	readonly _flamework_receive?: I;
 
-	/** @hidden The declared function type; its return type is what the transformer packs. */
+	/** @hidden The declared function type: its return type is what the transformer packs, its markers say how. */
 	readonly _flamework_fn?: F;
 
 	/** @hidden Registers a callback with `pack`, which turns a successful result into `[payload, blobs?]`. */
 	_setCallback(callback: (player: Player, ...args: never[]) => unknown, pack: (value: unknown) => unknown): void;
 }
 
-export interface RawClientSender<I extends unknown[], O> {
+export interface RawClientSender<I extends unknown[], O, M = "raw"> {
 	(...args: I): Promise<O>;
+
+	/** @hidden How the member is packed (see `NetworkPacking`), which keeps differently packed members apart in a union. */
+	readonly _flamework_packing?: M;
 
 	/**
 	 * Sends this request to the server.
@@ -88,9 +109,16 @@ export interface RawClientSender<I extends unknown[], O> {
 	invokeWithTimeout(timeout: number, ...args: I): Promise<O>;
 }
 
-export interface ClientSender<I extends unknown[], O> extends RawClientSender<I, O> {
+export interface ClientSender<I extends unknown[], O, F = unknown, M = NetworkPacking<F>> extends RawClientSender<
+	I,
+	O,
+	M
+> {
 	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
 	readonly _flamework_send?: I;
+
+	/** @hidden The declared function type, whose markers (`Serialized`) say whether its call sites pack. */
+	readonly _flamework_fn?: F;
 
 	/** @hidden Sends an argument list the transformer already packed; nothing when the list carries nothing. */
 	_invoke(payload?: buffer, blobs?: Array<defined>): Promise<O>;
@@ -99,7 +127,10 @@ export interface ClientSender<I extends unknown[], O> extends RawClientSender<I,
 	_invokeWithTimeout(timeout: number, payload?: buffer, blobs?: Array<defined>): Promise<O>;
 }
 
-export interface RawClientReceiver<I extends unknown[], O> {
+export interface RawClientReceiver<I extends unknown[], O, M = "raw"> {
+	/** @hidden How the member is packed (see `NetworkPacking`), which keeps differently packed members apart in a union. */
+	readonly _flamework_packing?: M;
+
 	/**
 	 * Connect to a networking function.
 	 * @param event The function to connect to
@@ -113,11 +144,15 @@ export interface RawClientReceiver<I extends unknown[], O> {
 	predict(...args: I): Promise<O>;
 }
 
-export interface ClientReceiver<I extends unknown[], O, F = unknown> extends RawClientReceiver<I, O> {
+export interface ClientReceiver<I extends unknown[], O, F = unknown, M = NetworkPacking<F>> extends RawClientReceiver<
+	I,
+	O,
+	M
+> {
 	/** @hidden Marks a receiver for the transformer, which packs the callback's result at the call site. */
 	readonly _flamework_receive?: I;
 
-	/** @hidden The declared function type; its return type is what the transformer packs. */
+	/** @hidden The declared function type: its return type is what the transformer packs, its markers say how. */
 	readonly _flamework_fn?: F;
 
 	/** @hidden Registers a callback with `pack`, which turns a successful result into `[payload, blobs?]`. */
@@ -125,11 +160,11 @@ export interface ClientReceiver<I extends unknown[], O, F = unknown> extends Raw
 }
 
 export type ServerHandler<E, R> = NetworkingObfuscationMarker & {
-	[k in keyof Functions<E>]: E[k] extends NetworkRaw<unknown>
+	[k in keyof Functions<E>]: IsRawMember<E[k]> extends true
 		? RawServerSender<FunctionParameters<E[k]>, FunctionReturn<E[k]>>
-		: ServerSender<FunctionParameters<E[k]>, FunctionReturn<E[k]>>;
+		: ServerSender<FunctionParameters<E[k]>, FunctionReturn<E[k]>, E[k]>;
 } & {
-	[k in keyof Functions<R>]: R[k] extends NetworkRaw<unknown>
+	[k in keyof Functions<R>]: IsRawMember<R[k]> extends true
 		? RawServerReceiver<FunctionParameters<R[k]>, FunctionReturn<R[k]>>
 		: ServerReceiver<FunctionParameters<R[k]>, FunctionReturn<R[k]>, R[k]>;
 } & {
@@ -139,11 +174,11 @@ export type ServerHandler<E, R> = NetworkingObfuscationMarker & {
 };
 
 export type ClientHandler<E, R> = NetworkingObfuscationMarker & {
-	[k in keyof Functions<E>]: E[k] extends NetworkRaw<unknown>
+	[k in keyof Functions<E>]: IsRawMember<E[k]> extends true
 		? RawClientSender<FunctionParameters<E[k]>, FunctionReturn<E[k]>>
-		: ClientSender<FunctionParameters<E[k]>, FunctionReturn<E[k]>>;
+		: ClientSender<FunctionParameters<E[k]>, FunctionReturn<E[k]>, E[k]>;
 } & {
-	[k in keyof Functions<R>]: R[k] extends NetworkRaw<unknown>
+	[k in keyof Functions<R>]: IsRawMember<R[k]> extends true
 		? RawClientReceiver<FunctionParameters<R[k]>, FunctionReturn<R[k]>>
 		: ClientReceiver<FunctionParameters<R[k]>, FunctionReturn<R[k]>, R[k]>;
 } & {
@@ -255,17 +290,16 @@ export type NamespaceMetadata<R, S> = Modding.Emit<{
 	outgoing: IntrinsicObfuscate<{ [k in keyof Functions<S>]: Modding.Target.Guard<Awaited<ReturnType<S[k]>>> }>;
 
 	/**
-	 * Decoders, present only with `networking.serialization` on and absent for raw functions: the
-	 * argument lists of requests this realm receives and the responses to requests it sends. Requests
-	 * and results are packed inline where they are produced.
+	 * Decoders for the functions that are packed (all of them with `networking.serialization` on, else
+	 * the serialized ones), absent for raw functions: the argument lists of requests this realm receives
+	 * and the responses to requests it sends. Requests and results are packed inline where they are
+	 * produced.
 	 */
 	incomingSerializers: IntrinsicObfuscate<{
-		[k in keyof Functions<R>]: R[k] extends NetworkRaw<unknown>
-			? undefined
-			: IntrinsicNetworkDecoder<Parameters<R[k]>>;
+		[k in keyof Functions<R>]: IntrinsicNetworkDecoder<Parameters<R[k]>, R[k], k>;
 	}>;
 	outgoingResults: IntrinsicObfuscate<{
-		[k in keyof Functions<S>]: S[k] extends NetworkRaw<unknown> ? undefined : IntrinsicNetworkResultDecoder<S[k]>;
+		[k in keyof Functions<S>]: IntrinsicNetworkResultDecoder<S[k], k>;
 	}>;
 
 	namespaceIds: ObfuscateNames<keyof FunctionNamespaces<R> | keyof FunctionNamespaces<S>>;

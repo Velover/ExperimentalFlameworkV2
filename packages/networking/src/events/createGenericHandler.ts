@@ -44,7 +44,15 @@ export function createGenericHandler<T extends ClientHandler<S, R> | ServerHandl
 			const guards = metadata.incoming[name];
 			assert(guards);
 
-			incomingGuards = createGuards(name, guards[0], guards[1], networkInfo, config.warnOnInvalidGuards, signals);
+			incomingGuards = createGuards(
+				name,
+				guards[0],
+				guards[1],
+				guards[2],
+				networkInfo,
+				config.warnOnInvalidGuards,
+				signals,
+			);
 		}
 
 		// A malformed serialized payload is reported like a failed guard, with no argument index.

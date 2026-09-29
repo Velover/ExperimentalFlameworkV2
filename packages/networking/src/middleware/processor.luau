@@ -74,8 +74,9 @@ end
 	that does not call it drops the message there. `final` ends the chain.
 
 	`guards`, when given, check the arguments before any middleware runs: `fixed[i]` checks argument
-	`i`, `rest` every one past them. The first one that fails is reported through `reject` with its
-	0-based index, and the processor returns `rejected` without calling anything else.
+	`i`, `rest` every one past them, and `after` (for a rest parameter with parameters after it) the
+	last ones. The first one that fails is reported through `reject` with its 0-based index, and the
+	processor returns `rejected` without calling anything else.
 
 	`cancelled` is what a Promise that was cancelled reads as (`Networking.Skip` for a function).
 ]]
@@ -105,8 +106,42 @@ local function createProcessor(
 
 	local fixed = guards.fixed
 	local rest = guards.rest
+	local after = guards.after
 	local reject = guards.reject
 	local fixedCount = #fixed
+
+	if after ~= nil and #after > 0 then
+		local afterCount = #after
+
+		-- `(...args: [A, ...B[], C])`: A first, C last, and every argument between them a B.
+		return function(player, ...)
+			local count = select("#", ...)
+			while count > 0 and select(count, ...) == nil do
+				count -= 1
+			end
+
+			local total = math.max(fixedCount + afterCount, count)
+			local restEnd = total - afterCount
+			for index = 1, total do
+				local guard
+				if index <= fixedCount then
+					guard = fixed[index]
+				elseif index > restEnd then
+					guard = after[index - restEnd]
+				else
+					guard = rest
+				end
+
+				local value = select(index, ...)
+				if guard ~= nil and not guard(value) then
+					reject(player, index - 1, value)
+					return rejected
+				end
+			end
+
+			return follow(callTrimmed(head, player, ...), cancelled)
+		end
+	end
 
 	return function(player, ...)
 		-- Checked up to the last value: a trailing nil is an argument that was not passed.

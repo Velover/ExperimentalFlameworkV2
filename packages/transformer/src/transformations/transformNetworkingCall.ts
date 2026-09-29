@@ -2,12 +2,18 @@ import ts from "typescript";
 import { Diagnostics } from "../classes/diagnostics";
 import { TransformState } from "../classes/transformState";
 import { f } from "../util/factory";
-import { buildInlineEncoding, buildInlineResultEncoding } from "../util/functions/buildSerializerFromType";
+import {
+	buildInlineEncoding,
+	buildInlineResultEncoding,
+	unwrapPromise,
+} from "../util/functions/buildSerializerFromType";
+import { getNetworkMode, isPackedMode, NetworkMode } from "../util/functions/networkMode";
 
 /**
- * With `networking.serialization` on, a call that sends over a networking handler packs its
- * argument list right where it is made: the encoding is generated inline from the handler's types
- * and the packed `(payload, blobs?)` goes to the handler's hidden `_fire` / `_invoke` entry point.
+ * A call that sends over a packed networking member -- every member but the raw ones with
+ * `networking.serialization` on, the ones declared `Serialized` otherwise -- packs its argument list
+ * right where it is made: the encoding is generated inline from the handler's types and the packed
+ * `(payload, blobs?)` goes to the handler's hidden `_fire` / `_invoke` entry point.
  * A function receiver's callback is registered with a generated `pack` for its result type, which
  * the runtime applies to what the middleware chain resolves with, so that results leave packed.
  *
@@ -17,10 +23,17 @@ import { buildInlineEncoding, buildInlineResultEncoding } from "../util/function
  * the sending side does not.
  *
  * Call sites are found by type: the handler members carry hidden `_flamework_send` /
- * `_flamework_fn` markers. A member declared `Networking.Raw*` has no marker and is left alone, as is
+ * `_flamework_fn` markers, the second holding the declared member, whose own markers say how it is
+ * packed. A member declared `Networking.Raw*` has no marker and is left alone, as is
  * a handler reached through a widened type (which then sends unpacked values that the peer rejects
  * as malformed). A handler reached through `?.` is typed with `undefined` in it; the marker is looked
  * for on the rest. An argument list that carries nothing (`bump(): void`) sends no payload at all.
+ *
+ * A target typed as a union of members (a conditional, or a helper that returns one of several
+ * members) is packed when every member in it is, the same way, and left alone when none is. Members
+ * that are packed differently are refused, since whatever the call site did would not suit some of
+ * them. Their handler types carry how they are packed (`_flamework_packing`), so that such a union
+ * does not reduce to the one member type the others extend.
  */
 
 /** Sending methods and the hidden entry point each becomes. */
@@ -33,31 +46,158 @@ const SENDERS: Record<string, string> = {
 };
 
 export function transformNetworkingCall(state: TransformState, node: ts.CallExpression): ts.Expression | undefined {
-	if (state.projectConfig.networking?.serialization !== true) return;
-
 	const typeChecker = state.typeChecker;
 	const callee = node.expression;
 
 	if (f.is.propertyAccessExpression(callee)) {
 		const name = callee.name.text;
-		const target = typeChecker.getNonNullableType(typeChecker.getTypeAtLocation(callee.expression));
-		const optional = callee.questionDotToken !== undefined;
+		if (name === "setCallback" || SENDERS[name] !== undefined) {
+			const target = typeChecker.getNonNullableType(typeChecker.getTypeAtLocation(callee.expression));
+			const optional = callee.questionDotToken !== undefined;
+			const isCallback = name === "setCallback";
 
-		if (name === "setCallback" && target.getProperty("_flamework_fn")) {
-			return transformReceiverCallback(state, node, callee.expression, target, optional);
-		}
-
-		if (SENDERS[name] !== undefined && target.getProperty("_flamework_send")) {
-			return transformSend(state, node, callee.expression, target, SENDERS[name], optional);
+			const member = packedMember(
+				state,
+				target,
+				isCallback ? "_flamework_fn" : "_flamework_send",
+				callee.expression,
+				node,
+			);
+			if (member) {
+				return isCallback
+					? transformReceiverCallback(state, node, callee.expression, member, optional)
+					: transformSend(state, node, callee.expression, member, SENDERS[name], optional);
+			}
 		}
 	}
 
-	// `handler.event(...)` and `handler.fn(...)`: the call signature is the sender itself.
+	// `handler.event(...)` and `handler.fn(...)`: the call signature is the sender itself. This is also
+	// how a member named like a method (an event called `fire`) is reached.
 	const target = typeChecker.getNonNullableType(typeChecker.getTypeAtLocation(callee));
-	if (target.getProperty("_flamework_send")) {
-		const method = target.getProperty("_invoke") ? "_invoke" : "_fire";
-		return transformSend(state, node, callee, target, method, node.questionDotToken !== undefined);
+	const member = packedMember(state, target, "_flamework_send", callee, node);
+	if (!member) return;
+
+	const method = member.getProperty("_invoke") ? "_invoke" : "_fire";
+	return transformSend(state, node, callee, member, method, node.questionDotToken !== undefined);
+}
+
+/** One of the types a call's target may be, and how a call on it is sent. */
+interface TargetMember {
+	type: ts.Type;
+	/** `other` for a value that is not a networking member this kind of call packs for. */
+	mode: NetworkMode | "other";
+	packed: boolean;
+}
+
+/**
+ * The handler member a call on `targetType` packs for, or `undefined` when the call is left as it is.
+ * `marker` is what makes a member one this kind of call can pack: `_flamework_send` for a send,
+ * `_flamework_fn` for `setCallback`. Whether it does follows the markers on its declared type
+ * (`_flamework_fn`) and the project's switch; a member declared with conflicting markers is refused
+ * here.
+ *
+ * A target typed as a union of members is packed only when every member is, and then as the first
+ * of them. Members that are packed differently are refused, and so are packed members whose
+ * argument lists (for `setCallback`, results) are not the same type: one call site packs one way.
+ */
+function packedMember(
+	state: TransformState,
+	targetType: ts.Type,
+	marker: "_flamework_send" | "_flamework_fn",
+	target: ts.Expression,
+	node: ts.CallExpression,
+): ts.Type | undefined {
+	const typeChecker = state.typeChecker;
+	const targetName = ts.getParseTreeNode(target)?.getText();
+	const resolved =
+		targetType.flags & ts.TypeFlags.Instantiable ? typeChecker.getApparentType(targetType) : targetType;
+
+	const members = (resolved.isUnion() ? resolved.types : [resolved]).map((type): TargetMember => {
+		if (type.getProperty(marker)) {
+			const mode = getNetworkMode(markerType(state, type, "_flamework_fn", node), node, targetName);
+			return { type, mode, packed: isPackedMode(state, mode) };
+		}
+
+		// A raw member carries `_flamework_packing` without the marker.
+		return { type, mode: type.getProperty("_flamework_packing") ? "raw" : "other", packed: false };
+	});
+
+	const packed = members.filter((member) => member.packed);
+	if (packed.length === 0) return;
+
+	const isCallback = marker === "_flamework_fn";
+	if (packed.length < members.length) {
+		refuseMixedTarget(
+			node,
+			describeModes(state, members),
+			isCallback
+				? "One call site packs the results of all of them or of none, so the callers of some would reject what the callback returns."
+				: "One call site packs for all of them or for none, so some would drop what it sends as malformed.",
+		);
 	}
+
+	// Several members that all pack: the one encoding has to suit each of them.
+	const carried = (member: ts.Type) =>
+		isCallback ? resultType(state, member, node) : markerType(state, member, "_flamework_send", node);
+	const first = carried(packed[0].type);
+	for (const member of packed.slice(1)) {
+		const other = carried(member.type);
+		if (
+			first !== undefined &&
+			other !== undefined &&
+			typeChecker.isTypeAssignableTo(first, other) &&
+			typeChecker.isTypeAssignableTo(other, first)
+		) {
+			continue;
+		}
+
+		const what = isCallback ? "results" : "argument lists";
+		const show = (type: ts.Type | undefined) => (type ? `'${typeChecker.typeToString(type)}'` : "none");
+		refuseMixedTarget(
+			node,
+			`their ${what} are not the same type (${show(first)} and ${show(other)})`,
+			`One call site packs one of them, which the members with the other ${what} cannot read.`,
+		);
+	}
+
+	return packed[0].type;
+}
+
+/** How the members of a mixed target are sent, one phrase per way. */
+function describeModes(state: TransformState, members: TargetMember[]): string {
+	const switchOn = state.projectConfig.networking?.serialization === true;
+	const phrases: Record<TargetMember["mode"], string> = {
+		serialized: "Serialized members are packed into a buffer",
+		plain: switchOn
+			? "plain members are packed, as networking.serialization is on"
+			: "plain members are sent as they are, as networking.serialization is off",
+		raw: "Raw members are sent as they are",
+		other: "a value that is not a networking member is called as it is",
+	};
+
+	const modes = new Set(members.map((member) => member.mode));
+	return (["serialized", "plain", "raw", "other"] as const)
+		.filter((mode) => modes.has(mode))
+		.map((mode) => phrases[mode])
+		.join("; ");
+}
+
+/** The build error for a call whose target may be members that one call site cannot pack for. */
+function refuseMixedTarget(node: ts.CallExpression, what: string, consequence: string): never {
+	const text = ts.getParseTreeNode(node.expression)?.getText().replace(/\s+/g, " ");
+	const call = text !== undefined ? `The call '${text}(...)'` : "This call";
+	return Diagnostics.error(
+		node,
+		`${call} may reach networking members that are packed differently: ${what}.`,
+		consequence,
+		"Make the call where the member's own type is known, such as in each case of a switch over the name, or declare these members the same way.",
+	);
+}
+
+/** What a function member's callback returns, as it travels: without a Promise around it. */
+function resultType(state: TransformState, member: ts.Type, node: ts.Node): ts.Type | undefined {
+	const signature = markerType(state, member, "_flamework_fn", node)?.getCallSignatures()[0];
+	return signature ? unwrapPromise(state, signature.getReturnType()) : undefined;
 }
 
 /**
@@ -93,7 +233,7 @@ function transformSend(
 	if (leading.some(ts.isSpreadElement)) {
 		Diagnostics.error(
 			node,
-			"Flamework cannot pack this call: a spread argument ahead of the payload is not supported with networking.serialization enabled.",
+			"Flamework cannot pack this call: a spread argument ahead of the payload is not supported for a packed member (networking.serialization or Serialized).",
 		);
 	}
 

@@ -169,6 +169,11 @@ describe("test under several projects", () => {
 		expect(run.out).toContain("setting the properties of");
 		const plans = Object.entries(run.written).filter(([path]) => path.endsWith("patch-plan.json"));
 		expect(JSON.parse(plans[plans.length - 1]![1]).project).toBe("streaming");
+		// Each project's patch has a folder of its own for its plan, removed once it is done.
+		expect(run.madeDirs).toHaveLength(2);
+		expect(new Set(run.madeDirs).size).toBe(2);
+		expect(run.removedDirs).toEqual(run.madeDirs);
+		expect(plans.map(([path]) => path.slice(0, path.lastIndexOf("/")))).toEqual(run.madeDirs);
 
 		// One Studio window per project, each run on both realms and closed again.
 		expect(run.launched.map((command) => basename(command[1]!))).toEqual([
@@ -607,7 +612,7 @@ describe("test", () => {
 		expect(projects.err).toContain("place.streaming.rbxl is still open (PID 4002");
 	});
 
-	test("a window that does not close when asked is ended and says so; one already gone is not claimed closed", async () => {
+	test("the run's own window is ended without a word about asking; a stale one that does not close when asked says so; one already gone is not claimed closed", async () => {
 		const studio = studioThatOpens(BUILT_STUDIO, {
 			Server: JSON.stringify(resultJson()),
 			Client: JSON.stringify(resultJson({ realm: "client" })),
@@ -616,10 +621,17 @@ describe("test", () => {
 			files: { "place.rbxl": "built" },
 			studio: studio.fake,
 			onLaunch: studio.onLaunch,
+			// A window left from an earlier build: asked first, as every window the run did not open is.
+			windows: [{ pid: 3000, title: `${join(FIXTURE_CWD, "place.rbxl")} - Roblox Studio` }],
 			closeOutcome: "forced",
 		});
 		expect(forced.code).toBe(0);
-		expect(forced.out).toContain("closed place.rbxl (PID 4001) by ending its process: it did not close when asked");
+		expect(forced.out).toContain(
+			"closed the window left from an earlier build of place.rbxl (PID 3000) by ending its process: it did not close when asked",
+		);
+		// The run's own: Studio would only answer the ask with a save prompt, so it is not asked.
+		expect(forced.out).toContain("closed place.rbxl (PID 4001)");
+		expect(forced.out).not.toContain("closed place.rbxl (PID 4001) by ending");
 		expect(forced.windows).toHaveLength(0);
 
 		// Closed by hand during the run: the close finds nothing of it and says that, not "closed".
@@ -646,6 +658,49 @@ describe("test", () => {
 		);
 		expect(run.out).not.toContain("closed place.rbxl");
 		expect(run.closedWindows).toHaveLength(0);
+	});
+
+	test("the lock Studio keeps beside the place is removed with the window the run ends, and only one naming it", async () => {
+		// Studio writes `<place>.lock` with its PID on the first line, and removes it itself only when it
+		// closes; a process that is ended leaves it behind.
+		const studio = studioThatOpens(BUILT_STUDIO, {
+			Server: JSON.stringify(resultJson()),
+			Client: JSON.stringify(resultJson({ realm: "client" })),
+		});
+		const own = await runCli(["test", "place.rbxl"], {
+			files: { "place.rbxl": "built", "place.rbxl.lock": "4001\nRobloxStudioBeta\nPC\nguid\n\n" },
+			studio: studio.fake,
+			onLaunch: studio.onLaunch,
+		});
+		expect(own.code).toBe(0);
+		expect(own.removedFiles.map((path) => path.split("/").pop())).toEqual(["place.rbxl.lock"]);
+
+		// Windows can refuse for a moment after the process has gone: the removal is tried again.
+		const held = studioThatOpens(BUILT_STUDIO, {
+			Server: JSON.stringify(resultJson()),
+			Client: JSON.stringify(resultJson({ realm: "client" })),
+		});
+		const late = await runCli(["test", "place.rbxl"], {
+			files: { "place.rbxl": "built", "place.rbxl.lock": "4001\nRobloxStudioBeta\nPC\nguid\n\n" },
+			studio: held.fake,
+			onLaunch: held.onLaunch,
+			removalsRefused: 3,
+		});
+		expect(late.code).toBe(0);
+		expect(late.removedFiles.map((path) => path.split("/").pop())).toEqual(["place.rbxl.lock"]);
+
+		// A lock another Studio holds names that Studio: it is left alone.
+		const other = studioThatOpens(BUILT_STUDIO, {
+			Server: JSON.stringify(resultJson()),
+			Client: JSON.stringify(resultJson({ realm: "client" })),
+		});
+		const foreign = await runCli(["test", "place.rbxl"], {
+			files: { "place.rbxl": "built", "place.rbxl.lock": "999\nRobloxStudioBeta\nPC\nguid\n\n" },
+			studio: other.fake,
+			onLaunch: other.onLaunch,
+		});
+		expect(foreign.code).toBe(0);
+		expect(foreign.removedFiles).toEqual([]);
 	});
 
 	test("the window a run opened is closed by its process even when its title has changed", async () => {
@@ -968,5 +1023,84 @@ describe("test", () => {
 		expect(run.err).toContain("the client's run did not finish within 1s");
 		expect(run.err).toContain("last test that reported: economy/sells (PASS)");
 		expect(run.out).toContain("play session stopped");
+	});
+
+	test("a --sections entry only one realm has passes, and one that no realm has fails the run", async () => {
+		// The server has the section `coin`; the client does not, and says so as a miss of its own.
+		const clientMiss = JSON.stringify(
+			resultJson({ realm: "client", ok: false, passed: 0, sections: [], unknown: ["coin"] }),
+		);
+		const studio = studioThatOpens(BUILT_STUDIO, {
+			Server: JSON.stringify(
+				resultJson({ sections: [{ ...JSON.parse(resultJson()).sections[0], name: "coin" }] }),
+			),
+			Client: clientMiss,
+		});
+		const run = await runCli(["test", "place.rbxl", "--sections", "coin"], {
+			files: { "place.rbxl": "built" },
+			studio: studio.fake,
+			onLaunch: studio.onLaunch,
+		});
+
+		expect(run.code).toBe(0);
+		expect(run.out).toContain("not among the client's sections: coin");
+		expect(run.out).not.toContain("MISS");
+		expect(run.out).not.toContain("FAIL");
+
+		// Missing from both realms: the run fails, once, saying so.
+		const nowhere = studioThatOpens(BUILT_STUDIO, {
+			Server: JSON.stringify(resultJson({ ok: false, passed: 0, sections: [], unknown: ["coins"] })),
+			Client: JSON.stringify(
+				resultJson({ realm: "client", ok: false, passed: 0, sections: [], unknown: ["coins"] }),
+			),
+		});
+		const typo = await runCli(["test", "place.rbxl", "--sections", "coins"], {
+			files: { "place.rbxl": "built" },
+			studio: nowhere.fake,
+			onLaunch: nowhere.onLaunch,
+		});
+		expect(typo.code).toBe(1);
+		expect(typo.out).toContain("MISS matched nothing in any realm: coins");
+		// No realm says PASS for a run that fails on its filter: each realm's verdict waits for the others.
+		expect(typo.out).not.toMatch(/^PASS$/m);
+		expect(typo.out.match(/^FAIL$/gm)).toHaveLength(2);
+
+		// One realm alone judges its own filter, as before.
+		const alone = studioThatOpens(BUILT_STUDIO, { Client: clientMiss });
+		const client = await runCli(["test", "place.rbxl", "--sections", "coin", "--realm", "client"], {
+			files: { "place.rbxl": "built" },
+			studio: alone.fake,
+			onLaunch: alone.onLaunch,
+		});
+		expect(client.code).toBe(1);
+		expect(client.out).toContain("MISS matched nothing: coin");
+	});
+
+	test("a realm whose run raises is reported without Studio's wrapping, and the other realm still runs", async () => {
+		const studio = studioThatOpens(BUILT_STUDIO, { Server: "", Client: "" });
+		const answers = studio.fake.answers as Record<string, unknown>;
+		answers.execute_luau = (args: Record<string, unknown>) => {
+			if (args.datamodel_type === "Server") {
+				throw new Error(
+					"execute_luau: sabuiltin_Assistant.rbxm.Assistant.Packages._Index.AssistantUI.AssistantUI.Tools.ExecuteLuauTool:66: sabuiltin_Assistant.rbxm.Assistant.Packages._Index.AssistantUI.AssistantUI.Util.CommandExecution:54: AssistantCommand:2: Workspace.FlameworkTests did not appear within 30 seconds: is the testing scope active in this build, and is TestingPlugin included?",
+				);
+			}
+			return JSON.stringify(resultJson({ realm: "client" }));
+		};
+
+		const run = await runCli(["test", "place.rbxl"], {
+			files: { "place.rbxl": "built" },
+			studio: studio.fake,
+			onLaunch: studio.onLaunch,
+		});
+
+		expect(run.code).toBe(1);
+		expect(run.err).toContain(
+			"the server's run failed: Workspace.FlameworkTests did not appear within 30 seconds: is the testing scope active",
+		);
+		expect(run.err).not.toContain("sabuiltin");
+		expect(run.out).toContain("2 passed, 0 failed in 12ms (client)");
+		expect(run.out).toContain("play session stopped");
+		expect(run.closedWindows).toEqual(["place.rbxl"]);
 	});
 });
