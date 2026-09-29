@@ -91,8 +91,8 @@ still pays its byte.
 
 **Where it bites: charm-sync patches.** `SyncPatch` makes every field of the synced state optional.
 A patch that changes one field of a 40-field player-data object costs 40 presence bytes plus the
-value, where the raw table would send only that one key and value. Dive In's player data is that
-case.
+value, where the raw table would send only that one key and value. Player data synced this way is
+that case.
 
 **The proposal.** Give each object one bitmask, `ceil(n / 8)` bytes for its `n` optional fields,
 written before its fields: bit `i` says whether optional field `i` is present, and absent fields

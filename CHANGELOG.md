@@ -179,7 +179,7 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   size, write and read functions, as a named type does, instead of being written out at every place.
   This covers objects, unions, tuples, arrays, sets and maps: a mapped or conditional type's instance,
   an object literal type, `string[]`, `Map<string, number>`. The bytes sent are the same. A
-  charm-sync payload modelled on Dive In's went from 5,277 lines (166 KB) to 3,367 lines (108 KB).
+  game's charm-sync payload went from 5,277 lines (166 KB) to 3,367 lines (108 KB).
 - Serialization: the size, write and read functions of every hoisted type in a file are fields of one
   table, `codec`, instead of three locals each.
 - `Could not find Rojo data for '...'` adds what the path compiles to and that no `$path` in the Rojo

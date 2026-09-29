@@ -225,7 +225,7 @@ export class PathTests implements OnStart {
 			});
 
 			// v1 registered every decorated class it required; v2 read only a module's exports and
-			// silently left out every class a module did not export (36 components in Dive In). The
+			// silently left out every class a module did not export (36 components in one ported game). The
 			// transformer now records each class against the ModuleScript that defines it, whatever
 			// the id generation mode makes of its identifier.
 			test("getClassesInPath finds every class a folder's modules define, exported or not, each once", () => {
