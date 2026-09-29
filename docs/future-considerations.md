@@ -28,6 +28,70 @@ join, with a high level chosen for that member alone (a per-member level, not a 
   the frame header before decompressing, and drop a frame of unknown size: 521 bytes can announce
   and fill 16 MiB, 13 ms of work.
 
+## Next: serializer functions missing after a rebuild in watch mode
+
+**What happened.** During a `rbxtsc -w` session, a rebuild produced generated serializer code that
+called a write or read function that wasn't there. It happened more than once. No log was kept, so
+the exact message, the file and the edit that triggered it are unknown.
+
+**What the generated code relies on.** Everything below is emitted once per file, the first time
+something in that file needs it:
+- the `codec` table, which holds every hoisted type's `s_`, `w_` and `r_` functions;
+- the LEB128 helpers `vsize`, `vwrite` and `vread`;
+- the guard, enum and literal tables.
+
+One generator per file tracks what it has already emitted
+(`generators` in `packages/transformer/src/util/functions/buildSerializerFromType.ts`), and
+`takeHoisted` hands out each statement only once. Any path where the generator believes something
+was emitted, but the file's output doesn't contain it, gives exactly this symptom.
+
+**Leads, from reading the code only; none has been run.**
+- **A generator used for two transforms of one file.** The generators live in a module-level
+  `WeakMap` keyed by the `ts.SourceFile`, and a watch session keeps the process alive. A second
+  transform of the same `SourceFile` object would get the old generator. Its output would then use
+  `codec` and the varint helpers without declaring them. roblox-ts 3.0.0 builds a new compiler host
+  and program for every rebuild (`createProgramFactory`), so each rebuild should see new
+  `SourceFile` objects. Confirm that with a run.
+- **A hoisted type left half-built.** `hoist` records a type before it builds the type's three
+  functions. If building one of them fails, `catchDiagnostic` catches the error and the transform
+  goes on. The type stays recorded with some or none of its functions, and a later use of it in the
+  same file calls the missing ones. That build reports an error, which should stop roblox-ts from
+  writing any output. Check that it does in watch mode too.
+- **Files a rebuild skips.** A rebuild compiles the edited files and every file that imports them,
+  directly or not (`getChangedFilePaths`); other files keep their previous output. That can't lose a
+  function inside one file, since the table is local to each file. It could leave an encoder and a
+  decoder of the same type out of step, for example after `flamework.config.json` changes during a
+  session. Check whether the transformer reads the config once or on every build.
+
+**Reproduce.**
+1. Run `rbxtsc -w --writeTransformedFiles` on `tests/place` or the template.
+2. Make edits one at a time, rebuilding after each:
+   - change a field of a type an event sends;
+   - add a union member;
+   - rename a type;
+   - break a serialized type, then fix it;
+   - add a new file with a call site;
+   - move a call site to another file.
+3. After each rebuild, check every output file. Each `codec.<role>_<name>` it calls must have a
+   `codec.<role>_<name> = ` in the same file, and `codec`, `vsize`, `vwrite` and `vread` must be
+   declared wherever they are used.
+
+**If it happens again**, keep:
+- the full watch log;
+- the file's `.luau` output, and the transformed `.ts` that `--writeTransformedFiles` writes;
+- the edit made just before.
+
+**Possible fixes, depending on what the run shows:**
+- record a hoisted type only after all three functions are built, or remove it when building fails;
+- throw a file's generator away when that file's transform ends, so no state outlives one transform;
+- a build-time self-check that every `codec` field a file uses is defined in it. That turns a runtime
+  nil into a build error that names the type, whatever the cause.
+
+**Tests:**
+- the same file transformed twice in one process;
+- a type that fails at one call site, then is used successfully at another in the same file;
+- the output check from step 3, run over `tests/place` after a scripted watch session.
+
 ## Next: don't check again what a serialized member's decoder produced
 
 **The cost today.** An incoming member that travels packed is decoded from its buffer, and then its
