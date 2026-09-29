@@ -12,7 +12,9 @@ yet several fixes made the common path do a little more work so those rare cases
 ## Measured and dropped: compressing payloads with `EncodingService:CompressBuffer`
 
 `Networking.Compressed*` was built, measured in Studio on 2026-09-28, and dropped. Roblox already
-compresses what a remote carries, buffers included. A 500-item inventory is 35.0 KB on the wire as
+compresses every `buffer` a remote carries: each on its own, with Zstd at about level 1, kept only
+when smaller (measured 2026-09-29). It compresses nothing else: tables, strings, numbers and
+datatypes go out as they are, however repetitive. A 500-item inventory is 35.0 KB on the wire as
 plain tables and 3.1 KB serialized. Zstd over the packed buffer at its default level made it 3.2 KB,
 larger once the frame is counted. Across the payloads measured, Zstd at level 3 changed the bytes on
 the wire by -4% to +26% (the small event grew from 35 to 44 bytes), and it added 50 to 300 µs to
@@ -25,6 +27,58 @@ join, with a high level chosen for that member alone (a per-member level, not a 
 - A server that accepts compressed payloads from clients also has to check the decompressed size in
   the frame header before decompressing, and drop a frame of unknown size: 521 bytes can announce
   and fill 16 MiB, 13 ms of work.
+
+## Next: don't check again what a serialized member's decoder produced
+
+**The cost today.** An incoming member that travels packed is decoded from its buffer, and then its
+generated `t` guards run over the decoded values, just as they do for a raw member. This applies to
+a `Serialized` member, and to every member when `networking.serialization` is on.
+
+Measured in Studio on 2026-09-29, streaming 100 entities to one client:
+
+| Variant | Receive cost per message |
+| --- | --- |
+| `Serialized` message | about 54 µs |
+| Its decode and apply alone | about 16 µs |
+| A hand-written buffer with the same layout | about 11 µs |
+
+The gap looks like the guards, but that is inferred from the code and not isolated yet:
+- `createGenericHandler` builds `incomingGuards` for every incoming member unless
+  `disableIncomingGuards` is set;
+- the metadata keeps `t.array(t.interface({...}))` for the serialized members.
+
+**Why most of those checks are redundant.** The decoder is generated from the same type, and each
+value it produces already has that type:
+- numbers come from sized reads;
+- strings come from `readstring`;
+- arrays and maps come from counts;
+- a union member comes from its tag;
+- a literal comes from its index.
+
+A payload that doesn't fit fails the decode and is dropped as malformed before any guard runs.
+
+**What a decoded value doesn't guarantee, and must stay checked:**
+- values that travel beside the buffer in the blob list: Instances, `unknown`, and datatypes
+  without a layout;
+- refinements the decoder doesn't imply. For example, an f64 read can give NaN, which `t.number`
+  rejects. List every one before dropping a guard.
+
+**The proposal.** For a member whose arguments are decoded from a buffer, emit guards only for the
+blob-list slots and for the refinements above, and skip the rest. That could bring a `Serialized`
+member's receive cost close to a hand-written buffer's.
+
+**Measure first.** In Studio, receive the same stream with `disableIncomingGuards` on and off, to
+confirm the guards are the ~40 µs.
+
+**What must hold.** A hostile client still cannot get a value of the wrong type to a handler.
+- A wrong kind in a blob slot is refused.
+- A malformed buffer is refused.
+- NaN or any other refinement still behaves as today.
+
+**Tests:**
+- hostile payloads: wrong blob kinds, NaN, truncated and oversized counts;
+- guards emitted only for blob slots, and for members decoded from a buffer only;
+- the Studio receive-cost measurement, before and after.
 
 ## Next: a presence bitmask for optional fields (and booleans)
 
