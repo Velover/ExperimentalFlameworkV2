@@ -144,39 +144,6 @@ confirm the guards are the ~40 µs.
 - guards emitted only for blob slots, and for members decoded from a buffer only;
 - the Studio receive-cost measurement, before and after.
 
-## Next: a presence bitmask for optional fields (and booleans)
-
-**The cost today.** The serializer writes 1 presence byte for every optional field (`x?: T`), present
-or not, then the value when present; and 1 byte for every boolean
-(`packages/transformer/src/util/functions/buildSerializerFromType.ts`). For whole objects that is
-still well under Roblox's own table encoding, which spends each present field's name on the wire.
-For a sparse object it is not: a raw table skips an absent field entirely, while the serializer
-still pays its byte.
-
-**Where it bites: charm-sync patches.** `SyncPatch` makes every field of the synced state optional.
-A patch that changes one field of a 40-field player-data object costs 40 presence bytes plus the
-value, where the raw table would send only that one key and value. Player data synced this way is
-that case.
-
-**The proposal.** Give each object one bitmask, `ceil(n / 8)` bytes for its `n` optional fields,
-written before its fields: bit `i` says whether optional field `i` is present, and absent fields
-cost nothing else. The 40-field patch above drops from 40 bytes of presence to 5. Booleans can live
-in the same mask, one bit each instead of a byte. A union member index or a `T | undefined` argument
-could use it too where they sit in the same object.
-
-**What stays the same.** The layout is still known when the game is built: field order, which bit is
-which, and the mask's size are all fixed per object type, so the encoder and decoder remain straight-
-line generated code with no runtime library. Guards still run on the decoded values.
-
-**Constraints.** It changes the wire format of every serialized object with optional or boolean
-fields, so server and client must come from the same build, like any serialization change. The bit
-operations cost a little CPU on both ends; measure it.
-
-**Tests:** objects with 0, 1, 7, 8, 9 and 64 optional fields; all present, none present, and
-alternating; booleans mixed in; nested objects and arrays of objects, each with its own mask; the
-decoded values and guards unchanged; wire sizes before and after, including a charm-sync patch
-against the raw table.
-
 ## Small: a plain test when the serializer writes a boolean
 
 **Today** a boolean field or argument compiles to:
@@ -196,8 +163,7 @@ avoids `value === true`: an argument packed at its call site can be a literal, a
 
 **Fix:** give the condition the boolean type, for example `(value as boolean) ? 1 : 0`, so that
 roblox-ts emits `if _value then 1 else 0`. Check that a literal argument still compiles, and that the
-output of every other type is unchanged. This is independent of the presence bitmask above, which
-would move booleans into bits, and can ship first.
+output of every other type is unchanged.
 
 ## Next: obfuscating networking separately from everything else
 
