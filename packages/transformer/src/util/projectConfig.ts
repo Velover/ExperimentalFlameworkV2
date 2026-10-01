@@ -3,11 +3,12 @@ import fs from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
 import ts from "typescript";
+import { ProjectError } from "../classes/diagnostics";
 import { Logger } from "../classes/logger";
 import { Cache } from "./cache";
 import { coerceBySchema, loadEnv, substituteEnv, type Env } from "./env";
 import { TRANSFORMER_PACKAGE } from "./packages";
-import { getSchema, getSchemaErrors, validateSchema } from "./schema";
+import { describeSchemaErrors, getSchema, validateSchema } from "./schema";
 import type { TransformerConfig } from "../classes/transformState";
 
 /** The file every Flamework package reads its options from, found from the tsconfig's directory up to the package root. */
@@ -211,7 +212,9 @@ export function findProjectConfig(
 	if (explicitPath !== undefined) {
 		const resolved = path.resolve(projectDirectory, explicitPath);
 		if (!fs.existsSync(resolved)) {
-			throw new Error(`The Flamework config file '${explicitPath}' does not exist (looked at '${resolved}').`);
+			throw new ProjectError(
+				`The Flamework config file '${explicitPath}' does not exist (looked at '${resolved}').`,
+			);
 		}
 
 		return resolved;
@@ -253,25 +256,16 @@ export function readProjectConfig(configPath: string, env: Env = loadEnv(path.di
 	// TypeScript asserts a forward-slash path when it attaches a diagnostic to the JSON source file.
 	const { config: parsed, error } = ts.parseConfigFileTextToJson(configPath.replace(/\\/g, "/"), text);
 	if (error) {
-		throw new Error(`Failed to parse ${configPath}: ${ts.flattenDiagnosticMessageText(error.messageText, "\n")}`);
+		throw new ProjectError(
+			`Failed to parse ${configPath}: ${ts.flattenDiagnosticMessageText(error.messageText, "\n")}`,
+		);
 	}
 
 	const describe = (pointer: string) => `${configPath}: '${pointer === "" ? "/" : pointer}'`;
 	const config = coerceBySchema(substituteEnv(parsed, env, describe).value, getSchema("projectConfig"), describe);
 
 	if (!validateSchema("projectConfig", config)) {
-		const details = getSchemaErrors().map((v) => {
-			const location = v.instancePath === "" ? "/" : v.instancePath;
-			const extra =
-				v.params && "additionalProperty" in v.params
-					? ` '${v.params.additionalProperty}'`
-					: v.params && "allowedValues" in v.params && Array.isArray(v.params.allowedValues)
-						? `: ${v.params.allowedValues.map((value: unknown) => JSON.stringify(value)).join(", ")}`
-						: "";
-			return `${location} ${v.message}${extra}`;
-		});
-
-		throw new Error(`Invalid ${configPath}:\n  ${details.join("\n  ")}`);
+		throw new ProjectError(`Invalid ${configPath}:\n  ${describeSchemaErrors().join("\n  ")}`);
 	}
 
 	const projectConfig = { ...config } as ProjectConfig;
@@ -314,7 +308,7 @@ export function assertTransformerEntry(entry: TransformerEntry, configPath: stri
 		lines.push(`Remove ${unknown.join(", ")}: not a transformer option.`);
 	}
 
-	throw new Error(lines.join("\n"));
+	throw new ProjectError(lines.join("\n"));
 }
 
 /**
@@ -323,7 +317,7 @@ export function assertTransformerEntry(entry: TransformerEntry, configPath: stri
  */
 function locateProjectConfig(projectDirectory: string, rootDirectory: string, entry: TransformerEntry) {
 	if (entry.configFile !== undefined && typeof entry.configFile !== "string") {
-		throw new Error(
+		throw new ProjectError(
 			`"configFile" on the tsconfig entry for ${TRANSFORMER_PACKAGE} must be a path, relative to the tsconfig's directory.`,
 		);
 	}

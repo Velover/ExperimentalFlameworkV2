@@ -46,6 +46,11 @@ The walk is a straightforward recursive descent -- `transformFile` → `transfor
 kind under `transformations/statements` and `transformations/expressions`. A handler either rewrites
 the node or returns it unchanged.
 
+A build error at a node is a `DiagnosticError` (`classes/diagnostics.ts`), reported as a TypeScript
+diagnostic whose code is ` @flamework-experimental/transformer`. TypeScript prints it as
+`error TS @flamework-experimental/transformer: ...`, the leading space keeping the name apart from
+the `TS`, as roblox-ts does for its own (`error TS roblox-ts: ...`).
+
 Two pieces of state matter while transforming a file:
 
 - **File imports.** `state.addFileImport(file, "@rbxts/t", "t")` returns an identifier for a module,
@@ -108,6 +113,21 @@ process environment, then walks the schema alongside the value to convert string
 boolean, number and string-list slots, and only then is the schema validated. The runtime sections
 -- `core`, `networking`, `components`, `scopes` -- are written to `include/flamework/config.json`
 from `saveArtifacts`.
+
+A mistake in the project's own files is a `ProjectError` (`classes/diagnostics.ts`): a config file
+that does not parse or validate, a variable it uses that is not set, a value that does not convert,
+an option on the tsconfig entry, a game's `$` hash prefix, a `flamework.build` that cannot be used.
+`transformer.ts` catches it around the state's construction, prints it through the logger (its
+first line in red) and exits with 1, as the version check does: nothing in it is a bug, so it has no
+stack. roblox-ts prints anything else a transformer throws with its stack.
+
+The project's `flamework.build` is read only when the build reuses it: an incremental build that
+finds its tsbuildinfo, and a watcher's rebuild. A full build starts a new one without reading the
+old, so one cut short or holding a merge conflict is replaced rather than refused. A package's is
+read by every build, for the ids of its classes. One that cannot be read, is empty, is not JSON or
+does not validate stops the build naming the file and what is wrong with it, then what to do:
+delete the tsbuildinfo (an incremental build), restart the watcher, or reinstall the package it
+came with.
 
 roblox-ts constructs a fresh transformer state per program, which in watch mode is every rebuild,
 but the config and environment are used from the first read only: the process-level `Cache` keeps
@@ -895,7 +915,12 @@ of the arguments, bound to a local when it is more than a plain read; a target r
 `?.` (typed with `undefined` in it, so the marker is looked for on the rest) always gets the
 function, which returns where the chain would short-circuit -- testing the operand ahead of each
 `?.` when those are references, so the narrowing the chain gave the arguments still holds, else
-the bound target. `setCallback` on a member with
+the bound target. An argument that is more than an identifier or a literal is bound to a local as
+well, in call order, since the packing reads it more than once. An empty list (`[]`, a players list
+or a packed value) is bound as `never[]`, the type TypeScript gives the literal: roblox-ts checks
+the transformed file, where `const arg = []` is an implicit `any[]` that `noImplicitAny` refuses,
+and the parameter's own type might name a type the calling file cannot. The packing reads values
+through casts, so the annotation leaves the Luau as it was. `setCallback` on a member with
 `_flamework_fn` is registered through `_setCallback(callback, pack)`: the callback as written, and a
 generated `pack` that turns a successful result into `[payload, blobs?]`. The runtime applies `pack`
 to what the middleware chain returns (a Promise already followed), so middleware sees plain

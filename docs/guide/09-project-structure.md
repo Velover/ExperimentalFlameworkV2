@@ -268,7 +268,7 @@ written again by every plain build (`rbxtsc`), so none of it is committed:
 | `flamework.config.json` | yes | Your settings. The `$schema` line in it is a relative path into `node_modules`, the same on every machine, so it goes with the file. |
 | `.env` | yes | The defaults the config reads, with nothing secret in it. Leave build switches such as `FLAMEWORK_SCOPES` empty here: every plain build, the release one included, reads this file. |
 | `.env.local` | no | Your own overrides, and secrets such as `ROBLOX_API_KEY`. It wins over `.env`. |
-| `flamework.build` | no | The ids, the hash salt and the build seed. Every plain build writes it anew; only an incremental build or a watcher reads the old one. |
+| `flamework.build` | no | The ids, the hash salt and the build seed. Every plain build writes it anew, even over one cut short or holding a merge conflict; only an incremental build or a watcher reads the old one, and stops on one it cannot use with a message that names the file and what to do. |
 | `include/`, `include/flamework/` | no | roblox-ts copies its runtime into `include/` on every build, and the transformer writes `include/flamework/` (paths, globs, the runtime config) on every build of a game. roblox-ts's template already ignores `/include`. |
 | `out/`, `*.tsbuildinfo` | no | The compiled Luau, and an incremental build's record. |
 | Place files the build makes (`rojo build -o place.rbxl`, and the `place.patched.rbxl` or `place.<project>.rbxl` that `flamework-test` writes beside it) | no | Rebuilt from the sources. Ignore `/*.rbxl` at the root rather than every `*.rbxl`, so a place you keep in a folder on purpose, such as a test place saved from Studio, can still be committed. |

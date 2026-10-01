@@ -32,7 +32,7 @@ import {
 	TransformerEntry,
 } from "../util/projectConfig";
 import type { Env } from "../util/env";
-import { Diagnostics } from "./diagnostics";
+import { Diagnostics, ProjectError } from "./diagnostics";
 import { FLAMEWORK_SCOPE, CORE_PACKAGE } from "../util/packages";
 import { findPlaceSource, findSourcePath, type SourcePathState } from "../util/functions/findSourcePath";
 
@@ -106,6 +106,26 @@ export function buildInfoFileName(currentDirectory: string, options: ts.Compiler
 		: "the tsbuildinfo";
 }
 
+/**
+ * What to do when a package's flamework.build cannot be used: it was written when the package was
+ * built and came with it, and this build reads it for the ids of the package's classes. The package
+ * is named from the nearest package.json.
+ */
+function packageBuildInfoRemedy(file: string): string[] {
+	let name: string | undefined;
+	try {
+		const packageJson = ts.findPackageJson(path.dirname(file), ts.sys as never);
+		name = packageJson !== undefined ? JSON.parse(ts.sys.readFile(packageJson) ?? "{}").name : undefined;
+	} catch {
+		// Named by its folder instead.
+	}
+
+	const owner = typeof name === "string" ? `the package ${name}` : "the package it is in";
+	return [
+		`It came with ${owner}, which wrote it when it was built, and this build reads it for the ids of that package's classes. Reinstall the package, or build it again if it is your own.`,
+	];
+}
+
 export class TransformState {
 	public parsedCommandLine = parseCommandLine();
 	public currentDirectory = this.parsedCommandLine.project;
@@ -137,8 +157,14 @@ export class TransformState {
 	private buildInfoReused = false;
 
 	private setupBuildInfo() {
-		let baseBuildInfo = BuildInfo.fromDirectory(this.currentDirectory);
-		if (!baseBuildInfo || (Cache.isInitialCompile && isCleanBuildDirectory(this.options))) {
+		// A full build does not reuse the previous flamework.build, so it does not read it either: one
+		// that cannot be used (cut short by an interrupted write, a merge conflict) is replaced, not
+		// refused. Only an incremental build and a watcher's rebuild read it.
+		const reuses = !(Cache.isInitialCompile && isCleanBuildDirectory(this.options));
+		let baseBuildInfo = reuses
+			? BuildInfo.fromDirectory(this.currentDirectory, this.ownBuildInfoRemedy())
+			: undefined;
+		if (!baseBuildInfo) {
 			const buildInfoFile = getTsBuildInfoPath(this.options);
 			if (buildInfoFile !== undefined && ts.sys.fileExists(buildInfoFile)) {
 				// Said and stopped as the version check stops, without a stack: nothing here is a bug.
@@ -172,15 +198,27 @@ export class TransformState {
 		}
 
 		for (const candidate of candidates) {
-			const relativeCandidate = path.relative(this.currentDirectory, candidate);
-			const buildInfo = BuildInfo.fromPath(candidate);
-			if (buildInfo) {
-				Logger.infoIfVerbose(`Loaded buildInfo at ${relativeCandidate}, next id: ${buildInfo.getLatestId()}`);
-				baseBuildInfo.addBuildInfo(buildInfo);
-			} else {
-				Logger.warn(`Build info not valid at ${relativeCandidate}`);
-			}
+			const relativeCandidate = path.relative(this.currentDirectory, candidate).replace(/\\/g, "/");
+			const buildInfo = BuildInfo.fromPath(candidate, relativeCandidate, packageBuildInfoRemedy(candidate));
+			Logger.infoIfVerbose(`Loaded buildInfo at ${relativeCandidate}, next id: ${buildInfo.getLatestId()}`);
+			baseBuildInfo.addBuildInfo(buildInfo);
 		}
+	}
+
+	/**
+	 * What to do when the project's own flamework.build, read to keep the ids of the files this build
+	 * does not recompile, cannot be used: build every file again, which does not read it.
+	 */
+	private ownBuildInfoRemedy(): string[] {
+		if (getTsBuildInfoPath(this.options) !== undefined) {
+			return [
+				`This incremental build reads it to keep the ids of the files it does not recompile. Delete ${buildInfoFileName(this.currentDirectory, this.options)} and build again: a full build does not read flamework.build, and writes a new one.`,
+			];
+		}
+
+		return [
+			"This watcher reads it on every rebuild, to keep the ids of the files it does not recompile. Restart the watcher: a full build does not read flamework.build, and writes a new one.",
+		];
 	}
 
 	private setupRojo() {
@@ -491,7 +529,7 @@ export class TransformState {
 		this.buildInfo.setIdentifierPrefix(this.config.hashPrefix);
 
 		if (this.config.hashPrefix?.startsWith("$") && !this.packageName.startsWith(FLAMEWORK_SCOPE)) {
-			throw new Error(`The hashPrefix $ is used internally by Flamework`);
+			throw new ProjectError(`The hashPrefix $ is used internally by Flamework`);
 		}
 
 		Cache.isInitialCompile = false;

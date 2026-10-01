@@ -4,8 +4,9 @@ import fs from "fs";
 import crypto from "crypto";
 import { v4 as uuid } from "uuid";
 import { isPathDescendantOf } from "../util/functions/isPathDescendantOf";
-import { validateSchema } from "../util/schema";
+import { describeSchemaErrors, validateSchema } from "../util/schema";
 import { PKG_VERSION } from "../util/constants";
+import { ProjectError } from "./diagnostics";
 
 /** One use of a glob in a file, kept so that a glob matching nothing can be reported where it is written. */
 export interface GlobUse {
@@ -65,32 +66,64 @@ export interface FlameworkBuildInfo {
 	identifiers: { [key: string]: string };
 }
 
-export class BuildInfo {
-	static fromPath(fileName: string) {
-		if (!ts.sys.fileExists(fileName)) return new BuildInfo(fileName);
+/**
+ * What is wrong with a flamework.build's text, as a phrase (`it is empty`), or `undefined` when it
+ * is a build info.
+ */
+function findProblem(text: string | undefined): string | undefined {
+	if (text === undefined) return "it could not be read";
+	if (text.trim() === "") return "it is empty";
 
-		const fileContents = ts.sys.readFile(fileName);
-		if (!fileContents) throw new Error(`Could not read file ${fileName}`);
-
-		const buildInfo = JSON.parse(fileContents);
-		if (validateSchema("buildInfo", buildInfo)) {
-			return new BuildInfo(fileName, buildInfo);
-		}
-
-		throw new Error(`Found invalid build info at ${fileName}`);
+	let value: unknown;
+	try {
+		value = JSON.parse(text);
+	} catch (error) {
+		// A file cut short by an interrupted write, or holding a merge conflict, ends up here.
+		return `it is not valid JSON (${error instanceof Error ? error.message : String(error)})`;
 	}
 
-	static fromDirectory(directory: string) {
+	if (!validateSchema("buildInfo", value)) {
+		return `it does not have the shape Flamework writes (${describeSchemaErrors().join("; ")})`;
+	}
+}
+
+export class BuildInfo {
+	/**
+	 * Reads a flamework.build, or starts an empty one when there is no file. A file that cannot be
+	 * used -- unreadable, empty, cut short, not JSON, not shaped like a build info -- stops the build
+	 * with a `ProjectError` that names it as `name` and says what is wrong, followed by `remedy`:
+	 * what to do, which depends on whose file it is (see `TransformState.setupBuildInfo`).
+	 */
+	static fromPath(fileName: string, name = fileName, remedy: readonly string[] = []) {
+		if (!ts.sys.fileExists(fileName)) return new BuildInfo(fileName);
+
+		const text = ts.sys.readFile(fileName);
+		const problem = findProblem(text);
+		if (problem !== undefined) {
+			throw new ProjectError([`Flamework cannot use ${name}: ${problem}.`, ...remedy].join("\n"));
+		}
+
+		return new BuildInfo(fileName, JSON.parse(text!) as FlameworkBuildInfo);
+	}
+
+	/**
+	 * The project's own flamework.build: the one in `directory`, else the one at its package root.
+	 * `remedy` is what to do when it cannot be used; it is named relative to `directory`.
+	 */
+	static fromDirectory(directory: string, remedy?: readonly string[]) {
+		const read = (file: string) =>
+			this.fromPath(file, path.relative(directory, file).replace(/\\/g, "/") || file, remedy);
+
 		const buildInfoPath = path.join(directory, "flamework.build");
 		if (ts.sys.fileExists(buildInfoPath)) {
-			return this.fromPath(buildInfoPath);
+			return read(buildInfoPath);
 		}
 
 		const packageJsonPath = ts.findPackageJson(directory, ts.sys as never);
 		if (packageJsonPath) {
 			const buildInfoPath = path.join(path.dirname(packageJsonPath), "flamework.build");
 			if (buildInfoPath && ts.sys.fileExists(buildInfoPath)) {
-				return this.fromPath(buildInfoPath);
+				return read(buildInfoPath);
 			}
 		}
 	}

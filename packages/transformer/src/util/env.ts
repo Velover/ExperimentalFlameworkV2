@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { ProjectError } from "../classes/diagnostics";
 
 export type Env = Record<string, string | undefined>;
 
@@ -119,7 +120,7 @@ export function substituteEnv<T>(value: T, env: Env, describe: (pointer: string)
 					return fallback;
 				}
 
-				throw new Error(
+				throw new ProjectError(
 					`${describe(pointer)} uses $${name}, which is not set in the environment, .env or .env.local ` +
 						`and has no fallback. Set it, or write $\{${name}:-value} to give it one.`,
 				);
@@ -200,14 +201,14 @@ function coerceString(value: string, node: SchemaNode, where: () => string): unk
 			const lowered = value.trim().toLowerCase();
 			if (lowered === "true" || lowered === "1") return true;
 			if (lowered === "false" || lowered === "0") return false;
-			throw new Error(`${where()} is "${value}", which is not a boolean (true, false, 1 or 0).`);
+			throw new ProjectError(`${where()} is "${value}", which is not a boolean (true, false, 1 or 0).`);
 		}
 
 		case "number":
 		case "integer": {
 			const parsed = Number(value.trim());
 			if (value.trim() === "" || Number.isNaN(parsed)) {
-				throw new Error(`${where()} is "${value}", which is not a number.`);
+				throw new ProjectError(`${where()} is "${value}", which is not a number.`);
 			}
 
 			return parsed;

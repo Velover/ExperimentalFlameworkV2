@@ -9,10 +9,28 @@ import chalk from "chalk";
 import { emitTypescriptMismatch } from "./util/functions/emitTypescriptMismatch";
 import { PKG_VERSION } from "./util/constants";
 import { getTsBuildInfoPath } from "./util/functions/isCleanBuildDirectory";
+import { ProjectError } from "./classes/diagnostics";
 
 // TypeScript 5.9 stopped exporting its own `isDiagnosticWithLocation`; this is the same check.
 function isDiagnosticWithLocation(diagnostic: ts.Diagnostic): diagnostic is ts.DiagnosticWithLocation {
 	return diagnostic.file !== undefined && diagnostic.start !== undefined && diagnostic.length !== undefined;
+}
+
+/**
+ * The transform state, or a stop when the project's files cannot be used: a malformed
+ * flamework.config.json or flamework.build is said and stopped as the version check stops, without a
+ * stack, since nothing in it is a bug. roblox-ts prints a stack for anything else a transformer throws.
+ */
+function createState(program: ts.Program, context: ts.TransformationContext, entry: TransformerEntry) {
+	try {
+		return new TransformState(program, context, entry);
+	} catch (error) {
+		if (!(error instanceof ProjectError)) throw error;
+
+		const [headline, ...rest] = error.message.split("\n");
+		Logger.writeLine(chalk.red(headline), ...rest);
+		process.exit(1);
+	}
 }
 
 /**
@@ -24,7 +42,7 @@ export default function (program: ts.Program, entry?: TransformerEntry) {
 		if (Logger.verbose) Logger.write("\n");
 		f.setFactory(context.factory);
 
-		const state = new TransformState(program, context, entry ?? {});
+		const state = createState(program, context, entry ?? {});
 		const projectFlameworkVersion = state.buildInfo.getFlameworkVersion();
 		if (projectFlameworkVersion !== PKG_VERSION) {
 			// Only an incremental build reuses the previous flamework.build, and it compiles only the

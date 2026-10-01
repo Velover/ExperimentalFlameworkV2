@@ -15,6 +15,10 @@ for (const leftover of [
 	"tsconfig.incremental-probe.tsbuildinfo",
 	"src/incrementalAlpha.ts",
 	"src/incrementalBeta.ts",
+	// regressions.test.ts's flamework.build probes.
+	"tsconfig.buildinfo-probe.json",
+	"buildinfo-probe.tsbuildinfo",
+	"src/buildInfoPackage",
 ]) {
 	fs.rmSync(path.join(FIXTURE, leftover), { recursive: true, force: true });
 }

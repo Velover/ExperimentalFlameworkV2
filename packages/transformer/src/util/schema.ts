@@ -35,6 +35,23 @@ export function getSchemaErrors() {
 	return SCHEMA.errors ?? [];
 }
 
+/**
+ * The last validation's errors, one line each: where in the value (`/` for the root) and what is
+ * wrong there, with the property or the allowed values when the error names them.
+ */
+export function describeSchemaErrors(): string[] {
+	return getSchemaErrors().map((v) => {
+		const location = v.instancePath === "" ? "/" : v.instancePath;
+		const extra =
+			v.params && "additionalProperty" in v.params
+				? ` '${v.params.additionalProperty}'`
+				: v.params && "allowedValues" in v.params && Array.isArray(v.params.allowedValues)
+					? `: ${v.params.allowedValues.map((value: unknown) => JSON.stringify(value)).join(", ")}`
+					: "";
+		return `${location} ${v.message}${extra}`;
+	});
+}
+
 /** The parsed schema itself, for code that walks it alongside a value. */
 export function getSchema<K extends keyof Schemas>(key: K): object {
 	const validate = SCHEMA.getSchema(key in STANDALONE_SCHEMAS ? key : `root#/properties/${key}`);

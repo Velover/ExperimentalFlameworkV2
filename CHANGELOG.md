@@ -20,6 +20,28 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   registered twice, a value provided twice, two scoped registrations both kept). The line is taken
   with `debug.info` once per registration, at startup.
 
+### transformer
+
+#### Fixed
+
+- A literal empty list passed as a packed argument (`fire([])`, `invoke(player, [])`,
+  `except([], [])`) no longer fails a strict build with TS7034/TS7005: it is bound as `never[]`,
+  and so is an empty players list, which was bound with its parameter's type.
+- A `flamework.build` that cannot be used no longer ends the build with a stack trace. An
+  incremental build, a watcher's rebuild, or a package's file that is cut short, empty, not JSON or
+  of the wrong shape stops the build with a message naming the file, what is wrong with it and what
+  to do. A full build no longer reads the project's own `flamework.build`, which it only replaced,
+  so one cut short or holding a merge conflict is simply written anew.
+- Mistakes in the project's Flamework configuration stop the build with their message and no stack
+  trace: a `flamework.config.json` that does not parse or validate, an unset variable, a value that
+  does not convert, a `$` hash prefix in a game, and, on the tsconfig plugin entry, an option other
+  than `transform` and `configFile`, or a `configFile` that is not a string or names no file.
+
+#### Changed
+
+- Transformer errors are labelled `error TS @flamework-experimental/transformer:` (was
+  `error TS @flamework-experimental/core:`).
+
 ### networking
 
 #### Changed

@@ -18,6 +18,7 @@ const {
 } = await import("../out/util/projectConfig.js");
 const { loadEnv, parseEnvFile } = await import("../out/util/env.js");
 const { BuildInfo } = await import("../out/classes/buildInfo.js");
+const { ProjectError } = await import("../out/classes/diagnostics.js");
 const { Cache } = await import("../out/util/cache.js");
 
 const FIXTURE = path.resolve(import.meta.dir, "fixture");
@@ -194,6 +195,21 @@ describe("reading flamework.config.json", () => {
 		expect(() => readProjectConfig(file)).toThrow(/Failed to parse .*flamework\.config\.json/);
 		remove("flamework.config.json");
 	});
+
+	test("raises its errors as the project's, which the build reports without a stack", () => {
+		const file = write("flamework.config.json", `{ "transformer": `);
+		expect(() => readProjectConfig(file)).toThrow(ProjectError);
+
+		write("flamework.config.json", `{ "transformer": { "hashPrefix": 1 } }`);
+		expect(() => readProjectConfig(file)).toThrow(ProjectError);
+
+		write("flamework.config.json", `{ "transformer": { "obfuscation": "${"${FW_UNSET_FLAG}"}" } }`);
+		expect(() => readProjectConfig(file, {})).toThrow(ProjectError);
+
+		write("flamework.config.json", `{ "transformer": { "obfuscation": "maybe" } }`);
+		expect(() => readProjectConfig(file, {})).toThrow(ProjectError);
+		remove("flamework.config.json");
+	});
 });
 
 describe("environment substitution", () => {
@@ -366,6 +382,49 @@ describe("the watcher's fingerprint", () => {
 		expect(older.getIdentifierFromInternal("pkg:file@Class")).toBe("x");
 	});
 
+	test("refuse a flamework.build that cannot be used, saying why and then what to do", () => {
+		// It was a plain Error ("Found invalid build info at <path>", or JSON.parse's own), which
+		// roblox-ts prints with a stack.
+		const file = path.join(root, "broken.build");
+		const valid = JSON.stringify({ version: 1, flameworkVersion: "2.0.0", identifiers: {} }, undefined, "\t");
+		const refusal = (text: string) => {
+			fs.writeFileSync(file, text);
+			try {
+				BuildInfo.fromPath(file, "broken.build", ["Do this."]);
+			} catch (error) {
+				expect(error).toBeInstanceOf(ProjectError);
+				return (error as Error).message;
+			}
+		};
+
+		try {
+			// Cut short, as an interrupted write leaves it.
+			expect(refusal(valid.slice(0, 30))).toMatch(
+				/^Flamework cannot use broken\.build: it is not valid JSON \(.+\)\.\nDo this\.$/,
+			);
+			expect(refusal(`<<<<<<< HEAD\n${valid}\n=======\n${valid}\n>>>>>>> other\n`)).toMatch(
+				/^Flamework cannot use broken\.build: it is not valid JSON \(.+\)\.\nDo this\.$/,
+			);
+			expect(refusal("")).toBe("Flamework cannot use broken.build: it is empty.\nDo this.");
+			expect(refusal(`{ "version": "1", "identifiers": [] }`)).toBe(
+				"Flamework cannot use broken.build: it does not have the shape Flamework writes (/ must have required property 'flameworkVersion').\nDo this.",
+			);
+			expect(refusal("[1, 2]")).toBe(
+				"Flamework cannot use broken.build: it does not have the shape Flamework writes (/ must be object).\nDo this.",
+			);
+			expect(refusal(`{ "version": 1, "flameworkVersion": "2.0.0", "identifiers": { "a": 1 } }`)).toBe(
+				"Flamework cannot use broken.build: it does not have the shape Flamework writes (/identifiers/a must be string).\nDo this.",
+			);
+
+			// A valid one is read; one that is not there starts empty.
+			expect(refusal(valid)).toBeUndefined();
+			fs.rmSync(file);
+			expect(BuildInfo.fromPath(file).getLatestId()).toBe(1);
+		} finally {
+			fs.rmSync(file, { force: true });
+		}
+	});
+
 	test("keep a build seed for as long as the build info lives, and start a new one with a new build info", () => {
 		// The seed follows the salt's lifecycle: a plain build recreates the build info, a watcher
 		// keeps reading the saved one. Obfuscated callsite uuids take their namespace from it.
@@ -525,6 +584,10 @@ describe("the tsconfig entry", () => {
 });
 
 describe("the tsconfig entry, through rbxtsc", () => {
+	/** A line of a stack trace, which a mistake in the project's files is reported without. */
+	const STACK = /^\s+at .+:\d+:\d+\)?$/m;
+	const plain = (output: string) => output.replace(/\x1b\[[0-9;]*m/g, "");
+
 	test("an option on the entry fails the build and names the file to move it to", () => {
 		const result = compileWithEntry({ transform: "@flamework-experimental/transformer", obfuscation: true });
 
@@ -532,7 +595,41 @@ describe("the tsconfig entry, through rbxtsc", () => {
 		expect(result.output).toContain(
 			`Move 'obfuscation' to the "transformer" section of ${path.join(FIXTURE, "flamework.config.json")}.`,
 		);
+		expect(plain(result.output)).not.toMatch(STACK);
 	});
+
+	test("a config file that does not parse or validate fails the build without a stack", () => {
+		// It was a plain Error, which roblox-ts printed with a stack.
+		const file = path.join(FIXTURE, "probe-config", "flamework.config.json");
+		const build = (text: string) => {
+			fs.writeFileSync(file, text);
+			const result = compileWithEntry({
+				transform: "@flamework-experimental/transformer",
+				configFile: "probe-config/flamework.config.json",
+			});
+			expect(result.status).not.toBe(0);
+			const output = plain(result.output);
+			expect(output).not.toMatch(STACK);
+			expect(output).not.toContain("Node.js v");
+			return output;
+		};
+
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		try {
+			expect(build(`{ "transformer": { "hashPrefix": 1 } }`)).toContain(
+				`[Flamework]: Invalid ${file}:\n[Flamework]:   /transformer/hashPrefix must be string\n`,
+			);
+			expect(build(`{ "transformer": { `)).toContain(`[Flamework]: Failed to parse ${file}: '}' expected.\n`);
+			expect(build(`{ "transformer": { "obfuscation": "${"${FW_PROBE_UNSET}"}" } }`)).toContain(
+				"uses $FW_PROBE_UNSET, which is not set in the environment, .env or .env.local and has no fallback.",
+			);
+			expect(build(`{ "transformer": { "hashPrefix": "$probe" } }`)).toContain(
+				"[Flamework]: The hashPrefix $ is used internally by Flamework\n",
+			);
+		} finally {
+			fs.rmSync(path.dirname(file), { recursive: true, force: true });
+		}
+	}, 300_000);
 
 	test("the loader's keys and configFile build as before", () => {
 		const result = compileWithEntry({

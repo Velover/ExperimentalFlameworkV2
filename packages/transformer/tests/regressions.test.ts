@@ -9,6 +9,7 @@ import {
 	compileFixtureFresh,
 	compileFixtureWithEnv,
 	compileProbe,
+	compileProbes,
 	emitted,
 	normalize,
 } from "./compile";
@@ -864,4 +865,250 @@ export class NestedComponent extends BaseComponent<{}, Model & { Core: Folder & 
 		expect(result.status).not.toBe(0);
 		expect(result.output).toContain("which is not a direct child of this component");
 	});
+});
+
+describe("literal arguments at a packed call site", () => {
+	// A packed argument that is not an identifier or a literal is bound to a local first, as it is
+	// read more than once. `const arg = []` is an implicit `any[]`, which roblox-ts's check of the
+	// transformed file rejected under `noImplicitAny` (TS7034, TS7005); only the players list ahead
+	// of the payload was bound with a type. The members' types live in a file the calls do not import
+	// from, and one of them is kept to its module, so a binding typed by the parameter would name a
+	// type the calling file cannot.
+	const types = `import { Networking } from "@flamework-experimental/networking";
+
+export interface Item {
+	x: number;
+}
+
+interface Hidden {
+	y: string;
+}
+
+interface ProbeServerEvents {
+	items(items: Item[]): void;
+	hidden(items: Hidden[]): void;
+	serializedItems: Networking.SerializedReliable<(items: Item[]) => void>;
+	serializedHidden: Networking.SerializedReliable<(items: Hidden[]) => void>;
+	pair(count: number, items: Item[]): void;
+	optional(items?: Item[]): void;
+	tuple(values: [number?]): void;
+	either(value: string | Item[]): void;
+	lists(...lists: number[][]): void;
+	nested(value: { list: number[]; map?: Map<string, number> }): void;
+	record(value: Record<string, number>): void;
+	map(value: Map<string, number>): void;
+	grid(rows: number[][]): void;
+	readonlyItems(items: ReadonlyArray<Item>): void;
+}
+
+interface ProbeClientEvents {
+	items(items: Item[]): void;
+	serializedItems: Networking.SerializedReliable<(items: Item[]) => void>;
+}
+
+interface ProbeServerFunctions {
+	lookup(items: Item[]): number;
+	serializedLookup: Networking.Serialized<(items: Item[]) => number>;
+}
+
+interface ProbeClientFunctions {
+	ask(items: Item[]): number;
+	serializedAsk: Networking.Serialized<(items: Item[]) => number>;
+}
+
+const events = Networking.createEvent<ProbeServerEvents, ProbeClientEvents>();
+const functions = Networking.createFunction<ProbeServerFunctions, ProbeClientFunctions>();
+export const client = events.createClient({});
+export const server = events.createServer({});
+export const clientFunctions = functions.createClient({});
+export const serverFunctions = functions.createServer({});
+`;
+
+	const calls = `import { client, clientFunctions, server, serverFunctions } from "./literalArgTypes";
+
+export function clientSends(flag: boolean, rest: number[][]) {
+	client.items.fire([]);
+	client.items([]);
+	client.items.fire(([]));
+	client.items?.fire([]);
+	client.items.fire(flag ? [] : [{ x: 1 }]);
+	client.hidden.fire([]);
+	client.serializedItems.fire([]);
+	client.serializedHidden.fire([]);
+	client.pair.fire(1, []);
+	client.optional.fire([]);
+	client.optional.fire();
+	client.tuple.fire([]);
+	client.either.fire([]);
+	client.lists.fire([], [], []);
+	client.lists.fire([], ...rest);
+	client.nested.fire({ list: [] });
+	client.nested.fire({ list: [], map: new Map() });
+	client.record.fire({});
+	client.map.fire(new Map());
+	client.grid.fire([[]]);
+	client.readonlyItems.fire([]);
+}
+
+export function serverSends(player: Player) {
+	server.items.fire(player, []);
+	server.items.fire([], []);
+	server.items.broadcast([]);
+	server.items.except([], []);
+	server.items(player, []);
+	server.serializedItems.fire([player], []);
+}
+
+export function invokes(player: Player) {
+	clientFunctions.lookup.invoke([]);
+	clientFunctions.serializedLookup.invoke([]);
+	clientFunctions.serializedLookup.invokeWithTimeout(1, []);
+	serverFunctions.ask.invoke(player, []);
+	serverFunctions.serializedAsk.invokeWithTimeout(player, 1, []);
+}
+
+export const deferred = () => client.serializedItems.fire([]);
+`;
+
+	const compile = (env: Record<string, string>) =>
+		compileProbes({ literalArgTypes: types, literalArgCalls: calls }, env);
+	const plain = (output: string) => output.replace(/\x1b\[[0-9;]*m/g, "");
+	const body = (source: string, name: string) =>
+		source.match(new RegExp(`local function ${name}\\([^)]*\\)\\n[\\s\\S]*?\\nend\\n`))?.[0] ?? "";
+
+	test("compile under strict with networking.serialization on, each empty list bound as a table", () => {
+		const result = compile({});
+
+		expect(plain(result.output)).not.toContain("error TS");
+		expect(result.status).toBe(0);
+		const emit = result.files.get("literalArgCalls")!;
+		// `client.items.fire([])`: the list is a local of its own, packed and sent.
+		expect(body(emit, "clientSends")).toMatch(/^\tlocal arg\w* = \{\}\n[\s\S]*?client\.items:_fire\(buf\w*\)/m);
+		// A players list ahead of an empty payload list: both are bound.
+		expect(body(emit, "serverSends")).toMatch(
+			/local target\w* = \{\}\n\s*local arg\w* = \{\}\n[\s\S]*?server\.items:_fire\(target\w*, buf\w*\)/,
+		);
+		expect(body(emit, "invokes")).toMatch(/clientFunctions\.lookup:_invoke\(buf\w*\)/);
+		expect(body(emit, "invokes")).toMatch(/serverFunctions\.ask:_invoke\(player, buf\w*\)/);
+	}, 120_000);
+
+	test("compile under strict with networking.serialization off, where only Serialized members pack", () => {
+		const result = compile({ FLAMEWORK_FIXTURE_SERIALIZATION: "false" });
+
+		expect(plain(result.output)).not.toContain("error TS");
+		expect(result.status).toBe(0);
+		const emit = result.files.get("literalArgCalls")!;
+		expect(body(emit, "clientSends")).toMatch(/client\.items:fire\(\{\}\)/);
+		expect(body(emit, "clientSends")).toMatch(
+			/local arg\w* = \{\}\n[\s\S]*?client\.serializedHidden:_fire\(buf\w*\)/,
+		);
+		expect(body(emit, "invokes")).toMatch(/clientFunctions\.serializedLookup:_invokeWithTimeout\(1, buf\w*\)/);
+	}, 120_000);
+});
+
+describe("a flamework.build that cannot be used", () => {
+	// A malformed flamework.build was a stack trace (JSON.parse's SyntaxError, or a plain "Found invalid
+	// build info at <path>"), and a full build refused one it was about to replace without reading.
+	const RBXTSC = path.resolve(import.meta.dir, "../../../node_modules/roblox-ts/out/CLI/cli.js");
+	const own = path.join(FIXTURE, "flamework.build");
+	const STACK = /^\s+at .+:\d+:\d+\)?$/m;
+	const plain = (output: string) => output.replace(/\x1b\[[0-9;]*m/g, "");
+	const VERSION = JSON.parse(fs.readFileSync(path.resolve(import.meta.dir, "../package.json"), "utf8")).version;
+
+	const build = (args: string[] = []) => {
+		const result = spawnSync("node", [RBXTSC, ...args], { cwd: FIXTURE, encoding: "utf8" });
+		return { status: result.status, output: plain(`${result.stdout ?? ""}${result.stderr ?? ""}`) };
+	};
+	const restore = () => {
+		const restored = compileFixtureFresh();
+		if (restored.status !== 0) throw new Error(`fixture failed to restore:\n${restored.output}`);
+	};
+
+	test("is replaced by a full build, which does not read it", () => {
+		try {
+			fs.writeFileSync(own, `{ "version": 1, "identifiers": `);
+			const result = build();
+
+			expect(result.output).not.toContain("flamework.build");
+			expect(result.status).toBe(0);
+			expect(JSON.parse(fs.readFileSync(own, "utf8")).flameworkVersion).toBe(VERSION);
+		} finally {
+			restore();
+		}
+	}, 300_000);
+
+	test("stops an incremental build, which reuses it, naming it and the file to delete", () => {
+		const probe = path.join(FIXTURE, "tsconfig.buildinfo-probe.json");
+		const tsBuildInfo = path.join(FIXTURE, "buildinfo-probe.tsbuildinfo");
+		const { config } = ts.readConfigFile(path.join(FIXTURE, "tsconfig.json"), ts.sys.readFile);
+		config.compilerOptions.incremental = true;
+		config.compilerOptions.tsBuildInfoFile = "buildinfo-probe.tsbuildinfo";
+		const cleanUp = () => [probe, tsBuildInfo].forEach((file) => fs.rmSync(file, { force: true }));
+
+		const REMEDY =
+			"[Flamework]: This incremental build reads it to keep the ids of the files it does not recompile. Delete buildinfo-probe.tsbuildinfo and build again: a full build does not read flamework.build, and writes a new one.\n";
+		const refused = (text: string) => {
+			fs.writeFileSync(own, text);
+			const result = build(["-p", probe]);
+			expect(result.status).not.toBe(0);
+			expect(result.output).not.toMatch(STACK);
+			expect(result.output).not.toContain("Node.js v");
+			return result.output;
+		};
+
+		cleanUp();
+		fs.writeFileSync(probe, JSON.stringify(config, undefined, "\t"));
+		try {
+			// The first build has no tsbuildinfo to go by: a full one.
+			expect(build(["-p", probe]).status).toBe(0);
+			expect(fs.existsSync(tsBuildInfo)).toBe(true);
+			const written = fs.readFileSync(own, "utf8");
+
+			const cutShort = refused(written.slice(0, 200));
+			expect(cutShort).toMatch(
+				/\[Flamework\]: Flamework cannot use flamework\.build: it is not valid JSON \(.+\)\.\n/,
+			);
+			expect(cutShort).toContain(REMEDY);
+
+			expect(refused("")).toContain(`[Flamework]: Flamework cannot use flamework.build: it is empty.\n${REMEDY}`);
+			expect(refused(`{ "version": "1", "identifiers": [] }`)).toContain(
+				`[Flamework]: Flamework cannot use flamework.build: it does not have the shape Flamework writes (/ must have required property 'flameworkVersion').\n${REMEDY}`,
+			);
+
+			// One from another version is read, and refused as before.
+			const older = JSON.parse(written);
+			older.flameworkVersion = "2.0.0-alpha.1";
+			const outdated = refused(JSON.stringify(older));
+			expect(outdated).toContain("[Flamework]: Project was compiled on different version of Flamework.\n");
+			expect(outdated).toContain("Delete buildinfo-probe.tsbuildinfo and build again");
+			expect(outdated).toContain("Previous Flamework Version: 2.0.0-alpha.1");
+		} finally {
+			cleanUp();
+			restore();
+		}
+	}, 600_000);
+
+	test("stops a build that reads a package's, naming the package", () => {
+		const folder = path.join(FIXTURE, "src", "buildInfoPackage");
+		try {
+			fs.mkdirSync(folder, { recursive: true });
+			fs.writeFileSync(path.join(folder, "package.json"), `{ "name": "@probe/package", "version": "1.0.0" }`);
+			fs.writeFileSync(path.join(folder, "probe.ts"), "export const value = 1;\n");
+			fs.writeFileSync(path.join(folder, "flamework.build"), `{ "version": 1`);
+
+			const result = build();
+			expect(result.status).not.toBe(0);
+			expect(result.output).not.toMatch(STACK);
+			expect(result.output).toMatch(
+				/\[Flamework\]: Flamework cannot use src\/buildInfoPackage\/flamework\.build: it is not valid JSON \(.+\)\.\n/,
+			);
+			expect(result.output).toContain(
+				"[Flamework]: It came with the package @probe/package, which wrote it when it was built, and this build reads it for the ids of that package's classes. Reinstall the package, or build it again if it is your own.\n",
+			);
+		} finally {
+			fs.rmSync(folder, { recursive: true, force: true });
+			fs.rmSync(path.join(FIXTURE, "out", "buildInfoPackage"), { recursive: true, force: true });
+			restore();
+		}
+	}, 300_000);
 });

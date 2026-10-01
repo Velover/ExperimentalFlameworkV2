@@ -641,18 +641,22 @@ describe("globals the caller's declarations hide", () => {
 		const message = (name: string, line: number) =>
 			`Flamework's generated code here uses the global '${name}', which the declaration of '${name}' on line ${line} hides. Rename that declaration.`;
 
-		expect(output).toContain(`genHideArray.ts:6:2 - error TS @flamework-experimental/core: ${message("Array", 5)}`);
 		expect(output).toContain(
-			`genHideTypeIs.ts:5:2 - error TS @flamework-experimental/core: ${message("typeIs", 4)}`,
+			`genHideArray.ts:6:2 - error TS @flamework-experimental/transformer: ${message("Array", 5)}`,
+		);
+		expect(output).toContain(
+			`genHideTypeIs.ts:5:2 - error TS @flamework-experimental/transformer: ${message("typeIs", 4)}`,
 		);
 		// A module-level \`buffer\` hides the global from the alias too.
 		expect(output).toContain(
-			`genHideModuleBuffer.ts:6:2 - error TS @flamework-experimental/core: ${message("buffer", 4)}`,
+			`genHideModuleBuffer.ts:6:2 - error TS @flamework-experimental/transformer: ${message("buffer", 4)}`,
 		);
-		expect(output).toContain(`genHideEnum.ts:6:2 - error TS @flamework-experimental/core: ${message("Enum", 5)}`);
+		expect(output).toContain(
+			`genHideEnum.ts:6:2 - error TS @flamework-experimental/transformer: ${message("Enum", 5)}`,
+		);
 		// The check helper at the top of the file calls `warn` (mode warn), which a module-level function hides.
 		expect(output).toContain(
-			`genHideModuleWarn.ts:9:2 - error TS @flamework-experimental/core: ${message("warn", 5)}`,
+			`genHideModuleWarn.ts:9:2 - error TS @flamework-experimental/transformer: ${message("warn", 5)}`,
 		);
 	});
 });

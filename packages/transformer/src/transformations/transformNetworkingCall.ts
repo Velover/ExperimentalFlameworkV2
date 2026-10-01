@@ -241,7 +241,7 @@ function transformSend(
 	const chained = guardOptionalChain(state, statements, target, optionalTarget);
 	const transformedTarget = chained.target;
 	const leadingValues = leading.map((argument, index) =>
-		bindArgument(statements, argument, "target", emptyListAnnotation(state, node.arguments[index])),
+		bindArgument(statements, argument, "target", emptyListAnnotation(node.arguments[index])),
 	);
 
 	const site = { name: memberName(state, target) };
@@ -252,7 +252,9 @@ function transformSend(
 		statements.push(f.variableStatement(table, f.as(f.array(packed, false), arrayType())));
 		encoding = buildInlineEncoding(state, node, listType, { table }, site);
 	} else {
-		const values = packed.map((argument) => bindArgument(statements, argument, "arg"));
+		const values = packed.map((argument, index) =>
+			bindArgument(statements, argument, "arg", emptyListAnnotation(node.arguments[restIndex + index])),
+		);
 		encoding = buildInlineEncoding(state, node, listType, values, site);
 	}
 
@@ -694,20 +696,20 @@ function bindArgument(
 }
 
 /**
- * `const target = []` is an implicit `any[]`, which a project compiled with `noImplicitAny` rejects: an
- * empty list (`fire([], value)`) is bound with the type its context gave it.
+ * `const arg = []` is an implicit `any[]` (a local TypeScript lets evolve with what is pushed into it),
+ * which a project compiled with `noImplicitAny` rejects: an empty list, as a leading argument
+ * (`fire([], value)`) or a packed one (`fire([])`), parenthesized or not, is bound as `never[]`, the
+ * type TypeScript gives the literal itself. The parameter's type is not used: it may name a type the
+ * calling file cannot, one it never imports or one its module keeps to itself. The encoding reads
+ * the value through casts, so the annotation changes nothing in the output.
  */
-function emptyListAnnotation(state: TransformState, original: ts.Expression | undefined): ts.TypeNode | undefined {
-	if (!original || !ts.isArrayLiteralExpression(original) || original.elements.length > 0) return;
+function emptyListAnnotation(original: ts.Expression | undefined): ts.TypeNode | undefined {
+	if (!original) return;
 
-	const type = state.typeChecker.getContextualType(original);
-	if (!type) return;
+	const list = ts.skipParentheses(original);
+	if (!ts.isArrayLiteralExpression(list) || list.elements.length > 0) return;
 
-	return state.typeChecker.typeToTypeNode(
-		type,
-		original,
-		ts.NodeBuilderFlags.IgnoreErrors | ts.NodeBuilderFlags.NoTruncation,
-	);
+	return ts.factory.createArrayTypeNode(f.keywordType(ts.SyntaxKind.NeverKeyword));
 }
 
 function arrayType() {
