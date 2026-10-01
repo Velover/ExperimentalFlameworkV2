@@ -24,13 +24,19 @@ export function createClientMethod(
 		},
 
 		// With serialization on, the transformer rewrites the methods above into these with the packed
-		// list: `(payload, blobs?)`, or nothing at all for a list that carries nothing.
-		_invoke(...packed) {
-			return this.invokeWithTimeout(config.defaultTimeout, ...packed);
+		// list: `(payload, blobs?)`, or nothing at all for a list that carries nothing. A blob list
+		// that came out empty is left off, not sent as nil: a table costs bytes on the wire, a nil
+		// one, a missing argument none, and the receiver reads a missing list as an empty one.
+		_invoke(payload, blobs) {
+			return this._invokeWithTimeout(config.defaultTimeout, payload, blobs);
 		},
 
-		_invokeWithTimeout(timeout, ...packed) {
-			return this.invokeWithTimeout(timeout, ...packed);
+		_invokeWithTimeout(timeout, payload, blobs) {
+			if (blobs === undefined || next(blobs)[0] === undefined) {
+				return this.invokeWithTimeout(timeout, payload);
+			}
+
+			return this.invokeWithTimeout(timeout, payload, blobs);
 		},
 
 		setCallback(callback) {

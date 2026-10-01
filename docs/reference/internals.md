@@ -908,8 +908,14 @@ intrinsic for the same reason: every member of an event network, in both directi
 check wherever a handler of the network is created, including one the handler only sends;
 the receive pipeline decodes under `pcall` before the guards and the middleware chain, so they see
 plain values, and a decode failure is reported through `onMalformed`. Functions keep the request id and
-process result as plain arguments and pack only the payload after them. Apart from those result
-packers, no encoder for an argument list exists as a runtime value. A file's table of hoisted
+process result as plain arguments and pack only the payload after them. A call site hands the runtime
+a blob list whenever the types have blob slots, filled or not; the runtime leaves an empty one off
+the remote (`next(blobs) == nil`), in `_fire`/`_broadcast`/`_except`, `_invokeWithTimeout` (which
+`_invoke` goes through) and a function receiver's packed result, so the remote carries `(payload)`
+rather than `(payload, {})`. The receiving side decodes a missing list as an empty one (`NO_BLOBS`
+in `middleware/processor.luau`). Only the packed paths do this: a raw member's trailing empty table
+is a value, and is sent. Apart from those result packers, no encoder for an argument list exists as
+a runtime value. A file's table of hoisted
 functions (`codec`, below) still holds the `w_` writer of each type it hoists, even in a file that
 only decodes.
 

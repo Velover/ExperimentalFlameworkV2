@@ -351,8 +351,12 @@ Values that have no buffer representation travel next to the buffer, in a **blob
 Instances, `unknown`, `object`, `defined`, class instances, EnumItems, and the Roblox datatypes
 without a layout (anything roblox-ts declares, or anything with a `_nominal_` marker). The buffer
 holds each one's index in that list as a u32. So a nil where an Instance was expected costs four
-bytes and shifts nothing, and the receiving guard rejects it like any other wrong value. The blob
-list is `nil` when the types have no such values, and a table (possibly empty) when they do.
+bytes and shifts nothing, and the receiving guard rejects it like any other wrong value. The remote
+carries the blob list only when it holds something. When the types have no such values, or the
+values sent fill none of their slots (an optional Instance left out, an empty `defined[]`), the
+buffer is sent alone: a missing argument costs nothing, where an empty table costs two bytes and a
+`nil` one. `Flamework.createSerializer`'s `serialize` returns the list as its second value: `nil`
+when the types have no such values, and a table (possibly empty) when they do.
 
 Collections nest freely: a `Map<Instance, Array<Set<string>>>` is a varint count of blob keys, each
 followed by its array.

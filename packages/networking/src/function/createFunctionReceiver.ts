@@ -102,14 +102,21 @@ export function createFunctionReceiver(options: CreateFunctionReceiverOptions): 
 	 * With serialization, a successful value leaves packed as `[payload, blobs?]`, or nothing at all
 	 * when the result type carries nothing (`void`); errors always go back as they are. It is packed
 	 * here, after the middleware, so a value a middleware returns is packed like the callback's own.
+	 * A blob list that came out empty is left off, as a request's is (see `functions/`).
 	 */
 	const respond = (player: Player | undefined, id: unknown, processResult: unknown, value?: unknown) => {
 		if (processResult === true && packResult) {
 			const packed = packResult(value) as [buffer, Array<defined> | undefined] | undefined;
-			if (packed !== undefined) {
-				event.fireEither(player, id, processResult, packed[0], packed[1]);
-			} else {
+			if (packed === undefined) {
 				event.fireEither(player, id, processResult);
+				return;
+			}
+
+			const blobs = packed[1];
+			if (blobs === undefined || next(blobs)[0] === undefined) {
+				event.fireEither(player, id, processResult, packed[0]);
+			} else {
+				event.fireEither(player, id, processResult, packed[0], blobs);
 			}
 		} else {
 			event.fireEither(player, id, processResult, value);

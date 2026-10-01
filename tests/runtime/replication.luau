@@ -104,6 +104,15 @@ local function lastSent(remote: any): { n: number, [number]: any }
 	return sent[#sent].args
 end
 
+--- `kind:n` for each message a remote sent, `n` being every argument it was handed (`table.pack`).
+local function argumentCounts(remote: any): { string }
+	local counts = {}
+	for _, message in instances.sent(remote) do
+		table.insert(counts, `{message.kind}:{message.args.n}`)
+	end
+	return counts
+end
+
 --- Every entry of `actual` equals `expected`, in order.
 local function assertList(actual: { string }, expected: { string }, what: string)
 	assertEqual(#actual, #expected, what .. " count")
@@ -301,6 +310,62 @@ local cases: { { name: string, run: () -> () } } = {
 			assertEqual(status2, "Resolved", "server-to-client requests")
 			assertEqual(answer, "why:3:3:6", "result")
 			assertTrue(type(lastSent(findRemote(clientEnv, "@serializedAsk"))[3]) == "buffer", "a packed result from the client")
+		end,
+	},
+	{
+		-- A packed list whose types can hold an Instance leaves the blob list off when the values
+		-- filled none of its slots: the payload crosses alone, and the other realm reads the missing
+		-- list as an empty one. A list that holds something crosses as before.
+		name = "an empty blob list is left off the wire both ways, and a full one still crosses",
+		run = function()
+			local where = instances.new("Folder")
+			where.Name = "Mark"
+
+			local clientEvents = findRemote(clientEnv, "serializedMark")
+			instances.clearSent(clientEvents)
+			client.fireMarkClient(where)
+			flush()
+			assertList(server.drain(), { "serializedMark:bare@none", "serializedMark:placed@Mark" }, "events the server received")
+			assertList(argumentCounts(clientEvents), { "FireServer:1", "FireServer:2" }, "the client's events")
+			assertEqual(lastSent(clientEvents)[2][1], where, "the Instance in the blob list")
+
+			local serverEvents = findRemote(serverEnv, "serializedMarked")
+			instances.clearSent(serverEvents)
+			server.fireMarkServer(link.serverPlayer, where)
+			flush()
+			assertList(client.drain(), {
+				"serializedMarked:all@none",
+				"serializedMarked:all@Mark",
+				"serializedMarked:one@none",
+				"serializedMarked:one@Mark",
+			}, "events the client received")
+			assertList(
+				argumentCounts(serverEvents),
+				{ "FireAllClients:1", "FireAllClients:2", "FireClient:1", "FireClient:2" },
+				"the server's events"
+			)
+
+			-- A request is `(id, payload, blobs?)` and a result `(id, true, payload, blobs?)`, both on the
+			-- remote the request was sent on.
+			local clientRequests = findRemote(clientEnv, "$serializedFind")
+			local serverResults = findRemote(serverEnv, "$serializedFind")
+			instances.clearSent(clientRequests)
+			instances.clearSent(serverResults)
+			local status, found = client.invokeFindServer(where):awaitStatus()
+			assertEqual(status, "Resolved", "client-to-server requests")
+			assertList(found, { "none", "Mark" }, "results")
+			assertList(argumentCounts(clientRequests), { "FireServer:2", "FireServer:3" }, "the client's requests")
+			assertList(argumentCounts(serverResults), { "FireClient:3", "FireClient:4" }, "the server's results")
+
+			local serverRequests = findRemote(serverEnv, "@serializedFound")
+			local clientResults = findRemote(clientEnv, "@serializedFound")
+			instances.clearSent(serverRequests)
+			instances.clearSent(clientResults)
+			local status2, found2 = server.invokeFoundClient(link.serverPlayer, where):awaitStatus()
+			assertEqual(status2, "Resolved", "server-to-client requests")
+			assertList(found2, { "none", "Mark" }, "results")
+			assertList(argumentCounts(serverRequests), { "FireClient:2", "FireClient:3" }, "the server's requests")
+			assertList(argumentCounts(clientResults), { "FireServer:3", "FireServer:4" }, "the client's results")
 		end,
 	},
 	-- The shapes whose generated code once failed to compile or wrote the wrong thing (see

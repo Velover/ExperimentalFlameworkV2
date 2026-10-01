@@ -20,6 +20,18 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   registered twice, a value provided twice, two scoped registrations both kept). The line is taken
   with `debug.info` once per registration, at startup.
 
+### networking
+
+#### Changed
+
+- A packed member (`networking.serialization`, or `Networking.Serialized*`) no longer sends an
+  empty blob list. When the argument types can hold an Instance or another blob but the values sent
+  hold none (an optional Instance left out, an empty `defined[]`), the event, the function request
+  and the function's result carry the buffer alone (an event sends `(payload)` instead of
+  `(payload, {})`; a request `(id, payload)`, a result `(id, true, payload)`), which saves the two
+  bytes the empty table cost on every such message. Receivers already read a missing list as
+  empty, and `Flamework.createSerializer`'s `serialize` still returns the list.
+
 ## 2026-10-01: core, components, networking and testing 2.0.0-alpha.5; transformer 2.0.0-alpha.6
 
 ### Upgrade notes

@@ -26,6 +26,9 @@ interface Bidirectional {
 	/** A guard that the decoded values have to pass, and middleware that records what it is given. */
 	serializedPart: Networking.SerializedReliable<(part: Part, label: string) => void>;
 
+	/** Its types can hold an Instance, which a call may leave out; middleware records what it is given. */
+	serializedMaybe: Networking.SerializedReliable<(label: string, where?: Instance) => void>;
+
 	/** A plain member whose argument is a tuple with a rest element. */
 	tagged(entry: [number, ...string[]]): void;
 
@@ -41,17 +44,31 @@ interface Bidirectional {
 
 interface BidirectionalFunctions {
 	serializedLookup: Networking.Serialized<(ids: number[]) => Item[]>;
+
+	/** A request and a result that can each hold an Instance or leave it out; middleware records the request. */
+	serializedFind: Networking.Serialized<(label: string, where?: Instance) => Instance | undefined>;
 }
 
 const GlobalEvents = Networking.createEvent<Bidirectional, Bidirectional>();
 const GlobalFunctions = Networking.createFunction<BidirectionalFunctions, BidirectionalFunctions>();
 
+/**
+ * A message a remote sent. `args` is what the harness's `table.pack` made of the call, so `n` is
+ * `select("#", ...)`: every argument the remote was handed, a trailing nil included.
+ */
+interface Recorded {
+	kind: string;
+	player?: Instance;
+	args: Array<unknown> & { readonly n: number };
+}
+
 declare const __harness: {
-	sent: (remote: Instance) => Array<{ kind: string; player?: Instance; args: Array<unknown> }>;
+	sent: (remote: Instance) => Array<Recorded>;
 	clearSent: (remote: Instance) => void;
 	findRemote: (id: string) => Instance | undefined;
 	findRemoteById: (id: string) => Instance | undefined;
 	newPlayer: (name: string) => Instance;
+	removePlayer: (player: Instance) => void;
 	flush: () => void;
 	asRealm: (realm: "Server" | "Client", callback: () => void) => void;
 };
@@ -81,6 +98,28 @@ const renameResult: Networking.FunctionMiddleware<[ids: number[]], Item[]> = (pr
 	};
 };
 
+/** What the middleware on `serializedMaybe` and `serializedFind` was handed, as `label@where`. */
+const maybeSaw = new Array<string>();
+function describeWhere(label: string, where?: Instance) {
+	return `${label}@${where !== undefined ? where.Name : "none"}`;
+}
+
+const recordMaybe: Networking.EventMiddleware<[label: string, where?: Instance]> = (processNext) => {
+	return (player, label, where) => {
+		maybeSaw.push(describeWhere(label, where));
+		return processNext(player, label, where);
+	};
+};
+
+const recordFind: Networking.FunctionMiddleware<[label: string, where?: Instance], Instance | undefined> = (
+	processNext,
+) => {
+	return (player, label, where) => {
+		maybeSaw.push(`find:${describeWhere(label, where)}`);
+		return processNext(player, label, where);
+	};
+};
+
 const badRequests = new Array<{ argIndex: number; argValue: unknown }>();
 GlobalEvents.registerHandler("onBadRequest", (_player, data) => badRequests.push(data));
 
@@ -100,16 +139,32 @@ function handlers() {
 	if (events !== undefined && functions !== undefined) return { events, functions };
 
 	if (isServer) {
-		events = { server: GlobalEvents.createServer({ middleware: { serializedPart: [recordPart] } }) };
-		functions = { server: GlobalFunctions.createServer({ middleware: { serializedLookup: [renameResult] } }) };
+		events = {
+			server: GlobalEvents.createServer({
+				middleware: { serializedPart: [recordPart], serializedMaybe: [recordMaybe] },
+			}),
+		};
+		functions = {
+			server: GlobalFunctions.createServer({
+				middleware: { serializedLookup: [renameResult], serializedFind: [recordFind] },
+			}),
+		};
 	} else {
 		__harness.asRealm("Server", () => {
 			GlobalEvents.createServer({});
 			GlobalFunctions.createServer({});
 			__harness.flush();
 		});
-		events = { client: GlobalEvents.createClient({ middleware: { serializedPart: [recordPart] } }) };
-		functions = { client: GlobalFunctions.createClient({ middleware: { serializedLookup: [renameResult] } }) };
+		events = {
+			client: GlobalEvents.createClient({
+				middleware: { serializedPart: [recordPart], serializedMaybe: [recordMaybe] },
+			}),
+		};
+		functions = {
+			client: GlobalFunctions.createClient({
+				middleware: { serializedLookup: [renameResult], serializedFind: [recordFind] },
+			}),
+		};
 	}
 
 	__harness.flush();
@@ -365,6 +420,194 @@ export = suite("networking serialized members", [
 
 			expectEqual(expectRejects(request, "malformed result"), NetworkingFunctionError.InvalidResult, "rejection");
 			expectEqual(badResponses.size(), 1, "onBadResponse events");
+		},
+	],
+	[
+		"leaves an empty blob list off an event, and sends a full one as before",
+		() => {
+			const { events } = handlers();
+			const channel = remote("serializedMaybe");
+			const received = new Array<string>();
+			if (events.server !== undefined)
+				events.server.serializedMaybe.connect((_player, label, where) =>
+					received.push(describeWhere(label, where)),
+				);
+			else events.client!.serializedMaybe.connect((label, where) => received.push(describeWhere(label, where)));
+			__harness.flush();
+			maybeSaw.clear();
+			badRequests.clear();
+
+			const where = new Instance("Folder");
+			where.Name = "Spot";
+			__harness.clearSent(channel);
+			if (events.server !== undefined) {
+				events.server.serializedMaybe.fire(requester, "bare");
+				events.server.serializedMaybe.fire(requester, "placed", where);
+			} else {
+				events.client!.serializedMaybe.fire("bare");
+				events.client!.serializedMaybe.fire("placed", where);
+			}
+
+			// A copy: the harness's list is the remote's own, which `clearSent` empties.
+			const sent = [...__harness.sent(channel)];
+			expectEqual(sent.size(), 2, "messages");
+			expectEqual(sent[0].args.n, 1, "arguments without an Instance (the payload alone)");
+			expectTrue(typeIs(sent[0].args[0], "buffer"), "the payload");
+			expectEqual(sent[1].args.n, 2, "arguments with an Instance (the payload and the blob list)");
+			const blobs = sent[1].args[1] as Array<defined>;
+			expectEqual(blobs.size(), 1, "the blob list's size");
+			expectEqual(blobs[0], where, "the Instance in the blob list");
+
+			// The count is the engine's: a nil handed to the remote is an argument, which costs a byte.
+			__harness.clearSent(channel);
+			(channel as RemoteEvent).FireServer(sent[0].args[0], undefined);
+			expectEqual(__harness.sent(channel)[0].args.n, 2, "arguments counted with a trailing nil");
+
+			// Each goes back in as the other realm would deliver it, and the first once more as a sender
+			// that still sends an empty list would put it.
+			deliver(channel, ...sent[0].args);
+			deliver(channel, ...sent[1].args);
+			deliver(channel, sent[0].args[0], []);
+
+			const expected = ["bare@none", "placed@Spot", "bare@none"];
+			expectEqual(received.size(), expected.size(), "messages received");
+			expectEqual(maybeSaw.size(), expected.size(), "messages the middleware saw");
+			expected.forEach((line, index) => {
+				expectEqual(received[index], line, `received #${index + 1}`);
+				expectEqual(maybeSaw[index], line, `the middleware's #${index + 1}`);
+			});
+			expectEqual(badRequests.size(), 0, "messages rejected");
+		},
+	],
+	[
+		"leaves an empty blob list off a broadcast and an except, and sends a full one as before",
+		() => {
+			// Both are the server's alone; the client's `fire` is the case above.
+			if (!isServer) return;
+
+			const server = handlers().events.server!;
+			const channel = remote("serializedMaybe");
+			const received = new Array<string>();
+			server.serializedMaybe.connect((_player, label, where) => received.push(describeWhere(label, where)));
+			__harness.flush();
+			maybeSaw.clear();
+			badRequests.clear();
+
+			const where = new Instance("Folder");
+			where.Name = "Everywhere";
+			const excluded = __harness.newPlayer("Excluded") as Player;
+
+			__harness.clearSent(channel);
+			server.serializedMaybe.broadcast("all");
+			server.serializedMaybe.broadcast("all", where);
+			const broadcasts = [...__harness.sent(channel)];
+			expectEqual(broadcasts.size(), 2, "broadcasts");
+			expectEqual(broadcasts[0].kind, "FireAllClients", "the broadcast's dispatch");
+			expectEqual(broadcasts[0].args.n, 1, "a broadcast's arguments without an Instance");
+			expectEqual(broadcasts[1].args.n, 2, "a broadcast's arguments with an Instance");
+			expectEqual((broadcasts[1].args[1] as Array<defined>)[0], where, "the broadcast's blob list");
+
+			__harness.clearSent(channel);
+			server.serializedMaybe.except(excluded, "most");
+			const bare = [...__harness.sent(channel)];
+			__harness.clearSent(channel);
+			server.serializedMaybe.except([excluded], "most", where);
+			const full = [...__harness.sent(channel)];
+			__harness.removePlayer(excluded);
+
+			expectTrue(
+				bare.some((message) => message.player === requester),
+				"an except reached the requester",
+			);
+			expectEqual(full.size(), bare.size(), "messages of each except");
+			for (const message of bare) {
+				expectEqual(message.kind, "FireClient", "an except's dispatch");
+				expectTrue(message.player !== excluded, "an except left out the excluded player");
+				expectEqual(message.args.n, 1, "an except's arguments without an Instance");
+			}
+			for (const message of full) {
+				expectTrue(message.player !== excluded, "an except left out the excluded player");
+				expectEqual(message.args.n, 2, "an except's arguments with an Instance");
+				expectEqual((message.args[1] as Array<defined>)[0], where, "an except's blob list");
+			}
+
+			deliver(channel, ...broadcasts[0].args);
+			deliver(channel, ...broadcasts[1].args);
+			deliver(channel, ...bare[0].args);
+			deliver(channel, ...full[0].args);
+
+			const expected = ["all@none", "all@Everywhere", "most@none", "most@Everywhere"];
+			expectEqual(received.size(), expected.size(), "messages received");
+			expectEqual(maybeSaw.size(), expected.size(), "messages the middleware saw");
+			expected.forEach((line, index) => {
+				expectEqual(received[index], line, `received #${index + 1}`);
+				expectEqual(maybeSaw[index], line, `the middleware's #${index + 1}`);
+			});
+			expectEqual(badRequests.size(), 0, "messages rejected");
+		},
+	],
+	[
+		"leaves an empty blob list off a function's request and its result, and sends full ones as before",
+		() => {
+			const { functions } = handlers();
+			const given = new Instance("Folder");
+			given.Name = "Given";
+
+			// `give` answers with an Instance of its own, `drop` with none, `echo` with what it was sent.
+			const answer = (label: string, where?: Instance) =>
+				label === "give" ? given : label === "drop" ? undefined : where;
+			if (functions.server !== undefined)
+				functions.server.serializedFind.setCallback((_player, label, where) => answer(label, where));
+			else functions.client!.serializedFind.setCallback((label, where) => answer(label, where));
+			maybeSaw.clear();
+
+			const where = new Instance("Folder");
+			where.Name = "Asked";
+
+			// The request this realm sends goes into its own receiver as the other realm's would, and the
+			// result that receiver sends back answers the request. A request is `(id, payload, blobs?)`
+			// and a result `(id, true, payload, blobs?)`.
+			const send = remoteById(`${isServer ? "@" : "$"}serializedFind`);
+			const receive = remoteById(`${isServer ? "$" : "@"}serializedFind`);
+			const roundTrip = (
+				label: string,
+				asked: Instance | undefined,
+				requestCount: number,
+				resultCount: number,
+			) => {
+				__harness.clearSent(send);
+				__harness.clearSent(receive);
+				const request =
+					functions.server !== undefined
+						? asked !== undefined
+							? functions.server.serializedFind.invoke(requester, label, asked)
+							: functions.server.serializedFind.invoke(requester, label)
+						: asked !== undefined
+							? functions.client!.serializedFind.invoke(label, asked)
+							: functions.client!.serializedFind.invoke(label);
+
+				const requests = __harness.sent(send);
+				expectEqual(requests.size(), 1, `${label}: requests`);
+				expectEqual(requests[0].args.n, requestCount, `${label}: the request's arguments`);
+				deliver(receive, ...requests[0].args);
+
+				const results = __harness.sent(receive);
+				expectEqual(results.size(), 1, `${label}: results`);
+				expectEqual(results[0].args[1], true, `${label}: a successful result`);
+				expectEqual(results[0].args.n, resultCount, `${label}: the result's arguments`);
+				deliver(send, ...results[0].args);
+
+				return expectResolves(request, `${label}: the request`);
+			};
+
+			expectEqual(roundTrip("echo", undefined, 2, 3), undefined, "nothing asked and nothing found");
+			expectEqual(roundTrip("echo", where, 3, 4), where, "an Instance asked and found");
+			expectEqual(roundTrip("drop", where, 3, 3), undefined, "an Instance asked, nothing found");
+			expectEqual(roundTrip("give", undefined, 2, 4), given, "nothing asked, an Instance found");
+
+			const expected = ["find:echo@none", "find:echo@Asked", "find:drop@Asked", "find:give@none"];
+			expectEqual(maybeSaw.size(), expected.size(), "requests the middleware saw");
+			expected.forEach((line, index) => expectEqual(maybeSaw[index], line, `the middleware's #${index + 1}`));
 		},
 	],
 	[

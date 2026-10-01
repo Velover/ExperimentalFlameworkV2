@@ -13,9 +13,17 @@ export function createClientMethod(receiver: EventInterface, sender: EventInterf
 		},
 
 		// With serialization on, the transformer rewrites every `fire` into this with the packed list:
-		// `(payload, blobs?)`, or nothing at all for a list that carries nothing.
-		_fire(...packed) {
-			sender.fireServer(...packed);
+		// `(payload, blobs?)`, or nothing at all for a list that carries nothing. A blob list that came
+		// out empty is left off, not sent as nil: a table costs bytes on the wire, a nil one, a missing
+		// argument none, and the receiver reads a missing list as an empty one.
+		_fire(payload, blobs) {
+			if (payload === undefined) {
+				sender.fireServer();
+			} else if (blobs === undefined || next(blobs)[0] === undefined) {
+				sender.fireServer(payload);
+			} else {
+				sender.fireServer(payload, blobs);
+			}
 		},
 
 		connect(callback) {

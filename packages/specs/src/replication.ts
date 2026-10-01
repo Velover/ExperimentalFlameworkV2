@@ -114,20 +114,28 @@ interface ModeServerEvents {
 	serializedBump: Networking.SerializedReliable<() => void>;
 	serializedMove: Networking.SerializedUnreliable<(value: number) => void>;
 	serializedStep: Networking.Unreliable<Networking.Serialized<(items: Item[]) => void>>;
+
+	/** Its types can hold an Instance, which a call may leave out (an empty blob list stays off the wire). */
+	serializedMark: Networking.SerializedReliable<(label: string, where?: Instance) => void>;
 }
 
 interface ModeClientEvents {
 	serializedPush: Networking.SerializedReliable<(items: Item[], where: Instance) => void>;
 	serializedTick: Networking.Serialized<Networking.Unreliable<(value: number) => void>>;
+	serializedMarked: Networking.SerializedReliable<(label: string, where?: Instance) => void>;
 }
 
 interface ModeServerFunctions {
 	serializedLookup: Networking.Serialized<(ids: number[], where: Instance) => [Item[], Instance]>;
 	serializedNothing: Networking.Serialized<() => void>;
+
+	/** Answers with the Instance it was sent, if any. */
+	serializedFind: Networking.Serialized<(label: string, where?: Instance) => Instance | undefined>;
 }
 
 interface ModeClientFunctions {
 	serializedAsk: Networking.Serialized<(question: string) => Item[]>;
+	serializedFound: Networking.Serialized<(label: string, where?: Instance) => Instance | undefined>;
 }
 
 const ModeEvents = Networking.createEvent<ModeServerEvents, ModeClientEvents>();
@@ -146,6 +154,11 @@ function describeItems(items: Item[], where?: Instance) {
 	return `${items[0]?.name ?? "none"}:${items.size()}:${tail}${where !== undefined ? `@${where.Name}` : ""}`;
 }
 
+/** `label@where`, or `label@none` without an Instance. */
+function describeMark(label: string, where?: Instance) {
+	return `${label}@${where !== undefined ? where.Name : "none"}`;
+}
+
 export function setupModeServer() {
 	const events = ModeEvents.createServer({});
 	events.serializedReport.connect((_player, items, where) =>
@@ -161,6 +174,8 @@ export function setupModeServer() {
 		where,
 	]);
 	functions.serializedNothing.setCallback(() => {});
+	functions.serializedFind.setCallback((_player, _label, where) => where);
+	events.serializedMark.connect((_player, label, where) => log.push(`serializedMark:${describeMark(label, where)}`));
 }
 
 export function setupModeClient() {
@@ -170,6 +185,8 @@ export function setupModeClient() {
 
 	const functions = ModeFunctions.createClient({});
 	functions.serializedAsk.setCallback((question) => makeItems(3, question));
+	functions.serializedFound.setCallback((_label, where) => where);
+	events.serializedMarked.connect((label, where) => log.push(`serializedMarked:${describeMark(label, where)}`));
 }
 
 /** The client's sends: every event it has. */
@@ -192,6 +209,40 @@ export function invokeModeServer(where: Instance) {
 	return Promise.all([
 		functions.serializedLookup.invoke([1, 2, 3, 4], where).then(([items, back]) => describeItems(items, back)),
 		functions.serializedNothing.invoke().then((value) => `nothing:${value === undefined}`),
+	]);
+}
+
+/** Sends that can leave the blob list empty, each once without the Instance and once with it. */
+export function fireMarkClient(where: Instance) {
+	const events = ModeEvents.createClient({});
+	events.serializedMark.fire("bare");
+	events.serializedMark.fire("placed", where);
+}
+
+export function fireMarkServer(player: Player, where: Instance) {
+	const events = ModeEvents.createServer({});
+	events.serializedMarked.broadcast("all");
+	events.serializedMarked.broadcast("all", where);
+	events.serializedMarked.fire(player, "one");
+	events.serializedMarked.fire(player, "one", where);
+}
+
+/** The Instance each request got back: its name, or `none`. */
+export function invokeFindServer(where: Instance) {
+	const functions = ModeFunctions.createClient({});
+	const name = (found: Instance | undefined) => (found !== undefined ? found.Name : "none");
+	return Promise.all([
+		functions.serializedFind.invoke("bare").then(name),
+		functions.serializedFind.invoke("placed", where).then(name),
+	]);
+}
+
+export function invokeFoundClient(player: Player, where: Instance) {
+	const functions = ModeFunctions.createServer({});
+	const name = (found: Instance | undefined) => (found !== undefined ? found.Name : "none");
+	return Promise.all([
+		functions.serializedFound.invoke(player, "bare").then(name),
+		functions.serializedFound.invoke(player, "placed", where).then(name),
 	]);
 }
 

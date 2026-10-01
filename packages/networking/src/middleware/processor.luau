@@ -16,7 +16,8 @@
 
 local TS = _G[script]
 
---- Stands in for a missing blob list when decoding: a sender whose type has blob slots always sends one.
+--- Stands in for a missing blob list when decoding: a sender leaves the list off when its types have
+--- no blob slots, and when the values it sent filled none of them.
 local NO_BLOBS = {}
 
 --[[

@@ -38,17 +38,31 @@ export function createServerMethod(receiver: EventInterface, sender: EventInterf
 		},
 
 		// With serialization on, the transformer rewrites the methods above into these with the packed
-		// list: `(payload, blobs?)`, or nothing at all for a list that carries nothing.
-		_fire(players, ...packed) {
-			this.fire(players, ...packed);
+		// list: `(payload, blobs?)`, or nothing at all for a list that carries nothing. A blob list
+		// that came out empty is left off, not sent as nil: a table costs bytes on the wire, a nil
+		// one, a missing argument none, and the receiver reads a missing list as an empty one.
+		_fire(players, payload, blobs) {
+			if (blobs === undefined || next(blobs)[0] === undefined) {
+				this.fire(players, payload);
+			} else {
+				this.fire(players, payload, blobs);
+			}
 		},
 
-		_broadcast(...packed) {
-			this.broadcast(...packed);
+		_broadcast(payload, blobs) {
+			if (blobs === undefined || next(blobs)[0] === undefined) {
+				this.broadcast(payload);
+			} else {
+				this.broadcast(payload, blobs);
+			}
 		},
 
-		_except(players, ...packed) {
-			this.except(players, ...packed);
+		_except(players, payload, blobs) {
+			if (blobs === undefined || next(blobs)[0] === undefined) {
+				this.except(players, payload);
+			} else {
+				this.except(players, payload, blobs);
+			}
 		},
 
 		connect(callback) {
