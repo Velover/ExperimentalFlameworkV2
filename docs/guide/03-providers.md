@@ -409,7 +409,15 @@ to get configuration into everything without a global.
   warned about when you build, where the path is written, and at runtime after five seconds, by the
   registration's name; the wait goes on. An empty folder that is there registers nothing.
 - **Overlapping paths raise.** Registering `src/server` and `src/server/services` will hit
-  `provider ID was registered more than once`.
+  `provider ID was registered more than once`. The error names the class, both folder
+  registrations and the line of each.
+- **An id ignores type arguments.** A type's id names its declaration, so `Set<Player>` and
+  `Set<string>` both get `Set`'s (`@rbxts/compiler-types:types/Set@Set`), and two of them provided
+  or registered by type collide. Give one a type of its own, such as
+  `interface PlayerSet extends Set<Player> {}`, provided and injected as `PlayerSet`, or a class
+  that holds the value. Or give it an id of its own as a string (`provideInstance(value, "my-id")`,
+  `registerProvider(config, "my-id")`) and resolve it by that id. A type alias does not help:
+  `type PlayerSet = Set<Player>` still names `Set`.
 - **`@Injectable()` classes are not resolvable.** `resolveDependency<Session>()` will not find one.
   That is the point of the decorator.
 - **A missing dependency is a runtime error, not a compile error.** The exception is a component,

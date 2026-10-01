@@ -15,6 +15,8 @@ import { LIFECYCLE_SLOT, type PluginDefinition } from "../plugin/pluginDefinitio
 import { getProviderClassId, normalizeProviderConfig } from "./providerRegistration";
 import { holdsCondition, type ScopeCondition } from "./scopes";
 import { leftOutRegistration } from "../utility/leftOut";
+import { findCallSite } from "../utility/callSite";
+import { BUILDER_ORIGIN, type RegistrationSource } from "./duplicateId";
 
 type GenericId<T> = string | Modding.Target.Id<T>;
 
@@ -121,12 +123,13 @@ export class ModuleBuilder {
 		// The active scopes are the ones the build was compiled with, so this is the answer
 		// ignition would give; what it would register is only ever skipped there. Recorded, so that
 		// a miss on a class under the folder can say why it is missing.
+		const call = `registerProviders("${_stringPath}")`;
 		if (!holdsCondition(options)) {
-			this.module.leftOut!.push(leftOutRegistration(`registerProviders("${_stringPath}")`, options!, { path }));
+			this.module.leftOut!.push(leftOutRegistration(call, options!, { path }));
 			return this;
 		}
 
-		return this.registerProviderClasses(getClassesInPath(path, `registerProviders("${_stringPath}")`), options);
+		return this.registerProviderClasses(getClassesInPath(path, call), options, this.sourceOf(call));
 	}
 
 	/**
@@ -148,22 +151,53 @@ export class ModuleBuilder {
 	) {
 		assert(glob !== undefined);
 
+		const call = `registerProvidersGlob("${_glob}")`;
 		if (!holdsCondition(options)) {
-			this.module.leftOut!.push(leftOutRegistration(`registerProvidersGlob("${_glob}")`, options!, { glob }));
+			this.module.leftOut!.push(leftOutRegistration(call, options!, { glob }));
 			return this;
 		}
 
-		return this.registerProviderClasses(getClassesInGlob(glob), options);
+		return this.registerProviderClasses(getClassesInGlob(glob), options, this.sourceOf(call));
 	}
 
-	private registerProviderClasses(classes: object[], options?: ProviderRegistrationOptions) {
+	/** One source for every class a folder registration finds: the folder's call, and the line that made it. */
+	private registerProviderClasses(
+		classes: object[],
+		options: ProviderRegistrationOptions | undefined,
+		source: RegistrationSource,
+	) {
 		for (const provider of classes) {
 			if (Reflect.hasOwnMetadata(provider, "flamework:provider")) {
-				this.registerClassProvider(provider as Constructor, options);
+				this.addClassProvider(provider as Constructor, options, source);
 			}
 		}
 
 		return this;
+	}
+
+	/**
+	 * Where a registration is being made: `call`, on this builder, at the line that called into
+	 * core. Taken once per call, so that the error two registrations under one id raise can name
+	 * both; nothing reads it otherwise.
+	 */
+	private sourceOf(call: string): RegistrationSource {
+		return { call, origin: BUILDER_ORIGIN, site: findCallSite() };
+	}
+
+	private addProvider(config: ProviderConfig, injectionId: string, source: RegistrationSource) {
+		this.module.providers.push({ config: normalizeProviderConfig(config), injectionId, source });
+		return this;
+	}
+
+	private addClassProvider(
+		provider: Constructor,
+		options: ProviderRegistrationOptions | undefined,
+		source: RegistrationSource,
+	) {
+		const config: ProviderConfig =
+			options !== undefined ? { type: "class", value: provider, ...options } : { type: "class", value: provider };
+
+		return this.addProvider(config, getProviderClassId(provider), source);
 	}
 
 	/**
@@ -177,9 +211,7 @@ export class ModuleBuilder {
 	public registerProvider<T>(providerConfig: ProviderConfig, injectionId?: GenericId<T>) {
 		assert(injectionId !== undefined);
 
-		this.module.providers.push({ config: normalizeProviderConfig(providerConfig), injectionId });
-
-		return this;
+		return this.addProvider(providerConfig, injectionId, this.sourceOf("registerProvider"));
 	}
 
 	/**
@@ -188,10 +220,7 @@ export class ModuleBuilder {
 	 * This is just a shorthand for `registerProvider` which uses the generated `identifier` from the class.
 	 */
 	public registerClassProvider(provider: Constructor, options?: ProviderRegistrationOptions) {
-		const config: ProviderConfig =
-			options !== undefined ? { type: "class", value: provider, ...options } : { type: "class", value: provider };
-
-		return this.registerProvider(config, getProviderClassId(provider));
+		return this.addClassProvider(provider, options, this.sourceOf("registerClassProvider"));
 	}
 
 	/**

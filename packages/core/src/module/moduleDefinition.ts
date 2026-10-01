@@ -1,5 +1,6 @@
 import type { Modding } from "../modding";
 import type { PluginDefinition } from "../plugin/pluginDefinition";
+import type { RegistrationSource } from "./duplicateId";
 import { clearDefaultModule, getDefaultModule, setDefaultModule } from "./defaultModule";
 import { createModuleInstantiation, type Module } from "./module";
 import type { ScopeCondition } from "./scopes";
@@ -95,7 +96,17 @@ export class ModuleDefinition {
 	}
 }
 
-export type ModuleProvider = { config: ProviderConfig; injectionId: string };
+export type ModuleProvider = {
+	config: ProviderConfig;
+	injectionId: string;
+
+	/**
+	 * Where the registration was made, for the error a second registration under its id raises.
+	 *
+	 * @internal
+	 */
+	source?: RegistrationSource;
+};
 
 /**
  * What a registration can say about itself, whichever form it takes: an option on the class and

@@ -3,6 +3,23 @@
 Notable changes to the `@flamework-experimental` packages. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### core
+
+#### Changed
+
+- `provider ID was registered more than once` names both registrations, one per line below the
+  id: what each is (`registerClassProvider(Shop)`, `registerProvider({ type: "function" })`,
+  `provideInstance(value: Metrics)`, `class Shop, found by registerProviders("src/server")`), the
+  module builder or the plugin, by name, that made it, the script and line that made it
+  (`ServerScriptService.TS.main:12`; core's own frames are skipped), and its own scope
+  conditions. A hint follows: for an id of `@rbxts/compiler-types` (`Set`, `Map`, `Array`, ...) it
+  says that an id ignores type arguments, so `Set<A>` and `Set<B>` share one, and how to give one a
+  type or an id of its own; otherwise it fits the two registrations (overlapping folders, a class
+  registered twice, a value provided twice, two scoped registrations both kept). The line is taken
+  with `debug.info` once per registration, at startup.
+
 ## 2026-10-01: core, components, networking and testing 2.0.0-alpha.5; transformer 2.0.0-alpha.6
 
 ### Upgrade notes

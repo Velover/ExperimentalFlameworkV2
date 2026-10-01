@@ -88,11 +88,8 @@ export function hasCondition(condition: ScopeCondition | undefined): condition i
 	);
 }
 
-/**
- * Describes the conditions that applied to something, and the active set they were judged
- * against, for an error message: `activeIn [a, b]; inactiveIn [c]; active scopes [a]`.
- */
-export function describeConditions(conditions: ReadonlyArray<ScopeCondition>): string {
+/** The parts of the conditions that ask for something, for a message: `activeIn [a, b]`, `inactiveIn [c]`. */
+export function listConditions(conditions: ReadonlyArray<ScopeCondition>): string[] {
 	const parts = new Array<string>();
 
 	for (const condition of conditions) {
@@ -109,6 +106,15 @@ export function describeConditions(conditions: ReadonlyArray<ScopeCondition>): s
 		}
 	}
 
+	return parts;
+}
+
+/**
+ * Describes the conditions that applied to something, and the active set they were judged
+ * against, for an error message: `activeIn [a, b]; inactiveIn [c]; active scopes [a]`.
+ */
+export function describeConditions(conditions: ReadonlyArray<ScopeCondition>): string {
+	const parts = listConditions(conditions);
 	parts.push(`active scopes [${getConfiguredScopes().join(", ")}]`);
 	return parts.join("; ");
 }

@@ -37,7 +37,7 @@ Everything is a method on `target`, and everything registers into the module bei
 
 | Method | Does |
 |---|---|
-| `provideInstance(value)` | Hands the module an object under its type's id. Providers inject it; `resolveDependency` finds it. |
+| `provideInstance(value)` | Hands the module an object under its type's id. Providers inject it; `resolveDependency` finds it. An id ignores type arguments, so two `Set<...>` provided by type collide: see [Providers › Caveats](03-providers.md#caveats). |
 | `registerClassProvider(Class, options?)` | Registers a provider, exactly as the module builder would. |
 | `registerProvider<T>(config)` | The same, for a function or alias provider. |
 | `registerProviders(path, options?)` / `registerProvidersGlob(glob, options?)` | Registers every `@Provider()` class the ModuleScripts under a folder define, exported or not, as the module builder does. How a plugin in your game's source ships a folder of providers: the path is resolved in the project that compiles the plugin, so a plugin published as a package cannot use it ([Macros › Paths](07-macros.md#paths)). When the options' scope condition does not hold, the folder is not looked up at all. |
@@ -193,8 +193,10 @@ writing `SomeRegistry.add(this)` in every provider's constructor, use `observe` 
   `implements` metadata and will never match.
 - **`onRemoved` fires on extinguish** for every object the plugin was told about. Keep it idempotent.
 - **A provider registered by a plugin collides like any other.** The error
-  `provider ID was registered more than once` names the id: the module and a plugin, or two plugins,
-  registered the same thing.
+  `provider ID was registered more than once` names the id and both registrations, each with the
+  module builder or the plugin, by name, that made it and the line that did: the module and a
+  plugin, or two plugins, registered the same thing. A registration made in a hook counts as the
+  plugin's.
 - **You do not control hook order across *different* modules.** Priority orders hooks within one
   module.
 

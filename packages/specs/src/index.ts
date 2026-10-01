@@ -1,6 +1,7 @@
 import type { TestSuite } from "./testkit";
 
 import components = require("./specs/components");
+import duplicateIds = require("./specs/duplicateIds");
 import functions = require("./specs/functions");
 import generatedCode = require("./specs/generatedCode");
 import lifecycle = require("./specs/lifecycle");
@@ -27,6 +28,7 @@ export const suites: TestSuite[] = [
 	providers,
 	modules,
 	plugins,
+	duplicateIds,
 	scopes,
 	lifecycle,
 	components,

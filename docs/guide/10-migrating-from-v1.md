@@ -554,6 +554,9 @@ values are as they were. Middleware, connections and handlers changed ([step 10]
   it on demand; v2 does not.
 - Is any decorated class in a registered folder meant to stay out of the module? Unexported classes
   are registered now, as in v1: move it out of the folder, or into the function that uses it.
+- Do any two `registerProviders` paths overlap, as `addPaths` calls could? Each registration
+  registers what is under it, so a class under both raises `provider ID was registered more than
+  once`, which names both folders. Register the outer folder alone.
 - Does a provider's `onStart` expect the components of tagged instances to exist already? They are
   built after it now.
 - Does anything count on a component surviving an invalid attribute? Give the attribute a

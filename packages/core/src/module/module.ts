@@ -13,6 +13,7 @@ import { getClassImplements } from "../utility/getClassImplements";
 import { getClassesInPath } from "../utility/getClassesInPath";
 import { getClassesInGlob } from "../utility/globs";
 import { explainUnresolvedClass } from "../utility/explainUnresolved";
+import { findCallSite, isCoreFunction } from "../utility/callSite";
 import { explainLeftOut, leftOutRegistration } from "../utility/leftOut";
 import { extinguishesBegun, threadWaits } from "../utility/threadWaits";
 import type { Destructor, ExtractSingleCallback } from "../utility/types";
@@ -24,6 +25,7 @@ import type {
 	ProviderRegistrationOptions,
 } from "./moduleDefinition";
 import { clearDefaultModule } from "./defaultModule";
+import { duplicateIdMessage, type Registration, type RegistrationSource } from "./duplicateId";
 import { HookPriority, type HookPhase, type RegisteredHook } from "./moduleHooks";
 import {
 	DEFAULT_LOAD_ORDER,
@@ -215,6 +217,10 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 
 	/** Objects handed over by `provideInstance`, attached to their interfaces once every plugin is set up. */
 	const providedInstances = new Array<object>();
+
+	/** Where each provided id was provided from, for the error a second registration under it raises. */
+	const providedSources = new Map<string, RegistrationSource>();
+
 	/**
 	 * Provided objects that have not joined their interfaces: until the ignition reaches them, and
 	 * for good when an observer refuses one. `release` has nothing to take them out of, and a failed
@@ -250,27 +256,51 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		}
 	};
 
-	const assertNotProvided = (injectionId: string) => {
-		if (instantiatedProviders.has(injectionId)) {
-			error(`module '${state.debugName}': provider ID was registered more than once: ${injectionId}`);
+	/**
+	 * What holds an id that something else is now being registered under: an object a plugin
+	 * provided, or a registration that was kept. Only ever asked on the way to the error.
+	 */
+	const findHolder = (injectionId: string): Registration | undefined => {
+		const source = providedSources.get(injectionId);
+		if (source !== undefined) {
+			return { kind: "instance", value: instantiatedProviders.get(injectionId), source };
+		}
+
+		const kept = providers.find((v) => v.injectionId === injectionId);
+		if (kept !== undefined) {
+			return { kind: "registration", provider: kept };
 		}
 	};
 
-	const registerClassProvider = (provider: Constructor, registrationOptions?: ProviderRegistrationOptions) => {
+	/** Raises the error two registrations under one id get, naming both. */
+	const raiseDuplicate = (injectionId: string, first: Registration | undefined, second: Registration) => {
+		error(duplicateIdMessage(state.debugName, injectionId, first, second));
+	};
+
+	const registerClassProvider = (
+		provider: Constructor,
+		registrationOptions: ProviderRegistrationOptions | undefined,
+		source: RegistrationSource,
+	) => {
 		const injectionId = getProviderClassId(provider);
 		registered.push({
 			config: normalizeProviderConfig(
 				withOptions<ProviderConfig>({ type: "class", value: provider }, registrationOptions),
 			),
 			injectionId,
+			source,
 		});
 	};
 
 	/** Own metadata only, as the builder does: an undecorated subclass of a provider is skipped. */
-	const registerProviderClasses = (classes: object[], registrationOptions?: ProviderRegistrationOptions) => {
+	const registerProviderClasses = (
+		classes: object[],
+		registrationOptions: ProviderRegistrationOptions | undefined,
+		source: RegistrationSource,
+	) => {
 		for (const provider of classes) {
 			if (Reflect.hasOwnMetadata(provider, "flamework:provider")) {
-				registerClassProvider(provider as Constructor, registrationOptions);
+				registerClassProvider(provider as Constructor, registrationOptions, source);
 			}
 		}
 	};
@@ -308,7 +338,7 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		}
 
 		includedPlugins.add(plugin);
-		plugin.setup(pluginTarget);
+		plugin.setup(createPluginTarget(plugin));
 	};
 
 	const lookupInImports = (injectionId: string) => {
@@ -332,7 +362,7 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 	 */
 	const activateProviders = () => {
 		const active = new Array<ModuleProvider>();
-		const seen = new Set<string>();
+		const seen = new Map<string, ModuleProvider>();
 
 		for (const entry of registered) {
 			const conditions: ScopeCondition[] = [moduleScope, entry.config, getProviderClassScope(entry.config)];
@@ -348,12 +378,24 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 				}
 			}
 
-			assertNotProvided(entry.injectionId);
-			if (seen.has(entry.injectionId)) {
-				error(`module '${state.debugName}': provider ID was registered more than once: ${entry.injectionId}`);
+			// Nothing has been constructed yet, so what holds the id here is an object a plugin provided.
+			if (instantiatedProviders.has(entry.injectionId)) {
+				raiseDuplicate(entry.injectionId, findHolder(entry.injectionId), {
+					kind: "registration",
+					provider: entry,
+				});
 			}
 
-			seen.add(entry.injectionId);
+			const previous = seen.get(entry.injectionId);
+			if (previous !== undefined) {
+				raiseDuplicate(
+					entry.injectionId,
+					{ kind: "registration", provider: previous },
+					{ kind: "registration", provider: entry },
+				);
+			}
+
+			seen.set(entry.injectionId, entry);
 			active.push(entry);
 		}
 
@@ -993,68 +1035,103 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		awaitExtinguished,
 	};
 
-	/** What a plugin's setup is handed. Everything registers into this instantiation. */
-	const pluginTarget: PluginTarget = {
-		module,
-		scope: hasCondition(moduleScope) ? moduleScope : undefined,
-		isActive: (...conditions) => holdsEveryCondition([moduleScope, ...conditions]),
-		registerClassProvider,
-		// A registration whose own condition does not hold leaves its folders untouched, as the
-		// module builder's forms do.
-		registerProviders: (path, registrationOptions, resolved) => {
-			assert(resolved !== undefined);
-			if (holdsCondition(registrationOptions)) {
-				registerProviderClasses(
-					getClassesInPath(resolved, `registerProviders("${path}")`),
-					registrationOptions,
-				);
-			} else {
-				leftOut.push(
-					leftOutRegistration(`registerProviders("${path}")`, registrationOptions!, { path: resolved }),
-				);
-			}
-		},
-		registerProvidersGlob: (glob, registrationOptions, resolved) => {
-			assert(resolved !== undefined);
-			if (holdsCondition(registrationOptions)) {
-				registerProviderClasses(getClassesInGlob(resolved), registrationOptions);
-			} else {
-				leftOut.push(
-					leftOutRegistration(`registerProvidersGlob("${glob}")`, registrationOptions!, { glob: resolved }),
-				);
-			}
-		},
-		registerProvider: (config, injectionId) => {
-			assert(injectionId !== undefined);
-			registered.push({ config: normalizeProviderConfig(config), injectionId });
-		},
-		provideInstance: (instance, injectionId) => {
-			assert(injectionId !== undefined);
-			assertNotProvided(injectionId);
-			instantiatedProviders.set(injectionId, instance);
+	// What every plugin's target shares: none of it names the plugin.
+	const targetScope = hasCondition(moduleScope) ? moduleScope : undefined;
+	const isActive: PluginTarget["isActive"] = (...conditions) => holdsEveryCondition([moduleScope, ...conditions]);
+	const onPreIgnite: PluginTarget["onPreIgnite"] = (callback, hookOptions) =>
+		registerHook("preIgnite", callback, hookOptions?.priority);
+	const onPostIgnite: PluginTarget["onPostIgnite"] = (callback, hookOptions) =>
+		registerHook("postIgnite", callback, hookOptions?.priority);
+	const onIgnited: PluginTarget["onIgnited"] = (callback, hookOptions) =>
+		registerHook("ignited", callback, hookOptions?.priority);
+	const onExtinguished: PluginTarget["onExtinguished"] = (callback, hookOptions) =>
+		registerHook("extinguished", callback, hookOptions?.priority);
+	const observe: PluginTarget["observe"] = (config, interfaceId) => {
+		assert(interfaceId !== undefined);
 
-			// Once, however many ids it is provided under: it joins its interfaces once per entry,
-			// and the same object twice was initialised, started and told `onAdded` twice.
-			if (!providedInstances.includes(instance)) {
-				providedInstances.push(instance);
-				unjoinedInstances.add(instance);
-			}
-		},
-		includePlugin,
-		onPreIgnite: (callback, hookOptions) => registerHook("preIgnite", callback, hookOptions?.priority),
-		onPostIgnite: (callback, hookOptions) => registerHook("postIgnite", callback, hookOptions?.priority),
-		onIgnited: (callback, hookOptions) => registerHook("ignited", callback, hookOptions?.priority),
-		onExtinguished: (callback, hookOptions) => registerHook("extinguished", callback, hookOptions?.priority),
-		observe: (config, interfaceId) => {
-			assert(interfaceId !== undefined);
+		let interested = observers.get(interfaceId);
+		if (!interested) {
+			observers.set(interfaceId, (interested = []));
+		}
 
-			let interested = observers.get(interfaceId);
-			if (!interested) {
-				observers.set(interfaceId, (interested = []));
-			}
+		interested.push(config as InterfaceConfiguration<unknown>);
+	};
 
-			interested.push(config as InterfaceConfiguration<unknown>);
-		},
+	/**
+	 * What a plugin's setup is handed: one per plugin, so that what it registers -- from its setup or
+	 * from a hook it added -- is recorded as the plugin's. Everything registers into this
+	 * instantiation.
+	 */
+	const createPluginTarget = (plugin: PluginDefinition): PluginTarget => {
+		const origin = `plugin '${plugin.name}'`;
+
+		// What core's own plugins register -- the lifecycle plugin's provider -- has no line of the
+		// user's to name, so the stack is not walked for it.
+		const fromCore = isCoreFunction(plugin.setup);
+		const sourceOf = (call: string): RegistrationSource => ({
+			call,
+			origin,
+			site: fromCore ? undefined : findCallSite(),
+		});
+
+		return {
+			module,
+			scope: targetScope,
+			isActive,
+			registerClassProvider: (provider, registrationOptions) =>
+				registerClassProvider(provider, registrationOptions, sourceOf("registerClassProvider")),
+			// A registration whose own condition does not hold leaves its folders untouched, as the
+			// module builder's forms do.
+			registerProviders: (path, registrationOptions, resolved) => {
+				assert(resolved !== undefined);
+				const call = `registerProviders("${path}")`;
+				if (holdsCondition(registrationOptions)) {
+					registerProviderClasses(getClassesInPath(resolved, call), registrationOptions, sourceOf(call));
+				} else {
+					leftOut.push(leftOutRegistration(call, registrationOptions!, { path: resolved }));
+				}
+			},
+			registerProvidersGlob: (glob, registrationOptions, resolved) => {
+				assert(resolved !== undefined);
+				const call = `registerProvidersGlob("${glob}")`;
+				if (holdsCondition(registrationOptions)) {
+					registerProviderClasses(getClassesInGlob(resolved), registrationOptions, sourceOf(call));
+				} else {
+					leftOut.push(leftOutRegistration(call, registrationOptions!, { glob: resolved }));
+				}
+			},
+			registerProvider: (config, injectionId) => {
+				assert(injectionId !== undefined);
+				registered.push({
+					config: normalizeProviderConfig(config),
+					injectionId,
+					source: sourceOf("registerProvider"),
+				});
+			},
+			provideInstance: (instance, injectionId) => {
+				assert(injectionId !== undefined);
+				const source = sourceOf("provideInstance");
+				if (instantiatedProviders.has(injectionId)) {
+					raiseDuplicate(injectionId, findHolder(injectionId), { kind: "instance", value: instance, source });
+				}
+
+				instantiatedProviders.set(injectionId, instance);
+				providedSources.set(injectionId, source);
+
+				// Once, however many ids it is provided under: it joins its interfaces once per entry,
+				// and the same object twice was initialised, started and told `onAdded` twice.
+				if (!providedInstances.includes(instance)) {
+					providedInstances.push(instance);
+					unjoinedInstances.add(instance);
+				}
+			},
+			includePlugin,
+			onPreIgnite,
+			onPostIgnite,
+			onIgnited,
+			onExtinguished,
+			observe,
+		};
 	};
 
 	return module;

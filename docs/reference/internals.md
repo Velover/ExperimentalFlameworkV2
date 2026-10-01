@@ -204,7 +204,9 @@ Packages must stay on `full` so their ids do not collide with a game's; only gam
 shorten. The mode only applies to the project's own declarations. An id declared in a package is
 read from that package's `flamework.build`, or formatted from its path with the prefix recorded
 there (`getDeclarationUid`), so obfuscation leaves package ids as the package published them: the
-package's compiled code compares against those strings.
+package's compiled code compares against those strings. An id names a declaration, never its type
+arguments: `Set<A>` and `Set<B>` both get `Set`'s, `@rbxts/compiler-types:types/Set@Set`, and an
+alias of a named type (`type Players = Set<Player>`) gets that type's.
 
 **Guards** ([`src/util/functions/buildGuardFromType.ts`](../../packages/transformer/src/util/functions/buildGuardFromType.ts))
 compile a type into a `@rbxts/t` check. Unions become `t.union` (`t.unionList` past two members), tuples `t.strictArray` (a tuple with a rest element gets a check of its own: the elements before the rest, then any number of rest elements, then the ones after it), arrays
@@ -280,6 +282,18 @@ rather than half-working.
    as long as at most one survives. Lists of conditions hold an empty condition rather than
    `undefined`, because an array literal with an `undefined` in it compiles to a table with a hole,
    which Luau can neither measure nor walk.
+
+   A collision, here or at a second `provideInstance`, raises one error that names both
+   registrations (`module/duplicateId.ts`). Each registration and each provided id carries a
+   `RegistrationSource`, recorded once as it is made: the call, the module builder or the plugin
+   (each plugin's setup is handed a `PluginTarget` of its own, so what its hooks register is its
+   own too), and the line that made it. The line is the first stack frame outside core
+   (`utility/callSite.ts`): `debug.info` walks up from the registration, past C frames and every
+   frame whose source starts with core's own folder, read once from the source of `callSite`
+   itself, so a folder registration, `apply` or a nested plugin still lands on the user's line. A
+   plugin whose setup is core's (the lifecycle plugin) is not walked. The walk runs once per
+   registration, at startup, and nothing is recorded per frame; the recorded source is only read
+   when the error is raised.
 4. Objects the plugins provided join the interfaces they implement, now that every observer is in
    place -- each once, however many ids it was provided under, and it leaves them once on release;
    then every kept provider is resolved, which constructs it -- in ascending `loadOrder`

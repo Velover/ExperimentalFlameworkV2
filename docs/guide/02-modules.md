@@ -242,10 +242,14 @@ Flamework.createModule()
 - **`Dependency<T>()` answers from one module.** It uses the first module ignited, unless a later one
   was ignited with `{ default: true }`. A realm with two running modules (tests, tools) should say
   which one, or resolve through the module handle.
-- **Duplicate registration raises at ignition.** `provider ID was registered more than once` usually
-  means two `registerProviders` paths overlap. It can also mean a class is registered both by path
-  and by hand, or by both the module and a plugin. Two registrations are fine when their
-  [scope conditions](11-scopes.md) keep at most one of them.
+- **Duplicate registration raises at ignition.** `provider ID was registered more than once` names
+  both registrations: what each is, whether the module builder or a plugin made it, the folder
+  registration that found it, and the script and line of your code that made it (the compiled
+  Luau's line, as in any Roblox error). A hint follows. It usually means two `registerProviders`
+  paths overlap. It can also mean a class is registered both by path and by hand, or by both the
+  module and a plugin, or that two values of one generic type were provided by type: an id ignores
+  type arguments (see [Providers › Caveats](03-providers.md#caveats)). Two registrations are fine
+  when their [scope conditions](11-scopes.md) keep at most one of them.
 - **Imports are one way.** A module sees its imports' providers, but an import never sees the
   importer's. A fake registered in the importer replaces nothing in the import.
 
