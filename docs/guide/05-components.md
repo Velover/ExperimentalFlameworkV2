@@ -8,7 +8,9 @@ destroys it when the tag is removed.
 npm install @flamework-experimental/components
 ```
 
-Map it in your Rojo project next to `core` ([Getting started › Rojo](01-getting-started.md#rojo)).
+A Rojo project that maps the whole `node_modules/@flamework-experimental` folder in one line, as in
+[Getting started › Rojo](01-getting-started.md#rojo), takes it in with nothing to add; one that maps
+the packages by name needs a `components` entry next to `core`.
 
 ## Your first component
 

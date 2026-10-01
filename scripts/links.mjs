@@ -6,7 +6,8 @@ import { fileURLToPath } from "url";
  * Link handling for the Markdown files copied into the packages before publishing (copy-readme.mjs,
  * copy-docs.mjs). A copy sits at the same path in its package that its source has in the repository,
  * so a link to another file that ships stays relative, and a link to anything else in the repository
- * is pointed at that file on GitHub, anchor and all.
+ * is pointed at that file on GitHub, anchor and all. A block marked as for the repository only is
+ * left out of a copy (`withoutRepositoryOnly`).
  */
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const REPOSITORY = "https://github.com/Velover/ExperimentalFlameworkV2";
@@ -145,6 +146,38 @@ export function rewriteTarget(file, target, shipped) {
 /** A shipped copy of the Markdown file at `file` in the repository: see {@link rewriteTarget}. */
 export function rewriteLinks(text, file, shipped) {
 	return mapLinks(text, (target) => rewriteTarget(file, target, shipped));
+}
+
+/**
+ * A block of Markdown for this repository's contributors, which a package's copy leaves out: from a
+ * line `<!-- repository only ... -->` to a line `<!-- end repository only -->`, both included, with
+ * the blank line after it.
+ */
+const REPOSITORY_ONLY = /^<!-- repository only\b[^\n]*-->\r?\n[\s\S]*?^<!-- end repository only -->\r?\n(\r?\n)?/gm;
+
+/**
+ * `text` without its repository-only blocks: see {@link REPOSITORY_ONLY}. A marker it cannot pair
+ * (no end, an end without a start, or one not at the start of its line) raises, so a block is never
+ * shipped, or the text after it dropped, without a word.
+ */
+export function withoutRepositoryOnly(text) {
+	const starts = text.match(/^<!-- repository only\b/gm)?.length ?? 0;
+	const ends = text.match(/^<!-- end repository only -->/gm)?.length ?? 0;
+	let blocks = 0;
+	const result = text.replace(REPOSITORY_ONLY, () => {
+		blocks++;
+		return "";
+	});
+
+	if (starts !== ends || blocks !== starts || /repository only/.test(result)) {
+		throw new Error(
+			`unpaired repository-only markers: ${starts} start(s), ${ends} end(s), ${blocks} block(s) removed; ` +
+				"each block must be a line `<!-- repository only ... -->` and a line `<!-- end repository only -->`, " +
+				"both at the start of the line",
+		);
+	}
+
+	return result;
 }
 
 /** What core ships of the docs, as repository paths: the index and every guide page. */

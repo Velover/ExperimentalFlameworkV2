@@ -64,8 +64,10 @@ release place altogether is Rojo's job; see [shipping](#shipping).
 Everything a project needs, in the order it is needed:
 
 1. The package: `npm install @flamework-experimental/testing`. It brings the roblox-ts side and the
-   `flamework-test` CLI, nothing else. Map it in your Rojo project next to `core`
-   ([Getting started › Rojo](01-getting-started.md#rojo)). The CLI runs on
+   `flamework-test` CLI, nothing else. A Rojo project that maps the whole
+   `node_modules/@flamework-experimental` folder in one line, as in
+   [Getting started › Rojo](01-getting-started.md#rojo), takes it in with nothing to add; one that
+   maps the packages by name needs a `testing` entry next to `core`. The CLI runs on
    [Bun](https://bun.sh), whatever installed it: npm's and pnpm's `flamework-test` command starts
    `bun`, and without it on the `PATH` fails with `'"bun"' is not recognized`.
 2. The switch: the `scopes` line above in `flamework.config.json`, and the scope in neither `.env`

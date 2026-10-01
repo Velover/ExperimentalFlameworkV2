@@ -8,7 +8,9 @@ typed handlers.
 npm install @flamework-experimental/networking
 ```
 
-Map it in your Rojo project next to `core` ([Getting started › Rojo](01-getting-started.md#rojo)).
+A Rojo project that maps the whole `node_modules/@flamework-experimental` folder in one line, as in
+[Getting started › Rojo](01-getting-started.md#rojo), takes it in with nothing to add; one that maps
+the packages by name needs a `networking` entry next to `core`.
 
 ## Declaring a network
 
@@ -395,20 +397,21 @@ so nothing is sent:
 ```
 
 The message names the width, the value (for a string or a buffer, its length: `300 bytes`), and
-where the value sits in the type. That is a field path from the serialized type (`Tile.x`, or
-`value.x` when the type has no name), an argument of a call and the event or function it goes
-through (`'place' [0].x`, numbered from 0), or a function's `result`. An element of an array or a
-set is `[]`, and a map's keys and values are `<key>` and `<value>`. So are the arguments a call
+where the value sits in the type. That is a field path from the serialized type (`Tile.x` for a
+named object, union or tuple, `value.x` otherwise), an argument of a call and the event or function
+it goes through (`'place' [0].x`, numbered from 0), or a function's `result`. An element of an array
+or a set is `[]`, and a map's keys and values are `<key>` and `<value>`. So are the arguments a call
 spreads into a rest parameter (`fire(...values)`), whose places are only known when it runs:
 `'many' []`. Under obfuscation the event or function is not named.
 
-A named object, union or tuple whose size varies, and any other such type a file reaches more than
-once, has code of its own that its file shares (see [Serializers](07-macros.md#serializers)). A
-type of a fixed size never has: it is written where it is reached, and its path goes on from there.
-A path goes on through shared code from where the value was sent, but a shared type inside another
-one starts from the outer type's name (`Tile.items[].id`), which keeps the writes from building
-strings. An outer type with no name starts from how TypeScript prints it, in parentheses:
-`({ pos: { x: i16; }; items: Item[]; }).items[].id`, or `(u16[])[]`.
+A named object, union or tuple whose size varies, and any other type of varying size a file reaches
+more than once (an array, a set or a map included), has code of its own that its file shares (see
+[Serializers](07-macros.md#serializers)). A type of a fixed size never has: it is written where it
+is reached, and its path goes on from there. A path goes on through shared code from where the value
+was sent, but a shared type inside another one starts from the outer type's name
+(`Tile.items[].id`), which keeps the writes from building strings. An outer type with no name starts
+from how TypeScript prints it, in parentheses: `({ pos: { x: i16; }; items: Item[]; }).items[].id`,
+or `(u16[])[]`.
 
 Implicit widths behave like plain numbers, strings and buffers. They mix with each other and take
 any strict width of their kind: an `Implicit.u8` goes into an `Implicit.u16` and back, and a strict
@@ -597,8 +600,13 @@ same build, as they must for the switch.
 
 ### Size on the wire
 
-Roblox already compresses what a remote carries, buffers included, so the size win is in packing.
-These are bytes per message, measured in Studio on 2026-09-28:
+Roblox compresses the `buffer` values a remote carries, and nothing else (measured on 2026-09-29).
+Each buffer is compressed on its own, not together with the rest of the call or the packet, with
+Zstd at about level 1, and the compressed form is kept only when it is smaller. Tables, strings,
+numbers and datatypes such as `Vector3` and `CFrame` go out as they are, however repetitive. So
+packing saves twice: the buffer is smaller than the values it replaces, and, being a buffer, it is
+the one part of the payload the engine compresses. These are bytes per message, measured in Studio
+on 2026-09-28:
 
 | Payload | Plain tables | `Serialized` |
 |---|---|---|

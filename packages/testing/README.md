@@ -5,7 +5,8 @@ Tests that run inside a real place, and the CLI that runs them. Two halves in on
 - **The roblox-ts side** (`out/`): `defineTests`, `test`, `defer`, `scratch`, the `expect*`
   assertions, and `TestingPlugin`, which hosts the sections on `Workspace.FlameworkTests` (a
   BindableFunction) and `Workspace.FlameworkTestsServer` (a RemoteFunction) under the `testing`
-  scope. How to write the tests is in the guide's [Testing in the place](../../docs/guide/12-testing.md).
+  scope. How to write the tests is in the guide's
+  [Testing in the place](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/docs/guide/12-testing.md).
 - **`flamework-test`** (`cli/`, the package's `bin`): runs those sections where the engine is
   real, from a terminal or CI. It runs them in one of two places:
   - **Roblox Studio on this machine**, the default. It opens the place Rojo built, runs the tests
@@ -23,10 +24,12 @@ bun run test        # guide 12's test script: compile with the scope, rojo build
 ```
 
 The place has to be compiled with the `testing` scope, or it has no test host, so the quick start is
-the [test script](../../docs/guide/12-testing.md#setting-up) from guide 12, as a package script. It
-compiles with `FLAMEWORK_SCOPES` set to `testing` in its own environment, builds the place, runs
-`flamework-test test test.rbxl`, and compiles again with the variable set to nothing. Never put the
-scope in `.env` or `.env.local`: every build on the machine reads them, the ones you ship included.
+the
+[test script](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/docs/guide/12-testing.md#setting-up)
+from guide 12, as a package script. It compiles with `FLAMEWORK_SCOPES` set to `testing` in its own
+environment, builds the place, runs `flamework-test test test.rbxl`, and compiles again with the
+variable set to nothing. Never put the scope in `.env` or `.env.local`: every build on the machine
+reads them, the ones you ship included.
 
 **The CLI needs [Bun](https://bun.sh)**, whatever installed the package: its `bin` is TypeScript that
 Bun runs as it is. `npm install` and `pnpm add` work too, and their `flamework-test` command starts
@@ -147,7 +150,9 @@ but runs none of its Scripts, so nothing ignites the game. The shim has to requi
 that exports `ignite()` and call it. `"testing": { "entry": "src/server/main" }` in
 `flamework.config.json` tells it which one. In Studio, the place's own Scripts run, and the module
 is up before the tests are invoked. A cloud command checks for the entry before it publishes
-anything. See [Running the tests](../../docs/testing/place.md) for the setup.
+anything. See
+[Running the tests](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/docs/testing/place.md)
+for the setup.
 
 The place must be closed in Studio while `cloud publish` runs: Roblox refuses to save a version of
 a place that is open (`409 Server is busy`).
@@ -283,8 +288,8 @@ cloud module, which:
 2. waits for `Workspace.FlameworkTests`;
 3. invokes it, and returns the result as JSON.
 
-See [Running the tests](../../docs/testing/place.md) for the setup on the game's side, the limits,
-and what each error means.
+See [Running the tests](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/docs/testing/place.md)
+for the setup on the game's side, the limits, and what each error means.
 
 ## Limits
 
@@ -319,10 +324,11 @@ A run uses one task.
 
 - `bun test cli/tests` runs the CLI suite with a mocked `fetch`, a fake Studio proxy and fake
   processes. Nothing reaches the network, Studio or Lune.
-- The real thing runs in [`tests/place`](../../tests/place/README.md), the repository's test place.
-  Its dependencies are workspace links to this package and the others. `bun run test:place` from
-  the repository root builds the packages and runs the place's suite in Studio under four Rojo
-  projects, with no packing or copying.
+- The real thing runs in
+  [`tests/place`](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/tests/place/README.md),
+  the repository's test place. Its dependencies are workspace links to this package and the others.
+  `bun run test:place` from the repository root builds the packages and runs the place's suite in
+  Studio under four Rojo projects, with no packing or copying.
 - `bun run typecheck` runs `tsc -p cli --noEmit`, and `bun run build` builds the roblox-ts side.
 
 The CLI runs under Bun. The Luau it submits or runs lives in `cli/tasks/*.lune`, imported as text.

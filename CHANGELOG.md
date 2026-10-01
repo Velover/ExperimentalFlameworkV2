@@ -32,6 +32,18 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   bytes the empty table cost on every such message. Receivers already read a missing list as
   empty, and `Flamework.createSerializer`'s `serialize` still returns the list.
 
+### Docs
+
+- Guide 06, size on the wire: corrected. Roblox compresses only the `buffer` values a remote
+  carries, each on its own; tables, strings, numbers and datatypes go out as they are. The alpha.4
+  and alpha.5 guides said it compressed everything a remote carries.
+- Guide 07, Serializers: rewritten for the current serializer (what `createSerializer` returns, the
+  per-file `codec` table, what `deserialize` checks and what it does not).
+- Guides 05, 06 and 12: the Rojo step matches the one-line mapping of the whole scope.
+- The docs index describes guides 6, 7 and 9 as they are now.
+- The package READMEs no longer carry the root README's paragraph for contributors, and the testing
+  README's links point at GitHub, so they work on npm.
+
 ## 2026-10-01: core, components, networking and testing 2.0.0-alpha.5; transformer 2.0.0-alpha.6
 
 ### Upgrade notes
@@ -79,6 +91,10 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   twin, as a plain `number` and an implicit one are `number`. Hovers and `Modding.Target.Text` of
   an intersection that spells a strict width out show the extra property, and a macro reading the
   brand object's fields sees one more optional field.
+
+### components, networking, testing
+
+- Version only (no changes).
 
 ### transformer
 

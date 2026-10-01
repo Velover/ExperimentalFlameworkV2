@@ -245,38 +245,87 @@ generators, and TypeScript ignores it. It is the same type that `registerProvide
 
 ### Serializers
 
-`Flamework.createSerializer<T>()` generates encode and decode code for `T` at the call site:
+`Flamework.createSerializer<T>()` packs a value of type `T` into a `buffer` and unpacks it again,
+with code generated from the type when you build. It is the generator that packs networking
+payloads, used on its own: the format, what each type costs, what travels as a blob, the widths and
+their checks are the ones [Networking › Serialization](06-networking.md#serialization) describes.
 
 ```ts
+import { Flamework, Serialization } from "@flamework-experimental/core";
+
 interface Snapshot {
     id: Serialization.u16;
     position: Vector3;
     tags: string[];
     mode: "idle" | "walk";
-    owner: Instance; // travels alongside the buffer
+    owner: Instance; // travels next to the buffer, in the blob list
 }
 
 const snapshots = Flamework.createSerializer<Snapshot>();
+
 const [payload, blobs] = snapshots.serialize(snapshot);
-const back = snapshots.deserialize(payload, blobs); // raises on malformed input
+const back = snapshots.deserialize(payload, blobs); // raises on a malformed payload
 ```
 
-The output is plain buffer code. Each field is a `buffer.write*` at an offset the transformer
-computed, with fixed-size types at literal offsets, and the decoder mirrors it. Fields go in
-declaration order. Counts and lengths are varints, and `Serialization.varint` does the same for an
-integer of your own. Named types with a variable size are moved out into `s_`, `w_` and `r_`
-functions (size, write, read), placed ahead of the statement, once per statement. That is also how
-recursive types work. There is no runtime library behind it, and nothing in the output describes the
-type.
+It returns a `Serialization.Serializer<T>`, a table of two functions:
 
-- Wrap `deserialize` in `pcall` for untrusted input.
-- Create serializers at the top level of a file (module scope). One built inside a function is
-  rebuilt on every call.
+| Function | Does |
+|---|---|
+| `serialize(value)` | Returns the buffer and the blob list: the values with no buffer representation, such as Instances, `unknown` and class instances, which the buffer refers to by index. The list is `nil` when `T` has no such values, and a table, possibly empty, when it has. |
+| `deserialize(payload, blobs?)` | Returns the value. Pass it the list `serialize` returned with the buffer. It raises on a buffer that is too short or too long, or holds a union tag, a literal's index or a count that cannot be right. Not every byte is checked: any non-zero byte reads as `true`, an enum value that names no item reads as `nil`, and so does a blob index past the list. |
 
-The same generator powers [networking serialization](06-networking.md#serialization), which lists
-what each kind of type costs and what travels as a blob. `serialize` checks the values of the
-`Serialization.Implicit` widths as it writes them, as a call site does; see
-[Implicit widths and checks](06-networking.md#implicit-widths-and-checks).
+Both functions are generated where you call `createSerializer`, as plain `buffer` code; the call
+itself only hands them back. `serialize` measures the value, creates a buffer of that size and
+writes into it. `deserialize` reads in the same order and checks that it used the whole buffer. The
+example compiles to this (local names shortened):
+
+```lua
+local snapshots = Flamework.createSerializer({
+    serialize = function(v)
+        local buf = buffer.create(codec.s_Snapshot(v))
+        local blobs = {}
+        codec.w_Snapshot(buf, 0, v, blobs)
+        return buf, blobs
+    end,
+    deserialize = function(buf, blobs)
+        local value, o = codec.r_Snapshot(buf, 0, blobs)
+        if o ~= buffer.len(buf) then
+            error("malformed payload")
+        end
+        return value
+    end,
+})
+```
+
+A type of a fixed size has no functions of its own. It is written and read inline, at offsets worked
+out when you build, and a serializer of one creates a buffer of a constant size. A named object,
+union or tuple whose size varies, and any other type of varying size the file reaches more than once
+(an array, a set or a map included), gets three: `s_` measures a value, `w_` writes it at an offset,
+and `r_` reads it back. They are fields of one table per file, `codec`, a single local declared
+ahead of the first statement that needs it. Every serializer and every networking call site in the
+file shares them, and they are how a type that refers to itself is written. The varint helpers
+(`vsize`, `vwrite`, `vread`), the lookup tables for literals and enums, and the guards that tell
+union members apart are declared once per file in the same way. There is no runtime library behind
+any of it, and nothing in the output describes the type.
+
+- `serialize` checks the values of the `Serialization.Implicit` widths as it writes them, under the
+  project's `serialization.checks`, as a call site does. A failure names where the value sits,
+  starting from the name of a named object, union or tuple (`Tile.x`), and from `value` otherwise
+  (`value[]` for an array, `value` itself for a width); see
+  [Implicit widths and checks](06-networking.md#implicit-widths-and-checks).
+- The format follows the types as written: fields in declaration order, and a union's members
+  numbered in the order written in the type argument and the declarations it reaches
+  ([What each type costs](06-networking.md#what-each-type-costs)). Reordering either, or changing a
+  width, changes the format: a buffer written before is then read wrong, or not at all. Keep that in
+  mind before you store buffers, in a DataStore say.
+- `deserialize` checks lengths, counts, union tags and literal indices, and trusts no count or
+  length it reads
+  ([Payloads that cannot be decoded](06-networking.md#payloads-that-cannot-be-decoded)). It does not
+  check the blob list: a blob comes back as whatever the list holds at its index, and `nil` past its
+  end. For data from another player, call it in `pcall`, then check the value with a guard
+  (`Flamework.createGuard<T>()`), as networking checks what it decodes.
+- Create serializers at the top level of a file (module scope). One created inside a function makes
+  its two functions again on every call.
 
 ## When a macro does not fire
 

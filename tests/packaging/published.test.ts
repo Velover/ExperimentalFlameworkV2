@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
 import fs from "fs";
 import path from "path";
-import { links, REPOSITORY, rewriteLinks } from "../../scripts/links.mjs";
+import { links, REPOSITORY, rewriteLinks, withoutRepositoryOnly } from "../../scripts/links.mjs";
 
 /**
  * Guards what the published tarballs hold beyond the Luau: the Rojo project files that let a game map
@@ -262,7 +262,17 @@ describe("the README copied into each package", () => {
 
 		const source = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
 		const copy = fs.readFileSync(path.join(ROOT, "packages", pkg, "README.md"), "utf8");
-		expect(withoutTargets(copy)).toBe(withoutTargets(source));
+		expect(withoutTargets(copy)).toBe(withoutTargets(withoutRepositoryOnly(source)));
+	});
+
+	// The notes for contributors to this repository (how the specs and their variants are built)
+	// stay in the root README and out of what npm shows.
+	test.each(PACKAGES)("%s ships it without the repository-only blocks", (pkg) => {
+		const source = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+		const copy = fs.readFileSync(path.join(ROOT, "packages", pkg, "README.md"), "utf8");
+		expect(source).toContain("packages/specs/variants");
+		expect(copy).not.toContain("packages/specs/variants");
+		expect(copy).not.toContain("repository only");
 	});
 
 	test("core's keeps its link to the shipped index relative; the others point at GitHub", () => {
@@ -270,6 +280,17 @@ describe("the README copied into each package", () => {
 		expect(read("core")).toContain("docs/README.md");
 		expect(read("components")).toContain(`${REPOSITORY}/blob/HEAD/docs/README.md`);
 		expect(read("core")).toContain(`${REPOSITORY}/blob/HEAD/docs/reference/internals.md`);
+	});
+});
+
+describe("testing's own README", () => {
+	// copy-readme leaves it as it is, so its links must work from node_modules and on npm as written.
+	test("links only to its own headings, files of the repository on GitHub, and other sites", () => {
+		for (const packer of PACKERS) {
+			expect(packed("testing", packer)).toContain("README.md");
+		}
+
+		expect(linkProblems("testing", "README.md", ["README.md"])).toEqual([]);
 	});
 });
 
