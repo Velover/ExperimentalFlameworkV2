@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { compileFixture, compileFixtureFresh, compileFixtureWithEnv, emitted } from "./compile";
+import { compileFixture, compileFixtureFresh, compileFixtureWithEnv, compileProbes, emitted } from "./compile";
 
 /*
  * `Serialization.Implicit` widths (an optional brand) and the checks generated where values are
@@ -83,6 +83,8 @@ function functionBody(emit: string, name: string): string {
 	return match[0];
 }
 
+const plain = (output: string) => output.replace(/\x1b\[[0-9;]*m/g, "");
+
 /** An emit without its checks and with generated names' numeric suffixes dropped, so two widths compare. */
 function withoutChecks(block: string, name: string): string {
 	return block
@@ -116,9 +118,127 @@ describe("implicit widths", () => {
 	});
 
 	test("count a brand of the project's own as implicit when its property is optional", () => {
-		const own = serializer(source(), "ownU16");
-		expect(own).toMatch(/buffer\.writeu16\(buf\w*, 0, v\w*\)/);
-		expect(own).toMatch(/codec\.checkWidth\("u16", v\w*, "value"\)/);
+		// On a property of its own, or on `__brand` as the strict widths have it.
+		for (const name of ["ownU16", "sharedU16"]) {
+			const own = serializer(source(), name);
+			expect(own).toMatch(/buffer\.writeu16\(buf\w*, 0, v\w*\)/);
+			expect(own).toMatch(/codec\.checkWidth\("u16", v\w*, "value"\)/);
+		}
+	});
+});
+
+describe("mixing widths", () => {
+	test("goes as implicitMixing.ts says, which the fixture's build checks", () => {
+		// Each `Expect` and `Refused` there is a type that does not compile when it does not hold:
+		// implicit widths mix with each other and take strict ones, implicit into strict is refused.
+		const result = compileFixture();
+		expect(result.status).toBe(0);
+		expect(plain(result.output)).not.toContain("implicitMixing");
+		expect(emitted("implicitMixing")).toMatch(/\nreturn nil\n?$/);
+	});
+
+	test("keeps both members of a union of two implicit widths, and packs what a call declares", () => {
+		const write = hoisted(source(), "w", "Mixed");
+		expect(write).toMatch(
+			/if type\(v\w*\) == "number" and \(v\w* >= 0 and v\w* <= 255 and v\w* % 1 == 0\) then\s*buffer\.writeu8\(buf\w*, o\w*, 0\)\s*buffer\.writeu8\(buf\w*, o\w* \+ 1, v\w*\)/,
+		);
+		expect(write).toMatch(
+			/elseif type\(v\w*\) == "number" and \(v\w* >= 0 and v\w* <= 65535 and v\w* % 1 == 0\) then\s*buffer\.writeu8\(buf\w*, o\w*, 1\)\s*buffer\.writeu16\(buf\w*, o\w* \+ 1, v\w*\)/,
+		);
+		expect(write).toMatch(/codec\.checkWidth\("u8 \| u16", v\w*, where\w*\)/);
+
+		// `[small, big]` and `flag ? big : small` are inferred; what is written is what `mix` declares.
+		const send = functionBody(source(), "sendMixed");
+		expect(send).toMatch(/codec\.w_Mixed\(buf\w*, o\w*, item\w*, "'mix' \[0\]\[\]"\)/);
+		expect(send).toMatch(
+			/local (arg\w*) = if flag then big else small\n[\s\S]*\n\tif not \(\1 >= 0 and \1 <= 255 and \1 % 1 == 0\) then\n\t\tcodec\.checkWidth\("u8", \1, "'mix' \[1\]"\)\n\tend\n\tbuffer\.writeu8\(buf\w*, o\w*, \1\)/,
+		);
+	});
+
+	test("takes the same width named twice as that width, strict when a brand is required", () => {
+		const strict = serializer(source(), "sameWidthStrict");
+		expect(strict).toMatch(/buffer\.writeu16\(buf\w*, 0, v\w*\)/);
+		expect(strict).not.toContain("checkWidth");
+		expect(serializer(source(), "sameWidthImplicit")).toMatch(
+			/codec\.checkWidth\("u16", v\w*, "value"\)\s*end\s*buffer\.writeu16\(buf\w*, 0, v\w*\)/,
+		);
+	});
+
+	test("writes a strict value and an implicit one inferred together as the implicit twin", () => {
+		// `[strict, held]` is an `Implicit.u8[]` and `flag ? strict : held` an `Implicit.u8`, not a union of
+		// the two, whose tag ahead of every value would double what is sent.
+		const body = functionBody(source(), "inferredTogether");
+		expect(body).not.toContain("union's members");
+		// The array's code is shared, and writes each value as a checked u8.
+		const list = body.match(/codec\.w_(\w+)\(buf\w*, 0, v\w*, "value"\)/);
+		expect(list).not.toBeNull();
+		const write = hoisted(source(), "w", list![1]);
+		expect(write).not.toContain("union's members");
+		expect(write).toMatch(
+			/codec\.checkWidth\("u8", item\w*, where\w* \.\. "\[\]"\)\s*end\s*buffer\.writeu8\(buf\w*, o\w*, item\w*\)\s*o\w* \+= 1/,
+		);
+		// The single value is one byte, checked.
+		expect(body).toMatch(
+			/local buf\w* = buffer\.create\(1\)\s*if not \(v\w* >= 0 and v\w* <= 255 and v\w* % 1 == 0\) then\s*codec\.checkWidth\("u8", v\w*, "value"\)\s*end\s*buffer\.writeu8\(buf\w*, 0, v\w*\)/,
+		);
+	});
+
+	test("refuses a type that names two different widths, naming it", () => {
+		const header = `import { Flamework, Serialization } from "@flamework-experimental/core";\n`;
+		const result = compileProbes({
+			// TypeScript prints this one as `never`: its two required brands conflict.
+			twoWidthsNever: `${header}export const n = Flamework.createSerializer<Serialization.u8 & Serialization.u16>();
+`,
+			// Two errors in one file: each is reported with only its own chain.
+			twoWidthsTwice: `${header}export const p = Flamework.createSerializer<{ p: Serialization.Implicit.u8 & Serialization.Implicit.u16 }>();
+export const q = Flamework.createSerializer<{ q: string; r: Serialization.Implicit.i8 & Serialization.Implicit.u32 }>();
+`,
+			twoWidthsStrict: `${header}type StrictAndImplicit = Serialization.u16 & Serialization.Implicit.u8;
+export const a = Flamework.createSerializer<StrictAndImplicit>();
+`,
+			twoWidthsImplicit: `${header}type TwoImplicit = Serialization.Implicit.u8 & Serialization.Implicit.u16;
+export const b = Flamework.createSerializer<{ id: TwoImplicit }>();
+`,
+			twoWidthsOwn: `${header}type OwnAndImplicit = number & { readonly __brand?: "u16" } & Serialization.Implicit.u8;
+export const c = Flamework.createSerializer<OwnAndImplicit>();
+`,
+			twoWidthsString: `${header}type TwoStrings = Serialization.Implicit.string8 & Serialization.string16;
+export const d = Flamework.createSerializer<TwoStrings>();
+`,
+			twoWidthsBuffer: `${header}type TwoBuffers = Serialization.buffer16 & Serialization.Implicit.buffer32;
+export const e = Flamework.createSerializer<TwoBuffers>();
+`,
+		});
+
+		const output = plain(result.output);
+		expect(result.status).not.toBe(0);
+		expect(output).toContain(
+			"Flamework cannot serialize this type: 'StrictAndImplicit' names two widths, u16 and u8; a value is written at one width, so keep one of them.",
+		);
+		expect(output).toContain("'TwoImplicit' names two widths, u8 and u16");
+		expect(output).toContain("Reached through: { id: TwoImplicit; } > TwoImplicit");
+		expect(output).toContain("'OwnAndImplicit' names two widths, u16 and u8");
+		expect(output).toContain("'TwoStrings' names two widths, string8 and string16");
+		expect(output).toContain("'TwoBuffers' names two widths, buffer16 and buffer32");
+
+		// Named as written, not as TypeScript prints it.
+		expect(output).toContain("'Serialization.u8 & Serialization.u16' names two widths, u8 and u16");
+		expect(output).not.toContain("'never'");
+		expect(output).toContain(
+			"'Serialization.Implicit.u8 & Serialization.Implicit.u16' names two widths, u8 and u16",
+		);
+		expect(output).toContain(
+			"'Serialization.Implicit.i8 & Serialization.Implicit.u32' names two widths, i8 and u32",
+		);
+		// The second error's chain starts from its own value, not from where the first one stopped.
+		const chains = output.match(/^Reached through: .*$/gm) ?? [];
+		const second = chains.find((chain) =>
+			chain.endsWith("> Serialization.Implicit.i8 & Serialization.Implicit.u32"),
+		);
+		expect(second).toMatch(
+			/^Reached through: \{ q: string; r: [^>]* \}; \} > Serialization\.Implicit\.i8 & Serialization\.Implicit\.u32$/,
+		);
+		expect(second).not.toContain("p:");
 	});
 });
 

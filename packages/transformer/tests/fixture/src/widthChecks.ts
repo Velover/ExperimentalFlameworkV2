@@ -35,6 +35,10 @@ export const strictBuffer32 = Flamework.createSerializer<Serialization.buffer32>
 type OwnU16 = number & { readonly unit?: "u16" };
 export const ownU16 = Flamework.createSerializer<OwnU16>();
 
+/** The same on `__brand`, the property strict widths use: implicit too, though such brands do not mix with each other. */
+type SharedU16 = number & { readonly __brand?: "u16" };
+export const sharedU16 = Flamework.createSerializer<SharedU16>();
+
 /** A named type whose code is shared: a check's path starts from its name. */
 interface Entity {
 	id: Serialization.Implicit.u16;
@@ -96,3 +100,33 @@ export function askFor(id: number) {
 }
 
 widthServerFunctions.ask.setCallback((_player, id) => id * 300);
+
+/** Two implicit widths in one union stay two members, as written. */
+type Mixed = Serialization.Implicit.u8 | Serialization.Implicit.u16;
+
+interface MixServerEvents {
+	mix(values: Mixed[], one: Serialization.Implicit.u8): void;
+}
+
+export const mixClient = Networking.createEvent<MixServerEvents, {}>().createClient({});
+
+/** Implicit widths mix: the call packs the declared types, whatever the arguments were inferred as. */
+export function sendMixed(small: Serialization.Implicit.u8, big: Serialization.Implicit.u16, flag: boolean) {
+	mixClient.mix.fire([small, big], flag ? big : small);
+}
+
+/** The same width named twice is that width: strict when a brand is required, implicit when every one is optional. */
+export const sameWidthStrict = Flamework.createSerializer<Serialization.u16 & Serialization.Implicit.u16>();
+export const sameWidthImplicit = Flamework.createSerializer<Serialization.Implicit.u16 & OwnU16>();
+
+/**
+ * A strict value and an implicit one inferred together are the implicit twin, which the strict width
+ * is a subtype of: `typeof` makes that the declared type, a u8 each, checked.
+ */
+export function inferredTogether(strict: Serialization.u8, held: Serialization.Implicit.u8, flag: boolean) {
+	const both = [strict, held];
+	const either = flag ? strict : held;
+	const [list] = Flamework.createSerializer<typeof both>().serialize(both);
+	const [one] = Flamework.createSerializer<typeof either>().serialize(either);
+	return [list, one];
+}

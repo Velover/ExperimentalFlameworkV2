@@ -954,10 +954,31 @@ generator through the `serializer` intrinsic.
 
 Width checks (`serialization.checks` in the project config, read by the transformer only and
 never written to the runtime config) are generated into the writes. `findBrand` reads a brand's
-literal through `getNonNullableType`, so an optional brand (`number & { __brand?: "u16" }`, what
-`Serialization.Implicit` declares) is recognised, and marks the kind `implicit`; before, an
+literal through `getNonNullableType`, so an optional brand (`number & { __brand?: "u16" }`, or
+`Serialization.Implicit`'s `_flamework_u16?`) is recognised, and marks the kind `implicit`; before, an
 optional brand's `"u16" | undefined` was no literal and the value went out as an f64 without a
-word. `checkedWidth` decides per kind whether a write is checked (`category`: implicit kinds, every
+word. It reads the literals of the value's kind only (a number's widths for a number, and so on),
+from every member of the intersection, and fails naming the type when two of them differ
+(`Serialization.u16 & Serialization.Implicit.u8`) rather than taking the first; the same width
+named twice is implicit only when every property naming it is optional. `Serialization.Implicit`
+gives each width an optional property of its own, so the implicit widths are assignable to each
+other and take any strict width of their kind, while implicit into strict stays an error, as it
+is for a plain `number`. TypeScript's subtype reduction does not merge two implicit widths: a
+subtype has to declare the target's optional properties, which one width's type does not for
+another's, so an inferred `[a, b]` or `c ? a : b` of an `Implicit.u8` and an `Implicit.u16` stays a
+union. Each strict width declares its twin's optional property too (`u8` has `_flamework_u8?` next
+to its required `__brand`), which makes it a subtype of the twin: `[strict, implicit]` reduces to
+the twin and `same(strict, implicit)` infers it, as when both were on `__brand`, and `findBrand`
+reads the width named twice, once required, as strict. The generator reads declared types (a
+parameter's, a property's, the type argument of `createSerializer`), so an inferred type reaches it
+only where `typeof` makes it the declared one (`createSerializer<typeof x>()`); there a union of a
+width and its twin would cost a tag per value. A failed type is named by `typeText`: an
+intersection as `spell` saw it written (`writtenAs`), since TypeScript prints one whose brands
+conflict (`Serialization.u8 & Serialization.u16`) as `never`. `computeLayout` and `buildHoisted`
+pop `trail` in a `finally`, and `layoutOf` clears `visiting` the same way: a file's one generator
+goes on after a failed value, and before this the next error's "Reached through" chain began
+with the last one's.
+`checkedWidth` decides per kind whether a write is checked (`category`: implicit kinds, every
 kind with a width, or none) and returns the width's name. A checked number that is more than a plain
 name is read once into a local, and the local, its test and its write go in a `do` block of their own
 (`writeNumber`): Luau allows 200 locals in a function, and a call site's code lands in the caller's

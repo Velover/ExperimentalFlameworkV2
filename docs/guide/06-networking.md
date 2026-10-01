@@ -406,10 +406,30 @@ one starts from the outer type's name (`Tile.items[].id`), which keeps the write
 strings. An outer type with no name starts from how TypeScript prints it, in parentheses:
 `({ pos: { x: i16; }; items: Item[]; }).items[].id`, or `(u16[])[]`.
 
-A strict width goes into its implicit twin, so `const x: Serialization.Implicit.u16 = strict`
-compiles, but not the other way round, and two different widths never mix: an `Implicit.u8` is not
-an `Implicit.u16`. A type of your own with an optional brand (`number & { __brand?: "u16" }`)
-counts as implicit.
+Implicit widths behave like plain numbers, strings and buffers. They mix with each other and take
+any strict width of their kind: an `Implicit.u8` goes into an `Implicit.u16` and back, and a strict
+`Serialization.u32` goes into either. What is checked is the width a value is written as, so 300
+held in an `Implicit.u16` and sent as an `Implicit.u8` fails the `u8` check. As with a plain
+`number`, going into a strict width takes a cast, and a number never goes into a string width.
+
+Each implicit width's brand is an optional property of its own
+(`number & { readonly _flamework_u16?: "u16" }`): optional to let a plain value in, and one per
+width to let the widths mix. Each strict width carries its twin's property as well, next to its
+required `__brand`, which makes it a subtype of the twin: a strict value and an implicit one
+together (`[strict, implicit]`, `flag ? strict : implicit`, or both passed as one generic `T`) are
+inferred as the implicit twin, as a plain `number` and an implicit one are inferred as `number`.
+
+A type of your own with an optional brand (`number & { __brand?: "u16" }`) counts as implicit too.
+Types of your own that share one property, such as `__brand?: "u8"` and `__brand?: "u16"`, do not
+mix with each other, nor take a strict width other than their own, which uses `__brand` too. Give
+each width a property of its own, as `Implicit` does, to make them mix. A brand of your own on
+`__brand`, strict or optional (`number & { __brand: "u16" }` or `{ __brand?: "u16" }`), is not a
+subtype of `Implicit.u16`, so it and an implicit value together are not inferred as the twin:
+`[own, implicit]` is a union of the two, which `createSerializer<typeof value>()` writes with a
+tag, and a generic `T` or a `Map` literal given both does not compile. Give it the twin's property
+too (`_flamework_u16?: "u16"`), or use `Serialization.u16`. A type that names two different widths, such as
+`Serialization.u16 & Serialization.Implicit.u8`, fails the build. The same width named twice is
+that width, and strict if either brand is required.
 
 Use an implicit width where a value comes from arithmetic or from outside, such as a count, a
 coordinate or a player's input, and you would rather hear about a value that does not fit than send

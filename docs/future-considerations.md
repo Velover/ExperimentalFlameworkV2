@@ -623,5 +623,12 @@ Edge cases found and deliberately left alone, because the fix would cost more th
       names. A module-level `type Array<T>` of a project's own still breaks the tuple-rest guard
       and spread sends.
     - A width failure in a spread argument list names no index (`'many' []`).
+    - The two-width build error names a type as written only where the serializer reaches its
+      declaration. Elsewhere (under an optional property, a union member, a generic argument)
+      TypeScript's printing shows, `_flamework_` properties included. A type interned by an
+      earlier `typeof x` in the file is named `'typeof x'`, a comment inside the written type is
+      kept, and the outer types of the chain still print `never`.
+    - A union of two members of the same width (`(Implicit.u8 | OwnStrict8)[]`) keeps a second
+      tag branch that is never taken.
   - An incremental build keeps the width checks, and the packing of `networking.serialization`, of
     the files it does not recompile after the config changes. Change either with a plain build.

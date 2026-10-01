@@ -76,6 +76,15 @@ const NUMBER_BRANDS = new Set<string>(Object.keys(WIDTH_SIZE));
 const VARINT_BRAND = "varint";
 const STRING_BRANDS: Record<string, LengthWidth> = { u8_string: "u8", u16_string: "u16", u32_string: "u32" };
 const BUFFER_BRANDS: Record<string, LengthWidth> = { u16_buffer: "u16", u32_buffer: "u32" };
+const isNumberBrand = (literal: string) => NUMBER_BRANDS.has(literal) || literal === VARINT_BRAND;
+const isStringBrand = (literal: string) => Object.prototype.hasOwnProperty.call(STRING_BRANDS, literal);
+const isBufferBrand = (literal: string) => Object.prototype.hasOwnProperty.call(BUFFER_BRANDS, literal);
+
+/** A brand's width literal, and whether every property that names it is optional (`implicit`). */
+interface Brand {
+	brand: string;
+	implicit: boolean;
+}
 
 /** A blob's 1-based index in the blob list, 0 for nil. */
 const BLOB_SIZE = 4;
@@ -731,6 +740,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	const walked = new Set<Shape>();
 	/** A name for an unnamed type's hoisted functions: how it was written, or the property it was reached through. */
 	const hints = new Map<ts.Type, string>();
+	/** The node each intersection was first spelled as, which is how messages name it; see {@link typeText}. */
+	const writtenAs = new Map<ts.Type, ts.TypeNode>();
 	/** A union's members as alternatives, shared by every spelling of it so a literal group is one table. */
 	const unionAlternatives = new Map<ts.UnionType, { isOptional: boolean; alternatives: Alternative[] }>();
 	let varint: Varint | undefined;
@@ -1036,10 +1047,30 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	}
 
 	function fail(message: string): never {
-		const chain = trail.map((type) => typeChecker.typeToString(type)).join(" > ");
+		const chain = trail.map((type) => typeText(type)).join(" > ");
 		const lines = [`Flamework cannot serialize this type: ${message}.`];
 		if (chain !== "") lines.push(`Reached through: ${chain}`);
 		return Diagnostics.error(diagnosticNode, ...(lines as [string, ...string[]]));
+	}
+
+	/**
+	 * A type for a message: an intersection as it was written where the generator reached it
+	 * (`Serialization.Implicit.u8 & Serialization.Implicit.u16`), anything else as TypeScript prints
+	 * it. TypeScript prints an intersection whose brands conflict (`Serialization.u8 & Serialization.u16`)
+	 * as `never`; one of those not reached through a node of its own is named by its alias or its members.
+	 */
+	function typeText(type: ts.Type): string {
+		const node = writtenAs.get(type);
+		if (node) return node.getText().replace(/\s+/g, " ");
+
+		const text = typeChecker.typeToString(type);
+		if (text !== "never" || !type.isIntersection()) return text;
+		if (type.aliasSymbol) {
+			const args = type.aliasTypeArguments?.map((arg) => typeText(arg));
+			return `${type.aliasSymbol.name}${args ? `<${args.join(", ")}>` : ""}`;
+		}
+
+		return type.types.map((member) => (member.isUnion() ? `(${typeText(member)})` : typeText(member))).join(" & ");
 	}
 
 	// --- top level -----------------------------------------------------------------------------------
@@ -1613,6 +1644,15 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			return spell(node.type, type);
 		}
 
+		if (
+			type.isIntersection() &&
+			node.pos >= 0 &&
+			!writtenAs.has(type) &&
+			typeChecker.getTypeFromTypeNode(node) === type
+		) {
+			writtenAs.set(type, node);
+		}
+
 		if (ts.isUnionTypeNode(node)) {
 			return type.isUnion() ? classifyUnion(type, node) : type;
 		}
@@ -1691,21 +1731,21 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			fail("a LuaTuple is several values at runtime, not a table; declare a tuple type such as `[A, B]` instead");
 		}
 
-		const found = findBrand(type);
-		const brand = found?.brand;
 		// An optional brand's values are checked; a required one's are not, unless the project says so.
-		const implicit = found?.implicit === true ? { implicit: true } : {};
+		const implicitOf = (found: Brand) => (found.implicit ? { implicit: true } : {});
 		const disjoint = type.types.find((member) => (member.flags & ts.TypeFlags.DisjointDomains) !== 0);
 		if (disjoint) {
 			if (disjoint.flags & ts.TypeFlags.Number) {
-				if (brand === VARINT_BRAND) return { kind: "varint", ...implicit };
-				if (brand && NUMBER_BRANDS.has(brand)) return { kind: "number", width: brand as Width, ...implicit };
-				return { kind: "number", width: "f64" };
+				const found = findBrand(type, isNumberBrand);
+				if (!found) return { kind: "number", width: "f64" };
+				if (found.brand === VARINT_BRAND) return { kind: "varint", ...implicitOf(found) };
+				return { kind: "number", width: found.brand as Width, ...implicitOf(found) };
 			}
 
 			if (disjoint.flags & ts.TypeFlags.String) {
-				const length = brand && STRING_BRANDS[brand];
-				return length ? { kind: "string", length, ...implicit } : { kind: "string", length: "v" };
+				const found = findBrand(type, isStringBrand);
+				if (!found) return { kind: "string", length: "v" };
+				return { kind: "string", length: STRING_BRANDS[found.brand], ...implicitOf(found) };
 			}
 
 			return describe(disjoint);
@@ -1713,8 +1753,9 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		const bufferSymbol = resolve("buffer");
 		if (type.types.some((member) => member.getSymbol() === bufferSymbol)) {
-			const length = brand && BUFFER_BRANDS[brand];
-			return length ? { kind: "buffer", length, ...implicit } : { kind: "buffer", length: "v" };
+			const found = findBrand(type, isBufferBrand);
+			if (!found) return { kind: "buffer", length: "v" };
+			return { kind: "buffer", length: BUFFER_BRANDS[found.brand], ...implicitOf(found) };
 		}
 
 		const datatype = type.types.find((member) => {
@@ -1735,26 +1776,45 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	}
 
 	/**
-	 * The literal in `number & { __brand: "u8" }`, whatever the property is called, and whether the
-	 * property is optional (`__brand?: "u8"`, `Serialization.Implicit.u8`), which makes the width
-	 * implicit: it takes plain values, and they are checked where they are written.
+	 * The width in `number & { __brand: "u8" }`: the literal of a property, whatever the property is
+	 * called, that `isWidth` takes for this kind of value (a number's widths for a number, and so on).
+	 * An optional property (`__brand?: "u8"`, or `Serialization.Implicit.u8`'s `_flamework_u8?`) makes
+	 * the width implicit: it takes plain values, and they are checked where they are written.
+	 *
+	 * Every member of the intersection is read, so a type that names two widths
+	 * (`Serialization.u16 & Serialization.Implicit.u8`, two implicit widths, or a brand of the
+	 * project's own next to one) is a build error naming it rather than whichever came first. The
+	 * same width named twice is that width, and implicit only when every property naming it is
+	 * optional: a required one keeps plain values out. Each strict width names its own twice, with
+	 * its implicit twin's optional property next to the required `__brand`.
 	 */
-	function findBrand(type: ts.IntersectionType): { brand: string; implicit: boolean } | undefined {
+	function findBrand(type: ts.IntersectionType, isWidth: (literal: string) => boolean): Brand | undefined {
+		let found: Brand | undefined;
 		for (const member of type.types) {
 			if ((member.flags & ts.TypeFlags.Object) === 0) continue;
 
 			for (const property of member.getProperties()) {
-				const implicit = (property.flags & ts.SymbolFlags.Optional) !== 0;
+				const optional = (property.flags & ts.SymbolFlags.Optional) !== 0;
 				let propertyType = typeChecker.getTypeOfPropertyOfType(member, property.name);
 				// An optional property's type carries `undefined` as well: `"u16" | undefined`.
-				if (propertyType && implicit) propertyType = typeChecker.getNonNullableType(propertyType);
-				if (propertyType?.isStringLiteral()) {
-					const brand = propertyType.value;
-					if (NUMBER_BRANDS.has(brand) || brand === VARINT_BRAND) return { brand, implicit };
-					if (brand in STRING_BRANDS || brand in BUFFER_BRANDS) return { brand, implicit };
+				if (propertyType && optional) propertyType = typeChecker.getNonNullableType(propertyType);
+				if (!propertyType?.isStringLiteral() || !isWidth(propertyType.value)) continue;
+
+				const brand = propertyType.value;
+				if (found && found.brand !== brand) {
+					// Named as the widths are: `u8_string` is a string8.
+					const [a, b] = [found.brand, brand].map((literal) =>
+						literal.replace(/^u(\d+)_(string|buffer)$/, "$2$1"),
+					);
+					fail(
+						`'${typeText(type)}' names two widths, ${a} and ${b}; a value is written at one width, so keep one of them`,
+					);
 				}
+				found = { brand, implicit: (found?.implicit ?? true) && optional };
 			}
 		}
+
+		return found;
 	}
 
 	function classifyObject(type: ts.Type): Kind {
@@ -1811,8 +1871,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		visiting.add(shape);
 		const before = provisional;
-		const layout = computeLayout(shape);
-		visiting.delete(shape);
+		let layout: Layout;
+		try {
+			layout = computeLayout(shape);
+		} finally {
+			visiting.delete(shape);
+		}
 
 		// A result that saw a cycle is only final for the type that closes it, at the top of the chain.
 		if (provisional === before || visiting.size === 0) layouts.set(shape, layout);
@@ -1823,10 +1887,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	function computeLayout(shape: Shape): Layout {
 		if (!isKind(shape)) {
+			// Popped however the type ends: the generator lives on after a failed type, for the file's next value.
 			trail.push(shape);
-			const layout = layoutOf(describe(shape));
-			trail.pop();
-			return layout;
+			try {
+				return layoutOf(describe(shape));
+			} finally {
+				trail.pop();
+			}
 		}
 
 		const fixed = (size: number, blobs = false): Layout => ({ size, min: size, blobs, zeros: false });
@@ -1971,9 +2038,17 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	/** The size, write and read functions of a hoisted type; see {@link hoist}. */
 	function buildHoisted(type: ts.Type, info: Hoisted) {
+		trail.push(type);
+		try {
+			buildHoistedFunctions(type, info);
+		} finally {
+			trail.pop();
+		}
+	}
+
+	function buildHoistedFunctions(type: ts.Type, info: Hoisted) {
 		const layout = info.layout;
 		const kind = describe(type);
-		trail.push(type);
 
 		const value = parameter("v");
 		const sizeBody = new Array<ts.Statement>();
@@ -2036,8 +2111,6 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				),
 			),
 		);
-
-		trail.pop();
 	}
 
 	/**

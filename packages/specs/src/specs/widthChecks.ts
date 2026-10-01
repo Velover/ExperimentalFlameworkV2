@@ -244,6 +244,9 @@ const strict = {
 
 const everything = Flamework.createSerializer<Everything>();
 
+/** Two implicit widths in one union: both stay members, as written. */
+const mixed = Flamework.createSerializer<Array<Serialization.Implicit.u8 | Serialization.Implicit.u16>>();
+
 /** An `Everything` at the edges of its widths. */
 function edges(): Everything {
 	return {
@@ -317,6 +320,40 @@ export = suite("width checks", [
 			expectEqual(buffer.len(implicit.string16.serialize("b".rep(300))[0]), 302, "string16 bytes");
 			expectEqual(buffer.len(implicit.buffer32.serialize(filled(70000))[0]), 70004, "buffer32 bytes");
 			expectEqual(buffer.len(implicit.u16.serialize(1)[0]), 2, "u16 bytes");
+		},
+	],
+	[
+		"mixes implicit widths as plain values, and checks a value against the width it is written as",
+		() => {
+			// Each of these goes in without a cast, as a plain number, string or buffer would.
+			const held: Serialization.Implicit.u16 = 300;
+			const small: Serialization.Implicit.u8 = 200;
+			const exact = 70000 as Serialization.u32;
+			const text: Serialization.Implicit.string16 = "a".rep(256);
+			const bytes: Serialization.Implicit.buffer32 = filled(65536);
+			expectEqual(roundTrip(implicit.u16, small), 200, "an implicit u8 written as a u16");
+			expectRaises(() => implicit.u8.serialize(held), "[Flamework] u8 cannot hold 300, at value", "u16 as u8");
+			expectRaises(
+				() => implicit.u16.serialize(exact),
+				"[Flamework] u16 cannot hold 70000, at value",
+				"a strict u32 written as an implicit u16",
+			);
+			expectRaises(
+				() => implicit.string8.serialize(text),
+				"[Flamework] string8 cannot hold 256 bytes, at value",
+				"an implicit string16 written as a string8",
+			);
+			expectRaises(
+				() => implicit.buffer16.serialize(bytes),
+				"[Flamework] buffer16 cannot hold 65536 bytes, at value",
+				"an implicit buffer32 written as a buffer16",
+			);
+
+			// A union of two implicit widths keeps both members: 200 goes as the u8, 300 as the u16.
+			const list = [small, held];
+			const [payload] = mixed.serialize(list);
+			expectEqual(buffer.len(payload), 6, "a count, then a tag and one byte, then a tag and two bytes");
+			expectTrue(deepEquals(mixed.deserialize(payload), [200, 300]), "read back");
 		},
 	],
 	[

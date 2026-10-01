@@ -11,6 +11,18 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   written as an f64 without a word. It is now written at its width and checked like
   `Serialization.Implicit.u16`, which by default raises for a value that does not fit. A buffer
   `Flamework.createSerializer` wrote for such a type with an earlier release no longer reads.
+  Brands of your own that share one property (`__brand?: "u8"` and `__brand?: "u16"`) do not mix
+  with each other; give each width a property of its own, as `Serialization.Implicit` does. A brand
+  of your own on `__brand`, strict or optional, is not a subtype of its `Serialization.Implicit`
+  twin: the two inferred together (`[own, implicit]`) are a union, which
+  `Flamework.createSerializer<typeof value>()` writes with a tag ahead of each value, and a generic
+  `T` or a `Map` literal given both does not compile. Give the brand the twin's property too
+  (`_flamework_u16?: "u16"`), or use the `Serialization` types.
+- **A type that names two widths fails the build.** `number & { a: "u8"; b: "u16" }`, or
+  `Serialization.u8 & Serialization.u16`, was written at whichever width the transformer found
+  first (here a u8), without a word. It is now a build error naming the type and both widths: keep
+  the width you mean. The same width named twice (`Serialization.u16 &
+  Serialization.Implicit.u16`) is still that width.
 - **A packed array is written by index, and a hole in it is refused.** Before, the count was
   `#array` but every nil was skipped: elements of a fixed size arrived one place early, with a zero
   (nil for a blob) in the last place, and elements whose size varies made a malformed payload the
@@ -25,7 +37,19 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 - `Serialization.Implicit`: a twin of each of the 14 widths (`Implicit.u8` … `Implicit.buffer32`).
   It takes a plain value with no cast, is written exactly as its strict twin, and is checked where it
-  is written.
+  is written. Implicit widths behave like plain numbers, strings and buffers: they mix with each
+  other and take any strict width of their kind (an `Implicit.u8` goes into an `Implicit.u16` and
+  back, and a strict `u32` goes into either), and a value is checked at the width it is written as.
+  Like a plain value, an implicit one goes into a strict width only through a cast.
+
+#### Changed
+
+- Each width's brand is an optional property of its own (`_flamework_u16?: "u16"`), which each
+  strict width carries next to its `__brand` as well: a strict value and an implicit one inferred
+  together (`[strict, implicit]`, `flag ? strict : implicit`, one generic `T`) are the implicit
+  twin, as a plain `number` and an implicit one are `number`. Hovers and `Modding.Target.Text` of
+  an intersection that spells a strict width out show the extra property, and a macro reading the
+  brand object's fields sees one more optional field.
 
 ### transformer
 
@@ -50,6 +74,12 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   call of the project's own value. This covers `typeIs`, the `Array`/`Map`/`Set` constructors and
   `Enum` at a call site, `buffer` declared at the top of the module, a module-level `warn` under
   `mode: "warn"`, and a hidden `globalThis`.
+- A type that names two different widths (`Serialization.u16 & Serialization.Implicit.u8`,
+  `number & { a: "u8"; b: "u16" }`, two implicit widths, or a brand of your own next to one) is a
+  build error naming the type, as written where the serializer reaches its declaration
+  (`'Serialization.u8 & Serialization.u16' names two widths, u8 and u16`, for a type TypeScript
+  prints as `never`); before, the first brand found was used (see the upgrade notes). The same
+  width named twice is that width, strict when any of its brands is required.
 
 #### Fixed
 
@@ -75,6 +105,17 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   the list has elements"). It is now sent as a count and the values, with any number of arguments,
   spread or not.
 - An array with a hole was sent without it (see the upgrade notes).
+- A brand literal named like an `Object.prototype` member (`toString`, `constructor`, `valueOf`,
+  `hasOwnProperty`, …) was taken for a string width, in every published release: on a string or a
+  buffer (`string & { __brand: "toString" }`) it crashed the build ("Cannot read properties of
+  undefined (reading 'kind')"), and next to a number's brand it hid it
+  (`number & { kind: "toString"; __brand: "u16" }` went out as an f64).
+- A width literal of another kind no longer hides the width next to it: a number's brand is read
+  among the number widths only, and likewise for strings and buffers.
+  `number & { a: "u8_string"; b: "u16" }` was an f64 and is a u16;
+  `string & { a: "u8"; b: "u16_string" }` had a varint length and is a string16.
+- A second serializer error in one file listed the first error's "Reached through" chain ahead of
+  its own.
 
 ## 2026-09-29: core, components, networking and testing 2.0.0-alpha.4; transformer 2.0.0-alpha.5; transformer-plugin 2.0.0-alpha.3
 
