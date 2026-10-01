@@ -2,6 +2,7 @@ import type { TestSuite } from "./testkit";
 
 import components = require("./specs/components");
 import functions = require("./specs/functions");
+import generatedCode = require("./specs/generatedCode");
 import lifecycle = require("./specs/lifecycle");
 import middleware = require("./specs/middleware");
 import modding = require("./specs/modding");
@@ -15,6 +16,7 @@ import scopes = require("./specs/scopes");
 import serialization = require("./specs/serialization");
 import serializedMembers = require("./specs/serializedMembers");
 import testing = require("./specs/testing");
+import widthChecks = require("./specs/widthChecks");
 
 /**
  * Every suite the Lune harness should run, in order.
@@ -34,5 +36,7 @@ export const suites: TestSuite[] = [
 	serializedMembers,
 	regressions,
 	serialization,
+	widthChecks,
+	generatedCode,
 	testing,
 ];

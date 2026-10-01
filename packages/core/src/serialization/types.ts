@@ -63,4 +63,47 @@ export namespace Serialization {
 	export type buffer16 = buffer & { readonly __brand: "u16_buffer" };
 	/** A buffer with a fixed four-byte length. */
 	export type buffer32 = buffer & { readonly __brand: "u32_buffer" };
+
+	/**
+	 * The same widths, for plain values: `const id: Serialization.Implicit.u16 = 7` needs no cast. An
+	 * implicit width is written exactly as its strict twin, and its value is checked where it is
+	 * written, which a cast never is: `serialization.checks` in `flamework.config.json` decides what a
+	 * value that does not fit does (by default it raises, naming the width, the value and where it
+	 * is). A strict width still goes into its implicit twin, but not the other way round, and two
+	 * different widths never mix.
+	 *
+	 * The brand is an optional property here (`number & { readonly __brand?: "u16" }`), which is
+	 * what lets a plain `number` in; a type of your own with an optional brand counts as implicit
+	 * too.
+	 */
+	export namespace Implicit {
+		/** An unsigned byte, 0 to 255, checked where it is written. */
+		export type u8 = number & { readonly __brand?: "u8" };
+		/** A signed byte, -128 to 127, checked where it is written. */
+		export type i8 = number & { readonly __brand?: "i8" };
+		/** An unsigned 16-bit integer, 0 to 65535, checked where it is written. */
+		export type u16 = number & { readonly __brand?: "u16" };
+		/** A signed 16-bit integer, -32768 to 32767, checked where it is written. */
+		export type i16 = number & { readonly __brand?: "i16" };
+		/** An unsigned 32-bit integer, checked where it is written. */
+		export type u32 = number & { readonly __brand?: "u32" };
+		/** A signed 32-bit integer, checked where it is written. */
+		export type i32 = number & { readonly __brand?: "i32" };
+		/** A single-precision float; a finite value past its range is refused where it is written. */
+		export type f32 = number & { readonly __brand?: "f32" };
+		/** A double-precision float, which holds every number: nothing to check. */
+		export type f64 = number & { readonly __brand?: "f64" };
+		/** A LEB128 varint, a whole number from 0 to 2^35 - 1, checked where it is written. */
+		export type varint = number & { readonly __brand?: "varint" };
+		/** A string of at most 255 bytes, checked where it is written. */
+		export type string8 = string & { readonly __brand?: "u8_string" };
+		/** A string of at most 65535 bytes, checked where it is written. */
+		export type string16 = string & { readonly __brand?: "u16_string" };
+		/** A string with a fixed four-byte length: nothing to check. */
+		export type string32 = string & { readonly __brand?: "u32_string" };
+		/** A buffer of at most 65535 bytes, checked where it is written. */
+		export type buffer16 = buffer & { readonly __brand?: "u16_buffer" };
+		/** A buffer with a fixed four-byte length: nothing to check. */
+		export type buffer32 = buffer & { readonly __brand?: "u32_buffer" };
+	}
 }

@@ -234,6 +234,33 @@ to `buffer.create(20)`, four writes at literal offsets and `Events.X._fire(paylo
 call was. A function callback is registered with a generated packer for its result type. The packer
 runs after the middleware, so the result is sent packed.
 
+That code sits among the caller's own declarations. A local that hides a global it uses is fine for
+`buffer` (say, `for (const [player, buffer, blobs] of updates)`): the code then reaches the global
+through an alias at the top of the file. So is a send inside `catch (error)` or `catch (math)`,
+the only places those two can be hidden, since roblox-ts refuses a local or a parameter with either
+name: `math` goes through an alias too, and `error` is raised as `assert(false, message)`, which
+gives the same message from the same line (inside a `catch (assert)` nested in it, `error` takes an
+alias as well, one more local at the top of the file). A type the code names (`Map`, `defined`,
+`buffer` and the like) is reached through `globalThis` where a declaration of yours hides it, so
+`type Map<K, V> = globalThis.Map<K, V>` is fine as well. The guards `createServer` and
+`createClient` build for incoming arguments still name such a type plainly, so a different `Map`
+type of your own in the module that calls them can break the build there, as it always could.
+
+Four things are build errors that name the global and the declaration, and ask you to rename the
+declaration:
+
+- hiding any other global the code needs at the call site: `typeIs` and the constructors of
+  `Array`, `Map` and `Set` (which roblox-ts only knows by their own names), `Enum` and the like;
+- declaring `buffer` at the top of the module itself, where no alias can help;
+- declaring `warn` there in a file whose width checks warn, since their helper calls it from the top
+  of the file (a local `warn` is fine);
+- hiding `globalThis` itself, through which those types are reached.
+
+What roblox-ts emits by itself is another matter, packed or not: inside `catch (table)` or
+`catch (type)`, its own `table.insert` and `type(...)` reach the caught value.
+Fields and types may have any name, `arguments`, `class`, `end` or `1st` included. A local the
+code names after one that no local can have is named `v_arguments` instead.
+
 Apart from those result packers and the code inlined at each call site, no function in the output
 encodes an event's or a request's argument list. A file's shared `codec` table does keep a writer for each named or repeated type the
 file reaches (`codec.w_Item`), even in a file that only decodes, and each writes one value into a
@@ -272,6 +299,10 @@ To pick a number's width, use a brand. `Serialization.u8`, `i8`, `u16`, `i16`, `
 Any brand with one of those literal names counts, so branded types you already have keep working.
 `Serialization.string8` / `string16` / `string32` (and `buffer16` / `buffer32`) give a string or
 buffer a fixed-width length instead.
+
+A brand is a cast: `7 as Serialization.u16`. By default nothing checks a cast value, so a number
+that does not fit its width wraps when it is written: 70000 sent as a `u16` arrives as 4464, -1 as
+65535, and 2.7 as 2. For values you would rather not cast, use the implicit widths below.
 
 Each union value carries a one-byte tag: its member's position as written. In
 `{ Coins: number } | { Items: string[] }`, Coins is 0 and Items is 1. In `number | string`, the
@@ -332,7 +363,111 @@ through the type. These are functions, Promises outside a function's result, sym
 `[A, B]` instead).
 
 An argument list that carries nothing (`bump(): void`) sends nothing. No buffer is allocated on
-either side, and the remote fires with no arguments at all.
+either side, and the remote fires with no arguments at all. An array rest parameter
+(`many(...values: number[])`) is sent as a count and the values, however many a call passes.
+
+### Implicit widths and checks
+
+`Serialization.Implicit` has a twin of every brand: `Implicit.u8`, `i8`, `u16`, `i16`, `u32`,
+`i32`, `f32`, `f64`, `varint`, `string8`, `string16`, `string32`, `buffer16` and `buffer32`. An
+implicit width takes a plain value, so no cast is needed:
+
+```ts
+interface Tile {
+    x: Serialization.Implicit.u16;
+    y: Serialization.Implicit.u16;
+    name: Serialization.Implicit.string8;
+}
+
+const tile: Tile = { x: column, y: row, name }; // plain numbers and a plain string
+```
+
+It is written exactly as its strict twin, the same bytes on the wire. What differs is that its values
+are checked where they are written. With the defaults, a value that does not fit raises right there,
+so nothing is sent:
+
+```
+[Flamework] u16 cannot hold 70000, at Tile.x
+```
+
+The message names the width, the value (for a string or a buffer, its length: `300 bytes`), and
+where the value sits in the type. That is a field path from the serialized type (`Tile.x`, or
+`value.x` when the type has no name), an argument of a call and the event or function it goes
+through (`'place' [0].x`, numbered from 0), or a function's `result`. An element of an array or a
+set is `[]`, and a map's keys and values are `<key>` and `<value>`. So are the arguments a call
+spreads into a rest parameter (`fire(...values)`), whose places are only known when it runs:
+`'many' []`. Under obfuscation the event or function is not named.
+
+A named object, union or tuple whose size varies, and any other such type a file reaches more than
+once, has code of its own that its file shares (see [Serializers](07-macros.md#serializers)). A
+type of a fixed size never has: it is written where it is reached, and its path goes on from there.
+A path goes on through shared code from where the value was sent, but a shared type inside another
+one starts from the outer type's name (`Tile.items[].id`), which keeps the writes from building
+strings. An outer type with no name starts from how TypeScript prints it, in parentheses:
+`({ pos: { x: i16; }; items: Item[]; }).items[].id`, or `(u16[])[]`.
+
+A strict width goes into its implicit twin, so `const x: Serialization.Implicit.u16 = strict`
+compiles, but not the other way round, and two different widths never mix: an `Implicit.u8` is not
+an `Implicit.u16`. A type of your own with an optional brand (`number & { __brand?: "u16" }`)
+counts as implicit.
+
+Use an implicit width where a value comes from arithmetic or from outside, such as a count, a
+coordinate or a player's input, and you would rather hear about a value that does not fit than send
+it wrapped. Keep a cast where the value is known to fit: nothing is checked on that path.
+
+What each width checks:
+
+| Width | Check |
+|---|---|
+| `u8`, `i8`, `u16`, `i16`, `u32`, `i32` | A whole number in range. |
+| `varint` | A whole number from 0 to 2^35 - 1. |
+| `f32` | Not a finite number past its range. NaN and the infinities are written as they are. |
+| `string8`, `string16` | At most 255 or 65535 bytes. |
+| `buffer16` | At most 65535 bytes. |
+| `f64`, `string32`, `buffer32` | Nothing: they hold every value. |
+
+An integer width costs three comparisons and a modulo per value (`n >= 0 and n <= 65535 and
+n % 1 == 0`), an `f32` two comparisons of `math.abs(n)`, and a string or a buffer one comparison of
+the length it takes anyway. A value that is more than a name, such as a field, is read once into a
+local, in a block of its own with its check and its write, so a function that writes many checked
+values holds no more locals than it would unchecked (Luau allows 200). A value that fails calls a
+helper its file shares, kept in the file's `codec` table (`codec.checkWidth`). A file that has
+that table pays no local for it; one that has none gets the table, one local at the top of the file,
+which a file already at Luau's 200 cannot take. A number literal is judged when you build: one that
+fits needs no check. Reading needs none either, since a decoded value always fits its width.
+
+The checks are set in `flamework.config.json`, in a section of their own, since
+`Flamework.createSerializer` checks the same way:
+
+```jsonc
+"serialization": {
+  "checks": { "category": "implicit", "mode": "assert", "side": "both" }
+}
+```
+
+| Key | Values | Default |
+|---|---|---|
+| `category` | `"implicit"`: values typed with an implicit width. `"all"`: strict widths too. `"none"`: nothing, so an implicit value is written as a strict one is and wraps. | `"implicit"` |
+| `mode` | `"assert"`: raise, so nothing is sent. `"warn"`: warn with the same message, then write the value as it is, so 70000 as a `u16` arrives as 4464. | `"assert"` |
+| `side` | The realm whose writes are checked: `"server"`, `"client"` or `"both"`. A module both realms run is checked only where it runs in that realm. Elsewhere its values are written unchecked. | `"both"` |
+
+A string or a buffer longer than its length prefix is refused in every case, strict widths included,
+as it always has been (`string is longer than its u8 length prefix allows`). The receiver would read
+every value after it wrong. So under `warn` it is warned about and then refused, and under `none` it
+is still refused. A `varint` has no wrapped form either: under `warn` a fraction is written rounded
+down, but a negative or NaN one can make the receiver misread or drop the payload, and one of 2^35
+or more raises a buffer error where it is written, as a strict `varint` always has.
+
+In a union, a member with a width only takes a number that fits it (see
+[What each type costs](#what-each-type-costs)). A number that fits no member of
+`Serialization.Implicit.u16 | string` fails the check of the members with a width, `u16` here, and
+follows `mode`: it raises, or it is warned about and written as the first checked member. A union
+with a plain `number` takes every number, so `Implicit.u16 | number` sends 70000 as the `number`,
+with no warning. Where nothing is checked (a strict width, `"none"`, the other realm), such a number
+raises `value matches none of the union's members`, as it always has.
+
+The checks are compiled into the code that writes values, so change them with a plain build. A
+running watcher keeps the values it started with ([Watching](09-project-structure.md#watching)).
 
 ### Payloads that cannot be decoded
 
@@ -345,23 +480,47 @@ bytes, than the buffer could hold is refused before anything is allocated. Eleme
 bytes (a lone literal, `undefined`, an object of only literals) cannot be limited that way, so a
 payload may announce at most 65535 of them in total, however they are nested.
 
-Nothing checks a value before it is sent: it is written as its declared type says. Most values that
-do not match raise an error at the sender while they are written, such as a table where a number
-was declared, or a value that fits no member of a union. Some do not:
+Apart from the [width checks](#implicit-widths-and-checks), nothing checks a value before it is
+sent: it is written as its declared type says. Most values that do not match raise an error at the
+sender while they are written, such as a table where a number was declared, or a value that fits no
+member of a union. Some do not:
 
-- A string that Luau reads as a number (`"5"`, `"0x10"`) is written as that number.
+- A string that Luau reads as a number (`"5"`, `"0x10"`) is written as that number. A checked
+  width changes that for the integers: their check raises Luau's own `attempt to compare number <=
+  string`. A `varint` raises `attempt to compare string < number` before its check, when it is
+  measured, and an `f32` takes the string as its number: it passes the check and is written.
 - A `boolean` is written as whether the value is truthy.
 - An object is written field by field, so the fields its type does not declare are dropped. Any
   table fits an object whose fields are all optional.
 - The last member tried in a union may only be checked to be a table (see above). A table of the
   wrong shape is then written as that member as far as it goes: a set sends every value as
   `true`, and a tuple drops what is past its length.
-- An array with holes is written without an error. The receiver then rejects the payload as
-  malformed.
 - A guard rejects NaN in a `number` field, so in a union such a value can pass to a later member:
   `{ v: number } | { v: boolean }` sends `{ v = NaN }` as `{ v = false }`.
 
 A value that does not match its type is a bug in the caller, not in the peer.
+
+An array is written by index, up to its length (`#`). A nil inside it is written as a nil where
+the element type takes one (`Array<T | undefined>`, `unknown[]`), and read back in its place;
+a remote's guard still turns such a list down on arrival, as it does one sent unpacked (`t.array`
+takes no gap). Where the element type takes no nil, there is nothing to write, so the sender raises,
+whatever `serialization.checks` says, and nothing is sent:
+
+```
+[Flamework] the array has no value at 'place' [0][2]
+```
+
+The index counts from 0, and the path is the one a width check gives, except in a type with code of
+its own, where it starts from the type's name: `Holder.list[1]`, `(string[])[2]`. That holds even
+next to the type's own width checks, which start where the value was sent (`Tagged.names[1]` next
+to `'tagged' [0].id`): a hole among elements whose size varies is found while the payload is
+measured, and that pass is not told where the value was sent. Only in a type with width checks of
+its own does a hole among elements of a fixed size, which is found while writing, start where the
+value was sent, as the checks do: `'tagged' [0].list[1]`. A tuple's rest element is written the
+same way (`the tuple has no value at ...`, and `the argument list` for arguments spread into a rest
+parameter). Sets and maps have no holes: Luau keeps no nil in a table's
+keys or values. Luau's `#` is not reliable around a hole, though: it may count past it or stop at
+it. So a hole near the end can still shorten the list, without an error.
 
 ### Opting in and out per event
 

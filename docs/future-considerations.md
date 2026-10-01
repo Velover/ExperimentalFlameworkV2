@@ -610,3 +610,18 @@ Edge cases found and deliberately left alone, because the fix would cost more th
   - Two Luau limits, neither reported by rbxtsc:
     - about 100 hoisted-type fields in one object's read function run out of Luau's registers;
     - about 100 distinct literal unions or guards in one file pass its 200 locals.
+  - Width checks and generated names (2026-10-01):
+    - A file with checks but no hoisted type gets its `codec` table, one more main-chunk local, so
+      under `category: "all"` a strict file already at 200 locals stops loading. A `catch (math)`
+      around a checked `f32` send adds the `math` alias as well.
+    - Inside a `catch (assert)` nested in a `catch (error)`, a packed array's hole check reaches
+      `error` through an alias: one more main-chunk local.
+    - `catch (table)` and `catch (type)` break roblox-ts's own `table.insert` and `type(...)`,
+      packed or not.
+    - Guards built outside the serializer (tuple guards, `createGuard`, component guards, and the
+      receiving guards of `createServer` and `createClient`) are not checked for hidden global
+      names. A module-level `type Array<T>` of a project's own still breaks the tuple-rest guard
+      and spread sends.
+    - A width failure in a spread argument list names no index (`'many' []`).
+  - An incremental build keeps the width checks, and the packing of `networking.serialization`, of
+    the files it does not recompile after the config changes. Change either with a plain build.

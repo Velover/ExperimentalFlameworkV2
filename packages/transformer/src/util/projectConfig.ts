@@ -69,6 +69,32 @@ export interface NetworkingRuntimeConfig {
 	serialization?: boolean;
 }
 
+/**
+ * Checks on the values written into a buffer, for the widths that can refuse one: generated into the
+ * encoding code by the transformer, so read at build time only.
+ */
+export interface SerializationChecksConfig {
+	/**
+	 * Which values are checked: `implicit` (the default) only those typed with an implicit width
+	 * (`Serialization.Implicit.*`, or any optional brand), `all` strict widths as well, `none` nothing.
+	 */
+	category?: "implicit" | "all" | "none";
+
+	/** What a value that does not fit does: `assert` (the default) raises, `warn` warns and writes it as it is. */
+	mode?: "assert" | "warn";
+
+	/** The realm whose writes are checked: `both` (the default), `server` or `client`. */
+	side?: "both" | "server" | "client";
+}
+
+/**
+ * Options for `Flamework.createSerializer` and every other generated encoding (networking's too). Read
+ * by the transformer only, since the encoding is compiled in; not a runtime section.
+ */
+export interface SerializationConfig {
+	checks?: SerializationChecksConfig;
+}
+
 export interface ComponentsRuntimeConfig {
 	/** Default `warningTimeout` for components that do not set one. */
 	warningTimeout?: number;
@@ -145,6 +171,7 @@ export interface CloudConfig {
 export interface ProjectConfig extends RuntimeConfig {
 	$schema?: string;
 	transformer?: TransformerOptions;
+	serialization?: SerializationConfig;
 	cloud?: CloudConfig;
 }
 
@@ -235,7 +262,12 @@ export function readProjectConfig(configPath: string, env: Env = loadEnv(path.di
 	if (!validateSchema("projectConfig", config)) {
 		const details = getSchemaErrors().map((v) => {
 			const location = v.instancePath === "" ? "/" : v.instancePath;
-			const extra = v.params && "additionalProperty" in v.params ? ` '${v.params.additionalProperty}'` : "";
+			const extra =
+				v.params && "additionalProperty" in v.params
+					? ` '${v.params.additionalProperty}'`
+					: v.params && "allowedValues" in v.params && Array.isArray(v.params.allowedValues)
+						? `: ${v.params.allowedValues.map((value: unknown) => JSON.stringify(value)).join(", ")}`
+						: "";
 			return `${location} ${v.message}${extra}`;
 		});
 

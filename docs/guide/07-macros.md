@@ -274,7 +274,9 @@ type.
   rebuilt on every call.
 
 The same generator powers [networking serialization](06-networking.md#serialization), which lists
-what each kind of type costs and what travels as a blob.
+what each kind of type costs and what travels as a blob. `serialize` checks the values of the
+`Serialization.Implicit` widths as it writes them, as a call site does; see
+[Implicit widths and checks](06-networking.md#implicit-widths-and-checks).
 
 ## When a macro does not fire
 

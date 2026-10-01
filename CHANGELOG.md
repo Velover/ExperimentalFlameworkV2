@@ -3,6 +3,79 @@
 Notable changes to the `@flamework-experimental` packages. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Upgrade notes
+
+- **An optional brand of your own now selects its width.** `number & { __brand?: "u16" }` was
+  written as an f64 without a word. It is now written at its width and checked like
+  `Serialization.Implicit.u16`, which by default raises for a value that does not fit. A buffer
+  `Flamework.createSerializer` wrote for such a type with an earlier release no longer reads.
+- **A packed array is written by index, and a hole in it is refused.** Before, the count was
+  `#array` but every nil was skipped: elements of a fixed size arrived one place early, with a zero
+  (nil for a blob) in the last place, and elements whose size varies made a malformed payload the
+  receiver dropped. An element type that takes nil (`Array<T | undefined>`, `unknown[]`) now writes
+  the hole in its place; one that takes none raises at the sender, whatever `serialization.checks`
+  says: `[Flamework] the array has no value at 'place' [0][2]`. A tuple's rest element works the
+  same way.
+
+### core
+
+#### Added
+
+- `Serialization.Implicit`: a twin of each of the 14 widths (`Implicit.u8` … `Implicit.buffer32`).
+  It takes a plain value with no cast, is written exactly as its strict twin, and is checked where it
+  is written.
+
+### transformer
+
+#### Added
+
+- `serialization.checks` in flamework.config.json: `category` (`"implicit"`, the default; `"all"`;
+  `"none"`), `mode` (`"assert"`, the default, or `"warn"`, which writes the value anyway) and
+  `side` (`"both"`, `"server"` or `"client"`). A value that does not fit is reported with its
+  width, value and place: `[Flamework] u16 cannot hold 70000, at Tile.x` or `'place' [0].x`. Every
+  generated write is covered: call sites, callback results, `Flamework.createSerializer` and the
+  shared `codec` writers. A string or buffer longer than its length prefix is refused as it always
+  was, under `warn` and `none` too. A failure calls one helper per file, kept in the file's `codec`
+  table; a file without that table gets it, which is one local at the top of the file. With the
+  defaults, a program without an implicit width compiles as before.
+
+#### Changed
+
+- An enum option given another value lists the allowed ones (`must be equal to one of the allowed
+  values: "implicit", "all", "none"`).
+- A declaration that hides a global the generated code cannot reach another way is now a build error
+  naming the global and the declaration, instead of a TypeScript error in generated code or a silent
+  call of the project's own value. This covers `typeIs`, the `Array`/`Map`/`Set` constructors and
+  `Enum` at a call site, `buffer` declared at the top of the module, a module-level `warn` under
+  `mode: "warn"`, and a hidden `globalThis`.
+
+#### Fixed
+
+- An optional brand was written as an f64 (see the upgrade notes).
+- A networking argument typed `Serialization.buffer16` or `buffer32` was rejected by the receiving
+  guard every time.
+- TS2352 in generated code for a readonly tuple or an object with an index signature packed at a
+  call site ("Conversion of type 'GridCoord' to type 'unknown[]' may be a mistake").
+- A local named `buffer` around a send (`for (const [player, buffer, blobs] of …)`) broke the
+  generated code (TS2339). The code now reaches the global through a module-level alias.
+- A send inside `catch (error)` or `catch (math)` did not compile when its code called them
+  (TS18046): unions, literals, fixed-length strings, decoders, `f32` union members and tuple rest
+  counts. `math` now goes through an alias, and `error` is raised as `assert(false, message)`,
+  with the same message from the same line.
+- A project's own type named after a global type the generated code names (`Map`, `Set`,
+  `defined`, `buffer`, `EnumItem`, `LuaTuple`, `CFrame`, the datatypes) took its place in that
+  code; it now names the global through `globalThis`. A project's own `Record` or `Callback` type
+  is no longer in the way.
+- Field or type names no local can have (`arguments`, `eval`, `class`, `end`, `1st`) broke the
+  generated code (TS1215, TS1389, syntax errors). Such a local is now `v_arguments`, and a
+  deduplicated guard named after a global type no longer hides it.
+- An array rest parameter (`many(...values: number[])`) could not be packed ("more arguments than
+  the list has elements"). It is now sent as a count and the values, with any number of arguments,
+  spread or not.
+- An array with a hole was sent without it (see the upgrade notes).
+
 ## 2026-09-29: core, components, networking and testing 2.0.0-alpha.4; transformer 2.0.0-alpha.5; transformer-plugin 2.0.0-alpha.3
 
 ### Upgrade notes

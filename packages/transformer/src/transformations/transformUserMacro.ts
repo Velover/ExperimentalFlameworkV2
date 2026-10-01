@@ -21,6 +21,7 @@ import {
 	buildSerializerFromType,
 } from "../util/functions/buildSerializerFromType";
 import { isTupleType } from "../util/functions/isTupleType";
+import { localName } from "../util/functions/identifierName";
 import { getNetworkMode, hasNetworkMarker, isPackedMode } from "../util/functions/networkMode";
 import { inlineMacroIntrinsic } from "./macros/intrinsics/inlining";
 import { addLeadingComment } from "../util/functions/addLeadingComment";
@@ -270,7 +271,10 @@ function buildUserMacro(state: TransformState, node: ts.Node, macro: UserMacro):
 		}
 
 		const line = ts.getLineOfLocalPosition(node.getSourceFile(), node.getStart());
-		const uniqueName = f.identifier(`${getNodeDebugName(state, node)}_${line + 1}`, true);
+		const uniqueName = f.identifier(
+			localName(state.typeChecker, `${getNodeDebugName(state, node)}_${line + 1}`),
+			true,
+		);
 		const comment = ts.factory.createEmptyStatement();
 		const variable = f.variableStatement(uniqueName, result);
 

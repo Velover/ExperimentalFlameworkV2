@@ -145,6 +145,50 @@ describe("reading flamework.config.json", () => {
 		remove("flamework.config.json");
 	});
 
+	test("accepts serialization.checks and refuses unknown keys and values, naming the values it takes", () => {
+		const file = write(
+			"flamework.config.json",
+			`{ "serialization": { "checks": { "category": "all", "mode": "warn", "side": "server" } } }`,
+		);
+		expect(readProjectConfig(file)).toEqual({
+			serialization: { checks: { category: "all", mode: "warn", side: "server" } },
+		});
+
+		write("flamework.config.json", `{ "serialization": { "checks": {} } }`);
+		expect(readProjectConfig(file)).toEqual({ serialization: { checks: {} } });
+
+		write("flamework.config.json", `{ "serialization": { "checks": { "mode": "${"${MODE:-assert}"}" } } }`);
+		expect(readProjectConfig(file, { MODE: "warn" })).toEqual({ serialization: { checks: { mode: "warn" } } });
+		expect(readProjectConfig(file, {})).toEqual({ serialization: { checks: { mode: "assert" } } });
+
+		write("flamework.config.json", `{ "serialization": { "checks": { "categry": "all" } } }`);
+		expect(() => readProjectConfig(file)).toThrow(
+			/\/serialization\/checks must NOT have additional properties 'categry'/,
+		);
+
+		write("flamework.config.json", `{ "serialization": { "check": {} } }`);
+		expect(() => readProjectConfig(file)).toThrow(/\/serialization must NOT have additional properties 'check'/);
+
+		write("flamework.config.json", `{ "serialization": { "checks": { "category": "strict" } } }`);
+		expect(() => readProjectConfig(file)).toThrow(
+			/\/serialization\/checks\/category must be equal to one of the allowed values: "implicit", "all", "none"/,
+		);
+
+		write("flamework.config.json", `{ "serialization": { "checks": { "mode": "raise" } } }`);
+		expect(() => readProjectConfig(file)).toThrow(
+			/\/serialization\/checks\/mode must be equal to one of the allowed values: "assert", "warn"/,
+		);
+
+		write("flamework.config.json", `{ "serialization": { "checks": { "side": "Server" } } }`);
+		expect(() => readProjectConfig(file)).toThrow(
+			/\/serialization\/checks\/side must be equal to one of the allowed values: "both", "server", "client"/,
+		);
+
+		write("flamework.config.json", `{ "serialization": { "checks": { "side": true } } }`);
+		expect(() => readProjectConfig(file)).toThrow(/\/serialization\/checks\/side must be string/);
+		remove("flamework.config.json");
+	});
+
 	test("reports a parse error with the file name", () => {
 		const file = write("flamework.config.json", `{ "transformer": `);
 		expect(() => readProjectConfig(file)).toThrow(/Failed to parse .*flamework\.config\.json/);
@@ -281,6 +325,18 @@ describe("the watcher's fingerprint", () => {
 
 		remove("flamework.config.json");
 		remove(".env");
+	});
+
+	test("changes with serialization.checks, which is compiled into every file that writes values", () => {
+		// The same as networking.serialization: a watcher that took up a change would leave the files it
+		// does not recompile checking the old way, so it keeps the first read and asks for a restart.
+		write("flamework.config.json", `{ "serialization": { "checks": { "mode": "${"${FW_FP_MODE:-assert}"}" } } }`);
+		const first = fingerprintProjectConfig(loadProjectConfig(root, root, {}, {}));
+		expect(fingerprintProjectConfig(loadProjectConfig(root, root, {}, { FW_FP_MODE: "warn" }))).not.toBe(first);
+
+		write("flamework.config.json", `{ "serialization": { "checks": { "mode": "assert", "side": "server" } } }`);
+		expect(fingerprintProjectConfig(loadProjectConfig(root, root, {}, {}))).not.toBe(first);
+		remove("flamework.config.json");
 	});
 
 	test("reads .env next to the tsconfig when there is no config file", () => {
@@ -787,6 +843,8 @@ describe("runtime sections", () => {
 		expect(
 			getRuntimeConfig({
 				transformer: { hashPrefix: "$x" },
+				// Compiled into the encoding code, like the transformer's options: not for the runtime.
+				serialization: { checks: { category: "all" } },
 				core: { profiling: false },
 				networking: { serialization: true },
 				scopes: { active: ["a"] },

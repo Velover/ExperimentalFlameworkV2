@@ -4,6 +4,7 @@ import { TransformState } from "../../classes/transformState";
 import { f } from "../factory";
 import { getDeclarationOfType } from "./getDeclarationOfType";
 import { getInstanceTypeFromType } from "./getInstanceTypeFromType";
+import { localName } from "./identifierName";
 import assert from "assert";
 
 /**
@@ -232,7 +233,10 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 		}
 
 		if (requiresDedup.has(type)) {
-			const dedupId = f.identifier(type.aliasSymbol?.name ?? type.symbol?.name ?? "dedup", true);
+			// Named after the type, as a local can be named: `const class = ...` or `const Map = ...` would
+			// not compile, or would hide the global from the code after it.
+			const typeName = type.aliasSymbol?.name ?? type.symbol?.name ?? "dedup";
+			const dedupId = f.identifier(localName(state.typeChecker, typeName), true);
 			dedupIds.set(type, dedupId);
 
 			dedupStatements.push(f.variableStatement(dedupId, guard));
@@ -615,6 +619,14 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 		const disjointType = type.types.find((v) => v.flags & ts.TypeFlags.DisjointDomains);
 		if (disjointType) {
 			return buildGuard(disjointType);
+		}
+
+		// A brand on a buffer (`Serialization.buffer16`) is such a field too: the value is a buffer, which
+		// is no table, so guarding the brand's object as well rejected every buffer that arrived.
+		const bufferSymbol = type.checker.resolveName("buffer", undefined, ts.SymbolFlags.Type, false);
+		const bufferType = type.types.find((v) => bufferSymbol !== undefined && v.getSymbol() === bufferSymbol);
+		if (bufferType) {
+			return buildGuard(bufferType);
 		}
 
 		const guards = type.types.map(buildGuard);

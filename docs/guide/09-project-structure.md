@@ -119,6 +119,7 @@ package has its own section in the file. The only entry `tsconfig.json` needs is
     "optimizations": { "guardGenerationDedupLimit": 5 },
     "plugins": []
   },
+  "serialization": { "checks": { "category": "implicit", "mode": "assert", "side": "both" } },
   "core": { "profiling": true },
   "networking": { "serialization": true },
   "components": { "warningTimeout": 5, "attributeWarningTimeout": 5, "streamingMode": "Contextual", "watchRenames": false },
@@ -133,6 +134,7 @@ package has its own section in the file. The only entry `tsconfig.json` needs is
 | | `idGenerationMode` | `"full"`, `"short"`, `"tiny"` or `"obfuscated"`. Defaults to `"obfuscated"` with obfuscation on, else `"full"`. Only shorten in a game. |
 | | `plugins` | Transformer plugins; see [transformer plugins](../reference/transformer-plugins.md). |
 | | `salt`, `noSemanticDiagnostics`, `optimizations` | Hash salt, skipping semantic diagnostics, [guard deduplication](#guard-deduplication). |
+| `serialization` | `checks`: `category`, `mode`, `side` | Checks on the values the generated code writes into a buffer (networking's and `Flamework.createSerializer`'s): which values (`Serialization.Implicit` widths by default, strict ones too, or none), whether one that does not fit raises or warns, and in which realm. Read when you build; see [Implicit widths and checks](06-networking.md#implicit-widths-and-checks). |
 | `core` | `profiling` | Default for `LifecyclePlugin` profiling; `createLifecyclePlugin({ profiling })` overrides it per module. |
 | `networking` | `serialization` | Serializes every event and function payload into a buffer with code generated at compile time; see [Networking](06-networking.md#serialization). |
 | `components` | `warningTimeout`, `attributeWarningTimeout`, `streamingMode`, `watchRenames` | Defaults for components that do not set their own. |
@@ -144,7 +146,10 @@ The transformer looks for the file in the tsconfig's directory, then in each par
 package root. So a repository with several places can share one file at the root, and a place can
 still have its own file, which is used instead.
 
-Comments and trailing commas are allowed. Unknown keys are rejected, with their name in the error.
+Comments and trailing commas are allowed. Unknown keys are rejected, with their name in the error,
+and so is a value an option does not take. For an option with a fixed set of values, the error lists
+them (`must be equal to one of the allowed values: "implicit", "all", "none"`); for a value of the
+wrong type, it gives the type (`must be string`).
 
 The `$schema` line gives your editor every option, with its description and its default, and checks
 what you write. You don't have to add it yourself. When a game builds, the transformer adds the line
@@ -163,7 +168,8 @@ reads itself, such as `import`, are allowed.)
 For a game project, the transformer copies the runtime sections (`core`, `networking`,
 `components`, `scopes` and `testing`) into
 `include/flamework/config.json`, and the packages read them through `getRuntimeConfig()` from
-`@flamework-experimental/core`. `cloud` is not one of them and never reaches the place. A package (a
+`@flamework-experimental/core`. `cloud` is not one of them and never reaches the place, and neither
+is `serialization`, which is compiled into the code that writes values. A package (a
 project with a scoped name) gets no such file: its defaults come from the game that uses it.
 
 **Do not set `idGenerationMode` or `obfuscation` in a published package.** Ids have to be stable,

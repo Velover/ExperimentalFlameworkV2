@@ -53,6 +53,8 @@ local link = bridge.link(serverEnv, clientEnv)
 local server = serverContext.require("@flamework-experimental/specs", "out", "replication")
 local client = clientContext.require("@flamework-experimental/specs", "out", "replication")
 local clientSender = clientContext.require("@flamework-experimental/specs", "out", "replicationSender")
+local serverShapes = serverContext.require("@flamework-experimental/specs", "out", "replicationShapes")
+local clientShapes = clientContext.require("@flamework-experimental/specs", "out", "replicationShapes")
 
 --- Lets deferred work -- remote wiring, replication, delivery -- run.
 local function flush(frames: number?)
@@ -123,10 +125,12 @@ end
 
 server.setupServer()
 server.setupModeServer()
+serverShapes.setupServer()
 flush()
 
 client.setupClient()
 client.setupModeClient()
+clientShapes.setupClient()
 flush()
 
 -- Cases ------------------------------------------------------------------------------------------
@@ -297,6 +301,104 @@ local cases: { { name: string, run: () -> () } } = {
 			assertEqual(status2, "Resolved", "server-to-client requests")
 			assertEqual(answer, "why:3:3:6", "result")
 			assertTrue(type(lastSent(findRemote(clientEnv, "@serializedAsk"))[3]) == "buffer", "a packed result from the client")
+		end,
+	},
+	-- The shapes whose generated code once failed to compile or wrote the wrong thing (see
+	-- replicationShapes.ts). Plain members are packed with networking.serialization on and sent as
+	-- they are with it off; the Serialized ones are packed either way.
+	{
+		name = "a caller's readonly tuples, readonly fields and index signatures cross as they were sent",
+		run = function()
+			clientShapes.firePlacements({ 1, -2, 300 }, { { 1, 2, 3 }, { 4, 5, 6 } }, { a = 1, b = 2 })
+			flush()
+
+			assertList(serverShapes.drain(), {
+				"place:1,-2,300:45",
+				"placeNested:1,-2,300|90|wall|7",
+				"placeNested:1,-2,300|180|door|8",
+				"placeRest:1,-2,300;1,-2,300",
+				"placeRest:1,2,3;4,5,6",
+				"placeOpt:1,-2,300",
+				"placeOpt:none",
+				"placeOr:1,-2,300",
+				"placeOr:named",
+				"indexSig:a=1,b=2",
+				"serializedPlace:1,-2,300:1,-2,300|90|wall|7",
+			}, "events the server received")
+
+			local status, value = clientShapes.invokeAsk({ 1, 2, 3 }):awaitStatus()
+			assertEqual(status, "Resolved", "a readonly tuple as a request and a result")
+			assertEqual(value, "2,3,4", "the result")
+		end,
+	},
+	{
+		-- The ECS loop's locals are named `buffer`, which hid the global the packing code named.
+		name = "an ECS payload sent from a loop whose locals are named buffer crosses",
+		run = function()
+			local blob = instances.new("Folder")
+			blob.Name = "Entity"
+			serverShapes.replicate(link.serverPlayer, blob)
+			flush()
+
+			assertList(clientShapes.drain(), {
+				"SendReliable:reliable:1",
+				"serializedSendReliable:reliable:1",
+				"SendReliable:empty:0",
+				"serializedSendReliable:empty:0",
+			}, "events the client received")
+		end,
+	},
+	{
+		name = "fields named after words no local can take cross",
+		run = function()
+			clientShapes.fireReserved(1)
+			flush()
+
+			assertList(serverShapes.drain(), clientShapes.reservedText(1), "events the server received")
+		end,
+	},
+	{
+		name = "an array with a hole crosses whole where nil is a value, and is refused at the sender where it is not",
+		run = function()
+			-- Written whole and read back whole: the receiving guard turns a list with a gap down, as it
+			-- does one sent unpacked, rather than the payload being unreadable.
+			clientShapes.fireHoles()
+			flush()
+			assertList(serverShapes.drain(), { "bad:serializedHoles:0" }, "what the server made of it")
+
+			clientShapes.fireWholeLists()
+			flush()
+			assertList(serverShapes.drain(), { "serializedHoles:1,2,3|a,b,3" }, "the lists without a hole")
+
+			local refused = clientShapes.fireRefusedHole()
+			assertTrue(
+				string.find(refused, "[Flamework] the argument list has no value at 'serializedMany' [1]", 1, true) ~= nil,
+				`the sender's error, got {refused}`
+			)
+			flush()
+			assertEmpty(serverShapes.drain(), "events the server received after the refusal")
+		end,
+	},
+	{
+		name = "array rest parameters cross with none, one and several arguments",
+		run = function()
+			clientShapes.fireMany({ 4, 5 })
+			flush()
+
+			assertList(serverShapes.drain(), {
+				"many:0:",
+				"many:1:1",
+				"many:3:1,2,3",
+				"many:2:4,5",
+				"manyNames:2:a,b",
+				"serializedMany:0:",
+				"serializedMany:1:4",
+				"serializedMany:2:4,5",
+			}, "events the server received")
+
+			local status, sums = clientShapes.invokeSums({ 4, 5 }):awaitStatus()
+			assertEqual(status, "Resolved", "requests with rest arguments")
+			assertEqual(sums, "0,5,6,9,0,2009", "the results")
 		end,
 	},
 	{

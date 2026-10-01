@@ -244,15 +244,16 @@ function transformSend(
 		bindArgument(statements, argument, "target", emptyListAnnotation(state, node.arguments[index])),
 	);
 
+	const site = { name: memberName(state, target) };
 	let encoding;
 	if (packed.some(ts.isSpreadElement)) {
 		// A spread makes the count a runtime matter: gather the list first, as `fire` itself would.
 		const table = f.identifier("args", true);
 		statements.push(f.variableStatement(table, f.as(f.array(packed, false), arrayType())));
-		encoding = buildInlineEncoding(state, node, listType, { table });
+		encoding = buildInlineEncoding(state, node, listType, { table }, site);
 	} else {
 		const values = packed.map((argument) => bindArgument(statements, argument, "arg"));
-		encoding = buildInlineEncoding(state, node, listType, values);
+		encoding = buildInlineEncoding(state, node, listType, values, site);
 	}
 
 	statements.push(...encoding.statements);
@@ -619,7 +620,7 @@ function transformReceiverCallback(
 
 	// The runtime calls `pack` only with a resolved, successful value: never a Promise or a Skip.
 	const value = f.identifier("value", true);
-	const pack = f.arrowFunction(f.block(packResult(state, node, fnType, value)), [
+	const pack = f.arrowFunction(f.block(packResult(state, node, fnType, value, memberName(state, target))), [
 		f.parameterDeclaration(value, f.keywordType(ts.SyntaxKind.UnknownKeyword)),
 	]);
 
@@ -633,14 +634,30 @@ function packResult(
 	node: ts.CallExpression,
 	fnType: ts.Type,
 	value: ts.Identifier,
+	name: string | undefined,
 ): ts.Statement[] {
-	const encoding = buildInlineResultEncoding(state, node, fnType, value, true);
+	const encoding = buildInlineResultEncoding(state, node, fnType, value, true, name);
 	const packed = packedArguments(encoding);
 
 	return [
 		...encoding.statements,
 		f.returnStatement(packed.length > 0 ? f.as(f.array(packed, false), arrayType()) : f.nil()),
 	];
+}
+
+/**
+ * The member a call goes through, as the source names it (`pong` in `server.pong.fire(...)`), for the
+ * message of a width check. None under obfuscation, which keeps member names out of the output, and
+ * none for a member reached any other way than by name.
+ */
+function memberName(state: TransformState, target: ts.Expression): string | undefined {
+	if (state.config.obfuscation) return;
+
+	const original = ts.getParseTreeNode(target) ?? target;
+	if (ts.isPropertyAccessExpression(original)) return original.name.text;
+	if (ts.isElementAccessExpression(original) && ts.isStringLiteralLike(original.argumentExpression)) {
+		return original.argumentExpression.text;
+	}
 }
 
 /** The type a hidden marker property carries, without the `undefined` its optionality adds. */

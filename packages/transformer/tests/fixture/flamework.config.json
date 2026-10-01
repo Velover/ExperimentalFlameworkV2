@@ -7,6 +7,13 @@
 		"optimizations": { "guardGenerationDedupLimit": "${FLAMEWORK_FIXTURE_DEDUP:-3}" },
 		"plugins": [{ "path": "./fieldInfoPlugin.cjs", "options": { "prefix": "fx" } }]
 	},
+	"serialization": {
+		"checks": {
+			"category": "${FLAMEWORK_FIXTURE_CHECKS:-implicit}",
+			"mode": "${FLAMEWORK_FIXTURE_CHECKS_MODE:-assert}",
+			"side": "${FLAMEWORK_FIXTURE_CHECKS_SIDE:-both}"
+		}
+	},
 	"networking": {
 		"serialization": "${FLAMEWORK_FIXTURE_SERIALIZATION:-true}"
 	},

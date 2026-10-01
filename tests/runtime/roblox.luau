@@ -521,6 +521,12 @@ function roblox.create(initialRealm: "Server" | "Client")
 			streamIn = instances.streamIn,
 			--- Every handler connected to an instance, so a spec can watch a count come back down.
 			connectionCount = instances.connectionCount,
+			--- The width-check codecs (`src/widthChecks/codecs.ts` of the specs) as one of
+			--- packages/specs/variants built them: the same source under another
+			--- `serialization.checks`, loaded into this graph like any other module.
+			checkVariant = function(name: string)
+				return context.require("@flamework-experimental/specs", "variants", name, "out", "widthChecks", "codecs")
+			end,
 		})
 
 		context.setGlobal("typeof", robloxTypeof)

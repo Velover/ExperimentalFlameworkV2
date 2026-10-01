@@ -11,6 +11,7 @@ import {
 	isInstanceType,
 	simplifyUnion,
 } from "./buildGuardFromType";
+import { localName } from "./identifierName";
 import { isArrayType, isTupleType } from "./isTupleType";
 
 /**
@@ -50,6 +51,15 @@ import { isArrayType, isTupleType } from "./isTupleType";
  * `unknown`, `any`, `object`, `defined`, empty object types and class instances. Only what a remote
  * cannot carry at all is a compile error: functions, Promises outside a function result, symbols,
  * bigint, `never`, template literals and `LuaTuple` (several values at runtime, not a table).
+ *
+ * Width checks (`serialization.checks`): a brand whose property is optional (`Serialization.Implicit.*`)
+ * is written exactly as the required one, and its values are checked where they are written: an
+ * integer width takes whole numbers in its range, a varint whole numbers below 2^35, an f32 any
+ * number but a finite one past its range, a string8, string16 or buffer16 no more bytes than its
+ * length prefix holds. A value that fails calls one helper per file (`checkWidth`), which raises or
+ * warns with the width, the value and where it is (`Entity.id`, `'move' [2].pos`), and which also
+ * decides the realm, so that a shared module checks only where `side` says. With `category: "all"`
+ * the required brands are checked too, and with `"none"` nothing is generated.
  */
 
 type Width = "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "f32" | "f64";
@@ -136,20 +146,18 @@ const CFRAME_COMPONENTS = 12;
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
 const MALFORMED = "malformed payload";
 
-/** What a name has to mean globally for a generated local to have to avoid it; see `localName`. */
-const GLOBAL_MEANING = ts.SymbolFlags.Value | ts.SymbolFlags.Namespace;
-
 /**
  * What the generator knows about a type. Children are kept as types so that named ones can be
  * hoisted; the synthetic kinds (literal groups, optionals, a union ordered by its spelling) only
  * appear where a type cannot stand.
  */
 type Kind =
-	| { kind: "number"; width: Width }
-	| { kind: "varint" }
+	/** `implicit`: the width came from an optional brand, whose values are checked (see `checkedWidth`). */
+	| { kind: "number"; width: Width; implicit?: boolean }
+	| { kind: "varint"; implicit?: boolean }
 	| { kind: "boolean" }
-	| { kind: "string"; length: LengthWidth }
-	| { kind: "buffer"; length: LengthWidth }
+	| { kind: "string"; length: LengthWidth; implicit?: boolean }
+	| { kind: "buffer"; length: LengthWidth; implicit?: boolean }
 	| { kind: "constant"; value: ts.Expression }
 	| { kind: "literals"; values: ts.Expression[] }
 	| { kind: "nothing" }
@@ -255,17 +263,71 @@ interface Cursor {
 	offset: number;
 }
 
-interface Ctx {
+/**
+ * Where a value being written or measured sits, for the message of a width check or of an array with a
+ * hole in it.
+ */
+interface Place {
+	/**
+	 * A root (`value`, a type's name, `result`) or an argument (`[2]`), then fields (`.pos`), elements
+	 * (`[]`) and map keys and values (`<key>`, `<value>`). Inside a hoisted `w_`, the part after its `where`.
+	 */
+	path?: string;
+	/** The event or function a call site sends through, which a message names when it may. */
+	site?: string;
+	/**
+	 * Inside a hoisted `w_` whose type has checks: its `where` parameter, which the caller fills with
+	 * where the value is (`'move' [1]`, `Entity.tags`). A failed check's message joins it with `path`,
+	 * only once it has failed.
+	 */
+	where?: ts.Identifier;
+	/**
+	 * Inside a hoisted function: the type's name, which starts the `where` it passes to the `w_` of another
+	 * type (`Entity.tags`), so that a call costs no joining of strings. Only the outermost place a value
+	 * is written from, a call site's argument or a serializer's value, reaches past one `w_`.
+	 */
+	owner?: string;
+	/** The value is a call's whole argument list (a spread made its length unknown): its elements are `[i]`. */
+	args?: boolean;
+}
+
+interface Ctx extends Place {
 	buf: ts.Identifier;
 	blobs: ts.Identifier | undefined;
 	cursor: Cursor;
 	out: ts.Statement[];
+	/**
+	 * Where the value being written sits, for a width check's message; see {@link Place.path}. Writes only.
+	 */
+	path?: string;
+	/** Writes a number without its check: a union's fallback member, whose check has already run. */
+	unchecked?: boolean;
+}
+
+/** `serialization.checks`, with the defaults filled in. */
+interface Checks {
+	category: "implicit" | "all" | "none";
+	mode: "assert" | "warn";
+	side: "both" | "server" | "client";
+}
+
+/** Where a call site's values go: the member it sends through, and whether the value is a function's result. */
+export interface EncodingSite {
+	/** The event or function, named in a check's message; left out under obfuscation. */
+	name?: string;
+	/** The one value is a function's result (`result` in a message) rather than an argument list. */
+	result?: boolean;
 }
 
 /** A hoisted type: its functions are `s_<name>`, `w_<name>` and `r_<name>` in the file's table. */
 interface Hoisted {
 	name: string;
 	layout: Layout;
+	/**
+	 * Whether a value of the type can fail a width check. Its `w_` then takes where the value is as a
+	 * last argument (`where`), which starts the paths of the checks inside; see {@link Ctx.where}.
+	 */
+	checks: boolean;
 }
 
 type HoistedRole = "s" | "w" | "r";
@@ -287,7 +349,6 @@ const factory = ts.factory;
 const num = (value: number) => f.number(value);
 const prop = (object: ts.Expression | string, name: string) =>
 	factory.createPropertyAccessExpression(typeof object === "string" ? f.identifier(object) : object, name);
-const bufferCall = (method: string, args: ts.Expression[]) => f.call(prop("buffer", method), args);
 const uid = (hint: string) => f.identifier(hint, true);
 const assign = (target: ts.Expression, value: ts.Expression) =>
 	f.statement(f.binary(target, ts.SyntaxKind.EqualsToken, value));
@@ -306,7 +367,6 @@ const forOf = (name: ts.BindingName, iterable: ts.Expression, body: ts.Statement
 		iterable,
 		f.block(body),
 	);
-const range = (from: ts.Expression, to: ts.Expression) => f.call("$range", [from, to]);
 const notNil = (value: ts.Expression) => f.binary(value, ts.SyntaxKind.ExclamationEqualsEqualsToken, f.nil());
 const isNil = (value: ts.Expression) => f.binary(value, ts.SyntaxKind.EqualsEqualsEqualsToken, f.nil());
 const equals = (left: ts.Expression, right: ts.Expression) =>
@@ -319,11 +379,6 @@ const conditional = (condition: ts.Expression, whenTrue: ts.Expression, whenFals
 		f.token(ts.SyntaxKind.ColonToken),
 		whenFalse,
 	);
-const raise = (message: string) => f.statement(f.call("error", [f.string(message)]));
-/** `typeIs(v, name)`: roblox-ts emits `type(v) == name` for primitives and `typeof(v) == name` otherwise, with no temporaries. */
-const typeOfIs = (value: ts.Expression, name: string) => f.call("typeIs", [value, f.string(name)]);
-const construct = (name: string, args: ts.Expression[], typeArguments?: ts.TypeNode[]) =>
-	factory.createNewExpression(f.identifier(name), typeArguments, args);
 
 /** A literal expression as text, for comparing and ordering literals. */
 function printLiteral(expression: ts.Expression): string {
@@ -369,25 +424,102 @@ function add(left: ts.Expression, right: ts.Expression | number): ts.Expression 
 	return f.binary(left, ts.SyntaxKind.PlusToken, right);
 }
 
-namespace T {
-	export const unknown = () => f.keywordType(ts.SyntaxKind.UnknownKeyword);
-	export const number = () => f.keywordType(ts.SyntaxKind.NumberKeyword);
-	export const string = () => f.keywordType(ts.SyntaxKind.StringKeyword);
-	export const buffer = () => f.referenceType("buffer");
-	export const defined = () => f.referenceType("defined");
-	export const blobs = () => f.referenceType("Array", [defined()]);
-	export const array = () => f.referenceType("Array", [unknown()]);
-	export const record = () => f.referenceType("Record", [string(), unknown()]);
-	export const map = () => f.referenceType("Map", [unknown(), unknown()]);
-	export const set = () => f.referenceType("Set", [defined()]);
-	export const enumItem = () => f.referenceType("EnumItem");
-	export const tuple = (elements: ts.TypeNode[]) => f.referenceType("LuaTuple", [f.tupleType(elements)]);
-	export const fn = (parameters: Array<[string, ts.TypeNode]>, result: ts.TypeNode) =>
+/**
+ * The types the generated code is written with. `global` names a global type, checked against what the
+ * place the code lands in declares (see {@link GLOBAL_TYPES}). Arrays, records and the functions of a
+ * file's table are spelled out rather than named (`unknown[]`, not `Array<unknown>`), so a project's own
+ * `Record` or `Callback` cannot stand in for them.
+ */
+function typeNodes(global: (name: string, args?: ts.TypeNode[]) => ts.TypeNode) {
+	const unknown = () => f.keywordType(ts.SyntaxKind.UnknownKeyword);
+	const number = () => f.keywordType(ts.SyntaxKind.NumberKeyword);
+	const string = () => f.keywordType(ts.SyntaxKind.StringKeyword);
+	const defined = () => global("defined");
+	const fn = (parameters: Array<[string, ts.TypeNode]>, result: ts.TypeNode) =>
 		f.functionType(
 			parameters.map(([name, type]) => f.parameterDeclaration(name, type)),
 			result,
 		);
+	return {
+		unknown,
+		number,
+		string,
+		defined,
+		fn,
+		buffer: () => global("buffer"),
+		blobs: () => factory.createArrayTypeNode(defined()),
+		array: () => factory.createArrayTypeNode(unknown()),
+		record: () =>
+			factory.createTypeLiteralNode([
+				factory.createIndexSignature(undefined, [f.parameterDeclaration("key", string())], unknown()),
+			]),
+		map: () => global("Map", [unknown(), unknown()]),
+		set: () => global("Set", [defined()]),
+		enumItem: () => global("EnumItem"),
+		tuple: (elements: ts.TypeNode[]) => global("LuaTuple", [f.tupleType(elements)]),
+		/** What a file's table of hoisted functions holds: the functions, called through casts to their own types. */
+		functions: () =>
+			factory.createTypeLiteralNode([
+				factory.createIndexSignature(
+					undefined,
+					[f.parameterDeclaration("key", string())],
+					f.functionType(
+						[
+							f.parameterDeclaration(
+								"args",
+								factory.createArrayTypeNode(f.keywordType(ts.SyntaxKind.NeverKeyword)),
+								undefined,
+								false,
+								true,
+							),
+						],
+						unknown(),
+					),
+				),
+			]),
+	};
 }
+
+/**
+ * The globals the generated code names, which a declaration where that code lands can hide. Code packed
+ * at a call site sits in the caller's scope, so `for (const [player, buffer] of ...)` around a send
+ * turns `buffer.create` into a read of the caller's buffer; the helpers hoisted to the top of the file
+ * sit in the module's scope. `alias`: a call site reads the global through a module-level `const`
+ * instead, which works wherever the module itself does not hide it. `refuse`: a macro or constructor
+ * roblox-ts only recognises by its own name (`typeIs`, `$range`, `new Map()`), or a global of the
+ * hoisted helpers, which a module-level declaration hides for all of them; the build asks for the
+ * declaration to be renamed. The other Luau globals roblox-ts reserves (`game`, `string`, `table`,
+ * and `type` and `typeof`, which it emits for `typeIs`) cannot be declared, a `catch` clause's
+ * variable aside.
+ */
+const GLOBAL_VALUES: Record<string, "alias" | "refuse"> = {
+	buffer: "alias",
+	// roblox-ts refuses a local, a parameter, a function or an import named after these, but not a
+	// `catch` clause's variable: `catch (error) { ... }` around a send would make the code's `error(...)`
+	// call it. Only a `catch` can hide them, so the module-level alias always reaches the global. A
+	// hidden `error` is mostly not aliased but raised through `assert` instead; see `raiseWith`.
+	error: "alias",
+	math: "alias",
+	typeIs: "refuse",
+	// A declaration named `$range` or `$tuple` is no Luau identifier: roblox-ts refuses a local, and a
+	// `catch ($range)` stops it outright, so nothing can hide these where a build gets this far.
+	$range: "refuse",
+	$tuple: "refuse",
+	Array: "refuse",
+	Map: "refuse",
+	Set: "refuse",
+	Enum: "refuse",
+	CFrame: "refuse",
+	warn: "refuse",
+	Promise: "refuse",
+};
+
+/**
+ * The global types the generated code names, which a declaration where it lands can hide too. A hidden
+ * one is spelled through `globalThis` (`globalThis.Map<unknown, unknown>`), which reaches the global
+ * whatever the module declares and leaves nothing in the Luau.
+ */
+const GLOBAL_TYPES = new Set(["buffer", "defined", "Map", "Set", "EnumItem", "LuaTuple", "CFrame"]);
 
 // --- entry points -----------------------------------------------------------------------------------
 
@@ -466,17 +598,19 @@ export interface InlineEncoding {
  * Packs an argument list where it is sent. `values` are the call's arguments for the tuple's
  * elements (a missing optional is `undefined`, extra ones feed the rest element), or the table that
  * holds them when a spread argument makes their number unknown. Argument expressions must be
- * identifiers or literals: they are read more than once.
+ * identifiers or literals: they are read more than once. `site` names the member for the message of
+ * a width check.
  */
 export function buildInlineEncoding(
 	state: TransformState,
 	node: ts.Node,
 	type: ts.Type,
 	values: ts.Expression[] | { table: ts.Expression },
+	site: EncodingSite = {},
 	file = state.getSourceFile(node),
 ): InlineEncoding {
 	const generator = generatorFor(state, node, file);
-	const encoding = generator.encodeList(type, values);
+	const encoding = generator.encodeList(type, values, site);
 	emitHoisted(state, generator);
 	return encoding;
 }
@@ -502,6 +636,7 @@ export function buildResultDecoderFromType(
 /**
  * Packs a function's result as a one-element list; see {@link buildResultDecoderFromType}. `value`
  * is flagged as a parameter when it is one, so the generated code copies it before any macro sees it.
+ * `name` is the function's, for the message of a width check.
  */
 export function buildInlineResultEncoding(
 	state: TransformState,
@@ -509,11 +644,12 @@ export function buildInlineResultEncoding(
 	fn: ts.Type,
 	value: ts.Identifier,
 	isParameter: boolean,
+	name?: string,
 	file = state.getSourceFile(node),
 ): InlineEncoding {
 	const generator = generatorFor(state, node, file);
 	if (isParameter) generator.markParameter(value);
-	const encoding = generator.encodeList(resultOf(state, generator, fn, node), [value]);
+	const encoding = generator.encodeList(resultOf(state, generator, fn, node), [value], { name, result: true });
 	emitHoisted(state, generator);
 	return encoding;
 }
@@ -535,6 +671,16 @@ function resultOf(
 
 	const returnType = unwrapPromise(state, signature.getReturnType());
 	return { kind: "list", elements: [generator.spell(signature.getDeclaration()?.type, returnType)] };
+}
+
+/** The project's `serialization.checks`, with every default filled in. */
+function checkSettings(state: TransformState): Checks {
+	const checks = state.projectConfig.serialization?.checks;
+	return {
+		category: checks?.category ?? "implicit",
+		mode: checks?.mode ?? "assert",
+		side: checks?.side ?? "both",
+	};
 }
 
 /** Unwraps `Promise<T>` to `T`. */
@@ -590,6 +736,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	let varint: Varint | undefined;
 	/** The per-file tally of zero-size elements the payload being decoded has announced; see `readCount`. */
 	let zeros: ts.Identifier | undefined;
+	/** The project's width checks, and the per-file helper a failed one calls; see `checkHelper`. */
+	const checks = checkSettings(state);
+	/** Whether the helper is in the file's table yet. */
+	let checkFunction = false;
 
 	/**
 	 * Parameters of the generated functions. roblox-ts copies a parameter into a temporary wherever one
@@ -597,6 +747,28 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 * call too; a `const` copy of our own passes straight through, so {@link bind} makes one.
 	 */
 	const parameters = new Set<ts.Identifier>();
+
+	/**
+	 * Values handed in from outside (a call site's arguments) and the copies {@link bind} makes of them.
+	 * Everything the generator makes itself is `unknown` and casts to any loose type, but these keep the
+	 * type they were declared with, and TypeScript refuses some of those casts outright: a readonly
+	 * tuple to `unknown[]`, an object with an index signature to `Map<unknown, unknown>`. {@link cast}
+	 * sends them through `unknown`, which leaves nothing in the Luau.
+	 */
+	const typed = new Set<ts.Expression>();
+
+	/**
+	 * How deep the generator is in code that lands at the top of the file (hoisted functions, tables,
+	 * helpers) rather than where the value is written or read; the globals that code names are looked
+	 * up in the module's scope rather than the call site's. See {@link globalRef}.
+	 */
+	let fileLevel = 0;
+	/** Whether each global is hidden where the current code lands, by scope, meaning and name. */
+	const hiddenHere = new Map<string, ts.Symbol | undefined>();
+	/** The module-level `const` each aliased global is read through, declared once per file. */
+	const globalAliases = new Map<string, ts.Identifier>();
+
+	const T = typeNodes(globalType);
 
 	return { buildSerializer, buildDecoder, encodeList, use, spell, markParameter, takeHoisted };
 
@@ -622,6 +794,234 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	/** Points diagnostics at the intrinsic or call site being built. */
 	function use(node: ts.Node) {
 		diagnosticNode = node;
+		hiddenHere.clear();
+	}
+
+	// --- globals ---------------------------------------------------------------------------------------
+
+	/** Builds code that lands at the top of the file; see {@link fileLevel}. */
+	function atFileLevel<R>(build: () => R): R {
+		fileLevel += 1;
+		try {
+			return build();
+		} finally {
+			fileLevel -= 1;
+		}
+	}
+
+	/**
+	 * The declaration that hides the global `name` where the code being built lands, if any: the call
+	 * site's scope for code packed there, the module's for the file's hoisted code.
+	 */
+	function hidingDeclaration(name: string, meaning: ts.SymbolFlags): ts.Symbol | undefined {
+		const key = `${fileLevel > 0 ? "file" : "site"}:${meaning}:${name}`;
+		if (hiddenHere.has(key)) return hiddenHere.get(key);
+
+		const location = fileLevel > 0 ? file : ts.getParseTreeNode(diagnosticNode);
+		const found = location && typeChecker.resolveName(name, location, meaning, false);
+		const hidden =
+			found !== undefined && found !== typeChecker.resolveName(name, undefined, meaning, false)
+				? found
+				: undefined;
+		hiddenHere.set(key, hidden);
+		return hidden;
+	}
+
+	/**
+	 * The build error for a global the generated code needs, hidden by a declaration of the project's:
+	 * "Flamework's generated code here uses the global 'Array', which the declaration of 'Array' on line
+	 * 12 hides. Rename that declaration."
+	 */
+	function refuseHidden(name: string, declared: ts.Symbol, isType = false): never {
+		const declaration = declared.declarations?.[0];
+		let at = "";
+		if (declaration) {
+			const source = declaration.getSourceFile();
+			const line = source.getLineAndCharacterOfPosition(declaration.getStart(source)).line + 1;
+			at = source === file ? ` on line ${line}` : ` in ${state.getFileId(source)}, line ${line}`;
+		}
+
+		return Diagnostics.error(
+			diagnosticNode,
+			`Flamework's generated code here uses the global ${isType ? "type " : ""}'${name}', which the declaration of '${name}'${at} hides. Rename that declaration.`,
+		);
+	}
+
+	/**
+	 * A global value from {@link GLOBAL_VALUES} (or a datatype's constructor), as the code being built can
+	 * reach it: its own name, or, where a call site's declaration hides `buffer`, `math` or `error`, the
+	 * module-level alias (`local math_1 = math`, one per file and global, only where one is hidden).
+	 */
+	function globalRef(name: string): ts.Identifier {
+		const hidden = hidingDeclaration(name, ts.SymbolFlags.Value);
+		if (!hidden) return f.identifier(name);
+
+		const policy = GLOBAL_VALUES[name] ?? "refuse";
+		if (policy === "refuse" || fileLevel > 0) return refuseHidden(name, hidden);
+
+		let alias = globalAliases.get(name);
+		if (!alias) {
+			// The alias is declared at the top of the file, where a module-level declaration would hide the
+			// global just as well.
+			const moduleLevel = atFileLevel(() => hidingDeclaration(name, ts.SymbolFlags.Value));
+			if (moduleLevel) return refuseHidden(name, moduleLevel);
+
+			alias = uid(name);
+			declarations.push(constDecl(alias, f.identifier(name), f.queryType(f.identifier(name))));
+			globalAliases.set(name, alias);
+		}
+
+		return alias;
+	}
+
+	/**
+	 * A reference to a global type from {@link GLOBAL_TYPES} (or a datatype): its own name, or, where a
+	 * declaration hides it (`type Map<K, V> = globalThis.Map<K, V>`, a local `interface Map`), the same
+	 * type through `globalThis`, which a type position reaches whatever is declared around it.
+	 */
+	function globalType(name: string, args?: ts.TypeNode[]): ts.TypeNode {
+		const hidden = hidingDeclaration(name, ts.SymbolFlags.Type);
+		if (!hidden) return f.referenceType(name, args);
+		if (hidingDeclaration("globalThis", ts.SymbolFlags.Namespace)) refuseHidden(name, hidden, true);
+		return f.referenceType(f.qualifiedNameType(f.identifier("globalThis"), name), args);
+	}
+
+	/**
+	 * Checks the globals named in code built elsewhere that the generated code includes: guards (`typeIs`,
+	 * `$range`, `Enum`, `Promise`) and literals (`Enum.KeyCode.A`). Those hold no identifier of the
+	 * project's, so every name there that is one of the globals refers to it. A global type a declaration
+	 * hides is spelled through `globalThis` instead (see {@link globalType}), so the node that comes back
+	 * may be a new one.
+	 */
+	function checkGlobalsIn<N extends ts.Node>(node: N): N {
+		const visit = (current: ts.Node): ts.Node => {
+			if (ts.isIdentifier(current)) {
+				if (
+					!ts.isGeneratedIdentifier(current) &&
+					(current.text in GLOBAL_VALUES || isDatatypeName(current.text))
+				) {
+					globalRef(current.text);
+				}
+				return current;
+			}
+			if (ts.isPropertyAccessExpression(current)) {
+				const expression = visit(current.expression) as ts.Expression;
+				return expression === current.expression
+					? current
+					: factory.updatePropertyAccessExpression(current, expression, current.name);
+			}
+			if (ts.isPropertyAssignment(current)) {
+				const name = ts.isComputedPropertyName(current.name)
+					? factory.updateComputedPropertyName(current.name, visit(current.name.expression) as ts.Expression)
+					: current.name;
+				const initializer = visit(current.initializer) as ts.Expression;
+				return name === current.name && initializer === current.initializer
+					? current
+					: factory.updatePropertyAssignment(current, name, initializer);
+			}
+			if (ts.isTypeReferenceNode(current)) {
+				const args = current.typeArguments?.map((argument) => visit(argument) as ts.TypeNode);
+				const changed = args?.some((argument, i) => argument !== current.typeArguments![i]) ?? false;
+				if (ts.isIdentifier(current.typeName) && isGlobalTypeName(current.typeName.text)) {
+					const reference = globalType(current.typeName.text, args) as ts.TypeReferenceNode;
+					return changed || !ts.isIdentifier(reference.typeName) ? reference : current;
+				}
+				return changed
+					? factory.updateTypeReferenceNode(current, current.typeName, factory.createNodeArray(args))
+					: current;
+			}
+			// A parameter's or a variable's own name is the guard's, not a global.
+			if (ts.isParameter(current) || ts.isVariableDeclaration(current)) {
+				const type = current.type && (visit(current.type) as ts.TypeNode);
+				const initializer = current.initializer && (visit(current.initializer) as ts.Expression);
+				if (type === current.type && initializer === current.initializer) return current;
+				return ts.isParameter(current)
+					? factory.updateParameterDeclaration(
+							current,
+							current.modifiers,
+							current.dotDotDotToken,
+							current.name,
+							current.questionToken,
+							type,
+							initializer,
+						)
+					: factory.updateVariableDeclaration(
+							current,
+							current.name,
+							current.exclamationToken,
+							type,
+							initializer,
+						);
+			}
+			return ts.visitEachChild(current, visit, state.context);
+		};
+
+		return visit(node) as N;
+	}
+
+	function isDatatypeName(name: string) {
+		return DATATYPES[name] !== undefined;
+	}
+
+	function isGlobalTypeName(name: string) {
+		return GLOBAL_TYPES.has(name) || isDatatypeName(name);
+	}
+
+	function bufferCall(method: string, args: ts.Expression[]) {
+		return f.call(prop(globalRef("buffer"), method), args);
+	}
+
+	function range(from: ts.Expression, to: ts.Expression) {
+		return f.call(globalRef("$range"), [from, to]);
+	}
+
+	function tuple(values: ts.Expression[]) {
+		return f.call(globalRef("$tuple"), values);
+	}
+
+	/** `typeIs(v, name)`: roblox-ts emits `type(v) == name` for primitives and `typeof(v) == name` otherwise, with no temporaries. */
+	function typeOfIs(value: ts.Expression, name: string) {
+		return f.call(globalRef("typeIs"), [value, f.string(name)]);
+	}
+
+	function construct(name: string, args: ts.Expression[], typeArguments?: ts.TypeNode[]) {
+		return factory.createNewExpression(globalRef(name), typeArguments, args);
+	}
+
+	/** `error("...")`, as a statement. */
+	function raise(message: string) {
+		return raiseWith(f.string(message));
+	}
+
+	/**
+	 * `error(message)` as a statement, as the code being built can reach it. Where a call site's `catch
+	 * (error)` hides the global, it is `assert(false, message)`, which raises the same message from the
+	 * same line (Luau's `assert` adds the position as `error` does) and costs the file no local: a file
+	 * at Luau's 200 locals that loaded before the hole checks put `error` into its sends still loads.
+	 * Only where a `catch (assert)` hides that too does it go through the module-level alias.
+	 */
+	function raiseWith(message: ts.Expression) {
+		if (
+			fileLevel === 0 &&
+			hidingDeclaration("error", ts.SymbolFlags.Value) &&
+			!hidingDeclaration("assert", ts.SymbolFlags.Value)
+		) {
+			return f.statement(f.call("assert", [f.bool(false), message]));
+		}
+
+		return f.statement(f.call(globalRef("error"), [message]));
+	}
+
+	// --- casts -----------------------------------------------------------------------------------------
+
+	/** `value as type`, through `unknown` when the value keeps its caller's type (see {@link typed}). */
+	function cast(value: ts.Expression, type: ts.TypeNode): ts.Expression {
+		return f.as(value, type, typed.has(value));
+	}
+
+	function skipCasts(expression: ts.Expression): ts.Expression {
+		while (ts.isAsExpression(expression)) expression = expression.expression;
+		return expression;
 	}
 
 	/** Hoisted statements added since the last call, in an order that keeps every reference in scope. */
@@ -648,7 +1048,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const layout = layoutOf(type);
 		countUses(type);
 		const value = parameter("v");
-		const serialize = f.arrowFunction(f.block(encodeBody(type, layout, value)), [
+		const serialize = f.arrowFunction(f.block(encodeBody(type, layout, value, rootPath(type))), [
 			f.parameterDeclaration(value, T.unknown()),
 		]);
 
@@ -689,8 +1089,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		);
 	}
 
-	function encodeList(type: ts.Type | ListKind, values: ts.Expression[] | { table: ts.Expression }): InlineEncoding {
-		return encodeElements(isKind(type) ? type : listOf(type), values);
+	function encodeList(
+		type: ts.Type | ListKind,
+		values: ts.Expression[] | { table: ts.Expression },
+		site: EncodingSite = {},
+	): InlineEncoding {
+		return encodeElements(isKind(type) ? type : listOf(type), values, site);
 	}
 
 	/** A list with nothing to carry: no elements, or only `void` ones. Such a list sends no payload. */
@@ -702,17 +1106,26 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 * Packs a list whose values are known one by one, so a static count of rest values and absent
 	 * optionals fold into the layout: a call with only fixed-size arguments gets a constant buffer size.
 	 */
-	function encodeElements(list: ListKind, values: ts.Expression[] | { table: ts.Expression }): InlineEncoding {
+	function encodeElements(
+		list: ListKind,
+		values: ts.Expression[] | { table: ts.Expression },
+		site: EncodingSite,
+	): InlineEncoding {
 		if (carriesNothing(list)) return { statements: [], payload: undefined, blobs: undefined };
 
 		const layout = layoutOf(list);
 		countUses(list);
 		const statements = new Array<ts.Statement>();
 		if (!Array.isArray(values)) {
-			const { buf, blobs } = encodeInto(list, layout, values.table, statements);
+			const { buf, blobs } = encodeInto(list, layout, values.table, statements, {
+				path: "",
+				site: site.name,
+				args: true,
+			});
 			return { statements, payload: buf, blobs };
 		}
 
+		for (const value of values) if (f.is.identifier(value)) typed.add(value);
 		const elementValue = (index: number) => values[index] ?? f.nil();
 		// The elements after a rest are the last arguments; TypeScript requires every one of them.
 		const after = list.after ?? [];
@@ -726,11 +1139,19 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const countBytes = staticVarint(rest.length);
 
 		const total = new Sum();
-		list.elements.forEach((element, index) => total.add(emitSize(element, elementValue(index), statements)));
+		const sizePlace = (index: number): Place => ({ path: site.result ? "result" : `[${index}]`, site: site.name });
+		list.elements.forEach((element, index) =>
+			total.add(emitSize(element, elementValue(index), statements, sizePlace(index))),
+		);
 		if (list.rest) {
 			total.add(countBytes.length);
-			for (const value of rest) total.add(emitSize(list.rest, value, statements));
-			after.forEach((element, index) => total.add(emitSize(element, afterValues[index], statements)));
+			const start = list.elements.length;
+			rest.forEach((value, index) =>
+				total.add(emitSize(list.rest!, value, statements, sizePlace(start + index))),
+			);
+			after.forEach((element, index) =>
+				total.add(emitSize(element, afterValues[index], statements, sizePlace(start + rest.length + index))),
+			);
 		}
 
 		const size = total.build();
@@ -742,15 +1163,26 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const variable = f.is.number(size) ? undefined : uid("o");
 		if (variable) statements.push(letDecl(variable, num(0)));
 
-		const ctx: Ctx = { buf, blobs, cursor: { variable, base: variable, offset: 0 }, out: statements };
-		list.elements.forEach((element, index) => emitWrite(element, elementValue(index), ctx));
+		const ctx: Ctx = {
+			buf,
+			blobs,
+			cursor: { variable, base: variable, offset: 0 },
+			out: statements,
+			site: site.name,
+		};
+		// Each argument is where a check's message starts: `[0]`, or `result` for a function's result.
+		const argument = (index: number) => within(ctx, site.result ? "result" : `[${index}]`, true);
+		list.elements.forEach((element, index) => emitWrite(element, elementValue(index), argument(index)));
 		if (list.rest) {
 			for (const byte of countBytes) {
 				ctx.out.push(f.statement(bufferCall("writeu8", [buf, at(ctx), num(byte)])));
 				ctx.cursor.offset += 1;
 			}
-			for (const value of rest) emitWrite(list.rest, value, ctx);
-			after.forEach((element, index) => emitWrite(element, afterValues[index], ctx));
+			const start = list.elements.length;
+			rest.forEach((value, index) => emitWrite(list.rest!, value, argument(start + index)));
+			after.forEach((element, index) =>
+				emitWrite(element, afterValues[index], argument(start + rest.length + index)),
+			);
 		}
 
 		return { statements, payload: buf, blobs };
@@ -771,10 +1203,16 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	/**
 	 * The argument list a tuple type describes, with Promise elements unwrapped. Each element is shaped
 	 * by where it was written: the tuple node when there is one, else the parameter or member it was
-	 * declared with (`Parameters<F>` keeps those).
+	 * declared with (`Parameters<F>` keeps those). An array is a list of nothing but a rest element:
+	 * `Parameters<F>` of `(...values: number[]) => void` is `number[]`, not a tuple.
 	 */
 	function listOf(type: ts.Type, node?: ts.TupleTypeNode): ListKind {
 		if (!isTupleType(state, type)) {
+			if (isArrayType(state, type)) {
+				const element = typeChecker.getTypeArguments(type)[0];
+				if (element) return { kind: "list", elements: [], rest: unwrapPromise(state, element) };
+			}
+
 			return { kind: "list", elements: [unwrapPromise(state, type)] };
 		}
 
@@ -809,16 +1247,25 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 * `const buf = buffer.create(<size>)`, the blob list when the type has blob slots, the writes,
 	 * and `return buf, blobs`.
 	 */
-	function encodeBody(shape: Shape, layout: Layout, value: ts.Identifier): ts.Statement[] {
+	function encodeBody(shape: Shape, layout: Layout, value: ts.Identifier, path: string): ts.Statement[] {
 		const body = new Array<ts.Statement>();
-		const { buf, blobs } = encodeInto(shape, layout, value, body);
-		body.push(f.returnStatement(blobs ? f.call("$tuple", [buf, blobs]) : buf));
+		const { buf, blobs } = encodeInto(shape, layout, value, body, { path });
+		body.push(f.returnStatement(blobs ? tuple([buf, blobs]) : buf));
 		return body;
 	}
 
-	/** The size pass, the buffer, the blob list when the type has blob slots, and the writes. */
-	function encodeInto(shape: Shape, layout: Layout, value: ts.Expression, body: ts.Statement[]) {
-		const size = emitSize(shape, value, body);
+	/**
+	 * The size pass, the buffer, the blob list when the type has blob slots, and the writes. `where`
+	 * is where the value is, for the messages of the checks (see {@link Place}).
+	 */
+	function encodeInto(
+		shape: Shape,
+		layout: Layout,
+		value: ts.Expression,
+		body: ts.Statement[],
+		where: { path: string; site?: string; args?: boolean },
+	) {
+		const size = emitSize(shape, value, body, where);
 
 		const buf = uid("buf");
 		body.push(constDecl(buf, bufferCall("create", [size])));
@@ -828,11 +1275,21 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		const top = isKind(shape) ? undefined : hoist(shape);
 		if (top) {
-			body.push(f.statement(callHoisted(top, "w", blobs ? [buf, num(0), value, blobs] : [buf, num(0), value])));
+			const args = blobs ? [buf, num(0), value, blobs] : [buf, num(0), value];
+			if (top.checks) args.push(whereOf({ path: where.path, site: where.site }));
+			body.push(f.statement(callHoisted(top, "w", args)));
 		} else {
 			const variable = layout.size === undefined ? uid("o") : undefined;
 			if (variable) body.push(letDecl(variable, num(0)));
-			emitWrite(shape, value, { buf, blobs, cursor: { variable, base: variable, offset: 0 }, out: body });
+			emitWrite(shape, value, {
+				buf,
+				blobs,
+				cursor: { variable, base: variable, offset: 0 },
+				out: body,
+				path: where.path,
+				site: where.site,
+				args: where.args,
+			});
 		}
 
 		return { buf, blobs };
@@ -1234,16 +1691,21 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			fail("a LuaTuple is several values at runtime, not a table; declare a tuple type such as `[A, B]` instead");
 		}
 
-		const brand = findBrand(type);
+		const found = findBrand(type);
+		const brand = found?.brand;
+		// An optional brand's values are checked; a required one's are not, unless the project says so.
+		const implicit = found?.implicit === true ? { implicit: true } : {};
 		const disjoint = type.types.find((member) => (member.flags & ts.TypeFlags.DisjointDomains) !== 0);
 		if (disjoint) {
 			if (disjoint.flags & ts.TypeFlags.Number) {
-				if (brand === VARINT_BRAND) return { kind: "varint" };
-				return { kind: "number", width: brand && NUMBER_BRANDS.has(brand) ? (brand as Width) : "f64" };
+				if (brand === VARINT_BRAND) return { kind: "varint", ...implicit };
+				if (brand && NUMBER_BRANDS.has(brand)) return { kind: "number", width: brand as Width, ...implicit };
+				return { kind: "number", width: "f64" };
 			}
 
 			if (disjoint.flags & ts.TypeFlags.String) {
-				return { kind: "string", length: (brand && STRING_BRANDS[brand]) || "v" };
+				const length = brand && STRING_BRANDS[brand];
+				return length ? { kind: "string", length, ...implicit } : { kind: "string", length: "v" };
 			}
 
 			return describe(disjoint);
@@ -1251,7 +1713,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		const bufferSymbol = resolve("buffer");
 		if (type.types.some((member) => member.getSymbol() === bufferSymbol)) {
-			return { kind: "buffer", length: (brand && BUFFER_BRANDS[brand]) || "v" };
+			const length = brand && BUFFER_BRANDS[brand];
+			return length ? { kind: "buffer", length, ...implicit } : { kind: "buffer", length: "v" };
 		}
 
 		const datatype = type.types.find((member) => {
@@ -1271,17 +1734,24 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return classifyObject(type);
 	}
 
-	/** The literal in `number & { __brand: "u8" }`, whatever the property is called. */
-	function findBrand(type: ts.IntersectionType): string | undefined {
+	/**
+	 * The literal in `number & { __brand: "u8" }`, whatever the property is called, and whether the
+	 * property is optional (`__brand?: "u8"`, `Serialization.Implicit.u8`), which makes the width
+	 * implicit: it takes plain values, and they are checked where they are written.
+	 */
+	function findBrand(type: ts.IntersectionType): { brand: string; implicit: boolean } | undefined {
 		for (const member of type.types) {
 			if ((member.flags & ts.TypeFlags.Object) === 0) continue;
 
 			for (const property of member.getProperties()) {
-				const propertyType = typeChecker.getTypeOfPropertyOfType(member, property.name);
+				const implicit = (property.flags & ts.SymbolFlags.Optional) !== 0;
+				let propertyType = typeChecker.getTypeOfPropertyOfType(member, property.name);
+				// An optional property's type carries `undefined` as well: `"u16" | undefined`.
+				if (propertyType && implicit) propertyType = typeChecker.getNonNullableType(propertyType);
 				if (propertyType?.isStringLiteral()) {
 					const brand = propertyType.value;
-					if (NUMBER_BRANDS.has(brand) || brand === VARINT_BRAND) return brand;
-					if (brand in STRING_BRANDS || brand in BUFFER_BRANDS) return brand;
+					if (NUMBER_BRANDS.has(brand) || brand === VARINT_BRAND) return { brand, implicit };
+					if (brand in STRING_BRANDS || brand in BUFFER_BRANDS) return { brand, implicit };
 				}
 			}
 		}
@@ -1490,17 +1960,24 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		for (let suffix = 1; hoistedNames.has(unique); suffix++) unique = `${name}_${suffix}`;
 		hoistedNames.add(unique);
 
-		const info: Hoisted = { name: unique, layout };
+		const info: Hoisted = { name: unique, layout, checks: hasChecks(type) };
 		hoisted.set(type, info);
 
 		// The functions are looked up in the table when called, which is what lets a type refer to
-		// itself, and their bodies can be built now.
+		// itself, and their bodies can be built now. They land at the top of the file.
+		atFileLevel(() => buildHoisted(type, info));
+		return info;
+	}
+
+	/** The size, write and read functions of a hoisted type; see {@link hoist}. */
+	function buildHoisted(type: ts.Type, info: Hoisted) {
+		const layout = info.layout;
 		const kind = describe(type);
 		trail.push(type);
 
 		const value = parameter("v");
 		const sizeBody = new Array<ts.Statement>();
-		const size = emitSize(kind, value, sizeBody);
+		const size = emitSize(kind, value, sizeBody, { path: "", owner: displayName(type) });
 		sizeBody.push(f.returnStatement(size));
 		definitions.push(
 			assign(
@@ -1512,36 +1989,41 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const buf = uid("buf");
 		const o = uid("o");
 		const blobs = layout.blobs ? uid("blobs") : undefined;
-		const typed = (list: Array<[ts.Identifier, ts.TypeNode]>) =>
+		const declare = (list: Array<[ts.Identifier, ts.TypeNode]>) =>
 			list.map(([id, type]) => f.parameterDeclaration(id, type));
 		const withBlobs = (list: Array<[ts.Identifier, ts.TypeNode]>) =>
-			typed(blobs ? [...list, [blobs, T.blobs()]] : list);
+			declare(blobs ? [...list, [blobs, T.blobs()]] : list);
 
 		const writeBody = new Array<ts.Statement>();
-		const writeCtx: Ctx = { buf, blobs, cursor: { variable: o, base: o, offset: 0 }, out: writeBody };
+		// Shared by every place that reaches the type: a check's path starts from the `where` its caller
+		// passes, and the `where` this passes on to another type's `w_` from this type's name.
+		const where = info.checks ? uid("where") : undefined;
+		const writeCtx: Ctx = {
+			buf,
+			blobs,
+			cursor: { variable: o, base: o, offset: 0 },
+			out: writeBody,
+			path: "",
+			where,
+			owner: displayName(type),
+		};
 		emitWrite(kind, value, writeCtx);
 		sync(writeCtx);
 		writeBody.push(f.returnStatement(o));
-		definitions.push(
-			assign(
-				hoistedField(info, "w"),
-				f.arrowFunction(
-					f.block(writeBody),
-					withBlobs([
-						[buf, T.buffer()],
-						[o, T.number()],
-						[value, T.unknown()],
-					]),
-				),
-			),
-		);
+		const writeParameters = withBlobs([
+			[buf, T.buffer()],
+			[o, T.number()],
+			[value, T.unknown()],
+		]);
+		if (where) writeParameters.push(f.parameterDeclaration(where, T.string()));
+		definitions.push(assign(hoistedField(info, "w"), f.arrowFunction(f.block(writeBody), writeParameters)));
 
 		const readBody = new Array<ts.Statement>();
 		const readCtx: Ctx = { buf, blobs, cursor: { variable: o, base: o, offset: 0 }, out: readBody };
 		const result = emitRead(kind, readCtx);
 		const bound = f.is.identifier(result) || isLiteral(result) ? result : bind(readBody, result, "value");
 		sync(readCtx);
-		readBody.push(f.returnStatement(f.call("$tuple", [bound, o])));
+		readBody.push(f.returnStatement(tuple([bound, o])));
 		definitions.push(
 			assign(
 				hoistedField(info, "r"),
@@ -1556,7 +2038,6 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		);
 
 		trail.pop();
-		return info;
 	}
 
 	/**
@@ -1567,13 +2048,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	function hoistedTable(): ts.Identifier {
 		if (!functionTable) {
 			functionTable = uid("codec");
-			declarations.push(
-				constDecl(
-					functionTable,
-					f.object([]),
-					f.referenceType("Record", [T.string(), f.referenceType("Callback")]),
-				),
-			);
+			declarations.push(constDecl(functionTable, f.object([]), T.functions()));
 		}
 
 		return functionTable;
@@ -1586,11 +2061,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	/** A call of a hoisted function, typed as it is so the call's result has the right type. */
 	function callHoisted(info: Hoisted, role: HoistedRole, args: ts.Expression[]): ts.Expression {
 		const blobs: Array<[string, ts.TypeNode]> = info.layout.blobs ? [["blobs", T.blobs()]] : [];
+		const where: Array<[string, ts.TypeNode]> = role === "w" && info.checks ? [["where", T.string()]] : [];
 		const type =
 			role === "s"
 				? T.fn([["v", T.unknown()]], T.number())
 				: role === "w"
-					? T.fn([["buf", T.buffer()], ["o", T.number()], ["v", T.unknown()], ...blobs], T.number())
+					? T.fn([["buf", T.buffer()], ["o", T.number()], ["v", T.unknown()], ...blobs, ...where], T.number())
 					: T.fn([["buf", T.buffer()], ["o", T.number()], ...blobs], T.tuple([T.unknown(), T.number()]));
 		return f.call(f.as(hoistedField(info, role), type), args);
 	}
@@ -1687,7 +2163,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		let guard = guards.get(type);
 		if (!guard) {
 			guard = uid("guard");
-			tables.push(constDecl(guard, buildGuardFromType(state, diagnosticNode, type, file)));
+			const expression = atFileLevel(() => checkGlobalsIn(buildGuardFromType(state, diagnosticNode, type, file)));
+			tables.push(constDecl(guard, expression));
 			guards.set(type, guard);
 		}
 
@@ -1698,14 +2175,17 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	function enumTableFor(name: string): ts.Identifier {
 		let table = enumTables.get(name);
 		if (!table) {
-			table = uid(`enum_${name}`);
+			const id = uid(`enum_${name}`);
 			const item = uid("item");
-			tables.push(
-				constDecl(table, construct("Map", []), f.referenceType("Map", [T.number(), T.enumItem()])),
-				forOf(item, f.call(prop(prop("Enum", name), "GetEnumItems"), []), [
-					f.statement(f.call(prop(table, "set"), [prop(item, "Value"), item])),
-				]),
+			atFileLevel(() =>
+				tables.push(
+					constDecl(id, construct("Map", []), globalType("Map", [T.number(), T.enumItem()])),
+					forOf(item, f.call(prop(prop(globalRef("Enum"), name), "GetEnumItems"), []), [
+						f.statement(f.call(prop(id, "set"), [prop(item, "Value"), item])),
+					]),
+				),
 			);
+			table = id;
 			enumTables.set(name, table);
 		}
 
@@ -1719,15 +2199,19 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			entry = { list: uid("literals"), index: uid("literalIndex") };
 			// The key type is spelled out: inferred from the pairs, TypeScript would pick the first literal's
 			// type (`"lit"`, or one EnumItem interface) and reject the others.
-			const pairs = kind.values.map((value, index) => f.array([value, num(index)], false));
-			tables.push(
-				constDecl(entry.list, f.array(kind.values, false), T.blobs()),
-				constDecl(
-					entry.index,
-					construct("Map", [f.array(pairs)], [T.defined(), T.number()]),
-					f.referenceType("Map", [T.defined(), T.number()]),
-				),
-			);
+			const { list, index } = entry;
+			atFileLevel(() => {
+				const values = kind.values.map(checkGlobalsIn);
+				const pairs = values.map((value, position) => f.array([value, num(position)], false));
+				tables.push(
+					constDecl(list, f.array(values, false), T.blobs()),
+					constDecl(
+						index,
+						construct("Map", [f.array(pairs)], [T.defined(), T.number()]),
+						globalType("Map", [T.defined(), T.number()]),
+					),
+				);
+			});
 			literalTables.set(kind, entry);
 		}
 
@@ -1742,8 +2226,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 */
 	function varintHelpers(): Varint {
 		if (varint) return varint;
-		varint = { size: uid("vsize"), write: uid("vwrite"), read: uid("vread") };
+		const helpers = { size: uid("vsize"), write: uid("vwrite"), read: uid("vread") };
+		varint = helpers;
+		atFileLevel(() => buildVarintHelpers(helpers));
+		return helpers;
+	}
 
+	function buildVarintHelpers(varint: Varint) {
 		const below = (value: ts.Expression, limit: number) => f.binary(value, ts.SyntaxKind.LessThanToken, num(limit));
 		const parameter = (id: ts.Identifier, type: ts.TypeNode) => f.parameterDeclaration(id, type);
 
@@ -1781,7 +2270,9 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 								addAssign(wo, num(1)),
 								assign(
 									wn,
-									f.call(prop("math", "floor"), [f.binary(wn, ts.SyntaxKind.SlashToken, num(128))]),
+									f.call(prop(globalRef("math"), "floor"), [
+										f.binary(wn, ts.SyntaxKind.SlashToken, num(128)),
+									]),
 								),
 							]),
 						),
@@ -1819,7 +2310,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 										scale,
 									),
 								),
-								ifStatement(below(byte, 128), [f.returnStatement(f.call("$tuple", [rn, ro]))]),
+								ifStatement(below(byte, 128), [f.returnStatement(tuple([rn, ro]))]),
 								f.statement(f.binary(scale, ts.SyntaxKind.AsteriskEqualsToken, num(128))),
 								ifStatement(
 									f.binary(scale, ts.SyntaxKind.GreaterThanToken, num(128 ** (VARINT_MAX_BYTES - 1))),
@@ -1832,8 +2323,6 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				),
 			),
 		);
-
-		return varint;
 	}
 
 	/**
@@ -1845,13 +2334,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const and = (left: ts.Expression, right: ts.Expression) =>
 			f.binary(left, ts.SyntaxKind.AmpersandAmpersandToken, right);
 		if (!whole) {
-			const magnitude = () => f.call(prop("math", "abs"), [n]);
+			const magnitude = () => f.call(prop(globalRef("math"), "abs"), [n]);
 			return factory.createPrefixUnaryExpression(
 				ts.SyntaxKind.ExclamationToken,
 				factory.createParenthesizedExpression(
 					and(
 						f.binary(magnitude(), ts.SyntaxKind.GreaterThanToken, num(maximum)),
-						f.binary(magnitude(), ts.SyntaxKind.LessThanToken, prop("math", "huge")),
+						f.binary(magnitude(), ts.SyntaxKind.LessThanToken, prop(globalRef("math"), "huge")),
 					),
 				),
 			);
@@ -1866,6 +2355,354 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			),
 			equals(f.binary(n, ts.SyntaxKind.PercentToken, num(1)), num(0)),
 		);
+	}
+
+	// --- width checks ---------------------------------------------------------------------------------
+
+	/** A width as it is spelled in `Serialization`: `u16`, `varint`, `string8`, `buffer16`. */
+	function widthName(kind: Kind): string {
+		switch (kind.kind) {
+			case "number":
+				return kind.width;
+			case "varint":
+				return "varint";
+			case "string":
+				return kind.length === "u8" ? "string8" : kind.length === "u16" ? "string16" : "string32";
+			case "buffer":
+				return kind.length === "u16" ? "buffer16" : "buffer32";
+			default:
+				return kind.kind;
+		}
+	}
+
+	/**
+	 * The width to check a value of `kind` against where it is written, or `undefined` when there is
+	 * nothing to check: the width holds every value (`f64`, `string32`, `buffer32`, a plain `number` or
+	 * `string`), or the project does not check it (`category`), or the write is a union's fallback
+	 * member, whose check has already run.
+	 */
+	function checkedWidth(kind: Kind, ctx?: Ctx): string | undefined {
+		if (checks.category === "none" || ctx?.unchecked) return;
+
+		let implicit: boolean | undefined;
+		switch (kind.kind) {
+			case "number":
+				if (kind.width === "f64") return;
+				implicit = kind.implicit;
+				break;
+			case "varint":
+				implicit = kind.implicit;
+				break;
+			case "string":
+			case "buffer":
+				if (kind.length === "v" || kind.length === "u32") return;
+				implicit = kind.implicit;
+				break;
+			default:
+				return;
+		}
+
+		if (checks.category === "implicit" && implicit !== true) return;
+		return widthName(kind);
+	}
+
+	/**
+	 * The file's helper for a value that failed its check, defined once ahead of everything that calls
+	 * it: `codec.checkWidth(width, value, where, unit?)`. It builds the message, `[Flamework] u16 cannot
+	 * hold 70000, at Entity.id`, and then raises (`assert`) or warns and returns `true` (`warn`), so the
+	 * value is written as it is. Under a `side` other than `both` it first asks the realm and returns
+	 * `false` outside it, leaving the value to be written unchecked: only a value that failed pays for
+	 * that question, and a module shared by both realms answers it where it runs. It is kept in the
+	 * file's table of hoisted functions rather than a local of its own (see {@link hoistedTable}): a file
+	 * that has the table pays no local for it.
+	 */
+	function checkHelper(): ts.Expression {
+		const helper = prop(hoistedTable(), "checkWidth");
+		if (!checkFunction) {
+			checkFunction = true;
+			atFileLevel(() => buildCheckHelper(helper));
+		}
+
+		const parameter = (name: string, type: ts.TypeNode, optional = false) =>
+			f.parameterDeclaration(name, type, undefined, optional);
+		return f.as(
+			helper,
+			f.functionType(
+				[
+					parameter("width", T.string()),
+					parameter("value", T.number()),
+					parameter("where", T.string()),
+					parameter("unit", T.string(), true),
+				],
+				f.keywordType(ts.SyntaxKind.BooleanKeyword),
+			),
+		);
+	}
+
+	function buildCheckHelper(checkFunction: ts.Expression) {
+		const width = uid("width");
+		const value = uid("value");
+		const where = uid("where");
+		const unit = uid("unit");
+		const message = uid("message");
+
+		const body = new Array<ts.Statement>();
+		if (checks.side !== "both") {
+			const runService = f.call(prop("game", "GetService"), [f.string("RunService")]);
+			const inRealm = f.call(prop(runService, checks.side === "server" ? "IsServer" : "IsClient"), []);
+			body.push(
+				ifStatement(factory.createPrefixUnaryExpression(ts.SyntaxKind.ExclamationToken, inRealm), [
+					f.returnStatement(f.bool(false)),
+				]),
+			);
+		}
+
+		const text = factory.createTemplateExpression(factory.createTemplateHead("[Flamework] "), [
+			factory.createTemplateSpan(width, factory.createTemplateMiddle(" cannot hold ")),
+			factory.createTemplateSpan(value, factory.createTemplateMiddle("")),
+			factory.createTemplateSpan(unit, factory.createTemplateMiddle(", at ")),
+			factory.createTemplateSpan(where, factory.createTemplateTail("")),
+		]);
+		body.push(constDecl(message, text));
+
+		if (checks.mode === "assert") {
+			// Level 2: the message points at the write that called this.
+			body.push(f.statement(f.call(globalRef("error"), [message, num(2)])));
+		} else {
+			body.push(f.statement(f.call(globalRef("warn"), [message])), f.returnStatement(f.bool(true)));
+		}
+
+		tables.push(
+			assign(
+				checkFunction,
+				f.arrowFunction(
+					f.block(body),
+					[
+						f.parameterDeclaration(width, T.string()),
+						f.parameterDeclaration(value, T.number()),
+						f.parameterDeclaration(where, T.string()),
+						f.parameterDeclaration(unit, T.string(), f.string("")),
+					],
+					undefined,
+					f.keywordType(ts.SyntaxKind.BooleanKeyword),
+				),
+			),
+		);
+	}
+
+	/** `codec.checkWidth("u16", n, <where>)`: the call a failed check makes; `unit` follows a length. */
+	function callCheck(width: string, value: ts.Expression, ctx: Ctx, unit?: string): ts.Expression {
+		const args = [f.string(width), value, whereOf(ctx)];
+		if (unit !== undefined) args.push(f.string(unit));
+		return f.call(checkHelper(), args);
+	}
+
+	/**
+	 * Where a value is, as a check's message says it: a string known at build time (`'move' [0].x`,
+	 * `value.id`), or, inside a hoisted `w_`, its `where` joined with the path after it (`where ..
+	 * ".id"`), which only runs once a check has failed.
+	 */
+	function whereOf(ctx: Place): ts.Expression {
+		if (ctx.where) {
+			return ctx.path ? f.binary(ctx.where, ts.SyntaxKind.PlusToken, f.string(ctx.path)) : ctx.where;
+		}
+
+		const path = ctx.path === undefined || ctx.path === "" ? "value" : ctx.path;
+		return f.string(ctx.site !== undefined ? `'${ctx.site}' ${path}` : path);
+	}
+
+	/**
+	 * The `where` a call of another type's `w_` passes, known at build time. Inside a hoisted `w_` it
+	 * starts from that type's name (`Entity.tags`) rather than from the caller's `where`, which would
+	 * join two strings on every call.
+	 */
+	function passedWhere(ctx: Ctx): ts.Expression {
+		if (ctx.owner !== undefined) return f.string(`${ctx.owner}${ctx.path ?? ""}`);
+		return whereOf(ctx);
+	}
+
+	/**
+	 * Whether some value of a shape can fail one of the width checks this project generates in the shape's
+	 * own code: not in a named type inside it, which is always hoisted and checks its values in its own
+	 * `w_`, and not in a union's member with a range, which only takes a number its test found in range.
+	 */
+	function hasChecks(root: Shape): boolean {
+		const seen = new Set<Shape>();
+		const walk = (shape: Shape): boolean => {
+			if (seen.has(shape)) return false;
+			seen.add(shape);
+			if (shape !== root && !isKind(shape) && alwaysHoisted(shape)) return false;
+
+			const kind = describe(shape);
+			switch (kind.kind) {
+				case "number":
+				case "varint":
+				case "string":
+				case "buffer":
+					return checkedWidth(kind) !== undefined;
+				case "optional":
+					return walk(kind.inner);
+				case "array":
+				case "set":
+					return walk(kind.element);
+				case "map":
+					return walk(kind.key) || walk(kind.value);
+				case "list":
+					return (
+						kind.elements.some(walk) ||
+						(kind.rest !== undefined && walk(kind.rest)) ||
+						(kind.after ?? []).some(walk)
+					);
+				case "object":
+					return kind.fields.some((field) => walk(field.shape));
+				case "union":
+					// A number no member takes is checked by the union's fallback (see `numericFallback`).
+					return (
+						numericFallback(kind) !== undefined ||
+						kind.alternatives.some(
+							(alternative) =>
+								numberRange(describe(alternative.shape)) === undefined && walk(alternative.shape),
+						)
+					);
+				default:
+					return false;
+			}
+		};
+
+		return walk(root);
+	}
+
+	/** A variable-size named object, union or tuple, which {@link hoist} always hoists wherever it is reached. */
+	function alwaysHoisted(type: ts.Type): boolean {
+		if (hoisted.has(type)) return true;
+		if (!canHoist(type) || hoistName(type) === undefined) return false;
+		const structure = describe(type).kind;
+		return structure !== "array" && structure !== "set" && structure !== "map";
+	}
+
+	/** A place one step further into the value: a field (`.pos`), an element (`[]`), or a new root. */
+	function within<P extends Place>(place: P, segment: string, root = false): P {
+		return { ...place, path: root ? segment : `${place.path ?? ""}${segment}`, args: undefined };
+	}
+
+	/** A field as a path segment: `.pos`, or `["two words"]` for a name that is not an identifier. */
+	function fieldSegment(name: string): string {
+		return IDENTIFIER.test(name) ? `.${name}` : `[${JSON.stringify(name)}]`;
+	}
+
+	/**
+	 * Where a check's path starts in `Flamework.createSerializer<T>()`: the name of a named object,
+	 * union or tuple type (`Entity.id`), else `value` (`value[0]`, or `value` itself for a width).
+	 */
+	function rootPath(shape: Shape): string {
+		if (isKind(shape) || hoistName(shape) === undefined) return "value";
+		const structure = describe(shape).kind;
+		return structure === "object" || structure === "union" || structure === "list" ? displayName(shape) : "value";
+	}
+
+	/**
+	 * A type as a check's path starts from it inside its hoisted functions, which every place that
+	 * reaches the type shares: its name (`Entity`, `Patch<Tree>`), parenthesized when TypeScript
+	 * prints it as more than a name (`(u16[])`), so the segments after it read as its own.
+	 */
+	function displayName(type: ts.Type): string {
+		const text = typeChecker.typeToString(type);
+		return /^[\w$.]+(<.*>)?$/.test(text) ? text : `(${text})`;
+	}
+
+	/**
+	 * Writes a number with `write`, checked first when its width is: `if not (<fits>) then checkWidth(...)
+	 * end`. A value that is more than a name is read once, into a local, and that local, the check and
+	 * the write go in a block of their own (`do ... end`): Luau allows 200 locals in a function, and a
+	 * function that writes many checked values holds no more of them than it would unchecked. A literal is
+	 * judged here: one that fits needs no check at all, one that does not calls the check as it is.
+	 */
+	function writeNumber(kind: Kind, value: ts.Expression, ctx: Ctx, write: (n: ts.Expression, ctx: Ctx) => void) {
+		const width = checkedWidth(kind, ctx);
+		const range = numberRange(kind);
+		if (width === undefined || range === undefined) return write(value, ctx);
+
+		const known = literalNumber(value);
+		if (known !== undefined) {
+			if (!fitsStatically(known, range)) ctx.out.push(f.statement(callCheck(width, value, ctx)));
+			return write(value, ctx);
+		}
+
+		const block: Ctx = { ...ctx, out: [] };
+		const n = f.is.identifier(value) ? value : bind(block.out, value, "n");
+		const target = block.out.length > 0 ? block : ctx;
+		target.out.push(
+			ifStatement(failsRange(cast(n, T.number()), range), [
+				f.statement(callCheck(width, cast(n, T.number()), ctx)),
+			]),
+		);
+		write(n, target);
+		if (target === block) ctx.out.push(f.block(block.out));
+	}
+
+	/** The negation of {@link fitsRange}, without a double negation for `f32`. */
+	function failsRange(n: ts.Expression, range: [number, number, boolean]): ts.Expression {
+		const fits = fitsRange(n, range);
+		if (
+			ts.isPrefixUnaryExpression(fits) &&
+			fits.operator === ts.SyntaxKind.ExclamationToken &&
+			ts.isParenthesizedExpression(fits.operand)
+		) {
+			return fits.operand.expression;
+		}
+
+		return factory.createPrefixUnaryExpression(
+			ts.SyntaxKind.ExclamationToken,
+			factory.createParenthesizedExpression(fits),
+		);
+	}
+
+	/** A number literal's value (`7`, `-1`), or `undefined` for anything else. */
+	function literalNumber(expression: ts.Expression): number | undefined {
+		if (f.is.number(expression)) return Number(expression.text);
+		if (
+			ts.isPrefixUnaryExpression(expression) &&
+			expression.operator === ts.SyntaxKind.MinusToken &&
+			f.is.number(expression.operand)
+		) {
+			return -Number(expression.operand.text);
+		}
+	}
+
+	/** What {@link fitsRange} says about a number known at compile time. */
+	function fitsStatically(n: number, [minimum, maximum, whole]: [number, number, boolean]): boolean {
+		if (!whole) return !(Math.abs(n) > maximum && Math.abs(n) < Infinity);
+		return n >= minimum && n <= maximum && n % 1 === 0;
+	}
+
+	/**
+	 * The member a number that fits none of a union's members is written as, once its check has let it
+	 * through (`warn`): the first checked member with a range, in written order. `widths` names every
+	 * member with a range, for the message. None when a member takes every number anyway (a plain
+	 * `number` or `f64`, or a blob that takes anything), or when no member with a range is checked;
+	 * such a number then raises "value matches none of the union's members", as it always has.
+	 */
+	function numericFallback(union: UnionKind, ctx?: Ctx): { index: number; widths: string } | undefined {
+		if (union.whole !== undefined) return;
+
+		const widths = new Array<string>();
+		for (const alternative of union.alternatives) {
+			const kind = describe(alternative.shape);
+			// A strict width and its implicit twin are one width to the message.
+			if (numberRange(kind) !== undefined && !widths.includes(widthName(kind))) widths.push(widthName(kind));
+		}
+
+		let index: number | undefined;
+		for (const i of evaluation(union).order) {
+			const kind = describe(union.alternatives[i].shape);
+			if (kind.kind === "number" && kind.width === "f64") return;
+			if (kind.kind === "blob" && kind.typeofName === undefined) return;
+			if (index === undefined && numberRange(kind) !== undefined && checkedWidth(kind, ctx) !== undefined) {
+				index = i;
+			}
+		}
+
+		return index !== undefined ? { index, widths: widths.join(" | ") } : undefined;
 	}
 
 	/**
@@ -2498,11 +3335,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	function bind(out: ts.Statement[], value: ts.Expression, hint: string, type?: ts.TypeNode): ts.Expression {
 		if (!type) {
 			if (f.is.identifier(value) && !isParameterReference(value)) return value;
-			if (ts.isAsExpression(value) && f.is.identifier(value.expression)) return value;
+			if (ts.isAsExpression(value) && f.is.identifier(skipCasts(value.expression))) return value;
 		}
 
 		const id = uid(hint);
 		out.push(constDecl(id, value, type));
+		if (!type && typed.has(value)) typed.add(id);
 		return id;
 	}
 
@@ -2526,8 +3364,11 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	// --- size ----------------------------------------------------------------------------------------
 
-	/** The byte count of `value`: a constant for fixed layouts, otherwise an expression (plus statements). */
-	function emitSize(shape: Shape, value: ts.Expression, out: ts.Statement[]): ts.Expression {
+	/**
+	 * The byte count of `value`: a constant for fixed layouts, otherwise an expression (plus statements).
+	 * `place` is where the value is, for the message of an array with a hole (see {@link elementAt}).
+	 */
+	function emitSize(shape: Shape, value: ts.Expression, out: ts.Statement[], place: Place): ts.Expression {
 		const layout = layoutOf(shape);
 		if (layout.size !== undefined) return num(layout.size);
 
@@ -2539,11 +3380,11 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const kind = describe(shape);
 		switch (kind.kind) {
 			case "string":
-				return sizeWithLength(out, kind.length, f.call(prop(f.as(value, T.string()), "size"), []));
+				return sizeWithLength(out, kind.length, f.call(prop(cast(value, T.string()), "size"), []));
 			case "buffer":
-				return sizeWithLength(out, kind.length, bufferCall("len", [f.as(value, T.buffer())]));
+				return sizeWithLength(out, kind.length, bufferCall("len", [cast(value, T.buffer())]));
 			case "varint":
-				return f.call(varintHelpers().size, [f.as(value, T.number())]);
+				return f.call(varintHelpers().size, [cast(value, T.number())]);
 			case "optional": {
 				if (isNilLiteral(value)) return num(1);
 				const inner = layoutOf(kind.inner);
@@ -2555,46 +3396,56 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				const total = uid("size");
 				out.push(letDecl(total, num(1)));
 				const body = new Array<ts.Statement>();
-				body.push(addAssign(total, emitSize(kind.inner, v, body)));
+				body.push(addAssign(total, emitSize(kind.inner, v, body, place)));
 				out.push(ifStatement(notNil(v), body));
 				return total;
 			}
 			case "array": {
-				const array = bind(out, f.as(value, T.array()), "array");
+				const array = bind(out, cast(value, T.array()), "array");
 				const count = bind(out, f.call(prop(array, "size"), []), "n");
 				const prefix = f.call(varintHelpers().size, [count]);
 				const element = layoutOf(kind.element);
 				if (element.size !== undefined) return countedSize(prefix, count, element.size);
 
+				// By index, as the elements are written: a nil the element type takes still takes its byte,
+				// and one it does not is refused here, the first time it is reached.
 				const total = uid("size");
-				const item = uid("item");
+				const index = uid("i");
 				out.push(letDecl(total, prefix));
 				const body = new Array<ts.Statement>();
-				body.push(addAssign(total, emitSize(kind.element, item, body)));
-				out.push(forOf(item, array, body));
+				const hole = allowsNil(kind.element) ? undefined : { place, container: "the array" };
+				const item = elementAt(array, index, body, hole);
+				body.push(addAssign(total, emitSize(kind.element, item, body, within(place, "[]"))));
+				out.push(forOf(index, range(num(1), count), body));
 				return total;
 			}
 			case "set": {
-				const set = bind(out, f.as(value, T.set()), "set");
+				const set = bind(out, cast(value, T.set()), "set");
 				const element = layoutOf(kind.element);
 				const item = uid("item");
 				return countedInPass(out, set, item, (body) =>
-					element.size !== undefined ? num(element.size) : emitSize(kind.element, item, body),
+					element.size !== undefined
+						? num(element.size)
+						: emitSize(kind.element, item, body, within(place, "[]")),
 				);
 			}
 			case "map": {
-				const map = bind(out, f.as(value, T.map()), "map");
+				const map = bind(out, cast(value, T.map()), "map");
 				const key = uid("key");
 				const entry = uid("entry");
 				return countedInPass(out, map, f.arrayBindingDeclaration([key, entry]), (body) =>
-					add(emitSize(kind.key, key, body), emitSize(kind.value, entry, body)),
+					add(
+						emitSize(kind.key, key, body, within(place, "<key>")),
+						emitSize(kind.value, entry, body, within(place, "<value>")),
+					),
 				);
 			}
 			case "list": {
-				const list = bind(out, f.as(value, T.array()), "list");
+				const list = bind(out, cast(value, T.array()), "list");
 				const total = new Sum();
 				kind.elements.forEach((element, index) => {
-					total.add(emitSize(element, f.elementAccessExpression(list, num(index)), out));
+					const at = within(place, `[${index}]`);
+					total.add(emitSize(element, f.elementAccessExpression(list, num(index)), out, at));
 				});
 
 				if (kind.rest) {
@@ -2604,7 +3455,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 					// The elements after the rest are at the end of the list, past `count` rest values.
 					after.forEach((element, index) => {
 						const at = add(count, kind.elements.length + index);
-						total.add(emitSize(element, f.elementAccessExpression(list, at), out));
+						total.add(emitSize(element, f.elementAccessExpression(list, at), out, within(place, "[]")));
 					});
 
 					const prefix = f.call(varintHelpers().size, [count]);
@@ -2618,8 +3469,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 					total.add(prefix);
 					out.push(letDecl(sum, total.build()));
 					const body = new Array<ts.Statement>();
-					const element = f.elementAccessExpression(list, f.binary(index, ts.SyntaxKind.MinusToken, num(1)));
-					body.push(addAssign(sum, emitSize(kind.rest, element, body)));
+					const element = allowsNil(kind.rest)
+						? f.elementAccessExpression(list, f.binary(index, ts.SyntaxKind.MinusToken, num(1)))
+						: elementAt(list, index, body, { place, container: tupleName(place) });
+					body.push(addAssign(sum, emitSize(kind.rest, element, body, within(place, "[]"))));
 					out.push(
 						forOf(index, range(num(kind.elements.length + 1), add(count, kind.elements.length)), body),
 					);
@@ -2629,10 +3482,11 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				return total.build();
 			}
 			case "object": {
-				const object = bind(out, f.as(value, T.record()), "object");
+				const object = bind(out, cast(value, T.record()), "object");
 				const total = new Sum();
 				for (const field of kind.fields) {
-					total.add(emitSize(field.shape, fieldAccess(object, field.name), out));
+					const at = within(place, fieldSegment(field.name));
+					total.add(emitSize(field.shape, fieldAccess(object, field.name), out, at));
 				}
 
 				return total.build();
@@ -2643,6 +3497,18 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				out.push(letDecl(total, num(1)));
 
 				let chain: ts.Statement | undefined;
+				// Room for a number no member takes, which `warn` writes as the fallback member.
+				const fallback = numericFallback(kind);
+				if (fallback) {
+					const member = kind.alternatives[fallback.index].shape;
+					const memberSize = layoutOf(member).size;
+					const body = new Array<ts.Statement>();
+					body.push(
+						addAssign(total, memberSize !== undefined ? num(memberSize) : emitSize(member, v, body, place)),
+					);
+					chain = ifStatement(typeOfIs(v, "number"), body);
+				}
+
 				for (const i of [...evaluation(kind).order].reverse()) {
 					const alternative = kind.alternatives[i];
 					const layout = layoutOf(alternative.shape);
@@ -2650,13 +3516,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 					const size =
 						kind.whole === i
 							? conditional(
-									isWhole(f.as(v, T.number())),
-									f.call(varintHelpers().size, [f.as(v, T.number())]),
+									isWhole(cast(v, T.number())),
+									f.call(varintHelpers().size, [cast(v, T.number())]),
 									num(8),
 								)
 							: layout.size !== undefined
 								? num(layout.size)
-								: emitSize(alternative.shape, v, body);
+								: emitSize(alternative.shape, v, body, place);
 					if (!(f.is.number(size) && size.text === "0")) body.push(addAssign(total, size));
 					if (body.length === 0 && chain === undefined) continue;
 					chain = ifStatement(discriminate(kind, i, v), body, chain);
@@ -2670,6 +3536,92 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		}
 	}
 
+	/**
+	 * Whether nil is one of a shape's values: an optional, `undefined`, or anything at all (`unknown`,
+	 * `any`, an unconstrained type parameter). An array element that takes nil is written as one; one that
+	 * does not has nothing to write a hole as, so the hole is refused (see {@link elementAt}).
+	 */
+	function allowsNil(shape: Shape): boolean {
+		const kind = describe(shape);
+		if (kind.kind === "optional" || kind.kind === "nothing") return true;
+		if (isKind(shape)) return false;
+		if (shape.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return true;
+		if (shape.flags & ts.TypeFlags.TypeVariable) {
+			const constraint = typeChecker.getBaseConstraintOfType(shape);
+			return constraint === undefined || constraint === shape || allowsNil(constraint);
+		}
+
+		return false;
+	}
+
+	/** What a message calls a tuple: a call's argument list, or a tuple value. */
+	function tupleName(place: Place): string {
+		return place.args ? "the argument list" : "the tuple";
+	}
+
+	/**
+	 * The element at the 1-based `index` of an array or a tuple's rest (`list[index - 1]`), as a local.
+	 * An array is counted and walked up to its length (`#`), so an element the length counts but that is
+	 * nil has to be written as a nil, which only an element type that takes nil can do. With `hole`, the
+	 * one pass that reaches the elements first (the size pass when it walks them, otherwise the writes)
+	 * refuses it, whatever `serialization.checks` says: `[Flamework] the array has no value at
+	 * 'send' [0][2]`, the index counted from 0.
+	 */
+	function elementAt(
+		list: ts.Expression,
+		index: ts.Identifier,
+		out: ts.Statement[],
+		hole?: { place: Place; container: string },
+	): ts.Identifier {
+		const item = uid("item");
+		out.push(constDecl(item, f.elementAccessExpression(list, f.binary(index, ts.SyntaxKind.MinusToken, num(1)))));
+		if (hole) {
+			const message = interpolate([
+				`[Flamework] ${hole.container} has no value at `,
+				...holeWhere(hole.place),
+				"[",
+				f.binary(index, ts.SyntaxKind.MinusToken, num(1)),
+				"]",
+			]);
+			out.push(ifStatement(isNil(item), [raiseWith(message)]));
+		}
+
+		return item;
+	}
+
+	/** Where the array with a hole is, as the parts of the message before its index. */
+	function holeWhere(place: Place): Array<string | ts.Expression> {
+		if (place.where) return place.path ? [place.where, place.path] : [place.where];
+		if (place.owner !== undefined) return [`${place.owner}${place.path ?? ""}`];
+		if (place.args) return [place.site !== undefined ? `'${place.site}' ` : ""];
+		const where = whereOf(place);
+		return [f.is.string(where) ? where.text : where];
+	}
+
+	/** Text and values as a template string, which roblox-ts emits as a Luau interpolated string. */
+	function interpolate(parts: Array<string | ts.Expression>): ts.Expression {
+		let head = "";
+		const spans = new Array<{ expression: ts.Expression; text: string }>();
+		for (const part of parts) {
+			if (typeof part !== "string") spans.push({ expression: part, text: "" });
+			else if (spans.length === 0) head += part;
+			else spans[spans.length - 1].text += part;
+		}
+
+		if (spans.length === 0) return f.string(head);
+		return factory.createTemplateExpression(
+			factory.createTemplateHead(head),
+			spans.map(({ expression, text }, position) =>
+				factory.createTemplateSpan(
+					expression,
+					position === spans.length - 1
+						? factory.createTemplateTail(text)
+						: factory.createTemplateMiddle(text),
+				),
+			),
+		);
+	}
+
 	// --- write ---------------------------------------------------------------------------------------
 
 	function emitWrite(shape: Shape, value: ts.Expression, ctx: Ctx): void {
@@ -2678,6 +3630,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			if (info) {
 				const args = [ctx.buf, at(ctx), value];
 				if (info.layout.blobs) args.push(ctx.blobs!);
+				if (info.checks) args.push(passedWhere(ctx));
 				ctx.out.push(assign(ctx.cursor.variable!, callHoisted(info, "w", args)));
 				ctx.cursor.base = ctx.cursor.variable;
 				ctx.cursor.offset = 0;
@@ -2688,14 +3641,14 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const kind = describe(shape);
 		switch (kind.kind) {
 			case "number":
-				ctx.out.push(
-					f.statement(bufferCall(`write${kind.width}`, [ctx.buf, at(ctx), f.as(value, T.number())])),
-				);
-				ctx.cursor.offset += WIDTH_SIZE[kind.width];
-				return;
+				return writeNumber(kind, value, ctx, (n, target) => {
+					target.out.push(
+						f.statement(bufferCall(`write${kind.width}`, [target.buf, at(target), cast(n, T.number())])),
+					);
+					target.cursor.offset += WIDTH_SIZE[kind.width];
+				});
 			case "varint":
-				writeVarint(ctx, f.as(value, T.number()));
-				return;
+				return writeNumber(kind, value, ctx, (n, target) => writeVarint(target, cast(n, T.number())));
 			case "boolean":
 				// The value is the condition rather than `value === true`: an argument packed at its
 				// call site can be a literal, and `false === true` is a comparison TypeScript rejects
@@ -2706,17 +3659,17 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				ctx.cursor.offset += 1;
 				return;
 			case "string": {
-				const text = bind(ctx.out, f.as(value, T.string()), "text");
+				const text = bind(ctx.out, cast(value, T.string()), "text");
 				const length = bind(ctx.out, f.call(prop(text, "size"), []), "length");
-				writeLength(ctx, kind.length, length, "string");
+				writeLength(ctx, kind.length, length, "string", checkedWidth(kind, ctx));
 				ctx.out.push(f.statement(bufferCall("writestring", [ctx.buf, at(ctx), text])));
 				advanceBy(ctx, length);
 				return;
 			}
 			case "buffer": {
-				const bytes = bind(ctx.out, f.as(value, T.buffer()), "bytes");
+				const bytes = bind(ctx.out, cast(value, T.buffer()), "bytes");
 				const length = bind(ctx.out, bufferCall("len", [bytes]), "length");
-				writeLength(ctx, kind.length, length, "buffer");
+				writeLength(ctx, kind.length, length, "buffer", checkedWidth(kind, ctx));
 				ctx.out.push(f.statement(bufferCall("copy", [ctx.buf, at(ctx), bytes])));
 				advanceBy(ctx, length);
 				return;
@@ -2727,7 +3680,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "literals": {
 				const { index } = literalTablesFor(kind);
 				const v = bind(ctx.out, value, "v");
-				const slot = bind(ctx.out, f.call(prop(index, "get"), [f.as(v, T.defined())]), "index");
+				const slot = bind(ctx.out, f.call(prop(index, "get"), [cast(v, T.defined())]), "index");
 				ctx.out.push(ifStatement(isNil(slot), [raise("value is not one of the literals its type allows")]));
 				const width = kind.values.length > 0xff ? "u16" : "u8";
 				ctx.out.push(f.statement(bufferCall(`write${width}`, [ctx.buf, at(ctx), slot])));
@@ -2741,7 +3694,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 					ifStatement(
 						notNil(blob),
 						[
-							f.statement(f.call(prop(blobs, "push"), [f.as(blob, T.defined())])),
+							f.statement(f.call(prop(blobs, "push"), [cast(blob, T.defined())])),
 							f.statement(bufferCall("writeu32", [ctx.buf, at(ctx), f.call(prop(blobs, "size"), [])])),
 						],
 						[f.statement(bufferCall("writeu32", [ctx.buf, at(ctx), num(0)]))],
@@ -2751,7 +3704,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				return;
 			}
 			case "datatype": {
-				const datatype = bind(ctx.out, f.as(value, f.referenceType(kind.name)), kind.name.toLowerCase());
+				const datatype = bind(ctx.out, cast(value, globalType(kind.name)), kind.name.toLowerCase());
 				for (const [width, names] of DATATYPES[kind.name]) {
 					ctx.out.push(f.statement(bufferCall(`write${width}`, [ctx.buf, at(ctx), path(datatype, names)])));
 					ctx.cursor.offset += WIDTH_SIZE[width];
@@ -2763,7 +3716,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				ctx.out.push(
 					constDecl(
 						f.arrayBindingDeclaration(components),
-						f.call(prop(f.as(value, f.referenceType("CFrame")), "GetComponents"), []),
+						f.call(prop(cast(value, globalType("CFrame")), "GetComponents"), []),
 					),
 				);
 				for (const component of components) {
@@ -2774,7 +3727,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			}
 			case "enum":
 				ctx.out.push(
-					f.statement(bufferCall("writeu16", [ctx.buf, at(ctx), prop(f.as(value, T.enumItem()), "Value")])),
+					f.statement(bufferCall("writeu16", [ctx.buf, at(ctx), prop(cast(value, T.enumItem()), "Value")])),
 				);
 				ctx.cursor.offset += 2;
 				return;
@@ -2799,42 +3752,48 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				return;
 			}
 			case "array": {
-				const array = bind(ctx.out, f.as(value, T.array()), "array");
+				// By index up to the count written, as the size pass counts them: a nil inside the array is
+				// written as one where the element type takes nil and refused where it does not, instead of
+				// being skipped, which left every element after it one place early.
+				const array = bind(ctx.out, cast(value, T.array()), "array");
 				writeVarint(ctx, f.call(prop(array, "size"), []));
-				const item = uid("item");
+				const hole = holeInWrite(kind.element) ? { place: ctx, container: "the array" } : undefined;
+				const index = uid("i");
 				ctx.out.push(
 					forOf(
-						item,
-						array,
-						branch(ctx, (child) => emitWrite(kind.element, item, child)),
+						index,
+						range(num(1), f.call(prop(array, "size"), [])),
+						branch(ctx, (child) =>
+							emitWrite(kind.element, elementAt(array, index, child.out, hole), within(child, "[]")),
+						),
 					),
 				);
 				return;
 			}
 			case "set": {
-				const set = bind(ctx.out, f.as(value, T.set()), "set");
-				writeCounted(ctx, set, (item, child) => emitWrite(kind.element, item, child));
+				const set = bind(ctx.out, cast(value, T.set()), "set");
+				writeCounted(ctx, set, (item, child) => emitWrite(kind.element, item, within(child, "[]")));
 				return;
 			}
 			case "map": {
-				const map = bind(ctx.out, f.as(value, T.map()), "map");
+				const map = bind(ctx.out, cast(value, T.map()), "map");
 				const key = uid("key");
 				const entry = uid("entry");
 				writeCounted(
 					ctx,
 					map,
 					(_, child) => {
-						emitWrite(kind.key, key, child);
-						emitWrite(kind.value, entry, child);
+						emitWrite(kind.key, key, within(child, "<key>"));
+						emitWrite(kind.value, entry, within(child, "<value>"));
 					},
 					f.arrayBindingDeclaration([key, entry]),
 				);
 				return;
 			}
 			case "list": {
-				const list = bind(ctx.out, f.as(value, T.array()), "list");
+				const list = bind(ctx.out, cast(value, T.array()), "list");
 				kind.elements.forEach((element, index) => {
-					emitWrite(element, f.elementAccessExpression(list, num(index)), ctx);
+					emitWrite(element, f.elementAccessExpression(list, num(index)), within(ctx, `[${index}]`));
 				});
 
 				if (kind.rest) {
@@ -2842,26 +3801,35 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 					const count = restCount(ctx.out, list, kind.elements.length + after.length);
 					writeVarint(ctx, count);
 					const index = uid("i");
-					const element = f.elementAccessExpression(list, f.binary(index, ts.SyntaxKind.MinusToken, num(1)));
+					const rest = kind.rest;
+					const hole = holeInWrite(rest) ? { place: ctx, container: tupleName(ctx) } : undefined;
 					ctx.out.push(
 						forOf(
 							index,
 							range(num(kind.elements.length + 1), add(count, kind.elements.length)),
-							branch(ctx, (child) => emitWrite(kind.rest!, element, child)),
+							branch(ctx, (child) => {
+								const element = hole
+									? elementAt(list, index, child.out, hole)
+									: f.elementAccessExpression(
+											list,
+											f.binary(index, ts.SyntaxKind.MinusToken, num(1)),
+										);
+								emitWrite(rest, element, within(child, "[]"));
+							}),
 						),
 					);
 
 					after.forEach((shape, position) => {
 						const at = add(count, kind.elements.length + position);
-						emitWrite(shape, f.elementAccessExpression(list, at), ctx);
+						emitWrite(shape, f.elementAccessExpression(list, at), within(ctx, "[]"));
 					});
 				}
 				return;
 			}
 			case "object": {
-				const object = bind(ctx.out, f.as(value, T.record()), "object");
+				const object = bind(ctx.out, cast(value, T.record()), "object");
 				for (const field of kind.fields) {
-					emitWrite(field.shape, fieldAccess(object, field.name), ctx);
+					emitWrite(field.shape, fieldAccess(object, field.name), within(ctx, fieldSegment(field.name)));
 				}
 				return;
 			}
@@ -2880,14 +3848,31 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				const writeMember = (child: Ctx, i: number) => {
 					child.out.push(f.statement(bufferCall("writeu8", [child.buf, at(child), num(i)])));
 					child.cursor.offset += 1;
-					emitWrite(kind.alternatives[i].shape, v, child);
+					// A member with a range is only reached by a number its test found in range, or by
+					// the fallback below once its check has run: no check of its own.
+					const shape = kind.alternatives[i].shape;
+					const ranged = numberRange(describe(shape)) !== undefined;
+					emitWrite(shape, v, ranged ? { ...child, unchecked: true } : child);
 				};
+
+				// A number no member takes fails the check of the members with a range: raised, or
+				// warned about and written as the first checked one, as it is (see `numericFallback`).
+				const fallback = numericFallback(kind, ctx);
+				if (fallback) {
+					const test = f.binary(
+						typeOfIs(v, "number"),
+						ts.SyntaxKind.AmpersandAmpersandToken,
+						callCheck(fallback.widths, cast(v, T.number()), ctx),
+					);
+					const body = branch(ctx, (child) => writeMember(child, fallback.index));
+					chain = ifStatement(test, body, chain);
+				}
 
 				for (const i of [...evaluation(kind).order].reverse()) {
 					const body = branch(ctx, (child) => {
 						if (kind.whole !== i) return writeMember(child, i);
 
-						const n = f.as(v, T.number());
+						const n = cast(v, T.number());
 						const whole = branch(child, (inner) => {
 							inner.out.push(
 								f.statement(
@@ -2915,23 +3900,40 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		}
 	}
 
+	/**
+	 * Whether the writes of an array or a tuple's rest refuse a hole (see {@link elementAt}): when the
+	 * element type takes no nil and has a fixed size, so the size pass never walked the elements.
+	 */
+	function holeInWrite(element: Shape): boolean {
+		return !allowsNil(element) && layoutOf(element).size !== undefined;
+	}
+
 	/** How many rest elements a list holds: never negative, since absent trailing optionals shorten it. */
 	function restCount(out: ts.Statement[], list: ts.Expression, fixed: number): ts.Identifier {
 		const count = uid("count");
-		const length = f.binary(f.call(prop(list, "size"), []), ts.SyntaxKind.MinusToken, num(fixed));
-		out.push(constDecl(count, f.call(prop("math", "max"), [length, num(0)])));
+		const size = f.call(prop(list, "size"), []);
+		// A list of nothing but its rest (an array rest parameter's arguments) is all rest.
+		const length = fixed === 0 ? size : f.binary(size, ts.SyntaxKind.MinusToken, num(fixed));
+		out.push(constDecl(count, fixed === 0 ? length : f.call(prop(globalRef("math"), "max"), [length, num(0)])));
 		return count;
 	}
 
-	/** The length prefix of a string or buffer: a varint, or a fixed width refusing what it cannot hold. */
-	function writeLength(ctx: Ctx, width: LengthWidth, length: ts.Expression, what: string) {
+	/**
+	 * The length prefix of a string or buffer: a varint, or a fixed width refusing what it cannot hold.
+	 * A checked width (`checked`, its name) calls the check first, which raises or warns with where the
+	 * value is; the refusal stays behind it either way, since a length past its prefix cannot be
+	 * written without every value after it being misread, so even `warn` does not write one.
+	 */
+	function writeLength(ctx: Ctx, width: LengthWidth, length: ts.Expression, what: string, checked?: string) {
 		if (width === "v") return writeVarint(ctx, length);
 
 		if (width !== "u32") {
+			const refuse = raise(`${what} is longer than its ${width} length prefix allows`);
 			ctx.out.push(
-				ifStatement(f.binary(length, ts.SyntaxKind.GreaterThanToken, num(LENGTH_MAX[width])), [
-					raise(`${what} is longer than its ${width} length prefix allows`),
-				]),
+				ifStatement(
+					f.binary(length, ts.SyntaxKind.GreaterThanToken, num(LENGTH_MAX[width])),
+					checked !== undefined ? [f.statement(callCheck(checked, length, ctx, " bytes")), refuse] : [refuse],
+				),
 			);
 		}
 
@@ -2970,8 +3972,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		if (kind.kind === "object") {
 			const key = objectKey(union, kind);
 			if (key) {
-				const field = fieldAccess(f.as(value, T.record()), key.name);
-				const test = key.value ? equals(field, key.value) : notNil(field);
+				const field = fieldAccess(cast(value, T.record()), key.name);
+				const test = key.value ? equals(field, checkGlobalsIn(key.value)) : notNil(field);
 				// Indexing is only safe once the value is known to be a table.
 				const tables = union.alternatives.every((other) => TABLE_KINDS.has(describe(other.shape).kind));
 				return tables ? test : f.binary(typeOfIs(value, "table"), ts.SyntaxKind.AmpersandAmpersandToken, test);
@@ -2988,7 +3990,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				return f.binary(
 					typeOfIs(value, "number"),
 					ts.SyntaxKind.AmpersandAmpersandToken,
-					fitsRange(f.as(value, T.number()), range),
+					fitsRange(cast(value, T.number()), range),
 				);
 			}
 			case "string":
@@ -3005,12 +4007,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				return f.binary(
 					typeOfIs(value, "EnumItem"),
 					ts.SyntaxKind.AmpersandAmpersandToken,
-					equals(prop(f.as(value, T.enumItem()), "EnumType"), prop("Enum", kind.name)),
+					equals(prop(cast(value, T.enumItem()), "EnumType"), prop(globalRef("Enum"), kind.name)),
 				);
 			case "literals":
-				return notNil(f.call(prop(literalTablesFor(kind).index, "get"), [f.as(value, T.defined())]));
+				return notNil(f.call(prop(literalTablesFor(kind).index, "get"), [cast(value, T.defined())]));
 			case "constant":
-				return equals(value, kind.value);
+				return equals(value, checkGlobalsIn(kind.value));
 			case "nothing":
 				return isNil(value);
 			case "blob":
@@ -3081,7 +4083,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				return bytes;
 			}
 			case "constant":
-				return kind.value;
+				return checkGlobalsIn(kind.value);
 			case "nothing":
 				return f.nil();
 			case "literals": {
@@ -3208,13 +4210,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 						branch(ctx, (child) => {
 							const element = emitRead(kind.rest!, child);
 							child.out.push(
-								assign(
-									f.elementAccessExpression(
-										list,
-										f.binary(index, ts.SyntaxKind.PlusToken, num(kind.elements.length - 1)),
-									),
-									element,
-								),
+								assign(f.elementAccessExpression(list, add(index, kind.elements.length - 1)), element),
 							);
 						}),
 					),
@@ -3270,24 +4266,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	function readInto(shape: Shape, ctx: Ctx, hint: string): ts.Expression {
 		const value = emitRead(shape, ctx);
 		if (!ctx.cursor.variable || f.is.identifier(value) || isLiteral(value)) return value;
-		return bind(ctx.out, value, localName(hint));
-	}
-
-	/**
-	 * A field's name as a local, kept clear of the globals the generated code reaches for.
-	 *
-	 * A synthesised local is renamed when it clashes with a name the file it lands in already uses,
-	 * but a global is declared elsewhere, so nothing renames a local named after one. A field named
-	 * after its own datatype -- `readonly CFrame: CFrame` -- then reads back as
-	 * `const CFrame = new CFrame(...)`. The Luau that lowers to is correct, since its right-hand
-	 * side is the outer binding; the intermediate TypeScript is checked before it is lowered, and a
-	 * `const` in its own initializer is an error there. The same goes for a field named `buffer` or
-	 * `Map`, which the reads that follow it would resolve to instead of the global.
-	 */
-	function localName(hint: string): string {
-		const name = hint.replace(/\W/g, "_");
-		const global = typeChecker.resolveName(name, undefined, GLOBAL_MEANING, false);
-		return global !== undefined ? `v_${name}` : name;
+		return bind(ctx.out, value, localName(typeChecker, hint));
 	}
 
 	function readLength(ctx: Ctx, width: LengthWidth): ts.Expression {

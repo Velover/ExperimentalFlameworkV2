@@ -5,7 +5,7 @@
   "description": "Runtime specs for Flamework, executed under Lune.",
   "main": "out/init.luau",
   "scripts": {
-    "build": "rbxtsc",
+    "build": "rbxtsc && bun ./variants/build.mjs",
     "watch": "rbxtsc -w"
   },
   "devDependencies": {

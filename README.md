@@ -71,7 +71,11 @@ bun run test:place     # the in-place suite in Roblox Studio (tests/place); need
   it does the reverse, so the two runs pin down the wire format from both ends.
 
 Specs live in [`packages/specs`](packages/specs). `rbxtsc` builds them like any other project that
-uses Flamework, so they test the transformer and the runtime together.
+uses Flamework, so they test the transformer and the runtime together. The width checks
+(`serialization.checks`) are compiled in, so `packages/specs/variants` builds their codecs once more
+per configuration, and the width-check specs run each build in both realms. Build the specs with
+`bun run build` (at the root, or in `packages/specs`), which runs `variants/build.mjs` after
+`rbxtsc`: a bare `rbxtsc` or `bun run watch` leaves the variants' builds missing or stale.
 
 A third suite runs against the real engine, and `bun run test` leaves it out. It lives in the
 [test place](tests/place/README.md), a small game linked to the packages' builds.

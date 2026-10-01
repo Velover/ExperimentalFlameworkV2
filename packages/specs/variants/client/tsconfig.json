@@ -1,0 +1,11 @@
+{
+	"extends": "../../tsconfig.json",
+	"compilerOptions": {
+		// roblox-ts insists on the project folder's own node_modules/@rbxts, which this folder does
+		// not have; the packages come from the specs' node_modules, as in the specs' own build.
+		"typeRoots": ["./node_modules/@rbxts", "../../node_modules/@rbxts", "../../node_modules/@flamework-experimental"],
+		"rootDir": "../../src",
+		"outDir": "out"
+	},
+	"files": ["../../src/widthChecks/codecs.ts"]
+}

@@ -2,7 +2,7 @@
 	"$schema": "http://json-schema.org/draft-07/schema#",
 	"$id": "flamework.config.schema.json",
 	"title": "Flamework project configuration",
-	"description": "One file for every Flamework package, read from flamework.config.json next to (or above) your tsconfig.json. The transformer section is read at build time and is the only place transformer options go: the tsconfig entry takes none. The other sections are compiled into include/flamework/config.json for the runtime packages. Every option says its default; leave an option out to keep the default. Any string may reference the environment as ${NAME} or ${NAME:-fallback} ($$ for a literal dollar), read from .env and .env.local next to this file with the process environment on top; a string where a boolean, number or list is expected is converted.",
+	"description": "One file for every Flamework package, read from flamework.config.json next to (or above) your tsconfig.json. The transformer section is read at build time and is the only place transformer options go: the tsconfig entry takes none. The serialization section is read at build time too. The other sections are compiled into include/flamework/config.json for the runtime packages. Every option says its default; leave an option out to keep the default. Any string may reference the environment as ${NAME} or ${NAME:-fallback} ($$ for a literal dollar), read from .env and .env.local next to this file with the process environment on top; a string where a boolean, number or list is expected is converted.",
 	"type": "object",
 	"additionalProperties": false,
 	"properties": {
@@ -67,6 +67,38 @@
 							"type": "integer",
 							"minimum": 1,
 							"description": "Object and union types that occur at least this many times inside one generated guard are emitted once as a local and referenced. Default: unset, which turns this off."
+						}
+					}
+				}
+			}
+		},
+		"serialization": {
+			"type": "object",
+			"additionalProperties": false,
+			"description": "Options for the encoding code generated from types: Flamework.createSerializer's serialize, and every networking call site and callback result that packs into a buffer. Read at build time only, since that code is compiled in; changing it needs a plain build (a running watcher keeps the values it started with).",
+			"properties": {
+				"checks": {
+					"type": "object",
+					"additionalProperties": false,
+					"description": "Checks on a value as it is written, for the widths that can refuse one: u8, i8, u16, i16, u32 and i32 take whole numbers in their range, varint a whole number from 0 to 2^35 - 1, f32 any number but a finite one past its range, string8 and string16 at most 255 and 65535 bytes, buffer16 at most 65535 bytes. f64, string32 and buffer32 hold every value. Reading needs no check: a decoded value always fits its width. Default: checks on values typed with Serialization.Implicit.*, raising, in both realms.",
+					"properties": {
+						"category": {
+							"type": "string",
+							"enum": ["implicit", "all", "none"],
+							"description": "Which values are checked. \"implicit\": only those typed with an implicit width (Serialization.Implicit.*, or any type with an optional brand). \"all\": strict widths (Serialization.u16 and the other casts) as well. \"none\": nothing, so an implicit value is written as a strict one is: a number that does not fit wraps (70000 as a u16 arrives as 4464), and a string or buffer longer than its length prefix still raises. Default: \"implicit\".",
+							"default": "implicit"
+						},
+						"mode": {
+							"type": "string",
+							"enum": ["assert", "warn"],
+							"description": "What a value that does not fit does. \"assert\": raises where it is written, naming the width, the value (a string's or buffer's length) and where in the type it is, so nothing is sent. \"warn\": warns with the same message and writes the value as it is, so a number wraps; a string or buffer longer than its length prefix cannot be written and still raises. Default: \"assert\".",
+							"default": "assert"
+						},
+						"side": {
+							"type": "string",
+							"enum": ["both", "server", "client"],
+							"description": "The realm whose writes are checked: \"server\", \"client\", or \"both\". Code shared by both realms is checked only where it runs in the realm named; elsewhere a value is written unchecked, as with \"none\". Default: \"both\".",
+							"default": "both"
 						}
 					}
 				}

@@ -12,6 +12,7 @@ import { f } from "../../util/factory";
 import { createNodeFactory, createNodeHandle, unwrapNode } from "./nodeFactory";
 import { createTypeFactory } from "./typeFacade";
 import { PLUGIN_PACKAGE } from "../../util/packages";
+import { localName } from "../../util/functions/identifierName";
 
 export interface PluginHost {
 	/**
@@ -144,7 +145,7 @@ export function createPluginHost(state: TransformState): PluginHost | undefined 
 
 	function createMacroContext(file: ts.SourceFile, node: ts.Node) {
 		function hoistRaw(expression: ts.Expression, name = "plugin"): ts.Identifier {
-			const identifier = f.identifier(name, true);
+			const identifier = f.identifier(localName(state.typeChecker, name), true);
 			state.nextRootStatements.push(f.variableStatement(identifier, expression));
 
 			return identifier;

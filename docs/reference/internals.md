@@ -952,6 +952,111 @@ members with the switch off. `core/src/serialization/types.ts` holds only types:
 brands and the `Serializer`/`Decoder` shapes. `Flamework.createSerializer<T>()` exposes the same
 generator through the `serializer` intrinsic.
 
+Width checks (`serialization.checks` in the project config, read by the transformer only and
+never written to the runtime config) are generated into the writes. `findBrand` reads a brand's
+literal through `getNonNullableType`, so an optional brand (`number & { __brand?: "u16" }`, what
+`Serialization.Implicit` declares) is recognised, and marks the kind `implicit`; before, an
+optional brand's `"u16" | undefined` was no literal and the value went out as an f64 without a
+word. `checkedWidth` decides per kind whether a write is checked (`category`: implicit kinds, every
+kind with a width, or none) and returns the width's name. A checked number that is more than a plain
+name is read once into a local, and the local, its test and its write go in a `do` block of their own
+(`writeNumber`): Luau allows 200 locals in a function, and a call site's code lands in the caller's
+function, so a local per checked write left in its scope ran a function of 40 sends, or a struct of
+250 fields, past it. The test is the negation of `fitsRange` -- the test a branded union member
+already used -- and a failure calls `codec.checkWidth(width, value, where, unit?)`, defined once
+per file among the tables (so ahead of the `codec` bodies that call it) in the file's `codec` table
+rather than a local of its own: a file that has the table pays no local for it, and one that has
+none gets the table, one main-chunk local, which a file already at Luau's 200 cannot take (a limit
+that `category: "all"` extends to strict programs). That helper holds the
+message (`[Flamework] u16 cannot hold 70000, at Entity.id`), the `mode` (`error(message, 2)`, or
+`warn` and `true`) and, for a `side` other than `both`, the realm: it asks `RunService` and returns
+`false` outside the realm, so a shared module is checked only where the realm says, and only a failed
+value pays for the question. A number literal is judged at build time. The path in the message is
+built at compile time: `Ctx.path` grows through `within` as `emitWrite` descends (`.field`, `[i]`
+for a known position, `[]` for an element, `<key>`/`<value>`), starting from `value` or the named
+type in `createSerializer`, `[i]` per argument at a call site (with the member's name from
+`transformNetworkingCall`, left out under obfuscation), and `result` for a callback's result. A
+hoisted `w_` is shared by every place that reaches its type, so when the type can fail a check
+in its own code (`hasChecks`: not in a union member with a range, which takes only what its test
+found in range, nor in a named type inside it, which is always hoisted and checks in its own `w_`) it
+takes one more parameter, `where`, which its callers fill with that path as a
+constant; the checks inside pass `where .. ".id"`, joined only once a check has failed. A `w_` that
+calls another type's `w_` passes its own type's name and path (`"Entity.tags"`), not its `where`
+joined, so no write builds a string: the outermost place a value is written from reaches one `w_`
+deep. A type without checks keeps the signature it always had. A string8,
+string16 or buffer16 keeps the refusal it always had (a length past its prefix would shift every
+value after it for the reader); the check's call goes in front of it, so `warn` warns and still
+refuses. In a union, a ranged member's discriminant already tests the range, so its write is
+`unchecked`; a number no member takes reaches an extra branch in front of the "matches none" error,
+`type(v) == "number" and checkWidth(...)`, which writes it as the first checked ranged member when
+`warn` lets it through (`numericFallback`; the size pass reserves that member's bytes for any
+number that gets there). A plain `number`, `f64` or catch-all member takes every number first, so
+such a union has no fallback. The fallback's message names each width once, so a strict width and
+its implicit twin read `u16`, not `u16 | u16`. With `category: "none"`, and for every strict width under the default,
+nothing is generated and the output is the same as before the checks existed.
+Receiving is untouched: a decoded value always fits its width, and an incoming guard for a branded
+number stays `t.number`. A branded buffer (`buffer16`, `buffer32`, strict or implicit) is guarded as
+a buffer, `t.typeof("buffer")`, as a branded primitive is guarded as the primitive
+(`buildIntersectionGuard`); guarding the brand's object half too rejected every buffer that arrived.
+
+Code packed at a call site is spliced into the caller's function: among the caller's declarations,
+and with the caller's own values. The values keep the types they were declared with (`typed`: the
+call's arguments, and the copies `bind` makes of them), and TypeScript refuses some casts from those
+straight to the loose types the generator writes with (TS2352): a readonly tuple to `unknown[]`, an
+object with an index signature to `Map<unknown, unknown>`. `cast` sends such a value through
+`unknown` (`origin as unknown as unknown[]`), which leaves nothing in the Luau; what the generator
+makes itself is `unknown` already and keeps the single cast. The globals the code names are resolved
+where it lands, the call site's scope or, for the hoisted code (`fileLevel`), the module's
+(`globalRef`, `globalType`). A `buffer` a caller's local hides (`for (const [player, buffer] of
+...)`) is read through a module-level `const buffer_1: typeof buffer = buffer`, and so is a `math`
+that a `catch (math)` around a call site hides. roblox-ts refuses a local, a parameter, a function
+or an import named after a Luau global it reserves (`error`, `math`, `assert`, `game`, `string`,
+`table`, and `type` and `typeof`, which it emits for `typeIs`), but not a `catch` clause's
+variable, so a `catch` is the only way to hide those and the module-level alias always reaches the
+global. A hidden `error` is not aliased but raised as `assert(false, message)` (`raiseWith`): Luau's
+`assert` puts the same position in front of the message as `error` does, and it costs the file no
+local, where an alias would take one from the main chunk of a file that loaded before the hole checks
+put `error` into its sends (the `assert` macro moves a message with a value in it into a
+temporary, inside the branch that raises). Only where a `catch (assert)` hides that too does `error`
+go through an alias. A global type a declaration hides (`type Map<K, V> = globalThis.Map<K, V>`, a
+function's own `interface Map`) is spelled `globalThis.Map<...>`, which a type position reaches
+whatever is declared around it (a hidden `globalThis` itself is a build error) and which leaves
+nothing in the Luau; before, a hidden type was refused,
+although a project's own alias of the global compiled before that. Anything else hidden (`typeIs`,
+`Array`, `Map`, `Set`, `Enum`, `Promise`, the datatypes' constructors), a `buffer` the module
+itself declares, and a module-level `warn` that the check helper calls under `mode: "warn"`, is a
+build error that names the declaration: a macro or constructor roblox-ts knows by name cannot go
+through an alias, and the helpers at the top of the file share the module's scope. `$range` and
+`$tuple` are looked up too, but nothing can hide them: they are no Luau identifiers, so roblox-ts
+refuses such a local and stops on such a `catch` variable. Guards and literals built elsewhere are
+walked for the same names, and a hidden global type in them is rewritten the same way
+(`checkGlobalsIn`). The guards `createServer` and `createClient` build for incoming arguments are
+not: a module that declares its own, different `Map` next to such a call can still fail to build
+there (TS2315), as it could before. What roblox-ts emits by itself is out of reach: inside `catch (table)` or
+`catch (type)`, its own `table.insert` and `type(...)` read the caught value, packed or not.
+Arrays, records and the `codec` table are typed structurally (`unknown[]`, `{ [key: string]:
+unknown }`), so a project's own `Record` or `Callback` is never in the way. A local named after a
+field or a type goes through `localName` (`util/functions/identifierName.ts`): a reserved word,
+`arguments` or `eval`, a Luau keyword, a global roblox-ts reserves, a leading digit, an empty name
+or a global gets a `v_` prefix. The printer renames a unique name only against the identifiers of the
+file it lands in, so a field declared in another file (a library's action with an `arguments`
+tuple) came out as `const arguments = ...`. A guard's deduplicated local, a macro's hoisted metadata
+and a plugin's hoisted value are named the same way.
+
+An array is written by index up to its length (`for i = 1, #array`), as it is counted, and so is a
+tuple's rest element. Before, the writes skipped a nil (`for _, item in array`) while the count said
+`#array`, so the reader got the list shifted, or ran out of bytes. An element type that takes nil
+(`allowsNil`: an optional, `undefined`, `unknown`) writes a hole as a nil. One that does not
+refuses it in the pass that reaches the elements first (`elementAt`): the size pass when it walks
+them (a variable-size element, where measuring a nil would raise first), otherwise the writes
+(`holeInWrite`), with the path a width check would give (`Place`, which `emitSize` carries too)
+and the index joined in when it raises. A hoisted `s_` takes no `where`, so a hole its size pass
+finds starts from the type's name even where the type's `w_` checks start from the caller's `where`. Nothing in `serialization.checks` changes that: a hole has
+nothing to be written as. `listOf` makes an array type, which is what `Parameters<F>` is for an
+array rest parameter, a list of nothing but its rest, as the tuple guards already did
+(`[[], guard]`); before, the array was one element, and a call with any other number of arguments
+could not be packed.
+
 ### Remote ids
 
 The generated metadata carries `incomingIds` and `outgoingIds` per realm, so each side knows what it
