@@ -165,6 +165,27 @@ avoids `value === true`: an argument packed at its call site can be a literal, a
 roblox-ts emits `if _value then 1 else 0`. Check that a literal argument still compiles, and that the
 output of every other type is unchanged.
 
+## Small: two cosmetic leftovers in the duplicate provider id error
+
+Both only change how the message reads (found in Studio on 2026-10-02, checking 2db5555). The error is
+raised at the same moment, for the same cause, and names the same two registrations either way.
+
+- **A double position prefix.** Every ignition error, this one included, starts with two positions
+  inside core before the message:
+  `ReplicatedStorage.rbxts_include.node_modules.@flamework-experimental.core.out.module.moduleDefinition:51: ReplicatedStorage.rbxts_include.node_modules.@flamework-experimental.core.out.module.module:182: module 'Ledgers': provider ID was registered more than once: ...`.
+  The inner one is where core raised it, and the outer one is added as the error is raised again on
+  its way out of `ignite` (roblox-ts's `TS.try`, most likely). Neither helps: the message already
+  names the user's lines. **Fix:** raise these errors without a position (`error(message, 0)`) and
+  re-raise in `ignite` without adding one, then check every ignition error still reads well (the
+  ones that do not name a line of their own may want the inner position kept).
+- **A generic-type sentence where nothing is generic.** The hint for an id that is both provided and
+  registered ends with "If X is generic, note that type arguments are not part of an id: X<A> and X<B>
+  share this one", even for classes that take no type arguments, such as `LifecycleProvider` and
+  `Components`. Core cannot see type parameters at runtime. **Fix:** keep the sentence only where it
+  can apply (an id of `@rbxts/compiler-types`, which already gets the full generic hint, or an id the
+  transformer marks as generic), and update the Lune specs (packages/specs/src/specs/duplicateIds.ts)
+  and the place cases (tests/place/src/server/Tests/duplicateIds.ts), which expect the sentence.
+
 ## Next: obfuscating networking separately from everything else
 
 **Today one switch does it all.** `"transformer": { "obfuscation": true }` turns on, together:
