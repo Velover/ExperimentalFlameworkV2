@@ -58,6 +58,7 @@ import {
 	parseRunResult,
 	resultPassed,
 	ResultParseError,
+	skipFailureNote,
 	type Judgement,
 	type RunResult,
 } from "./results.ts";
@@ -1217,11 +1218,16 @@ function readRunResult(results: string[], io: Io): RunResult | undefined {
  */
 const skipTally = new WeakMap<Io, number>();
 
-/** Prints a result as `--json`, `--list` or the summary ask, judged as `options` says. */
+/**
+ * Prints a result as `--json`, `--list` or the summary ask, judged as `options` says. Under
+ * `--json`, a run its skips fail says so on stderr, outside the JSON, which is the place's own.
+ */
 function printResult(result: RunResult, results: string[], flags: Flags, io: Io, options?: Judgement): void {
 	if (!flags.list) skipTally.set(io, (skipTally.get(io) ?? 0) + result.skipped);
 	if (flags.json) {
 		io.log(JSON.stringify(JSON.parse(results[0]!), null, 2));
+		const note = flags.list ? undefined : skipFailureNote(result, options);
+		if (note !== undefined) io.error(note);
 	} else {
 		io.log("");
 		for (const line of flags.list ? formatList(result, options) : formatSummary(result, options)) {

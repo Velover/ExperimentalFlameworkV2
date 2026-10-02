@@ -3,7 +3,42 @@
 Notable changes to the `@flamework-experimental` packages. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 2026-10-02: core, networking and testing 2.0.0-alpha.6; transformer 2.0.0-alpha.7
+
+### Upgrade notes
+
+- **Rebuild a place you test in Studio with testing alpha.6.** Since 2026-10-01 Roblox runs the
+  Luau of Studio's MCP server sandboxed, and sandboxed code may only invoke a Sandboxed bindable,
+  which the test host of a place built with alpha.5 or earlier is not: every Studio run of
+  `flamework-test` failed with `cannot invoke 'FlameworkTests'`. A place built with alpha.6 makes
+  it Sandboxed. Against an older build, the new CLI marks the bindable itself before invoking it,
+  for as long as Studio allows that, and says to rebuild when it cannot.
+- **Skips are counted apart from passes.** A test that calls the new `skip(reason)`, or is
+  registered with `test.skip`, counts in `skipped`, not in `passed` (`RunResult.passed`,
+  `SectionResult.passed`), and keeps `ok` true; a test that returns early still counts as passed.
+  The `[FWTEST]` SUMMARY line reads `N passed, M failed, K skipped (…ms)`, where it read
+  `N passed, M failed (…ms)`, and so do `flamework-test`'s section and realm summaries: anything
+  that parses them, or reads `passed` as the tests that did not fail, takes `skipped` in.
+- **`test` is a callable table**, since it carries `test.skip`. Calling it is unchanged; where only
+  a function will do (`task.spawn(test, ...)`, `coroutine.wrap`), wrap it in one.
+- **Transformer errors are labelled `@flamework-experimental/transformer`**
+  (`error TS @flamework-experimental/transformer:`, was `@flamework-experimental/core`): a script
+  that matches on the old label needs the new one.
+- **A full build no longer reads the project's own `flamework.build`.** It only ever replaced it,
+  so one cut short or holding a merge conflict is written anew instead of stopping the build. An
+  incremental build still reads it, and stops on a broken one with a message saying what to do.
+- **The new settings need transformer alpha.7.** `serialization.checks.types`,
+  `testing.failOnSkip` and `testing.keepAwake` are in its schema; alpha.6 refuses a
+  `flamework.config.json` with a key it does not know, so upgrade the transformer with the runtime
+  packages.
+- **A packed message with no Instance or blob in it leaves the empty list out.** An event sends
+  `(payload)` instead of `(payload, {})`, and a function's request and result likewise. Both realms
+  are built together and Flamework reads a missing list as empty, so nothing is needed; code of
+  your own that reads a packed member's remote directly (a remote spy, a test counting arguments)
+  sees one argument fewer.
+- **Union members told apart by an enum item are tried in their written order**, and no longer
+  warned about as members a value cannot tell apart. Each value is still written under its own
+  member's tag, so nothing changes on the wire.
 
 ### core
 
@@ -90,9 +125,11 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - `flamework-test` shows skips: each realm's summary counts them and lists each skipped test with
   its reason, in Studio and cloud runs; a multi-project run's last line counts each project's
   skips, and `--list` marks `test.skip` entries.
-- `--fail-on-skip` (or `FAIL_ON_SKIP`, `testing.failOnSkip`) on `test`, `studio run`, `cloud run` and
-  `cloud test` makes any skip fail the run. A place built with 2.0.0-alpha.5 or earlier passes it,
-  with a note.
+- `--fail-on-skip` (or `FAIL_ON_SKIP`, `testing.failOnSkip`) on `test`, `studio run`, `cloud run`
+  and `cloud test` makes any skip fail the run, and a section with a skip heads `FAIL`. With
+  `--json`, which prints the place's result as it is (its `ok` counts no skip as a failure), one
+  line on stderr, outside the JSON, says the skips failed the run. A place built with
+  2.0.0-alpha.5 or earlier passes it, with a note in the summary (none under `--json`).
 - `--keep-awake` (or `KEEP_AWAKE`, `testing.keepAwake`) on `test` and `studio run` asks Windows to
   keep the display on from the start of the run to its end: RenderStepped stops while the display
   sleeps, which fails `onRender` tests in unattended runs. Off by default; it changes no power
@@ -104,7 +141,6 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 - `flamework-test`'s report of a run that hangs names the last test that reported even when its
   name has spaces (it said no test had reported), and counts SKIP lines.
-
 - `flamework-test` runs a place's tests in Studio again. Since 2026-10-01, Studio runs the Luau of
   its MCP server (and its Assistant) sandboxed, and a sandboxed thread may only invoke a bindable
   that is Sandboxed itself, so every run failed with `cannot invoke 'FlameworkTests' since
@@ -127,8 +163,9 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 - `flamework-test` starts the MCP proxy and its PowerShell window scripts hidden in consoles of
   their own, and no longer blocks while closing or listing Studio windows.
-- A run's `passed` counts no longer include skipped tests, and the `[FWTEST]` SUMMARY line and
-  `flamework-test`'s section and realm summaries read `N passed, M failed, K skipped`.
+- A run's `passed` counts passes alone (a skip is counted in `skipped`), and the `[FWTEST]` SUMMARY
+  line and `flamework-test`'s section and realm summaries read `N passed, M failed, K skipped`,
+  where they read `N passed, M failed`.
 
 ### Docs
 

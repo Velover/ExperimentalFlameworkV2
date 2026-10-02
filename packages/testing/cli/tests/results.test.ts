@@ -6,6 +6,7 @@ import {
 	parseRunResult,
 	resultPassed,
 	ResultParseError,
+	skipFailureNote,
 	type RunResult,
 } from "../src/results.ts";
 
@@ -282,6 +283,32 @@ describe("formatSummary", () => {
 			"PASS",
 		]);
 		expect(resultPassed(PASSING, { failOnSkip: true })).toBe(true);
+	});
+
+	test("--fail-on-skip heads a section with a skip FAIL, and leaves the others and a run without it alone", () => {
+		const skipsOnly = { ...SKIPPING, ok: true, failed: 0, sections: [passingSkips(), PASSING.sections[1]!] };
+		const headers = (options?: { failOnSkip?: boolean }) =>
+			formatSummary(skipsOnly, options).filter((line) => /^(PASS|FAIL) \S/.test(line));
+
+		expect(headers({ failOnSkip: true })).toEqual([
+			"FAIL client  1 passed, 0 failed, 2 skipped",
+			"PASS shop  1 passed, 0 failed, 0 skipped",
+		]);
+		expect(headers()).toEqual([
+			"PASS client  1 passed, 0 failed, 2 skipped",
+			"PASS shop  1 passed, 0 failed, 0 skipped",
+		]);
+		expect(headers({ failOnSkip: false })).toEqual(headers());
+	});
+
+	test("the note --json prints on stderr names the skips that fail the run, and only under --fail-on-skip", () => {
+		const skipsOnly = { ...SKIPPING, ok: true, failed: 0, sections: [passingSkips()] };
+		expect(skipFailureNote(skipsOnly, { failOnSkip: true })).toBe(
+			`2 skipped on the client, which fails the run under --fail-on-skip (the JSON's "ok" does not count skips)`,
+		);
+		expect(skipFailureNote(skipsOnly)).toBeUndefined();
+		expect(skipFailureNote(PASSING, { failOnSkip: true })).toBeUndefined();
+		expect(skipFailureNote(parseRunResult([JSON.stringify(OLD_RUNNER)]), { failOnSkip: true })).toBeUndefined();
 	});
 
 	test("--fail-on-skip with a runner from before skips passes, and says it had nothing to go on", () => {

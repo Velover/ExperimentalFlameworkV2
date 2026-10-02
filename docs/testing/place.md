@@ -105,19 +105,22 @@ PASS
 A run under several projects counts them on its last line too:
 `projects: default passed (1 skipped), deferred passed`.
 
-`--fail-on-skip` makes any skip fail the run, for a CI job that must run everything: the realm's
-summary then ends `1 skipped, which fails the run under --fail-on-skip` and `FAIL`, and the exit
-code is 1. The same comes from `FAIL_ON_SKIP=true` in the shell, `.env` or `.env.local`, or from
+`--fail-on-skip` makes any skip fail the run, for a CI job that must run everything: a section with
+a skip then heads `FAIL` (`FAIL client  11 passed, 0 failed, 1 skipped`), the realm's summary ends
+`1 skipped, which fails the run under --fail-on-skip` and `FAIL`, and the exit code is 1. The same
+comes from `FAIL_ON_SKIP=true` in the shell, `.env` or `.env.local`, or from
 `"testing": { "failOnSkip": true }` in `flamework.config.json`, in that order after the flag;
 `--fail-on-skip=false` turns it off for one run. `test`, `studio run`, `cloud run` and
 `cloud test` take it. `--list` marks a test registered with `test.skip`
 (`economy/refunds  (skipped: marked with test.skip)`) and is never failed by one, since nothing ran.
-`--json` prints each test's `status` and `skipReason` as the place gave them.
+`--json` prints each test's `status` and `skipReason` as the place gave them, and the place's `ok`,
+which no skip makes false; a run its skips fail under `--fail-on-skip` says so in one line on
+stderr, outside the JSON: `1 skipped on the client, which fails the run under --fail-on-skip ...`.
 
 Across versions: a place built with 2.0.0-alpha.5 or earlier has no skips to report, and
-`--fail-on-skip` passes it with a note saying so. An older `flamework-test` against a newer place
-reads each skip as a test that did not fail and leaves it out of its counts: skips neither fail
-its run nor show in its summary.
+`--fail-on-skip` passes it with a note saying so in the summary (`--json` prints none). An older
+`flamework-test` against a newer place reads each skip as a test that did not fail and leaves it out
+of its counts: skips neither fail its run nor show in its summary.
 
 ### Unattended runs: keep the display on
 
@@ -147,10 +150,10 @@ renders and an `onRender` that does not fire still fail it.
 Ctrl+C stops a run where it is and cleans up what the run started, through the same steps a run
 that finishes takes: the play session it started is stopped, the window it opened is closed by the
 process it started (never a window it did not open), its window-name claim is released, the patch's
-temp folder is removed, lune and the MCP proxy are stopped, and the `--keep-awake` request is let go. Nothing new starts afterwards: the
-other realm and the other projects are not run. The CLI then exits 130 (but see
-[the exit code](#the-exit-code-and-the-prompt) for what a shell sees), ending on one line that says
-what it cleaned up and what it left:
+temp folder is removed, lune and the MCP proxy are stopped, and the `--keep-awake` request is let
+go. Nothing new starts afterwards: the other realm and the other projects are not run. The CLI then
+exits 130 (but see [the exit code](#the-exit-code-and-the-prompt) for what a shell sees), ending on
+one line that says what it cleaned up and what it left:
 
 ```
 Ctrl+C: stopping, and cleaning up what this run started (Ctrl+C again exits at once)
@@ -467,7 +470,7 @@ without running it, `place.deferred.rbxl`, to open in Studio and look at.
 | `MISS matched nothing in any realm: ...` | A `--sections` entry named no section or test in any realm that ran. |
 | `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started. The next line names the last test that reported in Studio's output (its `PASS`, `FAIL` or `SKIP` line); the one after it in that section is the hanging one. |
 | `- onRender fires on the client, where the server sees nothing (skipped): RenderStepped doesn't fire: the display may be asleep` | The PC's display was off during the run, so the engine rendered nothing. Run with `--keep-awake` (see [unattended runs](#unattended-runs-keep-the-display-on)), or keep the screen on. |
-| `1 skipped, which fails the run under --fail-on-skip` | A test skipped while `--fail-on-skip`, `FAIL_ON_SKIP` or `testing.failOnSkip` was on; the lines above it name the test and its reason. |
+| `1 skipped, which fails the run under --fail-on-skip` (with `--json`, on stderr: `1 skipped on the client, which fails the run ...`) | A test skipped while `--fail-on-skip`, `FAIL_ON_SKIP` or `testing.failOnSkip` was on; the lines above it name the test and its reason, under its section's `FAIL` (with `--json`, the JSON's `status` and `skipReason` do). |
 | `note: this place's runner predates skips ...` | The place was built with `@flamework-experimental/testing` 2.0.0-alpha.5 or earlier, which has no skips, so `--fail-on-skip` had nothing to fail on. |
 | `FAIL_ON_SKIP must be true or false` / `KEEP_AWAKE must be true or false` | The variable holds something else; `true`, `false`, `1`, `0`, `yes`, `no`, `on` and `off` are read, and empty is off. |
 | `--keep-awake is for Studio runs` | A cloud run has no display on this machine to keep on; drop the flag. `KEEP_AWAKE` is left alone there. |

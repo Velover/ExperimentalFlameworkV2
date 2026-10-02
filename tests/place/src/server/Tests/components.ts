@@ -17,6 +17,17 @@ import { discoveryIds } from "server/Discovery/hidden";
 import { deepIds } from "server/Discovery/nested/deep";
 import { FwTestPartComponent } from "server/Features/Testing/Components/FwTestPartComponent";
 import { FW_TEST_TAG } from "shared/Features/Testing/FwTestConfig";
+import {
+	addCore,
+	createComponentModule,
+	ExplainedOwner,
+	folder,
+	folderIn,
+	recordWarnings,
+	Rig,
+	settle,
+	untilGone,
+} from "shared/Tests/components";
 
 /** How many components for an instance of this name have been torn down, from the component's log. */
 function teardowns(name: string) {
@@ -358,6 +369,54 @@ export class ComponentTests implements OnStart {
 				plain.Parent = scratch();
 				expectEqual(this.components.getComponent<FwTestPartComponent>(plain), undefined, "no component");
 				expectDefined(Workspace, "the place is real");
+			});
+
+			// The Lune `components` suite's one server's case, beside the rest of that suite in
+			// `shared/Tests/components.ts`, whose components and helpers it uses.
+			test("names the instance guard in the warning when the reading at the flip is what holds a component down", () => {
+				// Contextual streaming on a server reads the tree once: the child moving away is not
+				// polled, so only the reading the flip to qualified is gated on sees that it is gone. A
+				// client watches the guard's tree instead, so no single reading holds the component down
+				// there, which is why the case is the server's alone.
+				const components = createComponentModule();
+				const warnings = recordWarnings();
+
+				const instance = folder("GatedExplained");
+				const elsewhere = folder("GatedElsewhere");
+				const core = addCore(instance);
+				folderIn(core, "Root");
+				CollectionService.AddTag(core, "Rig");
+				CollectionService.AddTag(instance, "ExplainedOwner");
+				expectDefined(components.getComponent<ExplainedOwner>(instance), "component");
+				settle();
+
+				// The removal is announced on a deferred signal, which is when the owner comes down.
+				warnings.clear();
+				components.removeComponent<Rig>(core);
+				untilGone(
+					() => components.getComponents<ExplainedOwner>(instance)[0],
+					"the component after its linked component was removed",
+				);
+				expectEqual(
+					components.getComponent<ExplainedOwner>(instance),
+					undefined,
+					"component asked for after its linked component was removed",
+				);
+
+				core.Parent = elsewhere;
+				expectDefined(components.getComponent<Rig>(core), "the linked component rebuilt elsewhere");
+				expectEqual(
+					components.getComponent<ExplainedOwner>(instance),
+					undefined,
+					"component while its tree is short of Core",
+				);
+
+				// Nothing recorded the guard failing, so the warning reads it the way the gate did.
+				task.wait(0.3);
+				expectTrue(
+					warnings.mentions("instance guard (child 'Core' is missing"),
+					`warnings: ${warnings.describe()}`,
+				);
 			});
 		});
 	}

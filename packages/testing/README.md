@@ -3,9 +3,9 @@
 Tests that run inside a real place, and the CLI that runs them. Two halves in one package:
 
 - **The roblox-ts side** (`out/`): `defineTests`, `test` and `test.skip`, `defer`, `scratch`,
-  `skip`, the `expect*` assertions, and `TestingPlugin`, which hosts the sections on `Workspace.FlameworkTests` (a
-  BindableFunction) and `Workspace.FlameworkTestsServer` (a RemoteFunction) under the `testing`
-  scope. How to write the tests is in the guide's
+  `skip`, the `expect*` assertions, and `TestingPlugin`, which hosts the sections on
+  `Workspace.FlameworkTests` (a BindableFunction) and `Workspace.FlameworkTestsServer` (a
+  RemoteFunction) under the `testing` scope. How to write the tests is in the guide's
   [Testing in the place](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/docs/guide/12-testing.md).
 - **`flamework-test`** (`cli/`, the package's `bin`): runs those sections where the engine is
   real, from a terminal or CI. It runs them in one of two places:
@@ -93,9 +93,12 @@ A skipped test (`skip(reason)` or `test.skip`) is not a failure, and is shown al
 realm's summary counts it (`9 passed, 0 failed, 1 skipped`) and lists it with its reason
 (`- name (skipped): reason`), and a run under several projects ends with each project's count
 (`projects: default passed (1 skipped), ...`). `--fail-on-skip` makes any skip fail the run, for
-CI that must run everything. A place built with 2.0.0-alpha.5 or earlier reports no skips, and
-`--fail-on-skip` then passes it with a note; an older CLI against a newer place leaves skips out of
-its summary, and never fails on one. See [Skipped tests](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/docs/testing/place.md#skipped-tests).
+CI that must run everything: a section with a skip heads `FAIL`, and with `--json`, whose `ok` no
+skip makes false, one line on stderr says the skips failed the run. A place built with
+2.0.0-alpha.5 or earlier reports no skips, and `--fail-on-skip` then passes it with a note in the
+summary (none under `--json`); an
+older CLI against a newer place leaves skips out of its summary, and never fails on one. See
+[Skipped tests](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/docs/testing/place.md#skipped-tests).
 
 `--keep-awake` asks Windows to keep the display on from the start of the run to its end, and lets
 go when the run ends, Ctrl+C included. While the display is off the engine renders nothing:
@@ -360,7 +363,7 @@ A run uses one task.
 | `MISS matched nothing in any realm: ...` | A `--sections` entry names no section or test in any realm that ran: a typo, or a section whose provider is not registered. |
 | `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started; the next line names the last test that reported (`PASS`, `FAIL` or `SKIP`), and the one after it in that section is the hanging one. |
 | `(skipped): RenderStepped doesn't fire: the display may be asleep` | The PC's display was off, so the engine rendered nothing; run with `--keep-awake`. |
-| `1 skipped, which fails the run under --fail-on-skip` | A test skipped under `--fail-on-skip` (or `FAIL_ON_SKIP`, `testing.failOnSkip`); the summary names it and its reason. |
+| `1 skipped, which fails the run under --fail-on-skip` (with `--json`, on stderr: `1 skipped on the client, ...`) | A test skipped under `--fail-on-skip` (or `FAIL_ON_SKIP`, `testing.failOnSkip`); the summary names it and its reason, under a section that heads `FAIL`. |
 | `FAIL_ON_SKIP must be true or false` / `KEEP_AWAKE must be true or false` | The variable holds something else: `true`, `false`, `1`, `0`, `yes`, `no`, `on`, `off`, or empty for off. |
 | `--keep-awake is for Studio runs` | A cloud run has no display on this machine; drop the flag. |
 | `no Studio window has the testing place ... open` | Nothing has it open, or the window has "MCP server" disabled and so is not listed. |

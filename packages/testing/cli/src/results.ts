@@ -208,13 +208,15 @@ function detailLines(text: string): string[] {
 
 /**
  * The per-section summary printed after a run: each section's counts, then each of its failures
- * with its message and each of its skips with its reason, in the order they ran.
+ * with its message and each of its skips with its reason, in the order they ran. A section heads
+ * `FAIL` when a test in it failed, or, under `failOnSkip`, when one skipped.
  */
 export function formatSummary(result: RunResult, options?: Judgement): string[] {
 	const lines: string[] = [];
 
 	for (const section of result.sections) {
-		const status = section.failed > 0 ? "FAIL" : "PASS";
+		const failing = section.failed > 0 || (options?.failOnSkip === true && section.skipped > 0);
+		const status = failing ? "FAIL" : "PASS";
 		lines.push(
 			`${status} ${section.name}  ${section.passed} passed, ${section.failed} failed, ${section.skipped} skipped`,
 		);
@@ -256,6 +258,15 @@ export function formatSummary(result: RunResult, options?: Judgement): string[] 
 	}
 	lines.push(resultPassed(result, options) ? "PASS" : "FAIL");
 	return lines;
+}
+
+/**
+ * What `--json` adds on stderr when the skips in `result` fail the run under `failOnSkip`: the
+ * JSON is the place's own, whose `ok` no skip makes false. Nothing when they do not fail it.
+ */
+export function skipFailureNote(result: RunResult, options?: Judgement): string | undefined {
+	if (options?.failOnSkip !== true || result.skipped === 0) return undefined;
+	return `${result.skipped} skipped on the ${result.realm}, which fails the run under --fail-on-skip (the JSON's "ok" does not count skips)`;
 }
 
 /**

@@ -124,6 +124,10 @@ describe("skips in a Studio run", () => {
 		});
 		expect(failed.code).toBe(1);
 		expect(failed.out).toContain("1 skipped, which fails the run under --fail-on-skip");
+		// The section whose skip fails the run heads FAIL; the server's, with none, still PASS.
+		expect(failed.out).toContain("FAIL projects  1 passed, 0 failed, 1 skipped");
+		expect(failed.out).toContain("PASS projects  2 passed, 0 failed, 0 skipped");
+		expect(failed.out).not.toContain("PASS projects  1 passed, 0 failed, 1 skipped");
 		// The other realm still ran, and the window is closed as ever.
 		expect(failed.out).toContain("2 passed, 0 failed, 0 skipped in 9ms (server)");
 		expect(failed.closedWindows).toEqual(["place.rbxl"]);
@@ -210,6 +214,38 @@ describe("skips in a Studio run", () => {
 			durationMs: 0,
 		});
 		expect(run.out).not.toContain("(skipped):");
+
+		// The JSON is the place's, "ok" and all; stderr, not stdout, says why the run failed.
+		expect(printed.ok).toBe(true);
+		expect(run.out).not.toContain("--fail-on-skip");
+		expect(run.err).toContain(
+			`1 skipped on the client, which fails the run under --fail-on-skip (the JSON's "ok" does not count skips)`,
+		);
+	});
+
+	test("--json says nothing on stderr about skips without --fail-on-skip, or with it and none", async () => {
+		const plain = await testRun(["--json", "--realm", "client"], {
+			server: skipping("server"),
+			client: skipping("client"),
+		});
+		expect(plain.code).toBe(0);
+		expect(plain.err).not.toContain("--fail-on-skip");
+
+		const none = await testRun(["--json", "--fail-on-skip"], {
+			server: skipping("server", { skips: 0 }),
+			client: skipping("client", { skips: 0 }),
+		});
+		expect(none.code).toBe(0);
+		expect(none.err).not.toContain("--fail-on-skip");
+
+		// Of several realms, the note names the one that skipped.
+		const both = await testRun(["--json", "--fail-on-skip"], {
+			server: skipping("server"),
+			client: skipping("client", { skips: 0 }),
+		});
+		expect(both.code).toBe(1);
+		expect(both.err).toContain("1 skipped on the server, which fails the run under --fail-on-skip");
+		expect(both.err).not.toContain("on the client");
 	});
 
 	test("--list marks a test registered with test.skip, and never fails under --fail-on-skip", async () => {

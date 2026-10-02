@@ -20,7 +20,6 @@ import {
 	expectThrows,
 	expectTrue,
 	scratch,
-	skip,
 	test,
 } from "@flamework-experimental/testing";
 import { CollectionService, LogService, ReplicatedStorage, RunService } from "@rbxts/services";
@@ -45,6 +44,9 @@ import { signalsAreDeferred } from "./signalBehavior";
  *
  * Every case builds a module of its own from the plugin below and extinguishes it afterwards, so
  * nothing here depends on the game's component plugin or leaks into the next case.
+ *
+ * The one case only a server runs is registered in this section by `server/Tests/components.ts`,
+ * with the components and helpers it takes from here, so that a client has no case to skip.
  */
 
 const events = new Array<string>();
@@ -157,7 +159,7 @@ class LateRigChildOwner extends BaseComponent<{}, Folder & { Core: LateRig }> {}
 
 /** Warns almost at once about a child whose component is missing, in that component's words. */
 @Component({ tag: "ExplainedOwner", warningTimeout: 0.1 })
-class ExplainedOwner extends BaseComponent<{}, Folder & { Core: Rig }> {}
+export class ExplainedOwner extends BaseComponent<{}, Folder & { Core: Rig }> {}
 
 /** Warns almost at once about a plain link whose target is the wrong shape. */
 @Component({ tag: "RootedImpatient", warningTimeout: 0.1, attributeWarningTimeout: 0 })
@@ -294,7 +296,7 @@ class Handler extends BaseComponent<{}, Folder> {}
 
 /** Declares a tree of its own, so the structure it needs is part of the guard on every link to it. */
 @Component({ tag: "Rig", warningTimeout: 0 })
-class Rig extends BaseComponent<{}, Folder & { Root: Folder }> {}
+export class Rig extends BaseComponent<{}, Folder & { Root: Folder }> {}
 
 /** The same tree, watched, so the guard on a link to it passes once the tree has filled in. */
 @Component({ tag: "LateRig", warningTimeout: 0, streamingMode: ComponentStreamingMode.Watching })
@@ -727,7 +729,7 @@ function buildModule() {
 }
 
 /** The module a case works against, extinguished when the case is over, whatever happened in it. */
-function createComponentModule() {
+export function createComponentModule() {
 	const module = buildModule();
 	defer(() => module.extinguish());
 
@@ -739,7 +741,7 @@ function createComponentModule() {
  * task, and a place may defer its signals as well. Two frames cover both, which is what the Lune
  * harness's `flush` stood for.
  */
-function settle() {
+export function settle() {
 	task.wait();
 	task.wait();
 }
@@ -769,7 +771,7 @@ function untilFound<T>(lookup: () => T | undefined, what: string): T {
 }
 
 /** Waits for a lookup to stop answering. */
-function untilGone(lookup: () => unknown, what: string) {
+export function untilGone(lookup: () => unknown, what: string) {
 	eventually(() => lookup() === undefined, what);
 }
 
@@ -777,7 +779,7 @@ function untilGone(lookup: () => unknown, what: string) {
  * Everything `warn` says while the case runs, off `LogService`; a case reads it after giving a
  * warning's timer the time it asked for.
  */
-function recordWarnings() {
+export function recordWarnings() {
 	return recordMessages(Enum.MessageType.MessageWarning);
 }
 
@@ -817,7 +819,7 @@ function trackedCount(components: Components, component: object) {
 	return trackers.get(component)?.instances.size() ?? 0;
 }
 
-function folderIn(parent: Instance, name: string, attributes?: { [key: string]: unknown }) {
+export function folderIn(parent: Instance, name: string, attributes?: { [key: string]: unknown }) {
 	const instance = new Instance("Folder");
 	instance.Name = name;
 	instance.Parent = parent;
@@ -830,7 +832,7 @@ function folderIn(parent: Instance, name: string, attributes?: { [key: string]: 
 }
 
 /** A folder in the case's scratch space, which goes with everything in it when the case ends. */
-function folder(name: string, attributes?: { [key: string]: unknown }) {
+export function folder(name: string, attributes?: { [key: string]: unknown }) {
 	return folderIn(scratch(), name, attributes);
 }
 
@@ -853,7 +855,7 @@ function partIn(parent: Instance, name: string) {
 }
 
 /** Completes an instance tree that a `Core` child is missing from. */
-function addCore(parent: Instance) {
+export function addCore(parent: Instance) {
 	const instance = new Instance("Folder");
 	instance.Name = "Core";
 	instance.Parent = parent;
@@ -4639,55 +4641,8 @@ export class ComponentSpecs implements OnStart {
 				expectArrayEqual(changes, ["1->4"], "attribute changes");
 			});
 
-			test("names the instance guard in the warning when the reading at the flip is what holds a component down", () => {
-				// Contextual streaming on a server reads the tree once: the child moving away is not
-				// polled, so only the reading the flip to qualified is gated on sees that it is gone.
-				if (!RunService.IsServer()) {
-					skip(
-						"a server's case: a client watches the guard's tree, so no single reading holds the component down",
-					);
-				}
-
-				const components = createComponentModule();
-				const warnings = recordWarnings();
-
-				const instance = folder("GatedExplained");
-				const elsewhere = folder("GatedElsewhere");
-				const core = addCore(instance);
-				folderIn(core, "Root");
-				CollectionService.AddTag(core, "Rig");
-				CollectionService.AddTag(instance, "ExplainedOwner");
-				expectDefined(components.getComponent<ExplainedOwner>(instance), "component");
-				settle();
-
-				// The removal is announced on a deferred signal, which is when the owner comes down.
-				warnings.clear();
-				components.removeComponent<Rig>(core);
-				untilGone(
-					() => components.getComponents<ExplainedOwner>(instance)[0],
-					"the component after its linked component was removed",
-				);
-				expectEqual(
-					components.getComponent<ExplainedOwner>(instance),
-					undefined,
-					"component asked for after its linked component was removed",
-				);
-
-				core.Parent = elsewhere;
-				expectDefined(components.getComponent<Rig>(core), "the linked component rebuilt elsewhere");
-				expectEqual(
-					components.getComponent<ExplainedOwner>(instance),
-					undefined,
-					"component while its tree is short of Core",
-				);
-
-				// Nothing recorded the guard failing, so the warning reads it the way the gate did.
-				task.wait(0.3);
-				expectTrue(
-					warnings.mentions("instance guard (child 'Core' is missing"),
-					`warnings: ${warnings.describe()}`,
-				);
-			});
+			// The Lune suite's next case, "names the instance guard in the warning when the reading at the
+			// flip is what holds a component down", is a server's: see `server/Tests/components.ts`.
 
 			// Tracker entries: what a leak shows up in. The Lune suite also counts the connections
 			// left on an instance (`__harness.connectionCount`), which the engine cannot show; the
