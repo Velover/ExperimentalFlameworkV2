@@ -28,6 +28,37 @@ export interface FakeWindow {
 	startedWith?: string;
 }
 
+/**
+ * A terminal's Ctrl+C for one run: `press` delivers the signal to the handler the CLI listens with,
+ * there and then, as Windows delivers a console Ctrl+C on a thread of its own. One press is one
+ * signal, as every shell, `bun run` and bin shim measured delivers it.
+ */
+export interface FakeCtrlC {
+	press: (signal?: string) => void;
+	/** Whether the CLI is listening; it stops once the command has returned. */
+	readonly listening: boolean;
+}
+
+export function fakeCtrlC(): FakeCtrlC & { listen: (handler: (signal: string) => void) => () => void } {
+	let handler: ((signal: string) => void) | undefined;
+	const ctrlC = {
+		press: (signal = "SIGINT") => handler?.(signal),
+		get listening() {
+			return handler !== undefined;
+		},
+		listen: (next: (signal: string) => void) => {
+			handler = next;
+			return () => {
+				handler = undefined;
+			};
+		},
+	};
+	return ctrlC;
+}
+
+/** An answer that never comes: a Studio still running the tests, a lune still patching. */
+export const never = <T>(): Promise<T> => new Promise<T>(() => {});
+
 export const TASK_PATH = `universes/${UNIVERSE}/places/${PLACE}/versions/4/luau-execution-sessions/s/tasks/t`;
 
 interface Call {
@@ -61,6 +92,10 @@ export interface Harness {
 	removedDirs: string[];
 	/** The files the run removed (Studio's lock files). */
 	removedFiles: string[];
+	/** Whether the run ended at once through the process's exit (a second Ctrl+C), rather than by returning. */
+	exitedAtOnce: boolean;
+	/** How many MCP proxies the run connected, and how many of them it left unclosed. */
+	proxies: { connected: number; open: number };
 }
 
 /** A canned Studio: what the proxy lists, and what each tool answers. */
@@ -68,7 +103,7 @@ export interface FakeStudio {
 	/** What the proxy lists; a function is asked on every listing, so windows can register mid-run. */
 	studios?: StudioEntry[] | (() => StudioEntry[]);
 	/** Answers by tool name; a function sees the arguments and may change state between calls. */
-	answers?: Record<string, string | ((args: Record<string, unknown>) => string)>;
+	answers?: Record<string, string | ((args: Record<string, unknown>) => string | Promise<string>)>;
 }
 
 export const TESTING_STUDIO: StudioEntry = { id: "studio-1", name: `TestingExperience (placeId: ${PLACE})` };
@@ -86,8 +121,8 @@ export async function runCli(
 		env?: Record<string, string | undefined>;
 		/** What the config reader answers; by default nothing, so no real .env is read. */
 		settings?: Partial<CloudSettings>;
-		/** Exit code of every spawned process; a function may decide per command. */
-		spawnCode?: number | ((command: string[]) => number);
+		/** Exit code of every spawned process; a function may decide per command, and answer later. */
+		spawnCode?: number | ((command: string[]) => number | Promise<number>);
 		studio?: FakeStudio;
 		/** Where Roblox Studio is; undefined means not installed. */
 		studioExe?: string | undefined;
@@ -101,6 +136,14 @@ export async function runCli(
 		onLaunch?: (command: string[]) => void;
 		/** How many removals of a file fail first, as Windows refuses to remove a file an ended process still holds. */
 		removalsRefused?: number;
+		/** The terminal's Ctrl+C; without one, nothing interrupts the run. */
+		ctrlC?: ReturnType<typeof fakeCtrlC>;
+		/** Runs when the CLI closes windows, before the close acts. */
+		onClose?: (target: CloseTarget) => void;
+		/** Runs when the CLI removes a file (a lock beside a place), before the removal acts. */
+		onRemoveFile?: (path: string) => void;
+		/** Answers a request in place of the queued responses when it returns one: a request still in flight, say. */
+		onFetch?: (url: string) => Promise<Response> | undefined;
 	} = {},
 ): Promise<Harness> {
 	const out: string[] = [];
@@ -117,6 +160,10 @@ export async function runCli(
 	const removedDirs: string[] = [];
 	const removedFiles: string[] = [];
 	let refusedRemovals = 0;
+	const proxies = { connected: 0, open: 0 };
+	let exitedAtOnce = false;
+	let exitAtOnce: (code: number) => void = () => {};
+	const exited = new Promise<number>((resolve) => (exitAtOnce = resolve));
 	// The caller's own array, so a test can open or retitle a window mid-run.
 	const windows: FakeWindow[] = options.windows ?? [];
 	let clock = new Date("2026-09-11T12:00:00.000Z").getTime();
@@ -134,6 +181,8 @@ export async function runCli(
 
 	const fetchImpl: FetchLike = async (url, init = {}) => {
 		calls.push({ url, init });
+		const answer = options.onFetch?.(url);
+		if (answer !== undefined) return await answer;
 		const next = queue.shift();
 		if (!next) throw new Error(`unexpected fetch call: ${url}`);
 		return next;
@@ -158,7 +207,7 @@ export async function runCli(
 		spawn: async (command) => {
 			spawned.push(command);
 			const code = options.spawnCode ?? 0;
-			return typeof code === "function" ? code(command) : code;
+			return typeof code === "function" ? await code(command) : code;
 		},
 		launch: async (command) => {
 			launched.push(command);
@@ -173,7 +222,10 @@ export async function runCli(
 			);
 			return pid;
 		},
-		closeWindow: async (target) => closeFakeWindows(target),
+		closeWindow: async (target) => {
+			options.onClose?.(target);
+			return closeFakeWindows(target);
+		},
 		studioWindows: async () => windows.map((window) => ({ pid: window.pid, title: window.title })),
 		claimWindowName: async (name, onWait) => {
 			if (options.claimHolder !== undefined) onWait(options.claimHolder);
@@ -182,15 +234,19 @@ export async function runCli(
 		},
 		connectStudio: async (): Promise<StudioClient> => {
 			const fake = options.studio ?? {};
+			proxies.connected += 1;
+			proxies.open += 1;
 			return {
 				call: async (name, args = {}) => {
 					studioCalls.push({ name, args });
 					const answer = fake.answers?.[name];
 					if (answer === undefined) throw new Error(`no canned answer for ${name}`);
-					return typeof answer === "function" ? answer(args) : answer;
+					return typeof answer === "function" ? await answer(args) : answer;
 				},
 				studios: async () => (typeof fake.studios === "function" ? fake.studios() : (fake.studios ?? [])),
-				close: () => {},
+				close: () => {
+					proxies.open -= 1;
+				},
 			};
 		},
 		studioExe: () => ("studioExe" in options ? options.studioExe : "C:/Roblox/RobloxStudioBeta.exe"),
@@ -208,6 +264,7 @@ export async function runCli(
 			removedDirs.push(path.replaceAll("\\", "/"));
 		},
 		removeFile: async (path) => {
+			options.onRemoveFile?.(path);
 			const normalized = path.replaceAll("\\", "/");
 			if (refusedRemovals < (options.removalsRefused ?? 0)) {
 				refusedRemovals += 1;
@@ -220,6 +277,12 @@ export async function runCli(
 		},
 		now: () => new Date(clock),
 		loadSettings: () => ({ env: {}, ...options.settings }),
+		// Never the real process's signals: a run hears only the Ctrl+C a test presses.
+		onInterrupt: (handler) => (options.ctrlC ? options.ctrlC.listen(handler) : () => {}),
+		exit: (code) => {
+			exitedAtOnce = true;
+			exitAtOnce(code);
+		},
 	};
 
 	/** What the real close script does, over the fake machine's windows. */
@@ -271,7 +334,8 @@ export async function runCli(
 		];
 	}
 
-	const code = await main(argv, deps);
+	// A second Ctrl+C ends the process at once, whatever the run is still waiting for.
+	const code = await Promise.race([main(argv, deps), exited]);
 	return {
 		code,
 		out: out.join("\n"),
@@ -289,6 +353,8 @@ export async function runCli(
 		madeDirs,
 		removedDirs,
 		removedFiles,
+		exitedAtOnce,
+		proxies,
 	};
 }
 

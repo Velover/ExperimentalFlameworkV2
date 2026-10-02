@@ -29,6 +29,14 @@ import {
 	type VersionType,
 } from "./openCloud.ts";
 import { loadCloudSettings, type CloudSettings } from "./config.ts";
+import {
+	describeSignal,
+	Interrupted,
+	interruptedExitCode,
+	Interruption,
+	rethrowInterrupted,
+	type Release,
+} from "./interrupt.ts";
 import { parseSections, renderFilter, renderOptions, renderShim, type Filter } from "./luau.ts";
 import {
 	patchCommand,
@@ -87,6 +95,12 @@ export const STUDIO_OPEN_TIMEOUT = "180s";
 export const CLAIM_TIMEOUT_MS = 600_000;
 /** How long a play session is waited for once started. */
 export const PLAY_START_TIMEOUT_MS = 90_000;
+/**
+ * How long a stop of the play session a run started is tried again, half a second apart, while
+ * Studio refuses it because the start is still under way ("Start play hasn't finished yet"): a
+ * Ctrl+C during the start, which takes about five seconds, stops waiting for it at once.
+ */
+export const PLAY_STOP_RETRY_MS = 30_000;
 /** How often Studio's lock beside a place is tried to be removed, half a second apart, once its process has been ended. */
 export const LOCK_REMOVAL_ATTEMPTS = 20;
 export const POLL_INTERVAL_MS = 2500;
@@ -387,7 +401,13 @@ Examples:
   flamework-test cloud run --sections economy       again, against the version last published
   flamework-test studio open && flamework-test studio run --realm client
 
-Exit codes: 0 success, 1 failure, 2 bad usage.`;
+Ctrl+C stops a run and cleans up what it started: the play session, the Studio window it opened
+(unless --keep), its temp files and child processes; a second Ctrl+C exits at once. A task already
+created on Open Cloud runs on: Open Cloud cannot cancel one.
+
+Exit codes: 0 success, 1 failure, 2 bad usage, 130 interrupted by Ctrl+C. 130 is this process's own
+code: run through the flamework-test bin, the shell gets the bin's Ctrl+C status back at once, and
+the cleanup's lines follow its prompt.`;
 
 // ------------------------------------------------------------------- deps
 
@@ -435,18 +455,99 @@ export interface CliDeps {
 	now?: () => Date;
 	/** Reads the `cloud` section of the nearest flamework.config.json. */
 	loadSettings?: (cwd: string, env: Record<string, string | undefined>) => CloudSettings;
+	/**
+	 * Hears Ctrl+C (and Ctrl+Break on Windows, SIGTERM elsewhere) for as long as a command runs, in
+	 * place of the process ending at once; returns what stops listening.
+	 */
+	onInterrupt?: (handler: (signal: string) => void) => () => void;
+	/** Ends the process at once, for a second Ctrl+C during the cleanup. */
+	exit?: (code: number) => void;
 }
 
 interface Io extends Required<Omit<CliDeps, "fetch">> {
-	fetch: FetchLike | undefined;
+	fetch: FetchLike;
+	/** Ctrl+C: what the run holds, and whether it has been interrupted (see interrupt.ts). */
+	interruption: Interruption;
 }
 
-function resolveDeps(deps: CliDeps): Io {
+/**
+ * The signals a run cleans up after. SIGBREAK is Ctrl+Break, and Windows only. Windows has no
+ * SIGTERM to hear: ending a process there (`process.kill(pid, "SIGTERM")`, `taskkill /F`) ends it
+ * at once, running no handler (measured with Bun 1.4.0: exit code 1, no cleanup).
+ */
+const INTERRUPT_SIGNALS = (): NodeJS.Signals[] =>
+	process.platform === "win32" ? ["SIGINT", "SIGBREAK"] : ["SIGINT", "SIGTERM"];
+
+/** A real sleep, which the run's own sleeps and a window-name claim's wait are made of. */
+const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * The CLI's dependencies, the real ones unless injected, made interruptible: once the run is
+ * interrupted every wait (a sleep, a child process, a request, a call to Studio) rejects at once
+ * and nothing new is started, except in the run's cleanup. What a dependency starts that would
+ * outlive the run (a child process, the MCP proxy, a window-name claim) is held on the ledger
+ * until it is let go.
+ */
+function resolveDeps(deps: CliDeps, interruption: Interruption): Io {
 	const env = deps.env ?? (process.env as Record<string, string | undefined>);
 	const cwd = deps.cwd ?? process.cwd();
+
+	const sleep = deps.sleep ?? pause;
+	const fetchImpl: FetchLike =
+		deps.fetch ?? ((input, init) => globalThis.fetch(input, { ...init, signal: interruption.abortSignal }));
+	const spawnChild =
+		deps.spawn ??
+		(async (command: string[], cwd: string) => {
+			const child = Bun.spawn({ cmd: command, cwd, stdout: "inherit", stderr: "inherit" });
+			// On this console the child hears a Ctrl+C itself, and is ended here in case it outlives it.
+			const end = () => child.kill();
+			interruption.abortSignal.addEventListener("abort", end, { once: true });
+			try {
+				const code = await child.exited;
+				// The Ctrl+C that ended the child can reach it before it reaches this process: a moment's
+				// wait lets it arrive, so the run reports the interruption rather than the child's failure.
+				if (code !== 0 && !interruption.interrupted) await pause(100);
+				return code;
+			} finally {
+				interruption.abortSignal.removeEventListener("abort", end);
+			}
+		});
+	const launch =
+		deps.launch ??
+		(async ([exe, ...args]: string[]) => {
+			// Detached, or Windows takes Studio down with this process when it exits.
+			const child = spawn(exe!, args, { detached: true, stdio: "ignore", windowsHide: false });
+			child.unref();
+			// Studio opens the file in the process started here, so this is the window's process.
+			return child.pid;
+		});
+	const claimDir = join(tmpdir(), "flamework-test");
+	const claim =
+		deps.claimWindowName ??
+		((name: string, onWait: (holder: number) => void) =>
+			claimWindowName(name, {
+				dir: claimDir,
+				timeoutMs: CLAIM_TIMEOUT_MS,
+				sleep: (ms) => interruption.run(() => pause(ms)),
+				onWait,
+			}));
+	const connect =
+		deps.connectStudio ??
+		(async () => {
+			const exe = findStudioMcp(env);
+			if (exe === undefined) {
+				throw new CliError(
+					"StudioMCP.exe was not found under Roblox Studio's versions folder",
+					"is Roblox Studio installed on this machine? Set STUDIO_MCP_EXE to point at it otherwise, or run in the cloud: flamework-test test <file> --cloud",
+				);
+			}
+			return await connectStudio(exe);
+		});
+	const makeTempDir = deps.makeTempDir ?? (() => mkdtemp(join(tmpdir(), "flamework-test-")));
+
 	return {
-		fetch: deps.fetch,
-		sleep: deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+		fetch: (input, init) => interruption.run(() => fetchImpl(input, init)),
+		sleep: (ms) => interruption.run(() => sleep(ms)),
 		readFile: deps.readFile ?? ((path) => Bun.file(path).arrayBuffer()),
 		readTextFile: deps.readTextFile ?? ((path) => Bun.file(path).text()),
 		writeTextFile:
@@ -456,54 +557,84 @@ function resolveDeps(deps: CliDeps): Io {
 				await Bun.write(path, text);
 			}),
 		exists: deps.exists ?? ((path) => Bun.file(path).exists()),
-		spawn:
-			deps.spawn ??
-			(async (command, cwd) => {
-				const child = Bun.spawn({ cmd: command, cwd, stdout: "inherit", stderr: "inherit" });
-				return await child.exited;
-			}),
-		launch:
-			deps.launch ??
-			(async ([exe, ...args]) => {
-				// Detached, or Windows takes Studio down with this process when it exits.
-				const child = spawn(exe!, args, { detached: true, stdio: "ignore", windowsHide: false });
-				child.unref();
-				// Studio opens the file in the process started here, so this is the window's process.
-				return child.pid;
-			}),
-		closeWindow: deps.closeWindow ?? (async (target) => runCloseScript(target)),
-		claimWindowName:
-			deps.claimWindowName ??
-			((name, onWait) =>
-				claimWindowName(name, {
-					dir: join(tmpdir(), "flamework-test"),
-					timeoutMs: CLAIM_TIMEOUT_MS,
-					sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-					onWait,
-				})),
-		studioWindows: deps.studioWindows ?? (async () => listStudioWindows()),
-		connectStudio:
-			deps.connectStudio ??
-			(async () => {
-				const exe = findStudioMcp(env);
-				if (exe === undefined) {
-					throw new CliError(
-						"StudioMCP.exe was not found under Roblox Studio's versions folder",
-						"is Roblox Studio installed on this machine? Set STUDIO_MCP_EXE to point at it otherwise, or run in the cloud: flamework-test test <file> --cloud",
-					);
-				}
-				return await connectStudio(exe);
-			}),
+		spawn: async (command, cwd) => {
+			interruption.check();
+			const name = basename(command[0] ?? "").replace(/\.exe$/i, "");
+			// Bun ends the children it started when this process exits (measured: lune, PowerShell and
+			// the proxy alike; only Studio, launched detached, outlives it), so exiting at once leaves none.
+			const release = interruption.hold(`${name}, which this run started`, `stopped ${name}`, {
+				endsWithProcess: true,
+			});
+			try {
+				return await interruption.run(() => spawnChild(command, cwd));
+			} finally {
+				release();
+			}
+		},
+		launch: async (command) => {
+			// Never raced: the process it starts is known only by what it returns.
+			interruption.check();
+			return await launch(command);
+		},
+		closeWindow: deps.closeWindow ?? ((target) => runCloseScript(target)),
+		claimWindowName: async (name, onWait) => {
+			const release = await interruption.run(
+				() => claim(name, onWait),
+				(late) => late(),
+			);
+			// Left by a second Ctrl+C, the claim names a process that has gone, and the next run takes it over.
+			const held = interruption.hold(
+				`the claim on the window name ${name} (a file in ${claimDir}, which the next run takes over)`,
+				`released the claim on the window name ${name}`,
+			);
+			return () => {
+				release();
+				held();
+			};
+		},
+		studioWindows: deps.studioWindows ?? (() => listStudioWindows()),
+		connectStudio: async () => {
+			const client = await interruption.run(connect, (late) => late.close());
+			const proxy = `the MCP proxy (StudioMCP.exe${client.pid !== undefined ? `, PID ${client.pid}` : ""})`;
+			// The proxy ends with this process, as every child Bun started does (measured 2026-10-01).
+			const held = interruption.hold(proxy, `closed ${proxy}`, { endsWithProcess: true });
+			return {
+				call: (name, args, timeoutMs) => interruption.run(() => client.call(name, args, timeoutMs)),
+				studios: () => interruption.run(() => client.studios()),
+				close: () => {
+					client.close();
+					held();
+				},
+				...(client.pid !== undefined ? { pid: client.pid } : {}),
+			};
+		},
 		studioExe: deps.studioExe ?? (() => findStudioExe(env)),
 		log: deps.log ?? ((message) => console.log(message)),
 		error: deps.error ?? ((message) => console.error(message)),
 		env,
 		cwd,
-		makeTempDir: deps.makeTempDir ?? (() => mkdtemp(join(tmpdir(), "flamework-test-"))),
+		makeTempDir: async () => {
+			interruption.check();
+			return await makeTempDir();
+		},
 		removeDir: deps.removeDir ?? ((path) => rm(path, { recursive: true, force: true })),
 		removeFile: deps.removeFile ?? ((path) => rm(path, { force: true })),
 		now: deps.now ?? (() => new Date()),
 		loadSettings: deps.loadSettings ?? loadCloudSettings,
+		onInterrupt:
+			deps.onInterrupt ??
+			((handler) => {
+				const listeners = INTERRUPT_SIGNALS().map((signal) => {
+					const listener = () => handler(signal);
+					process.on(signal, listener);
+					return { signal, listener };
+				});
+				return () => {
+					for (const { signal, listener } of listeners) process.off(signal, listener);
+				};
+			}),
+		exit: deps.exit ?? ((code) => process.exit(code)),
+		interruption,
 	};
 }
 
@@ -537,7 +668,7 @@ function makeClient(flags: Flags, io: Io): OpenCloudClient {
 		apiKey,
 		universeId,
 		placeId,
-		...(io.fetch ? { fetch: io.fetch } : {}),
+		fetch: io.fetch,
 		sleep: io.sleep,
 		readFile: io.readFile,
 	});
@@ -631,7 +762,8 @@ async function requireLune(io: Io, what: string): Promise<string> {
 	let code: number;
 	try {
 		code = await io.spawn([exe, "--version"], io.cwd);
-	} catch {
+	} catch (error) {
+		rethrowInterrupted(error);
 		code = -1;
 	}
 	if (code !== 0) {
@@ -703,6 +835,7 @@ async function patchPlace(
 	// Only the patch reads these, so they go to a folder of this run's own rather than into the
 	// game's: a folder shared by runs let two patches started together read each other's plan.
 	const workDir = await io.makeTempDir();
+	const releaseDir = io.interruption.hold(`the patch's temp folder ${workDir}`, "removed the patch's temp folder");
 	try {
 		const planPath = join(workDir, "patch-plan.json");
 		const plan: PatchPlan = { project: project.name, ops: planPatch(rojo) };
@@ -726,6 +859,7 @@ async function patchPlace(
 		}
 	} finally {
 		await io.removeDir(workDir);
+		releaseDir();
 	}
 
 	io.log(`wrote ${out}`);
@@ -784,7 +918,12 @@ async function publishProject(flags: Flags, io: Io, project: ProjectChoice): Pro
 	const client = makeClient(flags, io);
 	io.log(`publishing ${file} to the testing place ${client.placeId} as ${versionType}...`);
 
+	// An upload that Ctrl+C cuts short may have reached Roblox all the same.
+	const uploaded = io.interruption.hold(
+		`the upload to the testing place ${client.placeId}, which may still have made a new version of it`,
+	);
 	const versionNumber = await client.publishPlace(absolute, { versionType });
+	uploaded();
 	io.log(`published version ${versionNumber} (${versionType})`);
 
 	const record = {
@@ -904,9 +1043,18 @@ async function cmdRun(flags: Flags, io: Io, kind: "run" | "probe" = "run"): Prom
 		`running ${label} against ${version === undefined ? "the current version" : `version ${version}`} (${source}), timeout ${timeout}`,
 	);
 
+	// Open Cloud cannot cancel a task, so one that Ctrl+C leaves behind runs on until it finishes or
+	// its own timeout ends it; all a run can do is say where it is.
+	const creating = io.interruption.hold(
+		`a task being created on the testing place ${client.placeId}, which may still run there for up to ${timeout}`,
+	);
 	const created = await client.createTask(script, { version, timeout });
+	creating();
 	io.log(`task ${created.path}`);
 
+	const running = io.interruption.hold(
+		`the Open Cloud task ${created.path}, which runs on until it finishes or its timeout (${timeout}) ends it, since Open Cloud cannot cancel a task: read it with GET /cloud/v2/${created.path}`,
+	);
 	let lastState = "";
 	const task = await client.waitForTask(created.path, {
 		intervalMs: POLL_INTERVAL_MS,
@@ -919,6 +1067,7 @@ async function cmdRun(flags: Flags, io: Io, kind: "run" | "probe" = "run"): Prom
 			}
 		},
 	});
+	running();
 
 	const lines = await client.getLogs(created.path);
 	for (const line of lines) io.log(`  [place] ${line}`);
@@ -1169,22 +1318,27 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 
 	let find: (studios: StudioEntry[]) => StudioEntry | undefined;
 	let what: string;
+	let pid: number | undefined;
 	if (flags.file !== undefined) {
 		const file = resolve(io.cwd, flags.file);
 		if (!(await io.exists(file))) {
 			throw new CliError(`${flags.file} does not exist`);
 		}
-		await io.launch([exe, ...studioOpenArguments({ file })]);
+		pid = await io.launch([exe, ...studioOpenArguments({ file })]);
 		// A local file's window is listed by its file name, with no place id.
 		const name = basename(file);
 		find = (studios) => findStudio(studios, undefined, name);
 		what = flags.file;
 	} else {
 		const { universeId, placeId } = resolveIds(flags, io);
-		await io.launch([exe, ...studioOpenArguments({ placeId, universeId })]);
+		pid = await io.launch([exe, ...studioOpenArguments({ placeId, universeId })]);
 		find = (studios) => findStudioForPlace(studios, placeId);
 		what = `the testing place ${placeId}`;
 	}
+	// The window is what was asked for: Ctrl+C stops the wait for it, as the timeout does, and leaves it.
+	io.interruption.hold(
+		`the Studio window it opened (PID ${pid ?? "unknown"}, ${what}), which studio open leaves open`,
+	);
 	io.log(`opening ${what} in Studio; waiting for it to connect...`);
 
 	const client = await io.connectStudio();
@@ -1209,33 +1363,54 @@ function describeWindow(window: ClosedWindow): string {
  * enough -- or, for the process a run started, ending it at once, since Studio answers the ask with
  * a save prompt for every place file (see `closeWindowScript`); a window still running after that
  * throws, naming it. Returns everything matched, `untouched` windows included, for the caller to judge.
+ *
+ * A second Ctrl+C ends the close script with this process. `options.cutShort` names what that may
+ * leave, for a close that asks first (a window can be left showing its save prompt); `options.gone`
+ * lets go of the window this run holds as soon as the script has ended it, before its lock is removed.
  */
-async function closeWindows(target: CloseTarget, label: string, io: Io): Promise<ClosedWindow[]> {
-	const windows = await io.closeWindow(target);
-	for (const window of windows) {
-		if (window.outcome === "closed" || window.outcome === "ended") {
-			io.log(`closed ${label} (PID ${window.pid})`);
-		} else if (window.outcome === "forced") {
-			io.log(
-				`closed ${label} (PID ${window.pid}) by ending its process: it did not close when asked (a save prompt, usually; nothing a run makes is kept)`,
+async function closeWindows(
+	target: CloseTarget,
+	label: string,
+	io: Io,
+	options: { cutShort?: string; gone?: () => void } = {},
+): Promise<ClosedWindow[]> {
+	// A close is seen through, whenever Ctrl+C comes: a window ended and its lock left would be worse.
+	return await io.interruption.cleanup(async () => {
+		const closing = options.cutShort !== undefined ? io.interruption.hold(options.cutShort) : () => {};
+		let windows: ClosedWindow[];
+		try {
+			windows = await io.closeWindow(target);
+		} finally {
+			closing();
+		}
+		for (const window of windows) {
+			if (window.outcome === "closed" || window.outcome === "ended") {
+				io.log(`closed ${label} (PID ${window.pid})`);
+			} else if (window.outcome === "forced") {
+				io.log(
+					`closed ${label} (PID ${window.pid}) by ending its process: it did not close when asked (a save prompt, usually; nothing a run makes is kept)`,
+				);
+			}
+			if (window.outcome === "closed" || window.outcome === "ended" || window.outcome === "forced") {
+				options.gone?.();
+			}
+
+			// A Studio that is ended leaves the lock it keeps beside a place file it has open.
+			if ((window.outcome === "ended" || window.outcome === "forced") && "file" in target) {
+				await removeStudioLock(target.file, window.pid, io);
+			}
+		}
+
+		const open = windows.filter((window) => window.outcome === "open");
+		if (open.length > 0) {
+			const why = open.find((window) => window.error)?.error;
+			throw new CliError(
+				`${label} is still open (${open.map(describeWindow).join("; ")}): it did not close when asked, and ending its process failed${why ? `: ${why}` : ""}`,
+				"close it by hand; no other window was touched",
 			);
 		}
-
-		// A Studio that is ended leaves the lock it keeps beside a place file it has open.
-		if ((window.outcome === "ended" || window.outcome === "forced") && "file" in target) {
-			await removeStudioLock(target.file, window.pid, io);
-		}
-	}
-
-	const open = windows.filter((window) => window.outcome === "open");
-	if (open.length > 0) {
-		const why = open.find((window) => window.error)?.error;
-		throw new CliError(
-			`${label} is still open (${open.map(describeWindow).join("; ")}): it did not close when asked, and ending its process failed${why ? `: ${why}` : ""}`,
-			"close it by hand; no other window was touched",
-		);
-	}
-	return windows;
+		return windows;
+	});
 }
 
 /**
@@ -1255,14 +1430,19 @@ async function removeStudioLock(file: string, pid: number, io: Io): Promise<void
 
 	// Windows can hold the file for a moment after the process has gone, and refuses to remove it
 	// meanwhile (measured: three locks of four were still there after a run), so it is tried again.
-	for (let attempt = 0; attempt < LOCK_REMOVAL_ATTEMPTS; attempt += 1) {
-		try {
-			await io.removeFile(lock);
-			if (!(await io.exists(lock))) return;
-		} catch {
-			// Still held: try again below.
+	const removing = io.interruption.hold(`Studio's lock file ${lock}, which names a process that has ended`);
+	try {
+		for (let attempt = 0; attempt < LOCK_REMOVAL_ATTEMPTS; attempt += 1) {
+			try {
+				await io.removeFile(lock);
+				if (!(await io.exists(lock))) return;
+			} catch {
+				// Still held: try again below.
+			}
+			await io.sleep(500);
 		}
-		await io.sleep(500);
+	} finally {
+		removing();
 	}
 	// A lock that cannot be removed is left where it is: it only needs ignoring.
 }
@@ -1270,10 +1450,12 @@ async function removeStudioLock(file: string, pid: number, io: Io): Promise<void
 /**
  * Closes the window a run opened, by the process it started (the file alone when the launch could
  * not tell), and nothing else: another window with the same file open is named, not closed.
+ * `release` lets go of the run's hold on the window once it is closed.
  */
-async function closeOwnWindow(pid: number | undefined, file: string, io: Io): Promise<void> {
+async function closeOwnWindow(pid: number | undefined, file: string, io: Io, release: Release): Promise<void> {
 	const name = basename(file);
-	const windows = await closeWindows(pid !== undefined ? { pid, file } : { file }, name, io);
+	const windows = await closeWindows(pid !== undefined ? { pid, file } : { file }, name, io, { gone: release });
+	release();
 	if (!windows.some((window) => ["closed", "forced", "ended"].includes(window.outcome))) {
 		io.log(
 			pid !== undefined
@@ -1302,7 +1484,9 @@ async function cmdStudioClose(flags: Flags, io: Io): Promise<number> {
 	return await withStudio(flags, io, async (_client, studio) => {
 		const name = placeNameOf(studio.name);
 		const title = `${name} - Roblox Studio`;
-		const windows = await closeWindows({ title }, name, io);
+		const windows = await closeWindows({ title }, name, io, {
+			cutShort: `the window "${title}", whose close was cut short: it may still be open, showing its save prompt`,
+		});
 
 		const untouched = windows.filter((window) => window.outcome === "untouched");
 		if (untouched.length > 0) {
@@ -1346,6 +1530,10 @@ async function cmdStudioExec(flags: Flags, io: Io): Promise<number> {
 	const dataModel = dataModelOf(flags.realm, "Edit");
 
 	return await withStudio(flags, io, async (client, studio) => {
+		// Studio has no way to stop a snippet it was sent: one that Ctrl+C stops waiting for runs on.
+		const sent = io.interruption.hold(
+			`the Luau sent to ${studio.name} (${dataModel}), which runs on there until it returns`,
+		);
 		let answer: string;
 		try {
 			answer = await client.call(
@@ -1354,8 +1542,11 @@ async function cmdStudioExec(flags: Flags, io: Io): Promise<number> {
 				parseDurationMs(flags.timeout ?? DEFAULT_TIMEOUT, 120_000),
 			);
 		} catch (error) {
+			rethrowInterrupted(error);
+			sent();
 			throw new CliError(`the Luau failed in ${dataModel}: ${luauErrorMessage(error)}`);
 		}
+		sent();
 		io.log(answer);
 		return 0;
 	});
@@ -1369,6 +1560,9 @@ async function cmdStudioExec(flags: Flags, io: Io): Promise<number> {
  *
  * With several realms, a `--sections` entry only one realm has is not a miss in the other: each
  * realm's tests decide its own verdict, and an entry fails the run only when no realm matched it.
+ *
+ * `window` is the run's hold on the window it opened, when it opened one: the play session ends
+ * with that window, so closing it lets the session go too.
  */
 async function runRealms(
 	client: StudioClient,
@@ -1376,22 +1570,51 @@ async function runRealms(
 	realms: Array<"Server" | "Client">,
 	flags: Flags,
 	io: Io,
+	window?: Release,
 ): Promise<number> {
 	const filter: Filter = parseSections(flags.sections);
 	const script = renderStudioRun(renderFilter(filter), renderOptions({ list: flags.list === true }));
 	const state = () => client.call("get_studio_state", { studio_id: studio.id }, 30_000);
 
 	let startedHere = false;
+	let releaseSession = () => {};
+	// The session this run started is stopped as part of its cleanup, whenever Ctrl+C comes.
+	const stopSession = async (): Promise<void> => {
+		await io.interruption.cleanup(() => stopPlay(client, studio, io));
+		releaseSession();
+		io.log("play session stopped (--keep leaves it running)");
+	};
 	if (!isPlaying(await state())) {
 		io.log("starting a play session...");
-		await client.call("start_stop_play", { studio_id: studio.id, is_start: true }, 180_000);
-		startedHere = true;
+		const within = window !== undefined ? { within: window } : {};
+		releaseSession =
+			flags.keep === true
+				? io.interruption.hold("the play session it started, which --keep leaves running", undefined, within)
+				: io.interruption.hold("the play session it started", "stopped the play session it started", within);
+		try {
+			await client.call("start_stop_play", { studio_id: studio.id, is_start: true }, 180_000);
+			startedHere = true;
 
-		const deadline = io.now().getTime() + PLAY_START_TIMEOUT_MS;
-		while (io.now().getTime() < deadline) {
-			const current = await state();
-			if (/Client/.test(current) && /Server/.test(current)) break;
-			await io.sleep(1000);
+			const deadline = io.now().getTime() + PLAY_START_TIMEOUT_MS;
+			while (io.now().getTime() < deadline) {
+				const current = await state();
+				if (/Client/.test(current) && /Server/.test(current)) break;
+				await io.sleep(1000);
+			}
+		} catch (error) {
+			if (!(error instanceof Interrupted)) {
+				releaseSession();
+				throw error;
+			}
+			// Interrupted while the session started, or had just: it is this run's to stop all the same.
+			if (flags.keep !== true) {
+				try {
+					await stopSession();
+				} catch (stopError) {
+					printError(stopError, io);
+				}
+			}
+			throw error;
 		}
 	}
 
@@ -1412,6 +1635,7 @@ async function runRealms(
 					parseDurationMs(timeout, 120_000),
 				);
 			} catch (error) {
+				rethrowInterrupted(error);
 				code = 1;
 				if (/timed out/.test(String(error))) {
 					// Every test has `testing.timeout` of its own, so a realm that does not answer is
@@ -1458,9 +1682,29 @@ async function runRealms(
 		}
 		return code;
 	} finally {
-		if (startedHere && flags.keep !== true) {
-			await client.call("start_stop_play", { studio_id: studio.id, is_start: false }, 120_000);
-			io.log("play session stopped (--keep leaves it running)");
+		if (startedHere && flags.keep !== true) await stopSession();
+	}
+}
+
+/**
+ * Stops the play session. Studio refuses while the start it was asked for is still under way, which
+ * is where a Ctrl+C during the start leaves it (the start takes about five seconds, and the run
+ * stops waiting for it at once), so the stop is tried again until the start has finished, for up to
+ * {@link PLAY_STOP_RETRY_MS}.
+ */
+async function stopPlay(client: StudioClient, studio: StudioEntry, io: Io): Promise<string> {
+	const deadline = io.now().getTime() + PLAY_STOP_RETRY_MS;
+	let told = false;
+	for (;;) {
+		try {
+			return await client.call("start_stop_play", { studio_id: studio.id, is_start: false }, 120_000);
+		} catch (error) {
+			if (!/hasn't finished yet/i.test(String(error)) || io.now().getTime() >= deadline) throw error;
+			if (!told) {
+				told = true;
+				io.log("the play session is still starting; it is stopped once it has");
+			}
+			await io.sleep(500);
 		}
 	}
 }
@@ -1477,6 +1721,7 @@ async function describeHangingTest(client: StudioClient, studio: StudioEntry, da
 	try {
 		output = await client.call("get_console_output", { studio_id: studio.id }, 30_000);
 	} catch (error) {
+		rethrowInterrupted(error);
 		return `could not read Studio's output to place it: ${String(error)}`;
 	}
 
@@ -1526,6 +1771,8 @@ async function cmdTest(flags: Flags, io: Io): Promise<number> {
 
 	const outcomes: Array<{ project: ProjectChoice; code: number }> = [];
 	for (const project of projects) {
+		// A Ctrl+C during the last project's cleanup lets that finish; the next project does not start.
+		io.interruption.check();
 		io.log("");
 		io.log(`=== ${project.name}: ${relative(io.cwd, project.path)} ===`);
 		outcomes.push({ project, code: await testProject(flags, io, project) });
@@ -1560,19 +1807,23 @@ async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice): 
 
 	const client = await io.connectStudio();
 	try {
-		const stale = await closeWindows({ file }, `the window left from an earlier build of ${name}`, io);
+		const staleLabel = `the window left from an earlier build of ${name}`;
+		const stale = await closeWindows({ file }, staleLabel, io, {
+			cutShort: `${staleLabel}, if there is one: its close was cut short, and it may still be open, showing its save prompt`,
+		});
 		if (stale.length > 0) await io.sleep(2000);
 
 		let launched = false;
 		let pid: number | undefined;
 		let gaveUp = false;
+		let releaseWindow: Release = () => {};
 		// The run gives up on the window it opened; left open, it would only trip the next one.
-		// Whether it is closed now, which is only known once the close has run.
+		// Whether it is closed now, which is only known once the close has run. Ctrl+C gives up on it too.
 		const giveUp = async (): Promise<boolean> => {
 			gaveUp = true;
 			if (keep) return false;
 			try {
-				await closeOwnWindow(pid, file, io);
+				await closeOwnWindow(pid, file, io, releaseWindow);
 				return true;
 			} catch (closeError) {
 				printError(closeError, io);
@@ -1594,6 +1845,10 @@ async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice): 
 			const before = new Set((await client.studios()).map((entry) => entry.id));
 			pid = await io.launch([exe, ...studioOpenArguments({ file })]);
 			launched = true;
+			const window = `the Studio window it opened (PID ${pid ?? "unknown"}, ${name})`;
+			releaseWindow = keep
+				? io.interruption.hold(`${window}, which --keep leaves open`)
+				: io.interruption.hold(window, `closed ${window}`);
 			io.log(`opening ${label} in Studio; waiting for it to connect...`);
 
 			// The proxy says nothing of the process behind an entry, so a new entry of this name is
@@ -1638,7 +1893,7 @@ async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice): 
 			release = undefined;
 			io.log(`connected: ${studio.name} (${studio.id})`);
 
-			code = await runRealms(client, studio, realms, flags, io);
+			code = await runRealms(client, studio, realms, flags, io, releaseWindow);
 		} catch (error) {
 			if (launched && !gaveUp) await giveUp();
 			throw error;
@@ -1651,7 +1906,7 @@ async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice): 
 			return code;
 		}
 		try {
-			await closeOwnWindow(pid, file, io);
+			await closeOwnWindow(pid, file, io, releaseWindow);
 		} catch (error) {
 			// The results stand, but the run did not clean up after itself, and fails saying so.
 			printError(error, io);
@@ -1666,7 +1921,8 @@ async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice): 
 // ------------------------------------------------------------------- main
 
 export async function main(argv: string[], deps: CliDeps = {}): Promise<number> {
-	const io = resolveDeps(deps);
+	const interruption = new Interruption();
+	const io = resolveDeps(deps, interruption);
 
 	let parsed: ParsedArgs;
 	try {
@@ -1692,41 +1948,69 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
 		return 2;
 	}
 
+	// Ctrl+C is heard while the command runs: the first unwinds it through its own cleanup, which
+	// then says what it cleaned up and what was left; a second exits at once, however soon it comes,
+	// naming what may be left. One press is one signal: neither cmd, `bun run` (nested, or from a
+	// script) nor the bin shim was measured to repeat one (2026-10-02).
+	const stopListening = io.onInterrupt((signal) => {
+		if (interruption.interrupt(signal)) {
+			io.error("");
+			io.error(
+				`${describeSignal(signal)}: stopping, and cleaning up what this run started (${describeSignal(signal)} again exits at once)`,
+			);
+			return;
+		}
+		io.error(interruption.abandoned(signal));
+		io.exit(interruptedExitCode(interruption.by ?? signal));
+	});
 	try {
-		switch (parsed.command) {
+		const code = await runCommand(parsed.command, parsed.flags, io);
+		if (!interruption.interrupted) return code;
+		io.error(interruption.summary());
+		return interruptedExitCode(interruption.by!);
+	} finally {
+		stopListening();
+	}
+}
+
+async function runCommand(command: string, flags: Flags, io: Io): Promise<number> {
+	try {
+		switch (command) {
 			case "test":
-				return await cmdTest(parsed.flags, io);
+				return await cmdTest(flags, io);
 			case "patch":
-				return await cmdPatch(parsed.flags, io);
+				return await cmdPatch(flags, io);
 			case "studio open":
-				return await cmdStudioOpen(parsed.flags, io);
+				return await cmdStudioOpen(flags, io);
 			case "studio close":
-				return await cmdStudioClose(parsed.flags, io);
+				return await cmdStudioClose(flags, io);
 			case "studio status":
-				return await cmdStudioStatus(parsed.flags, io);
+				return await cmdStudioStatus(flags, io);
 			case "studio play":
-				return await cmdStudioPlay(parsed.flags, io, true);
+				return await cmdStudioPlay(flags, io, true);
 			case "studio stop":
-				return await cmdStudioPlay(parsed.flags, io, false);
+				return await cmdStudioPlay(flags, io, false);
 			case "studio exec":
-				return await cmdStudioExec(parsed.flags, io);
+				return await cmdStudioExec(flags, io);
 			case "studio run":
-				return await cmdStudioRun(parsed.flags, io);
+				return await cmdStudioRun(flags, io);
 			case "cloud publish":
-				return await cmdPublish(parsed.flags, io);
+				return await cmdPublish(flags, io);
 			case "cloud run":
-				return await cmdRun(parsed.flags, io, "run");
+				return await cmdRun(flags, io, "run");
 			case "cloud probe":
-				return await cmdRun(parsed.flags, io, "probe");
+				return await cmdRun(flags, io, "probe");
 			case "cloud test":
-				return await cmdCloudTest(parsed.flags, io);
+				return await cmdCloudTest(flags, io);
 			default:
-				io.error(`error: unknown command: ${parsed.command}`);
+				io.error(`error: unknown command: ${command}`);
 				io.error("");
 				io.error(USAGE);
 				return 2;
 		}
 	} catch (error) {
+		// Interrupted: what it cleaned up is said once the command has unwound, by main.
+		if (error instanceof Interrupted) return interruptedExitCode(error.signal);
 		if (error instanceof UsageError) {
 			io.error(`error: ${error.message}`);
 			io.error("");

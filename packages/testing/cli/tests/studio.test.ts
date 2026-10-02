@@ -154,19 +154,19 @@ describe.skipIf(process.platform !== "win32")("the close script, on real process
 	const exits = (child: ReturnType<typeof spawnIdle>) =>
 		Promise.race([child.exited.then(() => true), Bun.sleep(5000).then(() => false)]);
 
-	test("any quote in a path or title is taken literally, and nothing in one runs", () => {
+	test("any quote in a path or title is taken literally, and nothing in one runs", async () => {
 		const files = [
 			"C:\\Bob\u2019s Projects\\place.rbxl",
 			"C:\\\u2018quoted\u2019\\place.rbxl",
 			"C:\\a\u201Ab\u201Bc\\place.rbxl",
 			"C:\\it's \u201Cq\u201D\\place.rbxl",
 		];
-		for (const file of files) expect(runCloseScript({ file }, "fwclose-no-such-process")).toEqual([]);
+		for (const file of files) expect(await runCloseScript({ file }, "fwclose-no-such-process")).toEqual([]);
 
 		// Were the value spliced in as text, this would print an answer of its own and stop the script.
 		const injected = 'C:\\a\u2019+$([Console]::WriteLine("FWCLOSE [{}]"); exit)+\u2019b\\place.rbxl';
-		expect(runCloseScript({ file: injected }, "fwclose-no-such-process")).toEqual([]);
-		expect(runCloseScript({ title: `${injected} - Roblox Studio` }, "fwclose-no-such-process")).toEqual([]);
+		expect(await runCloseScript({ file: injected }, "fwclose-no-such-process")).toEqual([]);
+		expect(await runCloseScript({ title: `${injected} - Roblox Studio` }, "fwclose-no-such-process")).toEqual([]);
 	}, 60_000);
 
 	test("titles are compared as the file system compares paths: ordinally, ignoring case only", () => {
@@ -214,18 +214,18 @@ $cases = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64Stri
 		const similar = spawnIdle(`${file}.bak`);
 		try {
 			await Bun.sleep(300);
-			expect(runCloseScript({ pid: own.pid, file: "C:\\nowhere\\place.rbxl" }, processName)).toEqual([]);
+			expect(await runCloseScript({ pid: own.pid, file: "C:\\nowhere\\place.rbxl" }, processName)).toEqual([]);
 			// Started on "<file>.bak": the file's name is only part of it.
-			expect(runCloseScript({ pid: similar.pid, file }, processName)).toEqual([]);
+			expect(await runCloseScript({ pid: similar.pid, file }, processName)).toEqual([]);
 
 			// The process given, by the file on its command line: a run's own process is ended without asking.
-			const closed = runCloseScript({ pid: own.pid, file }, processName);
+			const closed = await runCloseScript({ pid: own.pid, file }, processName);
 			expect(closed).toEqual([{ pid: own.pid, title: "", outcome: "ended" }]);
 			expect(await exits(own)).toBe(true);
 			expect(other.exitCode).toBeNull();
 
 			// A process this close was not given is matched by its title only, and these have none.
-			expect(runCloseScript({ file }, processName)).toEqual([]);
+			expect(await runCloseScript({ file }, processName)).toEqual([]);
 			expect(other.exitCode).toBeNull();
 			expect(similar.exitCode).toBeNull();
 		} finally {

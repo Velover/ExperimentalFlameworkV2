@@ -7,7 +7,7 @@
  * enabled in Studio's Assistant settings a terminal can execute Luau, start and stop a play
  * session and read Studio's state exactly as an assistant would.
  */
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -28,6 +28,8 @@ export interface StudioClient {
 	/** Lists the connected Studio windows, retrying while the proxy is still joining the hub. */
 	studios: () => Promise<StudioEntry[]>;
 	close: () => void;
+	/** The proxy's process, when known. */
+	pid?: number;
 }
 
 // --------------------------------------------------------------- executables
@@ -287,19 +289,54 @@ export function parseClosedWindows(stdout: string): ClosedWindow[] {
 	}));
 }
 
-/** Runs the close script in Windows PowerShell and returns what became of each window it matched. */
-export function runCloseScript(target: CloseTarget, processName?: string): ClosedWindow[] {
+/**
+ * Runs a script in Windows PowerShell, hidden, and resolves with what it printed. It never blocks
+ * this process meanwhile, so a Ctrl+C that comes during a close is heard when it comes, not once
+ * the close is done.
+ */
+async function runPowerShell(
+	script: string,
+	timeoutMs: number,
+): Promise<{ stdout: string; stderr: string; error?: Error }> {
 	// Encoded, so no quote or path in the script depends on how the command line is quoted.
-	const encoded = Buffer.from(closeWindowScript(target, processName), "utf16le").toString("base64");
-	const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
-		encoding: "utf8",
-		timeout: 90_000,
-		windowsHide: true,
-	});
+	const encoded = Buffer.from(script, "utf16le").toString("base64");
+	let child: ReturnType<typeof Bun.spawn<"ignore", "pipe", "pipe">>;
 	try {
-		return parseClosedWindows(result.stdout ?? "");
+		// Hidden, and no stdio inherited: a console of its own, which a Ctrl+C in the terminal does not reach.
+		child = Bun.spawn({
+			cmd: ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+			windowsHide: true,
+		});
 	} catch (error) {
-		const why = result.error?.message ?? (result.stderr ?? "").trim();
+		return { stdout: "", stderr: "", error: error instanceof Error ? error : new Error(String(error)) };
+	}
+	let error: Error | undefined;
+	const timer = setTimeout(() => {
+		error = new Error(`PowerShell did not finish within ${timeoutMs / 1000}s`);
+		child.kill();
+	}, timeoutMs);
+	try {
+		const [stdout, stderr] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+		]);
+		await child.exited;
+		return { stdout, stderr, ...(error ? { error } : {}) };
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** Runs the close script in Windows PowerShell and returns what became of each window it matched. */
+export async function runCloseScript(target: CloseTarget, processName?: string): Promise<ClosedWindow[]> {
+	const result = await runPowerShell(closeWindowScript(target, processName), 90_000);
+	try {
+		return parseClosedWindows(result.stdout);
+	} catch (error) {
+		const why = result.error?.message ?? result.stderr.trim();
 		throw new Error(
 			`could not tell whether the Studio window closed (${error instanceof Error ? error.message : String(error)})${why ? `: ${why}` : ""}`,
 		);
@@ -313,25 +350,20 @@ export interface StudioWindow {
 }
 
 /** Every Roblox Studio process on this machine, with its window's title; read-only. */
-export function listStudioWindows(processName = "RobloxStudioBeta"): StudioWindow[] {
+export async function listStudioWindows(processName = "RobloxStudioBeta"): Promise<StudioWindow[]> {
 	const script = `
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $out = @(Get-Process -Name ${powershellString(processName)} -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ pid = [int]$_.Id; title = [string]$_.MainWindowTitle } })
 ${powershellString(CLOSE_MARKER)} + (ConvertTo-Json -InputObject @($out) -Compress)
 `;
-	const encoded = Buffer.from(script, "utf16le").toString("base64");
-	const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
-		encoding: "utf8",
-		timeout: 60_000,
-		windowsHide: true,
-	});
-	const line = (result.stdout ?? "")
+	const result = await runPowerShell(script, 60_000);
+	const line = result.stdout
 		.split(/\r?\n/)
 		.reverse()
 		.find((entry) => entry.startsWith(CLOSE_MARKER));
 	if (line === undefined) {
 		throw new Error(
-			`could not list the Studio windows${result.error ? `: ${result.error.message}` : result.stderr ? `: ${result.stderr.trim()}` : ""}`,
+			`could not list the Studio windows${result.error ? `: ${result.error.message}` : result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
 		);
 	}
 	return (JSON.parse(line.slice(CLOSE_MARKER.length)) as StudioWindow[]).map((window) => ({
@@ -444,7 +476,12 @@ interface JsonRpcResponse {
 
 /** Spawns the proxy, does the MCP handshake and returns a client over it. */
 export async function connectStudio(exe: string): Promise<StudioClient> {
-	const child: ChildProcess = spawn(exe, [], { stdio: ["pipe", "pipe", "pipe"] });
+	// Hidden, which with no stdio inherited gives it a console of its own: a Ctrl+C in the terminal
+	// does not reach it, so it is still there for an interrupted run to stop its play session with.
+	// It exits when this process does, its stdin closing.
+	const child: ChildProcess = spawn(exe, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+	// A request written after the proxy has gone (a retry an interruption left running) is dropped.
+	child.stdin?.on("error", () => {});
 	let buffer = "";
 	let nextId = 0;
 	const pending = new Map<number, Pending>();
@@ -525,5 +562,6 @@ export async function connectStudio(exe: string): Promise<StudioClient> {
 		close: () => {
 			child.kill();
 		},
+		...(child.pid !== undefined ? { pid: child.pid } : {}),
 	};
 }

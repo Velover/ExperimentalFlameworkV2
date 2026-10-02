@@ -75,6 +75,62 @@ and `studio run [--realm server|client|both]`, which runs the tests in whatever 
 testing place open without opening or closing anything. See the package's
 [README](../../packages/testing/README.md) for each.
 
+### Ctrl+C
+
+Ctrl+C stops a run where it is and cleans up what the run started, through the same steps a run
+that finishes takes: the play session it started is stopped, the window it opened is closed by the
+process it started (never a window it did not open), its window-name claim is released, the patch's
+temp folder is removed, and lune and the MCP proxy are stopped. Nothing new starts afterwards: the
+other realm and the other projects are not run. The CLI then exits 130 (but see
+[the exit code](#the-exit-code-and-the-prompt) for what a shell sees), ending on one line that says
+what it cleaned up and what it left:
+
+```
+Ctrl+C: stopping, and cleaning up what this run started (Ctrl+C again exits at once)
+play session stopped (--keep leaves it running)
+closed place.rbxl (PID 38332)
+interrupted by Ctrl+C: cleaned up: stopped the play session it started; closed the Studio window it opened (PID 38332, place.rbxl); closed the MCP proxy (StudioMCP.exe, PID 35580)
+```
+
+A Ctrl+C while Studio starts the play session (which takes it about five seconds) stops waiting for
+the start at once, but Studio refuses to stop a session it is still starting (`Start play hasn't
+finished yet`), so the stop is tried again, half a second apart, until the start has finished:
+`the play session is still starting; it is stopped once it has`. After 30 seconds the stop gives up
+and says why; `test` then closes its window all the same, and the session ends with it.
+
+`--keep` keeps the window and the session then too, and the line names them as left. A Ctrl+C
+during the cleanup a finished run does anyway (stopping the session, closing the window) lets it
+finish, and the run still exits 130. A second Ctrl+C exits at once, however soon it comes after the
+first, naming what may be left (`may be left: the Studio window it opened (PID 11348, place.rbxl); the
+play session it started`); the next `test` of that file closes such a window as one left from an
+earlier build. The line leaves out what ends with the CLI's process anyway (Bun ends the child
+processes it started when it exits: lune, the MCP proxy, a close script), and names a close the
+second Ctrl+C cut short: a window left from an earlier build is asked to close first, and may be left
+showing its save prompt. `studio run` stops the session it started; `studio open` stops waiting and
+leaves the window, which is what it was asked for; `studio exec` stops waiting, and its Luau runs on
+in Studio, which has no way to stop it.
+
+Ctrl+Break does the same as Ctrl+C, and exits 149. Windows has no SIGTERM for the CLI to hear:
+ending its process there (`taskkill /F`, or `process.kill` with SIGINT, SIGTERM or SIGKILL) ends it
+at once, with no cleanup. On Linux and macOS, where only the cloud commands run, SIGTERM does the
+same as Ctrl+C, and exits 143.
+
+#### The exit code and the prompt
+
+130 is the exit code of the CLI's own process, which is not what a shell sees through the
+`flamework-test` bin, the way a terminal or a package script runs it. Bun's bin shim
+(`node_modules/.bin/flamework-test.exe`) is ended by the Ctrl+C itself, at once, so the shell gets
+the shim's status back, or `bun run`'s around it, the same value (0xC000013A, which cmd and
+PowerShell show as -1073741510), and its prompt, while the CLI goes on cleaning up in the same
+console and prints its last lines after the prompt, a few seconds later (measured with Bun 1.4.0,
+through the bin, `bun run` and `bun run test:place` alike).
+
+To have the terminal wait for the cleanup and get 130, run the CLI's file with `bun` yourself:
+`bun node_modules/@flamework-experimental/testing/cli/src/cli.ts test place.rbxl`. Not from a
+package script, though: `bun run` ends a child it started that way the moment Ctrl+C reaches it, so
+the CLI loses its cleanup altogether, while through the bin the shim stands between them and the CLI
+survives it. Package scripts call the bin, as the scripts here do.
+
 ## In the cloud
 
 `test <file> --cloud` (or `cloud test <file>`) publishes the build to a testing place as a Saved
@@ -197,6 +253,13 @@ task itself failed. `--json` prints the raw result table instead.
 A version is published as `Saved`, which uploads it and gives it a number without making it live,
 and the tests run against that number. Nothing here publishes to players. The place has to be
 closed in Studio while `cloud publish` runs: Roblox refuses to save a version of an open place.
+
+Ctrl+C stops a cloud run from waiting, and undoes what is on this machine (the patch's temp folder,
+lune), but not what has reached Roblox. An upload it cuts short may still have made a version, and
+`build/version.json` is then not written. A task already created runs on until it finishes or its
+own timeout ends it, since the Luau Execution API has no way to cancel one; the run's last line
+names its path, which `GET /cloud/v2/<path>` reads afterwards. It counts against the 10 concurrent
+tasks of the place meanwhile.
 
 ### Limits
 
@@ -336,6 +399,8 @@ without running it, `place.deferred.rbxl`, to open in Studio and look at.
 | `lune is needed to set the properties of the project ...` | A chosen `--project` sets its `$properties` on a copy of the build under Lune; install it or set `LUNE_EXE`. |
 | `the Rojo project ... does not exist` / `two projects are both named ...` | A `--project` or `ROJO_PROJECT` entry names no file, or two files share a name; both are checked before the first run. |
 | `skipped Workspace.X (not a property the reflection database knows)` | Not a property of that class in Lune's reflection database; check the spelling against the Properties window. |
+| Ctrl+C under `bun run` left the window open and printed no `interrupted by Ctrl+C` line | The script runs the CLI's file with `bun` directly, and `bun run` ends that process at once; call the `flamework-test` bin instead (see [Ctrl+C](#ctrlc)). The next `test` of that file closes the window. |
+| After Ctrl+C the prompt came back at once, and the `interrupted by Ctrl+C` line came after it | Expected through the bin: its shim ends at once, and the CLI cleans up after it (see [the exit code](#the-exit-code-and-the-prompt)). Run the CLI's file with `bun` to wait for it. |
 | `a cloud run needs "testing": { "entry": ... }` | The cloud has to ignite the game itself; give the config the ModuleScript that exports `ignite()`. |
 | `403 PERMISSION_DENIED ... luau-execution-session ... missing` | The key lacks the task scopes for this experience. |
 | `409 Conflict: Save failed. Server is busy` on publish | The place is open in Roblox Studio. Close it; the upload succeeds at once afterwards. |

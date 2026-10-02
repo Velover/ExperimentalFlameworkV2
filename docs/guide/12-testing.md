@@ -128,6 +128,10 @@ Everything a project needs, in the order it is needed:
    "scripts": { "test": "bun scripts/test.mjs" }
    ```
 
+   Ctrl+C is the exception to "whatever happened": it ends this script at once, so the rebuild
+   without the scope does not run and `out/` keeps the test host until the next plain `rbxtsc`.
+   `flamework-test` itself still cleans up its window and session.
+
    `test.rbxl` has a name of its own, so the place a release is built into never holds the tests.
    Ignore it with the other built places, `/*.rbxl` at the root. Besides the build, a run leaves:
    - the places `flamework-test` makes beside the build (`test.patched.rbxl` with an original

@@ -54,6 +54,24 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   bytes the empty table cost on every such message. Receivers already read a missing list as
   empty, and `Flamework.createSerializer`'s `serialize` still returns the list.
 
+### testing
+
+#### Fixed
+
+- `flamework-test`: Ctrl+C (and Ctrl+Break) no longer leaves the Studio window it opened, its play
+  session, the window-name claim in `%TEMP%\flamework-test`, the patch's temp folder or its child
+  processes behind. The run stops waiting, cleans up through its normal end-of-run steps (`--keep`
+  keeps the window and session; a session Studio is still starting is stopped once the start has
+  finished) and ends on one line saying what it cleaned up and what it left. The CLI's own process
+  exits 130 (149 for Ctrl+Break); through the bin the shell gets the shim's status at once and the
+  cleanup's lines follow the prompt. A second Ctrl+C exits at once, naming what may be left. A cloud
+  task already created runs on (Open Cloud cannot cancel one), and the line names it.
+
+#### Changed
+
+- `flamework-test` starts the MCP proxy and its PowerShell window scripts hidden in consoles of
+  their own, and no longer blocks while closing or listing Studio windows.
+
 ### Docs
 
 - Guide 06, size on the wire: corrected. Roblox compresses only the `buffer` values a remote

@@ -93,6 +93,17 @@ How `test` handles Studio windows:
 - Runs of same-named files started at the same time take turns to open their windows, because the
   proxy lists a window by its file name alone. A run that finds another window of a file with that
   name opening alongside its own cannot tell the two apart, so it refuses and closes its own.
+- Ctrl+C stops the run and cleans up what it started, through the steps a finished run takes: it
+  stops the play session it started (one Studio is still starting is stopped once the start has
+  finished) and closes the window it opened (by its process; `--keep` keeps both), releases its
+  window-name claim, removes the patch's temp folder and stops lune and the MCP proxy. It runs
+  nothing more (not the other realm, not the next project) and ends on one line naming what it
+  cleaned up and what it left; the CLI's own process exits 130. A second Ctrl+C exits at once,
+  however soon it comes, naming what may be left. Through the `flamework-test` bin (and so
+  through a package script) the shell gets its prompt back at once, with the bin's own Ctrl+C
+  status rather than 130, and the cleanup's lines follow a few seconds later; to wait for them, run
+  `bun node_modules/@flamework-experimental/testing/cli/src/cli.ts ...` yourself (not from a
+  package script). See [Ctrl+C](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/docs/testing/place.md#ctrlc).
 
 | Command | Does |
 |---|---|
@@ -111,7 +122,9 @@ These are the pieces `test` is made of, for driving a window by hand. They act o
 - or whatever `--studio <name|id>` names.
 
 Only the first needs the testing place's ids, so a window found either other way is driven without
-them. When nothing matches, they say so and list what is open.
+them. When nothing matches, they say so and list what is open. On Ctrl+C, `studio run` stops the
+session it started, `studio open` stops waiting and leaves the window, and `studio exec`'s Luau runs
+on in Studio.
 
 | Command | Does |
 |---|---|
@@ -132,7 +145,10 @@ bunx flamework-test studio close
 
 These need a testing experience and an Open Cloud key (see [Settings](#settings)). They run the
 server's sections only, because a Luau execution task has no client. The Luau that `cloud run`
-submits to run the tests is called the *shim*.
+submits to run the tests is called the *shim*. Ctrl+C cannot undo what reached Roblox: an upload it
+cuts short may still make a version (and `build/version.json` is not written), and a task already
+created runs on until it finishes or its timeout, since the Luau Execution API cannot cancel one;
+the run's last line names the task's path.
 
 | Command | Does |
 |---|---|
@@ -310,6 +326,8 @@ A run uses one task.
 | `MISS matched nothing in any realm: ...` | A `--sections` entry names no section or test in any realm that ran: a typo, or a section whose provider is not registered. |
 | `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started; the next line names the last test that reported, and the one after it in that section is the hanging one. |
 | `no Studio window has the testing place ... open` | Nothing has it open, or the window has "MCP server" disabled and so is not listed. |
+| Ctrl+C under `bun run` left Studio open and printed no `interrupted by Ctrl+C` line | The script runs the CLI's file with `bun` directly, and `bun run` ends that process at once; call the `flamework-test` bin. The next `test` of that file closes the window. |
+| After Ctrl+C the prompt came back at once, and the `interrupted by Ctrl+C` line came after it | Expected through the bin: its shim ends at once and the CLI cleans up after it. Run the CLI's file with `bun` to wait for it. |
 | `a cloud run needs "testing": { "entry": ... }` | The cloud needs the ModuleScript that ignites the game; Studio does not. |
 | `403 PERMISSION_DENIED` naming a scope | The key lacks that scope for this experience. |
 | `409 Conflict: Save failed. Server is busy` on publish | The place is open in Roblox Studio; `studio close` it and publish again. |
