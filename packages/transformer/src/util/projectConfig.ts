@@ -86,6 +86,15 @@ export interface SerializationChecksConfig {
 
 	/** The realm whose writes are checked: `both` (the default), `server` or `client`. */
 	side?: "both" | "server" | "client";
+
+	/**
+	 * Tests every value written to be of its declared kind first (a number, a string, a table, a
+	 * Vector3, one of a literal union's members...), whatever `category` says, so that a wrong one
+	 * raises naming where it is instead of a buffer error. Follows `mode` and `side`, but a value of the
+	 * wrong kind cannot be written, so `warn` raises too, except for a boolean, which is warned about
+	 * and written as whether it is truthy. Off (`false`) by default.
+	 */
+	types?: boolean;
 }
 
 /**

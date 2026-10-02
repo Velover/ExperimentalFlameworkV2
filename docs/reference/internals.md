@@ -1060,6 +1060,62 @@ number that gets there). A plain `number`, `f64` or catch-all member takes every
 such a union has no fallback. The fallback's message names each width once, so a strict width and
 its implicit twin read `u16`, not `u16 | u16`. With `category: "none"`, and for every strict width under the default,
 nothing is generated and the output is the same as before the checks existed.
+Type checks (`checks.types`, off by default) test each value's kind before anything reads it.
+`typeCheckIn` decides where: in the pass that reads the value first, which is the size pass for a
+variable-size layout (it reads a string with `#`, a varint with `vsize`, a table field by field)
+and the writes for a fixed-size one. A union member is written with `Place.tested` (its discriminant
+or guard found its kind, so its own test is left out; `within` drops the flag a step further in, and
+an object member's field that the discriminant compared, `Place.compared`, is not compared again),
+and the argument table a spread call gathers (`args`) is roblox-ts's own. `typeExpectation` gives
+the message's expected text (`number`, `table`, `Vector3`, `Enum.Material`, a literal union's
+members, a union's alias or its members as written) and `typeTest` the test: `typeIs` (`type()` for
+a primitive, `typeof()` for a datatype), `enumTest` (shared with `discriminate`), or `~=` for a
+lone literal. A blob is tested only when `typeof` names its type, which is when roblox-ts's
+`CheckableTypes` has it (`isTypeofName`), the names `typeIs` takes, and nil stays a blob's 0. A
+struct the Roblox API declares (`GroupInfo`) is a plain table no name can test, so `classify` gives
+it no `typeofName`: a blob that takes anything, as a nominal type is, tried last in a union. It
+used to keep its name, and a union with one (`GroupInfo | number`) emitted `typeIs(v,
+"GroupInfo")`, which roblox-ts refuses (TS2345), with the checks off too. `literalKey` prints an
+enum item, which `getLiteral` builds as `Enum["Material"]["Plastic"]`, as `Enum.Material.Plastic`.
+It used to fall through to `printLiteral`, which printed the node's kind, `#212`, for every item:
+in a check's message, in the union warning's name for a union without an alias, and in
+`primitiveFit`, which took any two items for the same literal, so members told apart by an item
+(`{ key: Enum.KeyCode.A; a?: number } | { key: Enum.KeyCode.B; b?: number }`) were warned about
+as members a value cannot tell apart, and could be tried in another order than written.
+`discriminantOf` still compares `printLiteral`'s text, under which every item is alike, so a key
+holding two or more enum items is never a union's discriminant (a lone item against literals of
+other kinds still is: `{ key: Enum.KeyCode.A } | { key: "b" }`): such members are told apart by a
+key of their own or by their guards, as before.
+`emitTypeCheck` judges a literal at build time, tests a plain local as it is, and reads anything
+else (a field, an element, a parameter) into a local in a `do` block of its own with its test:
+roblox-ts reads whatever else a macro such as `typeIs` takes into a temporary of the function's own,
+one more of Luau's 200 locals per value. A number is tested in `writeNumber`'s block, ahead of a
+width's range, whose comparisons would raise on a string, and a boolean in `writeTyped`'s own block
+with its write; a boolean literal is judged at build time like any literal (`true` passes, and an
+`undefined`, which a call can pass where `strictNullChecks` is off, calls the helper as it is); a
+literal union and a union in the branch that already raised when nothing matched
+(`codec.checkType(...)` ahead of the old `error`, which stays for the other realm); a variable-size
+union in the size pass's chain, as a final `else`. A union whose members are all
+tables and that tells one apart by a key without a table test (`v.kind == "a"`) tests `type(v) ==
+"table"` once in front (`tablePrecheck`), since indexing a number raises first. The helper,
+`codec.checkType(expected, value, where, show?)`, is defined once per file next to `checkWidth`: for
+a `side` other than `both` it asks the realm and returns `false` outside it, it builds `[Flamework]
+<expected> expected, got <typeof(value)>, at <where>` (`show`, for a literal or an enum, prints a
+string, number, boolean or EnumItem as itself), and raises at level 2; under `mode: "warn"` only
+`expected == "boolean"` warns and returns `true`, since nothing else of the wrong type can be
+written; a lone literal type, `true` included, has its literal as `expected` and raises. A hoisted
+type's `s_` takes `where` too when its own code tests a value (`Hoisted.sizeChecks`, from
+`hasTypeChecks(type, "size")`), and `hasChecks` counts the write pass's type checks for the `w_`;
+callers pass `passedWhere` to both. That `where` is one more of the function's locals, so a type at
+Luau's 200 without the checks (sixteen CFrames, twelve locals each, three Vector3s and a string)
+would no longer load with them: under type checks, `emitScopedWrite` puts the write of each object
+field and tuple element whose code declares a local in a `do` block of its own, so that the `w_`
+holds the locals of one value at a time. The size pass needs no such blocks: a type's `r_` holds at
+least as many locals as its `s_` with `where` (reading a value takes at least the locals measuring
+it does, and `r_` has two parameters), so a type whose `s_` the checks would push past the limit
+does not load without them either. With `types` off none of this is generated, and the output is
+byte for byte what it was before, but for the `GroupInfo` and `literalKey` fixes above, which apply
+either way.
 Receiving is untouched: a decoded value always fits its width, and an incoming guard for a branded
 number stays `t.number`. A branded buffer (`buffer16`, `buffer32`, strict or implicit) is guarded as
 a buffer, `t.typeof("buffer")`, as a branded primitive is guarded as the primitive
@@ -1116,7 +1172,7 @@ tuple's rest element. Before, the writes skipped a nil (`for _, item in array`) 
 refuses it in the pass that reaches the elements first (`elementAt`): the size pass when it walks
 them (a variable-size element, where measuring a nil would raise first), otherwise the writes
 (`holeInWrite`), with the path a width check would give (`Place`, which `emitSize` carries too)
-and the index joined in when it raises. A hoisted `s_` takes no `where`, so a hole its size pass
+and the index joined in when it raises. A hoisted `s_` takes no `where` unless type checks are on, so a hole its size pass
 finds starts from the type's name even where the type's `w_` checks start from the caller's `where`. Nothing in `serialization.checks` changes that: a hole has
 nothing to be written as. `listOf` makes an array type, which is what `Parameters<F>` is for an
 array rest parameter, a list of nothing but its rest, as the tuple guards already did

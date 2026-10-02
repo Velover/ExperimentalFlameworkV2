@@ -60,6 +60,16 @@ import { isArrayType, isTupleType } from "./isTupleType";
  * warns with the width, the value and where it is (`Entity.id`, `'move' [2].pos`), and which also
  * decides the realm, so that a shared module checks only where `side` says. With `category: "all"`
  * the required brands are checked too, and with `"none"` nothing is generated.
+ *
+ * Type checks (`serialization.checks.types`, off by default): each value is tested to be of its kind
+ * before anything reads it (`type(v) == "number"`, `typeof(v) == "Vector3"`, a table for an object or
+ * a collection, a literal's or an enum's members), in the pass that reaches it first: the size pass
+ * for a value whose size varies, which it reads to measure, the writes for the others. A value that
+ * fails calls the file's `checkType`, which raises with what was expected, what came and where
+ * (`[Flamework] number expected, got string, at 'move' [0].pos.x`), in either `mode`, but for a
+ * boolean, which `warn` lets through to be written as whether it is truthy; `side` decides the realm
+ * as it does for the widths. A union member is written only once its test found its kind, so only the
+ * values inside it are tested again. Off, nothing is generated.
  */
 
 type Width = "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "f32" | "f64";
@@ -194,6 +204,13 @@ type ListKind = Extract<Kind, { kind: "list" }>;
 type UnionKind = Extract<Kind, { kind: "union" }>;
 type ObjectKind = Extract<Kind, { kind: "object" }>;
 
+/**
+ * Kinds whose type check (`checks.types`) goes ahead of the code that writes them. A number and a
+ * boolean are tested in a block with their write, a literal union and a union where they find no
+ * member, a blob once it is not nil.
+ */
+const TESTED_AHEAD = new Set<Kind["kind"]>(["constant", "datatype", "cframe", "enum", "list", "object"]);
+
 /** Kinds whose values are Luau tables, which can be indexed without a `typeof` check first. */
 const TABLE_KINDS = new Set<Kind["kind"]>(["object", "map", "array", "set", "list"]);
 
@@ -298,6 +315,13 @@ interface Place {
 	owner?: string;
 	/** The value is a call's whole argument list (a spread made its length unknown): its elements are `[i]`. */
 	args?: boolean;
+	/**
+	 * A union's test has already found the value's kind (`type(v) == "number"`, a guard), so its own type
+	 * check is not generated again; the values inside it are still checked. Gone a step further in.
+	 */
+	tested?: boolean;
+	/** On a union's object member: the field its discriminant compared (see `discriminantField`). */
+	compared?: string;
 }
 
 interface Ctx extends Place {
@@ -318,6 +342,8 @@ interface Checks {
 	category: "implicit" | "all" | "none";
 	mode: "assert" | "warn";
 	side: "both" | "server" | "client";
+	/** Whether every value written is tested to be of its kind first (see `typeCheckIn`). */
+	types: boolean;
 }
 
 /** Where a call site's values go: the member it sends through, and whether the value is a function's result. */
@@ -337,6 +363,8 @@ interface Hoisted {
 	 * last argument (`where`), which starts the paths of the checks inside; see {@link Ctx.where}.
 	 */
 	checks: boolean;
+	/** Whether its size pass can fail a type check (`checks.types`): its `s_` then takes `where` too. */
+	sizeChecks: boolean;
 }
 
 type HoistedRole = "s" | "w" | "r";
@@ -689,6 +717,7 @@ function checkSettings(state: TransformState): Checks {
 		category: checks?.category ?? "implicit",
 		mode: checks?.mode ?? "assert",
 		side: checks?.side ?? "both",
+		types: checks?.types ?? false,
 	};
 }
 
@@ -751,6 +780,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	const checks = checkSettings(state);
 	/** Whether the helper is in the file's table yet. */
 	let checkFunction = false;
+	/** Whether the type checks' helper is in the file's table yet; see `typeCheckHelper`. */
+	let typeCheckFunction = false;
+	/** roblox-ts's `CheckableTypes`, once looked up (`null` when the project has none); see `isTypeofName`. */
+	let checkableTypes: ts.Type | null | undefined;
 
 	/**
 	 * Parameters of the generated functions. roblox-ts copies a parameter into a temporary wherever one
@@ -1477,8 +1510,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		}
 
 		// The rest of the Roblox API (EnumItem, Font, RBXScriptSignal, ...) and anything nominal has no
-		// structure a plain table could stand in for; a global's name is also what `typeof` reports.
-		if (isRobloxType(symbol)) return { kind: "blob", typeofName: global ? symbol.name : undefined };
+		// structure a plain table could stand in for; a global's name is also what `typeof` reports, when
+		// `typeIs` takes it (see `isTypeofName`). A struct the API declares (`GroupInfo`) is a plain table
+		// at runtime, which no name tests: it takes anything, as a nominal type does.
+		if (isRobloxType(symbol)) {
+			return { kind: "blob", typeofName: global && isTypeofName(symbol.name) ? symbol.name : undefined };
+		}
 		if (hasNominalMarker(type)) return { kind: "blob" };
 
 		// A class instance is more than its fields; it travels as a reference.
@@ -2027,7 +2064,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		for (let suffix = 1; hoistedNames.has(unique); suffix++) unique = `${name}_${suffix}`;
 		hoistedNames.add(unique);
 
-		const info: Hoisted = { name: unique, layout, checks: hasChecks(type) };
+		const info: Hoisted = {
+			name: unique,
+			layout,
+			checks: hasChecks(type),
+			sizeChecks: hasTypeChecks(type, "size"),
+		};
 		hoisted.set(type, info);
 
 		// The functions are looked up in the table when called, which is what lets a type refer to
@@ -2052,14 +2094,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		const value = parameter("v");
 		const sizeBody = new Array<ts.Statement>();
-		const size = emitSize(kind, value, sizeBody, { path: "", owner: displayName(type) });
+		// With type checks, the size pass tests what it measures, from the `where` its caller passes.
+		const sizeWhere = info.sizeChecks ? uid("where") : undefined;
+		const size = emitSize(kind, value, sizeBody, { path: "", owner: displayName(type), where: sizeWhere });
 		sizeBody.push(f.returnStatement(size));
-		definitions.push(
-			assign(
-				hoistedField(info, "s"),
-				f.arrowFunction(f.block(sizeBody), [f.parameterDeclaration(value, T.unknown())]),
-			),
-		);
+		const sizeParameters = [f.parameterDeclaration(value, T.unknown())];
+		if (sizeWhere) sizeParameters.push(f.parameterDeclaration(sizeWhere, T.string()));
+		definitions.push(assign(hoistedField(info, "s"), f.arrowFunction(f.block(sizeBody), sizeParameters)));
 
 		const buf = uid("buf");
 		const o = uid("o");
@@ -2134,10 +2175,11 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	/** A call of a hoisted function, typed as it is so the call's result has the right type. */
 	function callHoisted(info: Hoisted, role: HoistedRole, args: ts.Expression[]): ts.Expression {
 		const blobs: Array<[string, ts.TypeNode]> = info.layout.blobs ? [["blobs", T.blobs()]] : [];
-		const where: Array<[string, ts.TypeNode]> = role === "w" && info.checks ? [["where", T.string()]] : [];
+		const where: Array<[string, ts.TypeNode]> =
+			(role === "w" && info.checks) || (role === "s" && info.sizeChecks) ? [["where", T.string()]] : [];
 		const type =
 			role === "s"
-				? T.fn([["v", T.unknown()]], T.number())
+				? T.fn([["v", T.unknown()], ...where], T.number())
 				: role === "w"
 					? T.fn([["buf", T.buffer()], ["o", T.number()], ["v", T.unknown()], ...blobs, ...where], T.number())
 					: T.fn([["buf", T.buffer()], ["o", T.number()], ...blobs], T.tuple([T.unknown(), T.number()]));
@@ -2589,9 +2631,328 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 * starts from that type's name (`Entity.tags`) rather than from the caller's `where`, which would
 	 * join two strings on every call.
 	 */
-	function passedWhere(ctx: Ctx): ts.Expression {
+	function passedWhere(ctx: Place): ts.Expression {
 		if (ctx.owner !== undefined) return f.string(`${ctx.owner}${ctx.path ?? ""}`);
 		return whereOf(ctx);
+	}
+
+	// --- type checks ---------------------------------------------------------------------------------
+
+	/**
+	 * The kind of a value whose type is tested in this pass, or `undefined`: type checks are off, the
+	 * kind has no test (an optional, which takes nil and tests what else it holds; `undefined`; a blob
+	 * that takes anything), a union's test found the value's kind already, the value is the argument
+	 * list a call spread into a table, or the other pass reaches the value first. The size pass reads
+	 * every value whose size varies to measure it (`#text`, `vsize(n)`, an object's fields) before
+	 * anything is written, so that is where such a value is tested; one of a fixed size is only read
+	 * by the writes.
+	 */
+	function typeCheckIn(shape: Shape, pass: "size" | "write", place: Place): Kind | undefined {
+		if (!checks.types || place.tested || place.args) return;
+		if ((layoutOf(shape).size !== undefined) !== (pass === "write")) return;
+		const kind = describe(shape);
+		return typeExpectation(kind) !== undefined ? kind : undefined;
+	}
+
+	/**
+	 * What a value of `kind` has to be, as a type check's message says it, and whether the message shows
+	 * a value that is not that as itself (`"c"`, `Enum.KeyCode.A`) rather than as its type: for a literal
+	 * or an enum, whose wrong values are mostly of the right type. `undefined` for a kind with no test.
+	 * A blob is tested only where `typeof` names its type (an Instance, an EnumItem, a Font); the other
+	 * blobs take anything.
+	 */
+	function typeExpectation(kind: Kind): { expected: string; show?: boolean } | undefined {
+		switch (kind.kind) {
+			case "number":
+			case "varint":
+				return { expected: "number" };
+			case "string":
+			case "boolean":
+			case "buffer":
+				return { expected: kind.kind };
+			case "datatype":
+				return { expected: kind.name };
+			case "cframe":
+				return { expected: "CFrame" };
+			case "enum":
+				return { expected: `Enum.${kind.name}`, show: true };
+			case "constant":
+				return { expected: literalKey(kind.value), show: true };
+			case "literals":
+				return {
+					expected: kind.values.map(literalKey).join(" | "),
+					show: true,
+				};
+			case "blob":
+				return kind.typeofName !== undefined ? { expected: kind.typeofName } : undefined;
+			case "array":
+			case "set":
+			case "map":
+			case "list":
+			case "object":
+				return { expected: "table" };
+			case "union":
+				return { expected: unionText(kind) };
+			default:
+				return undefined;
+		}
+	}
+
+	/**
+	 * Whether `typeof` names the values of a Roblox API type, so that a union's member test and a type
+	 * check can test a blob of it: one of roblox-ts's `CheckableTypes` (an Instance, an EnumItem, a
+	 * Font, a TweenInfo...), which is also what `typeIs` takes. Another type the API declares
+	 * (`GroupInfo`, a struct some method returns) is a plain table no name can test, which `classify`
+	 * makes a blob that takes anything, as a nominal type is. A project without `CheckableTypes`
+	 * trusts the name.
+	 */
+	function isTypeofName(name: string): boolean {
+		if (name === "Instance") return true;
+		if (checkableTypes === undefined) {
+			const symbol = resolve("CheckableTypes");
+			checkableTypes = symbol ? typeChecker.getDeclaredTypeOfSymbol(symbol) : null;
+		}
+
+		return checkableTypes === null || checkableTypes.getProperty(name) !== undefined;
+	}
+
+	/** A union as a type check's message names it: its alias, or its members in the order written. */
+	function unionText(union: UnionKind): string {
+		if (union.type?.aliasSymbol) return typeChecker.typeToString(union.type);
+		return union.alternatives.map((alternative) => alternativeName(alternative)).join(" | ");
+	}
+
+	/**
+	 * The test a value of `kind` passes, which `value` may be handed to a macro in: never a parameter
+	 * (see {@link emitTypeCheck}). Literals and unions have tests of their own, where they are written.
+	 */
+	function typeTest(kind: Kind, value: ts.Expression): ts.Expression {
+		switch (kind.kind) {
+			case "number":
+			case "varint":
+				return typeOfIs(value, "number");
+			case "string":
+			case "boolean":
+			case "buffer":
+				return typeOfIs(value, kind.kind);
+			case "datatype":
+				return typeOfIs(value, kind.name);
+			case "cframe":
+				return typeOfIs(value, "CFrame");
+			case "enum":
+				return enumTest(kind.name, value);
+			case "constant":
+				return equals(cast(value, T.unknown()), checkGlobalsIn(kind.value));
+			case "blob":
+				return typeOfIs(value, kind.typeofName!);
+			default:
+				return typeOfIs(value, "table");
+		}
+	}
+
+	/** `typeof(v) == "EnumItem" and v.EnumType == Enum.<name>`. */
+	function enumTest(name: string, value: ts.Expression): ts.Expression {
+		return f.binary(
+			typeOfIs(value, "EnumItem"),
+			ts.SyntaxKind.AmpersandAmpersandToken,
+			equals(prop(cast(value, T.enumItem()), "EnumType"), prop(globalRef("Enum"), name)),
+		);
+	}
+
+	/** The negation of a test: `a ~= b` for a comparison, `not (...)` otherwise. */
+	function failed(test: ts.Expression): ts.Expression {
+		if (ts.isBinaryExpression(test) && test.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken) {
+			return f.binary(test.left, ts.SyntaxKind.ExclamationEqualsEqualsToken, test.right);
+		}
+
+		return factory.createPrefixUnaryExpression(
+			ts.SyntaxKind.ExclamationToken,
+			factory.createParenthesizedExpression(test),
+		);
+	}
+
+	/** `codec.checkType(expected, value, <where>[, true])`: the call a failed type check makes. */
+	function callTypeCheck(kind: Kind, value: ts.Expression, place: Place): ts.Expression {
+		const { expected, show } = typeExpectation(kind)!;
+		const args = [f.string(expected), value, whereOf(place)];
+		if (show) args.push(f.bool(true));
+		return f.call(typeCheckHelper(), args);
+	}
+
+	/** `if not <test> then codec.checkType(...) end`. */
+	function typeCheckStatement(kind: Kind, value: ts.Expression, place: Place): ts.Statement {
+		return ifStatement(failed(typeTest(kind, value)), [f.statement(callTypeCheck(kind, value, place))]);
+	}
+
+	/**
+	 * Tests `value` ahead of the code that reads it. A literal is judged when building: one of the right
+	 * kind needs no test, and one of another calls the helper as it is. A comparison (a lone literal's)
+	 * reads the value as it is, and so does a macro (`typeIs`) a plain local; anything else roblox-ts
+	 * reads into a temporary of its own for the macro, a parameter included (see {@link parameters}),
+	 * which would be one more local of the function the code lands in (Luau allows 200). It is read into
+	 * a local in a block of its own instead, with its test, as `writeNumber` reads a checked number.
+	 */
+	function emitTypeCheck(kind: Kind, value: ts.Expression, out: ts.Statement[], place: Place) {
+		const literal = literalType(value);
+		if (literal !== undefined) {
+			if (!literalPasses(kind, value, literal)) out.push(f.statement(callTypeCheck(kind, value, place)));
+			return;
+		}
+
+		if (kind.kind === "constant" || (f.is.identifier(value) && !isParameterReference(value))) {
+			out.push(typeCheckStatement(kind, value, place));
+			return;
+		}
+
+		const v = uid("v");
+		if (typed.has(value)) typed.add(v);
+		out.push(f.block([constDecl(v, value), typeCheckStatement(kind, v, place)]));
+	}
+
+	/**
+	 * The field of a union's object member that the union's discriminant compared to the member's literal
+	 * (`v.kind == "circle"`), which the member's write then does not test again.
+	 */
+	function discriminantField(union: UnionKind, index: number): string | undefined {
+		const kind = describe(union.alternatives[index].shape);
+		if (kind.kind !== "object" || evaluation(union).tableOnly === index) return;
+		const key = objectKey(union, kind);
+		return key?.value !== undefined ? key.name : undefined;
+	}
+
+	/** What `type` says about a literal expression (`7`, `-1`, `"a"`, `true`, `undefined`), if it is one. */
+	function literalType(expression: ts.Expression): string | undefined {
+		if (literalNumber(expression) !== undefined) return "number";
+		if (f.is.string(expression)) return "string";
+		if (expression.kind === ts.SyntaxKind.TrueKeyword || expression.kind === ts.SyntaxKind.FalseKeyword) {
+			return "boolean";
+		}
+		if (isNilLiteral(expression)) return "nil";
+	}
+
+	function literalPasses(kind: Kind, value: ts.Expression, type: string): boolean {
+		if (kind.kind === "constant") return type !== "nil" && printLiteral(value) === printLiteral(kind.value);
+		return (
+			type === primitiveType(kind) &&
+			(kind.kind === "number" || kind.kind === "varint" || kind.kind === "string" || kind.kind === "boolean")
+		);
+	}
+
+	/**
+	 * Under type checks, a union whose members are all tables and that tells one of them by a key
+	 * (`v.kind == "a"`, with no test that the value is a table first) tests that once, ahead of its
+	 * members: reading a key of a number or a boolean raises before the union could say what it wanted.
+	 */
+	function tablePrecheck(union: UnionKind, value: ts.Expression, out: ts.Statement[], place: Place) {
+		if (!union.alternatives.every((alternative) => TABLE_KINDS.has(describe(alternative.shape).kind))) return;
+
+		const { tableOnly } = evaluation(union);
+		const keyed = union.alternatives.some((alternative, index) => {
+			const kind = describe(alternative.shape);
+			return kind.kind === "object" && index !== tableOnly && objectKey(union, kind) !== undefined;
+		});
+		if (!keyed) return;
+
+		out.push(ifStatement(failed(typeOfIs(value, "table")), [f.statement(callTypeCheck(union, value, place))]));
+	}
+
+	/**
+	 * The file's helper for a value of the wrong type, defined once like `checkWidth`:
+	 * `codec.checkType(expected, value, where, show?)`. It builds the message, `[Flamework] number
+	 * expected, got string, at 'move' [0].pos.x` (with `show`, the value itself: `got "c"`), and raises:
+	 * a value of the wrong type cannot be written, so `warn` raises too, but for a boolean (`expected`
+	 * is `"boolean"`), which it warns about and lets through to be written as whether it is truthy.
+	 * Under a `side` other than `both` it first asks the realm and returns `false` outside it, leaving
+	 * the value to be written unchecked, as with the type checks off.
+	 */
+	function typeCheckHelper(): ts.Expression {
+		const helper = prop(hoistedTable(), "checkType");
+		if (!typeCheckFunction) {
+			typeCheckFunction = true;
+			atFileLevel(() => buildTypeCheckHelper(helper));
+		}
+
+		const parameter = (name: string, type: ts.TypeNode, optional = false) =>
+			f.parameterDeclaration(name, type, undefined, optional);
+		return f.as(
+			helper,
+			f.functionType(
+				[
+					parameter("expected", T.string()),
+					parameter("value", T.unknown()),
+					parameter("where", T.string()),
+					parameter("show", f.keywordType(ts.SyntaxKind.BooleanKeyword), true),
+				],
+				f.keywordType(ts.SyntaxKind.BooleanKeyword),
+			),
+		);
+	}
+
+	function buildTypeCheckHelper(helper: ts.Expression) {
+		const expected = uid("expected");
+		const value = uid("value");
+		const where = uid("where");
+		const show = uid("show");
+		const got = uid("got");
+		const message = uid("message");
+
+		const body = new Array<ts.Statement>();
+		if (checks.side !== "both") {
+			const runService = f.call(prop("game", "GetService"), [f.string("RunService")]);
+			const inRealm = f.call(prop(runService, checks.side === "server" ? "IsServer" : "IsClient"), []);
+			body.push(
+				ifStatement(factory.createPrefixUnaryExpression(ts.SyntaxKind.ExclamationToken, inRealm), [
+					f.returnStatement(f.bool(false)),
+				]),
+			);
+		}
+
+		// What came: its type, or with `show`, a string, number, boolean or EnumItem as itself.
+		const is = (name: string) => equals(got, f.string(name));
+		const or = (left: ts.Expression, right: ts.Expression) => f.binary(left, ts.SyntaxKind.BarBarToken, right);
+		body.push(letDecl(got, f.call(globalRef("typeOf"), [value]), T.string()));
+		body.push(
+			ifStatement(show, [
+				ifStatement(
+					is("string"),
+					[assign(got, interpolate(['"', value, '"']))],
+					ifStatement(or(or(is("number"), is("boolean")), is("EnumItem")), [
+						assign(got, interpolate(["", value])),
+					]),
+				),
+			]),
+		);
+
+		body.push(constDecl(message, interpolate(["[Flamework] ", expected, " expected, got ", got, ", at ", where])));
+
+		if (checks.mode === "warn") {
+			body.push(
+				ifStatement(equals(expected, f.string("boolean")), [
+					f.statement(f.call(globalRef("warn"), [message])),
+					f.returnStatement(f.bool(true)),
+				]),
+			);
+		}
+
+		// Level 2: the message points at the write that called this.
+		body.push(f.statement(f.call(globalRef("error"), [message, num(2)])));
+
+		tables.push(
+			assign(
+				helper,
+				f.arrowFunction(
+					f.block(body),
+					[
+						f.parameterDeclaration(expected, T.string()),
+						f.parameterDeclaration(value, T.unknown()),
+						f.parameterDeclaration(where, T.string()),
+						f.parameterDeclaration(show, f.keywordType(ts.SyntaxKind.BooleanKeyword), undefined, true),
+					],
+					undefined,
+					f.keywordType(ts.SyntaxKind.BooleanKeyword),
+				),
+			),
+		);
 	}
 
 	/**
@@ -2642,7 +3003,55 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			}
 		};
 
-		return walk(root);
+		return walk(root) || hasTypeChecks(root, "write");
+	}
+
+	/**
+	 * Whether a shape's own code tests the type of some value in the pass named (see {@link typeCheckIn}):
+	 * not inside a named type, which is always hoisted and tests in its own functions, and not a union
+	 * member's own kind, which the union's test found, though the values inside the member are tested.
+	 */
+	function hasTypeChecks(root: Shape, pass: "size" | "write"): boolean {
+		if (!checks.types) return false;
+
+		const seen = new Set<Shape>();
+		const seenTested = new Set<Shape>();
+		const walk = (shape: Shape, tested: boolean): boolean => {
+			const visited = tested ? seenTested : seen;
+			if (visited.has(shape)) return false;
+			visited.add(shape);
+			if (shape !== root && !isKind(shape) && alwaysHoisted(shape)) return false;
+
+			const kind = describe(shape);
+			if (!tested && typeExpectation(kind) !== undefined) {
+				const fixed = layoutOf(shape).size !== undefined;
+				if (fixed === (pass === "write")) return true;
+			}
+
+			switch (kind.kind) {
+				case "optional":
+					return walk(kind.inner, tested);
+				case "array":
+				case "set":
+					return walk(kind.element, false);
+				case "map":
+					return walk(kind.key, false) || walk(kind.value, false);
+				case "list":
+					return (
+						kind.elements.some((element) => walk(element, false)) ||
+						(kind.rest !== undefined && walk(kind.rest, false)) ||
+						(kind.after ?? []).some((element) => walk(element, false))
+					);
+				case "object":
+					return kind.fields.some((field) => walk(field.shape, false));
+				case "union":
+					return kind.alternatives.some((alternative) => walk(alternative.shape, true));
+				default:
+					return false;
+			}
+		};
+
+		return walk(root, false);
 	}
 
 	/** A variable-size named object, union or tuple, which {@link hoist} always hoists wherever it is reached. */
@@ -2655,7 +3064,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	/** A place one step further into the value: a field (`.pos`), an element (`[]`), or a new root. */
 	function within<P extends Place>(place: P, segment: string, root = false): P {
-		return { ...place, path: root ? segment : `${place.path ?? ""}${segment}`, args: undefined };
+		return {
+			...place,
+			path: root ? segment : `${place.path ?? ""}${segment}`,
+			args: undefined,
+			tested: undefined,
+			compared: undefined,
+		};
 	}
 
 	/** A field as a path segment: `.pos`, or `["two words"]` for a name that is not an identifier. */
@@ -2693,23 +3108,45 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	function writeNumber(kind: Kind, value: ts.Expression, ctx: Ctx, write: (n: ts.Expression, ctx: Ctx) => void) {
 		const width = checkedWidth(kind, ctx);
 		const range = numberRange(kind);
-		if (width === undefined || range === undefined) return write(value, ctx);
+		// A type check (`checks.types`) goes first: a string must not reach the range's comparisons.
+		const typed = typeCheckIn(kind, "write", ctx) !== undefined;
+		const ranged = width !== undefined && range !== undefined;
+		if (!ranged && !typed) return write(value, ctx);
 
 		const known = literalNumber(value);
 		if (known !== undefined) {
-			if (!fitsStatically(known, range)) ctx.out.push(f.statement(callCheck(width, value, ctx)));
+			// A number literal is of the right type as it is built.
+			if (ranged && !fitsStatically(known, range)) ctx.out.push(f.statement(callCheck(width, value, ctx)));
 			return write(value, ctx);
 		}
 
 		const block: Ctx = { ...ctx, out: [] };
-		const n = f.is.identifier(value) ? value : bind(block.out, value, "n");
+		// `typeIs` would copy a parameter again (see `emitTypeCheck`), so the test reads a copy.
+		const n =
+			f.is.identifier(value) && !(typed && isParameterReference(value)) ? value : bind(block.out, value, "n");
 		const target = block.out.length > 0 ? block : ctx;
-		target.out.push(
-			ifStatement(failsRange(cast(n, T.number()), range), [
-				f.statement(callCheck(width, cast(n, T.number()), ctx)),
-			]),
-		);
+		if (typed) target.out.push(typeCheckStatement(kind, n, ctx));
+		if (ranged) {
+			target.out.push(
+				ifStatement(failsRange(cast(n, T.number()), range), [
+					f.statement(callCheck(width, cast(n, T.number()), ctx)),
+				]),
+			);
+		}
 		write(n, target);
+		if (target === block) ctx.out.push(f.block(block.out));
+	}
+
+	/**
+	 * Writes a boolean with `write`, tested first under type checks: read once, into a local in a block
+	 * of its own with its test and its write, as {@link writeNumber} reads a checked number.
+	 */
+	function writeTyped(kind: Kind, value: ts.Expression, ctx: Ctx, write: (v: ts.Expression, ctx: Ctx) => void) {
+		const block: Ctx = { ...ctx, out: [] };
+		const v = f.is.identifier(value) && !isParameterReference(value) ? value : bind(block.out, value, "v");
+		const target = block.out.length > 0 ? block : ctx;
+		target.out.push(typeCheckStatement(kind, v, ctx));
+		write(v, target);
 		if (target === block) ctx.out.push(f.block(block.out));
 	}
 
@@ -3006,10 +3443,15 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return kind.kind;
 	}
 
-	/** A literal as text, telling enum items apart too (`Enum.KeyCode.A`). */
+	/**
+	 * A literal as text, telling enum items apart too (`Enum.KeyCode.A`): `getLiteral` builds an item as
+	 * `Enum["KeyCode"]["A"]`, which would otherwise print as its syntax kind, the same for every item.
+	 */
 	function literalKey(expression: ts.Expression): string {
 		if (ts.isPropertyAccessExpression(expression))
 			return `${literalKey(expression.expression)}.${expression.name.text}`;
+		if (ts.isElementAccessExpression(expression) && f.is.string(expression.argumentExpression))
+			return `${literalKey(expression.expression)}.${expression.argumentExpression.text}`;
 		if (ts.isIdentifier(expression)) return expression.text;
 		return printLiteral(expression);
 	}
@@ -3447,10 +3889,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		if (!isKind(shape)) {
 			const info = hoist(shape);
-			if (info) return callHoisted(info, "s", [value]);
+			if (info) return callHoisted(info, "s", info.sizeChecks ? [value, passedWhere(place)] : [value]);
 		}
 
 		const kind = describe(shape);
+		// Measuring reads the value, so a value whose size varies has its type tested here (a union, in its chain).
+		const typed = typeCheckIn(shape, "size", place) !== undefined;
+		if (typed && kind.kind !== "union") emitTypeCheck(kind, value, out, place);
 		switch (kind.kind) {
 			case "string":
 				return sizeWithLength(out, kind.length, f.call(prop(cast(value, T.string()), "size"), []));
@@ -3568,18 +4013,24 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				const v = bind(out, value, "v");
 				const total = uid("size");
 				out.push(letDecl(total, num(1)));
+				if (typed) tablePrecheck(kind, v, out, place);
 
-				let chain: ts.Statement | undefined;
+				// A value no member takes is the type check's, which this pass reaches first.
+				let chain: ts.Statement | undefined = typed
+					? f.block([f.statement(callTypeCheck(kind, v, place))])
+					: undefined;
+				// A member's test found its kind: what is inside it is still tested.
+				const member = { ...place, tested: true };
 				// Room for a number no member takes, which `warn` writes as the fallback member.
 				const fallback = numericFallback(kind);
 				if (fallback) {
-					const member = kind.alternatives[fallback.index].shape;
-					const memberSize = layoutOf(member).size;
+					const shape = kind.alternatives[fallback.index].shape;
+					const memberSize = layoutOf(shape).size;
 					const body = new Array<ts.Statement>();
 					body.push(
-						addAssign(total, memberSize !== undefined ? num(memberSize) : emitSize(member, v, body, place)),
+						addAssign(total, memberSize !== undefined ? num(memberSize) : emitSize(shape, v, body, member)),
 					);
-					chain = ifStatement(typeOfIs(v, "number"), body);
+					chain = ifStatement(typeOfIs(v, "number"), body, chain);
 				}
 
 				for (const i of [...evaluation(kind).order].reverse()) {
@@ -3595,7 +4046,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 								)
 							: layout.size !== undefined
 								? num(layout.size)
-								: emitSize(alternative.shape, v, body, place);
+								: emitSize(alternative.shape, v, body, member);
 					if (!(f.is.number(size) && size.text === "0")) body.push(addAssign(total, size));
 					if (body.length === 0 && chain === undefined) continue;
 					chain = ifStatement(discriminate(kind, i, v), body, chain);
@@ -3712,6 +4163,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		}
 
 		const kind = describe(shape);
+		// A value of a fixed size is first read here, so its type is tested here (see `typeCheckIn`):
+		// ahead of the write for these kinds, in their own code for the others.
+		const typed = typeCheckIn(shape, "write", ctx) !== undefined;
+		if (typed && TESTED_AHEAD.has(kind.kind)) emitTypeCheck(kind, value, ctx.out, ctx);
 		switch (kind.kind) {
 			case "number":
 				return writeNumber(kind, value, ctx, (n, target) => {
@@ -3722,15 +4177,25 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				});
 			case "varint":
 				return writeNumber(kind, value, ctx, (n, target) => writeVarint(target, cast(n, T.number())));
-			case "boolean":
+			case "boolean": {
 				// The value is the condition rather than `value === true`: an argument packed at its
 				// call site can be a literal, and `false === true` is a comparison TypeScript rejects
 				// when it checks the emitted code.
-				ctx.out.push(
-					f.statement(bufferCall("writeu8", [ctx.buf, at(ctx), conditional(value, num(1), num(0))])),
-				);
-				ctx.cursor.offset += 1;
-				return;
+				const write = (b: ts.Expression, target: Ctx) => {
+					target.out.push(
+						f.statement(bufferCall("writeu8", [target.buf, at(target), conditional(b, num(1), num(0))])),
+					);
+					target.cursor.offset += 1;
+				};
+				if (typed) {
+					if (literalType(value) === undefined) return writeTyped(kind, value, ctx, write);
+					// A literal is judged now: `true` needs no test, and `undefined` (which a call can pass
+					// where `strictNullChecks` is off) calls the helper as it is, as any other value of the
+					// wrong type would: it raises, or under `warn` warns and the value is written as false.
+					emitTypeCheck(kind, value, ctx.out, ctx);
+				}
+				return write(value, ctx);
+			}
 			case "string": {
 				const text = bind(ctx.out, cast(value, T.string()), "text");
 				const length = bind(ctx.out, f.call(prop(text, "size"), []), "length");
@@ -3754,7 +4219,11 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				const { index } = literalTablesFor(kind);
 				const v = bind(ctx.out, value, "v");
 				const slot = bind(ctx.out, f.call(prop(index, "get"), [cast(v, T.defined())]), "index");
-				ctx.out.push(ifStatement(isNil(slot), [raise("value is not one of the literals its type allows")]));
+				// No member found: the type check names it, the refusal stays behind it (`side`).
+				const refuse = raise("value is not one of the literals its type allows");
+				ctx.out.push(
+					ifStatement(isNil(slot), typed ? [f.statement(callTypeCheck(kind, v, ctx)), refuse] : [refuse]),
+				);
 				const width = kind.values.length > 0xff ? "u16" : "u8";
 				ctx.out.push(f.statement(bufferCall(`write${width}`, [ctx.buf, at(ctx), slot])));
 				ctx.cursor.offset += WIDTH_SIZE[width];
@@ -3763,15 +4232,16 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "blob": {
 				const blob = bind(ctx.out, value, "blob");
 				const blobs = ctx.blobs!;
+				// nil is a blob's 0 as it always was; anything else has to be of the type `typeof` names.
+				const present: ts.Statement[] = [
+					f.statement(f.call(prop(blobs, "push"), [cast(blob, T.defined())])),
+					f.statement(bufferCall("writeu32", [ctx.buf, at(ctx), f.call(prop(blobs, "size"), [])])),
+				];
+				if (typed) present.unshift(typeCheckStatement(kind, blob, ctx));
 				ctx.out.push(
-					ifStatement(
-						notNil(blob),
-						[
-							f.statement(f.call(prop(blobs, "push"), [cast(blob, T.defined())])),
-							f.statement(bufferCall("writeu32", [ctx.buf, at(ctx), f.call(prop(blobs, "size"), [])])),
-						],
-						[f.statement(bufferCall("writeu32", [ctx.buf, at(ctx), num(0)]))],
-					),
+					ifStatement(notNil(blob), present, [
+						f.statement(bufferCall("writeu32", [ctx.buf, at(ctx), num(0)])),
+					]),
 				);
 				ctx.cursor.offset += BLOB_SIZE;
 				return;
@@ -3866,7 +4336,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "list": {
 				const list = bind(ctx.out, cast(value, T.array()), "list");
 				kind.elements.forEach((element, index) => {
-					emitWrite(element, f.elementAccessExpression(list, num(index)), within(ctx, `[${index}]`));
+					emitScopedWrite(element, f.elementAccessExpression(list, num(index)), within(ctx, `[${index}]`));
 				});
 
 				if (kind.rest) {
@@ -3894,7 +4364,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 					after.forEach((shape, position) => {
 						const at = add(count, kind.elements.length + position);
-						emitWrite(shape, f.elementAccessExpression(list, at), within(ctx, "[]"));
+						emitScopedWrite(shape, f.elementAccessExpression(list, at), within(ctx, "[]"));
 					});
 				}
 				return;
@@ -3902,7 +4372,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "object": {
 				const object = bind(ctx.out, cast(value, T.record()), "object");
 				for (const field of kind.fields) {
-					emitWrite(field.shape, fieldAccess(object, field.name), within(ctx, fieldSegment(field.name)));
+					const place = within(ctx, fieldSegment(field.name));
+					// A union's discriminant has compared this one already.
+					const compared = field.name === ctx.compared ? { ...place, tested: true } : place;
+					emitScopedWrite(field.shape, fieldAccess(object, field.name), compared);
 				}
 				return;
 			}
@@ -3917,15 +4390,24 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				// element past what the size pass budgeted.
 				const isFixedLayout = ctx.cursor.variable === undefined;
 				const start = ctx.cursor.offset;
-				let chain: ts.Statement = f.block([raise("value matches none of the union's members")]);
+				// Under type checks a value no member takes is named by the check (a union whose size varies
+				// was measured first, which named it already), and the refusal stays behind it (`side`).
+				if (typed) tablePrecheck(kind, v, ctx.out, ctx);
+				const refuse = raise("value matches none of the union's members");
+				let chain: ts.Statement = f.block(
+					typed ? [f.statement(callTypeCheck(kind, v, ctx)), refuse] : [refuse],
+				);
 				const writeMember = (child: Ctx, i: number) => {
 					child.out.push(f.statement(bufferCall("writeu8", [child.buf, at(child), num(i)])));
 					child.cursor.offset += 1;
 					// A member with a range is only reached by a number its test found in range, or by
-					// the fallback below once its check has run: no check of its own.
+					// the fallback below once its check has run: no check of its own. Any member's test
+					// found its kind, so its own type is not tested again either (`tested`).
 					const shape = kind.alternatives[i].shape;
 					const ranged = numberRange(describe(shape)) !== undefined;
-					emitWrite(shape, v, ranged ? { ...child, unchecked: true } : child);
+					const compared = checks.types ? discriminantField(kind, i) : undefined;
+					const member: Ctx = { ...child, tested: true, compared };
+					emitWrite(shape, v, ranged ? { ...member, unchecked: true } : member);
 				};
 
 				// A number no member takes fails the check of the members with a range: raised, or
@@ -3971,6 +4453,24 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				return;
 			}
 		}
+	}
+
+	/**
+	 * A field's or a tuple element's write. Under type checks, code that declares a local goes in a `do`
+	 * block of its own, so that the function holds the locals of one value at a time: the `where` the
+	 * checks add to a hoisted `w_` is one more of the 200 locals Luau allows a function, and a type at
+	 * that limit without the checks (sixteen CFrames hold twelve each) would otherwise no longer load
+	 * with them. Off, the code is as it was. The size pass is left as it is: a type's `r_` holds at
+	 * least as many locals as its `s_` does with `where` (reading a value takes at least the locals
+	 * measuring it does, and `r_` has two parameters), so a type whose `s_` the checks would push past
+	 * the limit does not load without them either.
+	 */
+	function emitScopedWrite(shape: Shape, value: ts.Expression, place: Ctx) {
+		if (!checks.types) return emitWrite(shape, value, place);
+		const block: Ctx = { ...place, out: [] };
+		emitWrite(shape, value, block);
+		if (block.out.some((statement) => ts.isVariableStatement(statement))) place.out.push(f.block(block.out));
+		else place.out.push(...block.out);
 	}
 
 	/**
@@ -4077,11 +4577,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "cframe":
 				return typeOfIs(value, "CFrame");
 			case "enum":
-				return f.binary(
-					typeOfIs(value, "EnumItem"),
-					ts.SyntaxKind.AmpersandAmpersandToken,
-					equals(prop(cast(value, T.enumItem()), "EnumType"), prop(globalRef("Enum"), kind.name)),
-				);
+				return enumTest(kind.name, value);
 			case "literals":
 				return notNil(f.call(prop(literalTablesFor(kind).index, "get"), [cast(value, T.defined())]));
 			case "constant":

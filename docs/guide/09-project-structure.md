@@ -119,7 +119,7 @@ package has its own section in the file. The only entry `tsconfig.json` needs is
     "optimizations": { "guardGenerationDedupLimit": 5 },
     "plugins": []
   },
-  "serialization": { "checks": { "category": "implicit", "mode": "assert", "side": "both" } },
+  "serialization": { "checks": { "category": "implicit", "mode": "assert", "side": "both", "types": false } },
   "core": { "profiling": true },
   "networking": { "serialization": true },
   "components": { "warningTimeout": 5, "attributeWarningTimeout": 5, "streamingMode": "Contextual", "watchRenames": false },
@@ -134,7 +134,7 @@ package has its own section in the file. The only entry `tsconfig.json` needs is
 | | `idGenerationMode` | `"full"`, `"short"`, `"tiny"` or `"obfuscated"`. Defaults to `"obfuscated"` with obfuscation on, else `"full"`. Only shorten in a game. |
 | | `plugins` | Transformer plugins; see [transformer plugins](../reference/transformer-plugins.md). |
 | | `salt`, `noSemanticDiagnostics`, `optimizations` | Hash salt, skipping semantic diagnostics, [guard deduplication](#guard-deduplication). |
-| `serialization` | `checks`: `category`, `mode`, `side` | Checks on the values the generated code writes into a buffer (networking's and `Flamework.createSerializer`'s): which values (`Serialization.Implicit` widths by default, strict ones too, or none), whether one that does not fit raises or warns, and in which realm. Read when you build; see [Implicit widths and checks](06-networking.md#implicit-widths-and-checks). |
+| `serialization` | `checks`: `category`, `mode`, `side`, `types` | Checks on the values the generated code writes into a buffer (networking's and `Flamework.createSerializer`'s): which values (`Serialization.Implicit` widths by default, strict ones too, or none), whether one that does not fit raises or warns, in which realm, and whether every value's type is tested as well (`types`, off by default; see [Type checks](06-networking.md#type-checks)). Read when you build; see [Implicit widths and checks](06-networking.md#implicit-widths-and-checks). |
 | `core` | `profiling` | Default for `LifecyclePlugin` profiling; `createLifecyclePlugin({ profiling })` overrides it per module. |
 | `networking` | `serialization` | Serializes every event and function payload into a buffer with code generated at compile time; see [Networking](06-networking.md#serialization). |
 | `components` | `warningTimeout`, `attributeWarningTimeout`, `streamingMode`, `watchRenames` | Defaults for components that do not set their own. |

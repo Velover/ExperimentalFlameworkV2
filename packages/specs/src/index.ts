@@ -17,6 +17,7 @@ import scopes = require("./specs/scopes");
 import serialization = require("./specs/serialization");
 import serializedMembers = require("./specs/serializedMembers");
 import testing = require("./specs/testing");
+import typeChecks = require("./specs/typeChecks");
 import widthChecks = require("./specs/widthChecks");
 
 /**
@@ -39,6 +40,7 @@ export const suites: TestSuite[] = [
 	regressions,
 	serialization,
 	widthChecks,
+	typeChecks,
 	generatedCode,
 	testing,
 ];

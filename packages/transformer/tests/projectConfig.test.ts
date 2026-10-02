@@ -190,6 +190,34 @@ describe("reading flamework.config.json", () => {
 		remove("flamework.config.json");
 	});
 
+	test("accepts serialization.checks.types as a boolean, from the environment too, and refuses anything else", () => {
+		const file = write(
+			"flamework.config.json",
+			`{ "serialization": { "checks": { "types": true, "mode": "warn" } } }`,
+		);
+		expect(readProjectConfig(file)).toEqual({ serialization: { checks: { types: true, mode: "warn" } } });
+
+		write("flamework.config.json", `{ "serialization": { "checks": { "types": "${"${TYPES:-false}"}" } } }`);
+		expect(readProjectConfig(file, {})).toEqual({ serialization: { checks: { types: false } } });
+		expect(readProjectConfig(file, { TYPES: "true" })).toEqual({ serialization: { checks: { types: true } } });
+		expect(readProjectConfig(file, { TYPES: "1" })).toEqual({ serialization: { checks: { types: true } } });
+		expect(() => readProjectConfig(file, { TYPES: "sometimes" })).toThrow(
+			/\/serialization\/checks\/types.*not a boolean/,
+		);
+
+		write("flamework.config.json", `{ "serialization": { "checks": { "types": "yes" } } }`);
+		expect(() => readProjectConfig(file)).toThrow(/\/serialization\/checks\/types.*not a boolean/);
+
+		write("flamework.config.json", `{ "serialization": { "checks": { "types": 1 } } }`);
+		expect(() => readProjectConfig(file)).toThrow(/\/serialization\/checks\/types must be boolean/);
+
+		write("flamework.config.json", `{ "serialization": { "checks": { "type": true } } }`);
+		expect(() => readProjectConfig(file)).toThrow(
+			/\/serialization\/checks must NOT have additional properties 'type'/,
+		);
+		remove("flamework.config.json");
+	});
+
 	test("reports a parse error with the file name", () => {
 		const file = write("flamework.config.json", `{ "transformer": `);
 		expect(() => readProjectConfig(file)).toThrow(/Failed to parse .*flamework\.config\.json/);
@@ -351,6 +379,9 @@ describe("the watcher's fingerprint", () => {
 		expect(fingerprintProjectConfig(loadProjectConfig(root, root, {}, { FW_FP_MODE: "warn" }))).not.toBe(first);
 
 		write("flamework.config.json", `{ "serialization": { "checks": { "mode": "assert", "side": "server" } } }`);
+		expect(fingerprintProjectConfig(loadProjectConfig(root, root, {}, {}))).not.toBe(first);
+
+		write("flamework.config.json", `{ "serialization": { "checks": { "mode": "assert", "types": true } } }`);
 		expect(fingerprintProjectConfig(loadProjectConfig(root, root, {}, {}))).not.toBe(first);
 		remove("flamework.config.json");
 	});

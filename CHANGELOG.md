@@ -22,8 +22,25 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ### transformer
 
+#### Added
+
+- `serialization.checks.types` (off by default): every value written at a packed call site or by
+  `Flamework.createSerializer`'s `serialize` is tested to be of its declared type first. One that is
+  not raises `[Flamework] number expected, got string, at 'move' [0].pos.x` instead of the buffer
+  library's error with no field name; literals and enum items show the value
+  (`Enum.Material.Plastic expected, got Enum.Material.Wood`). It follows `mode` and `side`. Under
+  `"warn"` a wrong type still raises, except a value declared `boolean`, which is warned about and
+  written as whether it is truthy. With it on, each field's write gets a block of its own, so a
+  type at Luau's 200-local limit still loads. Off, the generated code is unchanged.
+
 #### Fixed
 
+- A union with a struct the Roblox API declares (`GroupInfo | number`) no longer fails the build
+  with TS2345 at `typeIs(v, "GroupInfo")`: the member takes any value, as the type does alone, and
+  is tried last.
+- Union members told apart by an enum item (`{ key: Enum.KeyCode.A; … } | { key: Enum.KeyCode.B; … }`)
+  are no longer warned about as members a value cannot tell apart, nor tried out of their written
+  order. The union warning names an item as `Enum.KeyCode.A`, not `#212`.
 - A literal empty list passed as a packed argument (`fire([])`, `invoke(player, [])`,
   `except([], [])`) no longer fails a strict build with TS7034/TS7005: it is bound as `never[]`,
   and so is an empty players list, which was bound with its parameter's type.

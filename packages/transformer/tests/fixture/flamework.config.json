@@ -11,7 +11,8 @@
 		"checks": {
 			"category": "${FLAMEWORK_FIXTURE_CHECKS:-implicit}",
 			"mode": "${FLAMEWORK_FIXTURE_CHECKS_MODE:-assert}",
-			"side": "${FLAMEWORK_FIXTURE_CHECKS_SIDE:-both}"
+			"side": "${FLAMEWORK_FIXTURE_CHECKS_SIDE:-both}",
+			"types": "${FLAMEWORK_FIXTURE_CHECKS_TYPES:-false}"
 		}
 	},
 	"networking": {

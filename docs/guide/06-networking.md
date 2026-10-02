@@ -343,7 +343,8 @@ exceptions:
   union spelled through another alias or a generic is warned again): a value that fits both may be
   sent as the first, without what only the other declares. A third member that takes such values
   whole can make the warning more cautious than needed.
-- A blob that takes anything, such as `unknown`, goes last.
+- A blob that takes anything, such as `unknown` or a struct the Roblox API declares (`GroupInfo`,
+  `UserInfo`), goes last.
 
 So `Partial<Crate> | None` sends a `None` as `None` whichever way round it is written. When the last
 member tried is an object or a collection without a test of its own, it is only checked to be a
@@ -468,7 +469,7 @@ The checks are set in `flamework.config.json`, in a section of their own, since
 
 ```jsonc
 "serialization": {
-  "checks": { "category": "implicit", "mode": "assert", "side": "both" }
+  "checks": { "category": "implicit", "mode": "assert", "side": "both", "types": false }
 }
 ```
 
@@ -477,6 +478,7 @@ The checks are set in `flamework.config.json`, in a section of their own, since
 | `category` | `"implicit"`: values typed with an implicit width. `"all"`: strict widths too. `"none"`: nothing, so an implicit value is written as a strict one is and wraps. | `"implicit"` |
 | `mode` | `"assert"`: raise, so nothing is sent. `"warn"`: warn with the same message, then write the value as it is, so 70000 as a `u16` arrives as 4464. | `"assert"` |
 | `side` | The realm whose writes are checked: `"server"`, `"client"` or `"both"`. A module both realms run is checked only where it runs in that realm. Elsewhere its values are written unchecked. | `"both"` |
+| `types` | `true`: test the type of every value written as well, whatever `category` says; see [Type checks](#type-checks). | `false` |
 
 A string or a buffer longer than its length prefix is refused in every case, strict widths included,
 as it always has been (`string is longer than its u8 length prefix allows`). The receiver would read
@@ -496,6 +498,62 @@ raises `value matches none of the union's members`, as it always has.
 The checks are compiled into the code that writes values, so change them with a plain build. A
 running watcher keeps the values it started with ([Watching](09-project-structure.md#watching)).
 
+### Type checks
+
+A value of the wrong type, such as a string in a `number` field after an `as any` somewhere, fails
+where it is written with the buffer library's own error, which does not say which value it was:
+
+```
+invalid argument #3 to 'writef64' (number expected, got string)
+```
+
+With `"types": true` under `serialization.checks`, every value is tested to be of its declared type
+before it is written. One that is not raises with what was expected, what came, and the path a width
+check gives, so nothing is sent:
+
+```
+[Flamework] number expected, got string, at 'move' [0].pos.x
+```
+
+| Declared type | Tested to be |
+|---|---|
+| `number` and every number width | a number (`type(v) == "number"`), ahead of the width's range |
+| `string`, `boolean`, `buffer` and their widths | that type |
+| an object, an array, a `Set`, a `Map`, a tuple | a table, and then each value in it |
+| `Vector3`, `CFrame` and the other datatypes with a layout | that datatype (`typeof(v)`) |
+| an enum (`Enum.Material`) | an EnumItem of that enum |
+| a literal or a union of literals (`"a" \| "b"`, `Enum.Material.Plastic`) | one of them, and the message shows the value: `"a" \| "b" expected, got "c"`, `Enum.Material.Plastic expected, got Enum.Material.Wood` |
+| an Instance, a bare `EnumItem`, a `Font`, the engine's other types that `typeof` names | that type, or nil, which is written as nil as always |
+| an optional | nil, or its type |
+| a union | one of its members: `number \| string expected, got boolean`, or with an alias, `Shape expected, got table` |
+| `unknown`, `any`, `object`, a class instance, a struct the Roblox API declares (`GroupInfo`, a plain table in the engine) | nothing: they take any value |
+
+`Flamework.createSerializer` tests the same way, and its paths start from `value` or the type's name
+(`Entity.name`). `category` does not apply: every value is tested, whatever its width. `side` does,
+as for the widths: in the other realm the values are still tested, but one of the wrong type raises
+nothing and is written as it would be without the checks. A value of the wrong type cannot be
+written, so `"warn"` raises all the same, with one exception: a value declared `boolean`, which is
+warned about and then written as whether it is truthy, as it is without the checks. A lone literal
+type (`true`, `"circle"`) is no exception: under `"warn"` it raises like the rest.
+
+A test is a `type` or `typeof` call and a comparison per value (an enum's reads its `EnumType` as
+well), one to three nanoseconds in Lune: a send of a list of ten `{ x, y }` costs about 13% more, one
+of an object of ten values about 5%. A literal union and a union cost nothing more, since they look
+their value up anyway and only name it once nothing matched, except that a union of tables told
+apart by a key (`kind`) first tests that its value is a table. A value whose size varies (a string, a
+buffer, a `varint`, a table) is tested while the payload is measured, the pass that reads it first;
+one of a fixed size where it is written. A union member is written only once the union's test found
+its type, so only the values inside it are tested again. A literal argument is judged when you
+build: a `3` for a number is not tested, while an `undefined` for a `boolean`, which a project
+without `strictNullChecks` can pass, fails as any value of the wrong type does. With the type checks
+on, a type with code of its own is also measured with where the value was sent, so its paths start
+there in both passes (`'move' [1].name`), and so does a hole that measuring finds (see below). Where
+it was sent takes one more of the 200 locals Luau allows a function, so with the checks on, the
+code that writes a field or a tuple element goes in a block of its own where it needs locals, and
+the function holds the locals of one at a time: a type that loads without the checks, even one at
+that limit, loads with them. Off, which is the default, nothing is generated: the code is the same
+as without the option.
+
 ### Payloads that cannot be decoded
 
 A payload that cannot be decoded (truncated, the wrong shape, or hostile) is dropped and reported
@@ -507,16 +565,19 @@ bytes, than the buffer could hold is refused before anything is allocated. Eleme
 bytes (a lone literal, `undefined`, an object of only literals) cannot be limited that way, so a
 payload may announce at most 65535 of them in total, however they are nested.
 
-Apart from the [width checks](#implicit-widths-and-checks), nothing checks a value before it is
-sent: it is written as its declared type says. Most values that do not match raise an error at the
+Apart from the [width checks](#implicit-widths-and-checks) and, when you turn them on, the
+[type checks](#type-checks), nothing checks a value before it is sent: it is written as its declared
+type says. Most values that do not match raise an error at the
 sender while they are written, such as a table where a number was declared, or a value that fits no
 member of a union. Some do not:
 
 - A string that Luau reads as a number (`"5"`, `"0x10"`) is written as that number. A checked
   width changes that for the integers: their check raises Luau's own `attempt to compare number <=
   string`. A `varint` raises `attempt to compare string < number` before its check, when it is
-  measured, and an `f32` takes the string as its number: it passes the check and is written.
-- A `boolean` is written as whether the value is truthy.
+  measured, and an `f32` takes the string as its number: it passes the check and is written. The
+  type checks refuse such a string: `number expected, got string`.
+- A `boolean` is written as whether the value is truthy. The type checks raise instead, or under
+  `"warn"` warn first.
 - An object is written field by field, so the fields its type does not declare are dropped. Any
   table fits an object whose fields are all optional.
 - The last member tried in a union may only be checked to be a table (see above). A table of the
@@ -541,9 +602,10 @@ The index counts from 0, and the path is the one a width check gives, except in 
 its own, where it starts from the type's name: `Holder.list[1]`, `(string[])[2]`. That holds even
 next to the type's own width checks, which start where the value was sent (`Tagged.names[1]` next
 to `'tagged' [0].id`): a hole among elements whose size varies is found while the payload is
-measured, and that pass is not told where the value was sent. Only in a type with width checks of
-its own does a hole among elements of a fixed size, which is found while writing, start where the
-value was sent, as the checks do: `'tagged' [0].list[1]`. A tuple's rest element is written the
+measured, and that pass is not told where the value was sent, unless the [type checks](#type-checks)
+are on: then it is, and such a hole starts there too. Only in a type with checks of its own (width
+checks, or type checks of values of a fixed size) does a hole among elements of a fixed size, which is
+found while writing, start where the value was sent, as the checks do: `'tagged' [0].list[1]`. A tuple's rest element is written the
 same way (`the tuple has no value at ...`, and `the argument list` for arguments spread into a rest
 parameter). Sets and maps have no holes: Luau keeps no nil in a table's
 keys or values. Luau's `#` is not reliable around a hole, though: it may count past it or stop at

@@ -1,4 +1,5 @@
 import { Flamework, Serialization } from "@flamework-experimental/core";
+import * as typeCodecs from "../typeChecks/codecs";
 
 /*
  * The encodings the width-check specs run under every `serialization.checks` configuration. This
@@ -7,6 +8,9 @@ import { Flamework, Serialization } from "@flamework-experimental/core";
  * its own; the Lune harness hands a variant's build out through `__harness.checkVariant(name)`.
  * Nothing here may depend on which build it is: the specs tell them apart.
  */
+
+/** The type-check specs' encodings, built along with these, as the harness reaches only this file. */
+export const types = typeCodecs;
 
 export interface Tagged {
 	readonly id: Serialization.Implicit.u16;

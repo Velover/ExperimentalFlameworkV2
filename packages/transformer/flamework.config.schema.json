@@ -80,7 +80,7 @@
 				"checks": {
 					"type": "object",
 					"additionalProperties": false,
-					"description": "Checks on a value as it is written, for the widths that can refuse one: u8, i8, u16, i16, u32 and i32 take whole numbers in their range, varint a whole number from 0 to 2^35 - 1, f32 any number but a finite one past its range, string8 and string16 at most 255 and 65535 bytes, buffer16 at most 65535 bytes. f64, string32 and buffer32 hold every value. Reading needs no check: a decoded value always fits its width. Default: checks on values typed with Serialization.Implicit.*, raising, in both realms.",
+					"description": "Checks on a value as it is written, for the widths that can refuse one: u8, i8, u16, i16, u32 and i32 take whole numbers in their range, varint a whole number from 0 to 2^35 - 1, f32 any number but a finite one past its range, string8 and string16 at most 255 and 65535 bytes, buffer16 at most 65535 bytes. f64, string32 and buffer32 hold every value. Reading needs no check: a decoded value always fits its width. With types, every value's type is tested as well. Default: checks on values typed with Serialization.Implicit.*, raising, in both realms, and no type tests.",
 					"properties": {
 						"category": {
 							"type": "string",
@@ -99,6 +99,11 @@
 							"enum": ["both", "server", "client"],
 							"description": "The realm whose writes are checked: \"server\", \"client\", or \"both\". Code shared by both realms is checked only where it runs in the realm named; elsewhere a value is written unchecked, as with \"none\". Default: \"both\".",
 							"default": "both"
+						},
+						"types": {
+							"type": "boolean",
+							"description": "Tests every value written to be of its declared type first, whatever category says: a number, a string, a boolean, a buffer, a table for an object, array, set, map or tuple, a Vector3 or another datatype, a member of a literal union or an enum, an Instance, and a member of a union. A value that is not raises naming what was expected, what came and where (\"[Flamework] number expected, got string, at 'move' [0].pos.x\") rather than a buffer error with no field name. A value of the wrong type cannot be written, so mode \"warn\" raises too, except for a boolean, which is warned about and written as whether it is truthy. side applies as for the widths. Costs a type test per value written. Default: false.",
+							"default": false
 						}
 					}
 				}
