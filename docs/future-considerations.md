@@ -186,6 +186,23 @@ raised at the same moment, for the same cause, and names the same two registrati
   transformer marks as generic), and update the Lune specs (packages/specs/src/specs/duplicateIds.ts)
   and the place cases (tests/place/src/server/Tests/duplicateIds.ts), which expect the sentence.
 
+## Small: `flamework-test` writes its results to a file
+
+**Today** a run's results only go to the terminal (asked for on 2026-10-02). The summary lists each
+section's counts, every failure with its message and every skip with its reason, then a total per
+realm, and the exit code says pass or fail. `--json` prints the whole result object instead: every
+test's status, duration, error and skip reason, about 430 tests for the place's two realms, which is
+long to read. Nothing is written to a file, so an agent or a CI job that wants one test's outcome
+redirects the output itself and greps it.
+
+**Idea:** `--results <file>` (and a setting next to `testing.failOnSkip`, read only by the CLI):
+print the summary as now, and also write the full result of every realm and project to the file as
+JSON, keyed by project and realm, so one test's status or error can be queried (`jq`, a grep, a
+script) without reading the whole output. A JUnit XML form (`--junit <file>`) is the same data for CI
+systems that show test reports. Decide whether the file is written on a failed or interrupted run
+too (it should be, with what ran), where it goes by default, and that it never lands in the Rojo
+tree or a place.
+
 ## Next: obfuscating networking separately from everything else
 
 **Today one switch does it all.** `"transformer": { "obfuscation": true }` turns on, together:
