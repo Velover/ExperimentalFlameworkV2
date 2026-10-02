@@ -3,6 +3,7 @@ import {
 	defer,
 	defineTests,
 	eventually,
+	expectArrayEqual,
 	expectDefined,
 	expectEqual,
 	expectResolves,
@@ -10,7 +11,16 @@ import {
 	test,
 } from "@flamework-experimental/testing";
 import { Workspace } from "@rbxts/services";
-import { describeItems, findPackingRemote, makeItems, PackingEvents, PackingFunctions } from "shared/Tests/packingSpec";
+import {
+	describeItems,
+	describeWhere,
+	findPackingFunctionRemote,
+	findPackingRemote,
+	makeItems,
+	PackingEvents,
+	PackingFunctions,
+} from "shared/Tests/packingSpec";
+import { countWire } from "shared/Tests/wireCount";
 
 type PackingClient = ReturnType<typeof PackingEvents.createClient>;
 type PackingClientFunctions = ReturnType<typeof PackingFunctions.createClient>;
@@ -26,12 +36,19 @@ export class PackingClientTests implements OnStart {
 		// Made on first use: the client handlers wait for the server's remotes.
 		let events: PackingClient | undefined;
 		let functions: PackingClientFunctions | undefined;
+
+		/** What `serializedFindClient` was asked, as `label@where`, for the case that has the server ask. */
+		const findClientSaw = new Array<string>();
 		const handlers = () => {
 			if (events === undefined) events = PackingEvents.createClient({});
 			if (functions === undefined) {
 				functions = PackingFunctions.createClient({});
 				functions.serializedAsk.setCallback((question) => makeItems(3, question));
 				functions.serializedEcho.setCallback((text) => `${text}?`);
+				functions.serializedFindClient.setCallback((label, where) => {
+					findClientSaw.push(describeWhere(label, where));
+					return where;
+				});
 			}
 			return { events, functions };
 		};
@@ -43,6 +60,29 @@ export class PackingClientTests implements OnStart {
 			const connection = remote.OnClientEvent.Connect((...args: unknown[]) => messages.push(args));
 			defer(() => connection.Disconnect());
 			return messages;
+		};
+
+		/**
+		 * How many arguments each message a remote delivers carried, as `select("#", ...)` counts them,
+		 * for the rest of the case. The remote is found by `id` among the events', else the functions'.
+		 */
+		const countOn = (id: string) => {
+			const remote = expectDefined(findPackingRemote(id) ?? findPackingFunctionRemote(id), `the '${id}' remote`);
+			const counts = new Array<number>();
+			const connection = countWire(remote.OnClientEvent, false, (count) => counts.push(count));
+			defer(() => connection.Disconnect());
+			return counts;
+		};
+
+		/** What the server reports of the messages this sends (`packingHeard`) whose entry starts with `kind:`. */
+		const heard = (kind: string) => {
+			const entries = new Array<string>();
+			const prefix = `${kind}:`;
+			const connection = handlers().events.packingHeard.connect((entry) => {
+				if (entry.sub(1, prefix.size()) === prefix) entries.push(entry);
+			});
+			defer(() => connection.Disconnect());
+			return entries;
 		};
 
 		defineTests("packing", () => {
@@ -157,6 +197,100 @@ export class PackingClientTests implements OnStart {
 					expectTrue(entry.sub(1, 16) === "serializedUp#-1:", `reported as malformed: ${entry}`);
 				}
 				expectEqual(answers.size(), 0, "nothing reached the handler");
+			});
+
+			// A packed message carries its blob list only when the list holds something: without an
+			// Instance the remote is handed the buffer alone, one argument fewer than with one, and
+			// never an empty table. Counted on each remote as the engine delivered it.
+
+			test("a serialized event carries a blob list to the server only with an Instance in it", () => {
+				const { events } = handlers();
+				const entries = heard("up");
+
+				events.serializedMaybeUp.fire("bare");
+				events.serializedMaybeUp.fire("placed", Workspace);
+				eventually(() => entries.size() >= 2, "the server's report");
+
+				expectArrayEqual(
+					entries,
+					["up:bare@none:1", "up:placed@Workspace:2"],
+					"what the server decoded, and the arguments its remote delivered",
+				);
+			});
+
+			test("a serialized event fired, broadcast or sent to all but some carries a blob list only with an Instance in it", () => {
+				const { events } = handlers();
+				const got = new Array<string>();
+				const connection = events.serializedMaybeDown.connect((label, where) =>
+					got.push(describeWhere(label, where)),
+				);
+				defer(() => connection.Disconnect());
+				const counts = countOn("serializedMaybeDown");
+
+				events.packingAsk.fire("maybeDown");
+				eventually(() => got.size() >= 6 && counts.size() >= 6, "the six messages");
+
+				expectArrayEqual(
+					got,
+					[
+						"fire@none",
+						"fire+@Workspace",
+						"broadcast@none",
+						"broadcast+@Workspace",
+						"except@none",
+						"except+@Workspace",
+					],
+					"what the handler decoded",
+				);
+				expectArrayEqual(counts, [1, 2, 1, 2, 1, 2], "arguments on the wire, message by message");
+			});
+
+			test("a serialized request to the server, and its result, carry a blob list only with an Instance in it", () => {
+				const { functions } = handlers();
+				const entries = heard("find");
+				const results = countOn("$serializedFind");
+
+				expectEqual(
+					expectResolves(functions.serializedFind.invoke("bare"), "a request without an Instance"),
+					undefined,
+					"the result without one",
+				);
+				expectEqual(
+					expectResolves(functions.serializedFind.invoke("placed", Workspace), "a request with one"),
+					Workspace,
+					"the result with one",
+				);
+				eventually(() => entries.size() >= 2, "the server's report");
+
+				// A request is `(id, payload, blobs?)`, a result `(id, true, payload, blobs?)`.
+				expectArrayEqual(
+					entries,
+					["find:bare@none:2", "find:placed@Workspace:3"],
+					"the requests: what the server decoded, and the arguments its remote delivered",
+				);
+				expectArrayEqual(results, [3, 4], "the results: arguments on the wire");
+			});
+
+			test("a serialized request from the server, and the client's result, carry a blob list only with an Instance in it", () => {
+				const { events } = handlers();
+				const entries = heard("findClient");
+				const requests = countOn("@serializedFindClient");
+				findClientSaw.clear();
+
+				events.packingAsk.fire("maybeInvokeClient");
+				eventually(() => entries.size() >= 2, "the server's report");
+
+				expectArrayEqual(
+					findClientSaw,
+					["bare@none", "placed@Workspace"],
+					"what the client's callback decoded",
+				);
+				expectArrayEqual(requests, [2, 3], "the requests: arguments on the wire");
+				expectArrayEqual(
+					entries,
+					["findClient:bare@none:3", "findClient:placed@Workspace:4"],
+					"the results: what the server decoded, and the arguments its remote delivered",
+				);
 			});
 		});
 	}

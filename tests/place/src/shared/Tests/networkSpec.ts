@@ -11,7 +11,7 @@ import { ReplicatedStorage } from "@rbxts/services";
 
 /** What a client may ask the server to send it, each answering a case of the suite. */
 export type SpecRequest =
-	"broadcast" | "list" | "except" | "tick" | "raw" | "malformed" | "late" | "listenLate" | "burst";
+	"broadcast" | "list" | "except" | "tick" | "raw" | "malformed" | "late" | "listenLate" | "burst" | "maybe";
 
 export interface SpecServerEvents {
 	setScore(score: number): void;
@@ -25,6 +25,12 @@ export interface SpecServerEvents {
 
 	/** Asks the server to send `value` back the way `request` names. */
 	ask(request: SpecRequest, value: number): void;
+
+	/**
+	 * Can carry an Instance or leave it out. With serialization on, the blob list goes on the wire
+	 * only when it holds something; off, the arguments travel as they are.
+	 */
+	maybe(label: string, where?: Instance): void;
 
 	/**
 	 * One anonymous union spelled two ways. TypeScript keeps a single type for both, and each side
@@ -69,6 +75,15 @@ export interface SpecClientEvents {
 
 	/** The server's answer to `sortA` and `sortB`: which event, and the value as it decoded it. */
 	sorted(entry: string): void;
+
+	/** `maybe` the other way, sent without an Instance and then with one when asked (`maybe`). */
+	maybeDown(label: string, where?: Instance): void;
+
+	/**
+	 * The server's answer to `maybe`: `label@where:count:type`, what it decoded, how many arguments
+	 * its remote delivered and the type of the first of them.
+	 */
+	maybeHeard(entry: string): void;
 
 	/** Sent when asked (`late`), before anything on the client listens to them. */
 	late(value: number): void;

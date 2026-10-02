@@ -10,8 +10,11 @@ import {
 	expectTrue,
 	test,
 } from "@flamework-experimental/testing";
+import { Workspace } from "@rbxts/services";
 import { carried, findSpecRemote, onWire, SERIALIZED, SpecEvents, SpecRequest, wire } from "shared/Tests/networkSpec";
+import { describeWhere } from "shared/Tests/packingSpec";
 import { signalsAreDeferred } from "shared/Tests/signalBehavior";
+import { countWire } from "shared/Tests/wireCount";
 
 type SpecClient = ReturnType<typeof SpecEvents.createClient>;
 
@@ -207,6 +210,44 @@ export class NetworkingClientTests implements OnStart {
 				eventually(() => answers.size() === 1, "the server's answer");
 
 				expectEqual(answers[0][1], 0, "arguments on the wire");
+			});
+
+			test("an event that can carry an Instance carries a blob list only with one in it, both ways", () => {
+				// Packed when the project serializes: the buffer alone without an Instance, and the
+				// buffer and the blob list with one, never an empty list. Off, the arguments as they are.
+				const first = SERIALIZED ? "buffer" : "string";
+
+				const reports = new Array<string>();
+				const reported = handler().maybeHeard.connect((entry) => reports.push(entry));
+				defer(() => reported.Disconnect());
+
+				const got = new Array<string>();
+				const received = handler().maybeDown.connect((label, where) => got.push(describeWhere(label, where)));
+				defer(() => received.Disconnect());
+
+				const remote = expectDefined(findSpecRemote("maybeDown"), "the 'maybeDown' remote");
+				const onWireDown = new Array<string>();
+				const counting = countWire(remote.OnClientEvent, false, (count, value) =>
+					onWireDown.push(`${count}:${typeOf(value)}`),
+				);
+				defer(() => counting.Disconnect());
+
+				handler().maybe.fire("bare");
+				handler().maybe.fire("placed", Workspace);
+				ask("maybe", 0);
+				eventually(() => reports.size() >= 2 && got.size() >= 2, "the server's report and its messages");
+
+				expectArrayEqual(
+					reports,
+					[`bare@none:1:${first}`, `placed@Workspace:2:${first}`],
+					"up: what the server decoded, the arguments its remote delivered, and the first one's type",
+				);
+				expectArrayEqual(got, ["bare@none", "placed@Workspace"], "down: what the handler decoded");
+				expectArrayEqual(
+					onWireDown,
+					[`1:${first}`, `2:${first}`],
+					"down: the arguments on the wire, and the first one's type",
+				);
 			});
 
 			test("leaves a raw event's arguments as they are", () => {

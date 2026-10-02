@@ -11,9 +11,11 @@ import {
 	scratch,
 	test,
 } from "@flamework-experimental/testing";
-import { Players, ReplicatedStorage, RunService } from "@rbxts/services";
+import { Players, ReplicatedStorage, RunService, Workspace } from "@rbxts/services";
 import { Events, Functions } from "server/Core/network";
 import { findSpecRemote, onWire, SpecEvents, wire } from "shared/Tests/networkSpec";
+import { describeWhere } from "shared/Tests/packingSpec";
+import { countWire } from "shared/Tests/wireCount";
 
 /**
  * Flamework's own published remotes: every one it creates carries the hashed `id` attribute it
@@ -99,6 +101,20 @@ export class NetworkingTests implements OnStart {
 			task.defer(() => server.bumped.fire(player, bumps, bumpArguments));
 		});
 
+		// What each `maybe` carried, counted on the remote as the engine delivered it, with the type
+		// of its first argument: a buffer when the project serializes, the label when it does not.
+		const maybeWire = new Array<string>();
+		const maybeRemote = findSpecRemote("maybe");
+		if (maybeRemote !== undefined) {
+			countWire(maybeRemote.OnServerEvent, true, (count, first) => maybeWire.push(`${count}:${typeOf(first)}`));
+		}
+		server.maybe.connect((player, label, where) => {
+			if (!fromPlayer(player)) return;
+			task.defer(() =>
+				server.maybeHeard.fire(player, `${describeWhere(label, where)}:${maybeWire.shift() ?? "none"}`),
+			);
+		});
+
 		// The reliable half of a pair the client sends together: the unreliable half is only listened
 		// to from here, through the handler and straight on the remote, and what each saw is reported.
 		const bursting = new Set<Player>();
@@ -145,6 +161,9 @@ export class NetworkingTests implements OnStart {
 				// number, then the value itself the proper way.
 				findSpecRemote("scoreChanged")?.FireClient(player, ...onWire(wire.text, "not a number"));
 				server.scoreChanged.fire(player, value);
+			} else if (request === "maybe") {
+				server.maybeDown.fire(player, "bare");
+				server.maybeDown.fire(player, "placed", Workspace);
 			} else if (request === "burst") {
 				server.burst.fire(player, value);
 				server.burstUnreliable.fire(player, value);

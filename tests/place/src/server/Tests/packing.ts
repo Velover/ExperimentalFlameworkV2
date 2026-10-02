@@ -1,6 +1,16 @@
 import { OnStart, Provider } from "@flamework-experimental/core";
 import { defineTests, expectDefined, test } from "@flamework-experimental/testing";
-import { describeItems, findPackingRemote, makeItems, PackingEvents, PackingFunctions } from "shared/Tests/packingSpec";
+import { Players, Workspace } from "@rbxts/services";
+import {
+	describeItems,
+	describeWhere,
+	findPackingFunctionRemote,
+	findPackingRemote,
+	makeItems,
+	PackingEvents,
+	PackingFunctions,
+} from "shared/Tests/packingSpec";
+import { countWire } from "shared/Tests/wireCount";
 
 /** Whether an event came from a player, rather than from `predict` with a stand-in. */
 function fromPlayer(player: Player): boolean {
@@ -43,6 +53,31 @@ export class PackingTests implements OnStart {
 		]);
 		functions.serializedNothing.setCallback(() => {});
 
+		// The blob-list cases: each message that can carry an Instance is counted on its remote, the
+		// way the engine delivered it, and reported to the client beside what the handler decoded.
+		// The report waits a step, so that the count of the message it answers has been taken.
+		const heard = (player: Player, entry: () => string) =>
+			task.defer(() => events.packingHeard.fire(player, entry()));
+		const counted = (remote: RemoteEvent | undefined) => {
+			const counts = new Array<number>();
+			if (remote !== undefined) countWire(remote.OnServerEvent, true, (count) => counts.push(count));
+			return () => counts.shift() ?? -1;
+		};
+
+		const maybeUpCount = counted(findPackingRemote("serializedMaybeUp"));
+		events.serializedMaybeUp.connect((player, label, where) => {
+			if (fromPlayer(player)) heard(player, () => `up:${describeWhere(label, where)}:${maybeUpCount()}`);
+		});
+
+		const findCount = counted(findPackingFunctionRemote("$serializedFind"));
+		functions.serializedFind.setCallback((player, label, where) => {
+			if (fromPlayer(player)) heard(player, () => `find:${describeWhere(label, where)}:${findCount()}`);
+			return where;
+		});
+
+		// The client's results come back on the client function's own remote.
+		const findClientCount = counted(findPackingFunctionRemote("@serializedFindClient"));
+
 		// What the decoders refused, per player, until the client asks for it.
 		const rejected = new Map<Player, string[]>();
 		PackingEvents.registerHandler("onBadRequest", (player, data) => {
@@ -71,6 +106,26 @@ export class PackingTests implements OnStart {
 					rejected.delete(player);
 					events.packingRejected.fire(player, entries);
 				});
+			} else if (request === "maybeDown") {
+				// Every way the server sends, each without an Instance and then with one. `except` is
+				// told to leave out every other player, so that it reaches the asker.
+				const others = Players.GetPlayers().filter((other) => other !== player);
+				events.serializedMaybeDown.fire(player, "fire");
+				events.serializedMaybeDown.fire(player, "fire+", Workspace);
+				events.serializedMaybeDown.broadcast("broadcast");
+				events.serializedMaybeDown.broadcast("broadcast+", Workspace);
+				events.serializedMaybeDown.except(others, "except");
+				events.serializedMaybeDown.except(others, "except+", Workspace);
+			} else if (request === "maybeInvokeClient") {
+				// One after the other, so that the result each report counts is its own.
+				const report = (label: string) => (found: Instance | undefined) =>
+					heard(player, () => `findClient:${describeWhere(label, found)}:${findClientCount()}`);
+				functions.serializedFindClient
+					.invoke(player, "bare")
+					.then(report("bare"))
+					.then(() => functions.serializedFindClient.invoke(player, "placed", Workspace))
+					.then(report("placed"))
+					.catch((reason) => heard(player, () => `findClient:rejected:${tostring(reason)}`));
 			}
 		});
 
