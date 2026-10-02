@@ -171,6 +171,15 @@ captured alongside. Yielding is expected -- `task.wait`, signals, `WaitForChild`
 MCP call only returns once the snippet has stopped yielding, which is what keeps the cases from
 overlapping.
 
+Studio runs every snippet sandboxed (since 2026-10-01), without the LoadUnownedAsset, ScriptGlobals,
+DataStore and Network capabilities. In a snippet `_G` and `shared` are nil, `require` of one of the
+place's ModuleScripts fails, and `DataStoreService` is not there; the place's own scripts are not
+affected. A snippet may only invoke or fire a bindable that is Sandboxed itself and has no
+capability the snippet lacks, which is why the test host's `Workspace.FlameworkTests` is (see
+[Running the tests](place.md#in-studio-on-this-machine)). `RunService:Run()` and a client snippet's
+`RemoteFunction:InvokeServer` still work. The runner's prelude and the cases here use none of what
+is gone (all of them ran sandboxed on 2026-10-02).
+
 ```lua
 -- @mode server
 -- @timeout 20

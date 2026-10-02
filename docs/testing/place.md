@@ -43,6 +43,15 @@ the package was installed. The place has to be built with the `testing` scope ac
 every build reads), or the test providers are not registered and `Workspace.FlameworkTests` never
 appears.
 
+Studio runs the Luau its MCP server executes in a sandboxed thread (since 2026-10-01), and a
+sandboxed thread may only invoke a bindable that is Sandboxed itself and has no capability the
+thread lacks. So the host makes `Workspace.FlameworkTests` Sandboxed, with no capabilities. That
+decides only who may call it: the callback runs with the capabilities of the script that set it,
+so the tests keep `require`, `_G` and everything else. A place built with 2.0.0-alpha.5 or earlier
+has a bindable that is not Sandboxed. The CLI marks it before the invoke for as long as Studio
+lets sandboxed code do that; once Studio refuses, rebuild the place (see
+[Troubleshooting](#troubleshooting)).
+
 A window whose title shows that very file (Studio titles a local file's window with its full
 path) is from an earlier build and would test stale code, so `test` closes it before opening the
 fresh file: it asks that window to close, and ends it after ten seconds. The title alone decides.
@@ -95,8 +104,8 @@ interrupted by Ctrl+C: cleaned up: stopped the play session it started; closed t
 A Ctrl+C while Studio starts the play session (which takes it about five seconds) stops waiting for
 the start at once, but Studio refuses to stop a session it is still starting (`Start play hasn't
 finished yet`), so the stop is tried again, half a second apart, until the start has finished:
-`the play session is still starting; it is stopped once it has`. After 30 seconds the stop gives up
-and says why; `test` then closes its window all the same, and the session ends with it.
+`the play session is still starting; it is stopped once it has`. After 30 seconds of refusals (40
+at most, when the last stop is slow to answer) the stop gives up and says why; `test` then closes its window all the same, and the session ends with it.
 
 `--keep` keeps the window and the session then too, and the line names them as left. A Ctrl+C
 during the cleanup a finished run does anyway (stopping the session, closing the window) lets it
@@ -394,6 +403,7 @@ without running it, `place.deferred.rbxl`, to open in Studio and look at.
 | `RobloxStudioBeta.exe was not found` | Studio is not installed here; set `ROBLOX_STUDIO_EXE`, or run with `--cloud`. |
 | `... never showed up on the MCP proxy` | The window opened but "MCP server" is disabled in Studio's Assistant settings. |
 | `the server's run failed: Workspace.FlameworkTests did not appear` | The build was made without the `testing` scope active (`FLAMEWORK_SCOPES=testing` for that build), so the plugin stayed inert. The client's run follows, and says the same. |
+| `the server's run failed: The current thread cannot invoke 'FlameworkTests' since 'FlameworkTests' has additional values for the Capabilities property: ...` | Studio runs MCP code sandboxed, and the place was built with `@flamework-experimental/testing` 2.0.0-alpha.5 or earlier, whose host does not make its bindable Sandboxed (see [In Studio](#in-studio-on-this-machine)). A later CLI marks it before the invoke while Studio allows that; this error means it could not, or the CLI is that old too. Update the package and rebuild the place. A later CLI says so under the error. |
 | `MISS matched nothing in any realm: ...` | A `--sections` entry named no section or test in any realm that ran. |
 | `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started. The next line names the last test that reported in Studio's output; the one after it in that section is the hanging one. |
 | `lune is needed to set the properties of the project ...` | A chosen `--project` sets its `$properties` on a copy of the build under Lune; install it or set `LUNE_EXE`. |

@@ -68,11 +68,13 @@ import {
 	findStudioForPlace,
 	findStudioMcp,
 	isPlaying,
+	isSandboxRefusal,
 	listStudioWindows,
 	luauErrorMessage,
 	placeNameOf,
 	renderStudioRun,
 	runCloseScript,
+	SANDBOX_HINT,
 	studioOpenArguments,
 	titleShowsFile,
 	unquoteLuauResult,
@@ -101,6 +103,13 @@ export const PLAY_START_TIMEOUT_MS = 90_000;
  * Ctrl+C during the start, which takes about five seconds, stops waiting for it at once.
  */
 export const PLAY_STOP_RETRY_MS = 30_000;
+/** How long a stop of the play session is waited for, when it is not a retry. */
+export const PLAY_STOP_TIMEOUT_MS = 120_000;
+/**
+ * The least a retried stop is waited for, however little of {@link PLAY_STOP_RETRY_MS} is left: a
+ * stop Studio accepts takes a few seconds to answer. A retry is over this long past its deadline at most.
+ */
+export const PLAY_STOP_ANSWER_MS = 10_000;
 /** How often Studio's lock beside a place is tried to be removed, half a second apart, once its process has been ended. */
 export const LOCK_REMOVAL_ATTEMPTS = 20;
 export const POLL_INTERVAL_MS = 2500;
@@ -1447,6 +1456,11 @@ async function removeStudioLock(file: string, pid: number, io: Io): Promise<void
 	// A lock that cannot be removed is left where it is: it only needs ignoring.
 }
 
+/** How the window a run opened is named in what it holds: `the Studio window it opened (PID 4001, place.rbxl)`. */
+function ownWindow(pid: number | undefined, name: string): string {
+	return `the Studio window it opened (PID ${pid ?? "unknown"}, ${name})`;
+}
+
 /**
  * Closes the window a run opened, by the process it started (the file alone when the launch could
  * not tell), and nothing else: another window with the same file open is named, not closed.
@@ -1455,8 +1469,10 @@ async function removeStudioLock(file: string, pid: number, io: Io): Promise<void
 async function closeOwnWindow(pid: number | undefined, file: string, io: Io, release: Release): Promise<void> {
 	const name = basename(file);
 	const windows = await closeWindows(pid !== undefined ? { pid, file } : { file }, name, io, { gone: release });
-	release();
-	if (!windows.some((window) => ["closed", "forced", "ended"].includes(window.outcome))) {
+	const closed = windows.some((window) => ["closed", "forced", "ended"].includes(window.outcome));
+	// Not closed by this run: an interrupted run says so, rather than that it closed the window.
+	release(closed ? undefined : `${ownWindow(pid, name)} had already closed`);
+	if (!closed) {
 		io.log(
 			pid !== undefined
 				? `${name} had already closed: the Studio this run started (PID ${pid}) no longer has it open`
@@ -1620,6 +1636,7 @@ async function runRealms(
 
 	try {
 		let code = 0;
+		let hinted = false;
 		const several = realms.length > 1;
 		const answered: Array<{ result: RunResult; results: string[] }> = [];
 		for (const dataModel of realms) {
@@ -1643,7 +1660,13 @@ async function runRealms(
 					io.error(`the ${realm}'s run did not finish within ${timeout} (--timeout)`);
 					io.error(await describeHangingTest(client, studio, dataModel));
 				} else {
-					io.error(`the ${realm}'s run failed: ${luauErrorMessage(error)}`);
+					const message = luauErrorMessage(error);
+					io.error(`the ${realm}'s run failed: ${message}`);
+					// Once a run: both realms are refused alike.
+					if (isSandboxRefusal(message) && !hinted) {
+						hinted = true;
+						io.error(SANDBOX_HINT);
+					}
 				}
 				continue;
 			}
@@ -1690,14 +1713,17 @@ async function runRealms(
  * Stops the play session. Studio refuses while the start it was asked for is still under way, which
  * is where a Ctrl+C during the start leaves it (the start takes about five seconds, and the run
  * stops waiting for it at once), so the stop is tried again until the start has finished, for up to
- * {@link PLAY_STOP_RETRY_MS}.
+ * {@link PLAY_STOP_RETRY_MS}. A retried stop is waited for only as long as is left of that (or
+ * {@link PLAY_STOP_ANSWER_MS}, when less is left), so a Studio that stops answering during the
+ * retry holds the cleanup no longer than the retry, rather than for another stop's full timeout.
  */
 async function stopPlay(client: StudioClient, studio: StudioEntry, io: Io): Promise<string> {
 	const deadline = io.now().getTime() + PLAY_STOP_RETRY_MS;
 	let told = false;
+	let timeoutMs = PLAY_STOP_TIMEOUT_MS;
 	for (;;) {
 		try {
-			return await client.call("start_stop_play", { studio_id: studio.id, is_start: false }, 120_000);
+			return await client.call("start_stop_play", { studio_id: studio.id, is_start: false }, timeoutMs);
 		} catch (error) {
 			if (!/hasn't finished yet/i.test(String(error)) || io.now().getTime() >= deadline) throw error;
 			if (!told) {
@@ -1705,6 +1731,7 @@ async function stopPlay(client: StudioClient, studio: StudioEntry, io: Io): Prom
 				io.log("the play session is still starting; it is stopped once it has");
 			}
 			await io.sleep(500);
+			timeoutMs = Math.min(PLAY_STOP_TIMEOUT_MS, Math.max(deadline - io.now().getTime(), PLAY_STOP_ANSWER_MS));
 		}
 	}
 }
@@ -1845,7 +1872,7 @@ async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice): 
 			const before = new Set((await client.studios()).map((entry) => entry.id));
 			pid = await io.launch([exe, ...studioOpenArguments({ file })]);
 			launched = true;
-			const window = `the Studio window it opened (PID ${pid ?? "unknown"}, ${name})`;
+			const window = ownWindow(pid, name);
 			releaseWindow = keep
 				? io.interruption.hold(`${window}, which --keep leaves open`)
 				: io.interruption.hold(window, `closed ${window}`);

@@ -74,6 +74,14 @@ error is printed as the snippet raised it (`the server's run failed: Workspace.F
 not appear within 30 seconds: ...`), without the Studio Assistant's own locations in front of it.
 The exit code is the worst of them.
 
+Studio runs the Luau its MCP server executes in a sandboxed thread, and a sandboxed thread may only
+invoke a bindable that is Sandboxed itself and has no capability the thread lacks. So the host
+makes `Workspace.FlameworkTests` Sandboxed, with no capabilities. That decides only who may call
+it: the callback runs with the capabilities of the script that set it, so the tests keep
+`require`, `_G` and everything else. A place built with 2.0.0-alpha.5 or earlier has a bindable
+that is not Sandboxed; the CLI marks it before the invoke for as long as Studio lets sandboxed code
+do that, and once Studio refuses, the place has to be rebuilt (see Troubleshooting).
+
 `--sections` is judged across the realms that run: an entry only the server has is listed for the
 client as `not among the client's sections: coin`, which does not fail it, and the run fails only on
 an entry no realm has (`MISS matched nothing in any realm: coins`). With `--realm`, the one realm
@@ -323,6 +331,7 @@ A run uses one task.
 | `RobloxStudioBeta.exe was not found` / `StudioMCP.exe was not found` | Studio is not installed here; set `ROBLOX_STUDIO_EXE` / `STUDIO_MCP_EXE`, or run in the cloud with `--cloud`. |
 | `... never showed up on the MCP proxy` | The window opened but "MCP server" is disabled in Studio's Assistant settings. |
 | `the server's run failed: Workspace.FlameworkTests did not appear within 30 seconds` | The place was built without the `testing` scope active (`FLAMEWORK_SCOPES=testing` for that build), so the plugin stayed inert. The other realm still runs, and reports the same. |
+| `the server's run failed: The current thread cannot invoke 'FlameworkTests' since 'FlameworkTests' has additional values for the Capabilities property: ...` | Studio runs MCP code sandboxed, and the place was built with 2.0.0-alpha.5 or earlier, whose host does not make its bindable Sandboxed. A later CLI marks it before the invoke while Studio allows that; this error means it could not, or the CLI is that old too. Update the package and rebuild the place; a later CLI says so under the error. |
 | `MISS matched nothing in any realm: ...` | A `--sections` entry names no section or test in any realm that ran: a typo, or a section whose provider is not registered. |
 | `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started; the next line names the last test that reported, and the one after it in that section is the hanging one. |
 | `no Studio window has the testing place ... open` | Nothing has it open, or the window has "MCP server" disabled and so is not listed. |

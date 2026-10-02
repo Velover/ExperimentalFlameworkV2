@@ -32,6 +32,24 @@ function answer(current: Host, filter: unknown, options: unknown): RunResult {
 }
 
 /**
+ * Lets sandboxed code invoke the bindable. Studio runs the Luau its MCP server and its Assistant
+ * execute (which is how `flamework-test` reaches the host) in a sandboxed thread, without
+ * capabilities such as LoadUnownedAsset or ScriptGlobals, and a sandboxed thread may only invoke a
+ * bindable that is Sandboxed itself with no capability the thread lacks: one that is not Sandboxed
+ * counts as having them all ("cannot invoke 'FlameworkTests' since 'FlameworkTests' has additional
+ * values for the Capabilities property"). Sandboxed with no capabilities (an instance's
+ * `Capabilities` are empty until something sets them, and nothing here does), any thread that can
+ * reach it may invoke it. That is only who may call it: the callback runs with the capabilities of the script
+ * that set it, so the tests keep `require`, `_G` and the rest. In a pcall, so an engine without
+ * the property still hosts the tests.
+ */
+function openToSandboxedCallers(bindable: BindableFunction) {
+	pcall(() => {
+		bindable.Sandboxed = true;
+	});
+}
+
+/**
  * Creates the instances and connects them, or joins the host that already exists. On the server
  * that is immediate. A client waits for the server's BindableFunction to replicate and answers
  * on it -- a callback is per realm, so one instance serves both -- and makes its own if none
@@ -50,6 +68,8 @@ export function attach(config: HostConfig) {
 	if (RunService.IsServer()) {
 		const bindable = new Instance("BindableFunction");
 		bindable.Name = BINDABLE_NAME;
+		// Before it is parented, so it replicates Sandboxed.
+		openToSandboxedCallers(bindable);
 		bindable.OnInvoke = (filter: unknown, options: unknown) => answer(current, filter, options);
 		bindable.Parent = Workspace;
 
@@ -76,6 +96,9 @@ export function attach(config: HostConfig) {
 			current.created.push(bindable);
 		}
 
+		// Its own, or the server's, which arrives marked already (the property replicates): marking
+		// it again costs nothing and does not depend on that.
+		openToSandboxedCallers(bindable);
 		bindable.OnInvoke = (filter: unknown, options: unknown) => answer(current, filter, options);
 	});
 }

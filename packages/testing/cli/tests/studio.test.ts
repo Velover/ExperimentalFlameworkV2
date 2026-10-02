@@ -11,11 +11,13 @@ import {
 	findStudioForPlace,
 	isLocalFileWindow,
 	isPlaying,
+	isSandboxRefusal,
 	parseClosedWindows,
 	luauErrorMessage,
 	placeNameOf,
 	renderStudioRun,
 	runCloseScript,
+	SANDBOX_HINT,
 	studioOpenArguments,
 	unquoteLuauResult,
 } from "../src/studio.ts";
@@ -73,6 +75,41 @@ describe("studio helpers", () => {
 		expect(code).toContain('WaitForChild("FlameworkTests", 30)');
 		expect(code).toContain('host:Invoke("economy", { list = true })');
 		expect(code).toContain("JSONEncode");
+	});
+
+	test("the run snippet marks the host Sandboxed before invoking it, and uses nothing a sandboxed thread lacks", () => {
+		const lines = renderStudioRun("nil", "{}").split("\n");
+		// Studio runs the snippet sandboxed; a host from 2.0.0-alpha.5 or earlier does not mark its
+		// bindable itself. In a pcall: once Studio refuses that too, the invoke says why.
+		const mark = lines.indexOf("pcall(function() host.Sandboxed = true end)");
+		const invoke = lines.findIndex((line) => line.includes("host:Invoke(nil, {})"));
+		expect(mark).toBeGreaterThan(lines.findIndex((line) => line.includes("WaitForChild")));
+		expect(invoke).toBeGreaterThan(mark);
+		// No require, _G, shared or DataStore: a sandboxed thread has none of them.
+		expect(lines.join("\n")).not.toMatch(/\brequire\b|\b_G\b|\bshared\b|DataStore/);
+	});
+
+	test("Studio's refusal of a sandboxed invoke is told from other errors", () => {
+		expect(
+			isSandboxRefusal(
+				"The current thread cannot invoke 'FlameworkTests' since 'FlameworkTests' has additional values for the Capabilities property: LoadUnownedAsset (and 3 more)",
+			),
+		).toBe(true);
+		expect(
+			isSandboxRefusal(
+				"The current thread cannot invoke 'FlameworkTests' since 'FlameworkTests' has an additional value for the Capabilities property: LoadUnownedAsset",
+			),
+		).toBe(true);
+		expect(
+			isSandboxRefusal(
+				"The current thread cannot invoke 'FlameworkTests' since 'FlameworkTests' has the Sandboxed property set to false but the calling thread is sandboxed",
+			),
+		).toBe(true);
+		expect(isSandboxRefusal("Workspace.FlameworkTests did not appear within 30 seconds")).toBe(false);
+		expect(isSandboxRefusal("Script that implemented this callback has been destroyed")).toBe(false);
+		expect(SANDBOX_HINT).toContain("rebuild the place");
+		expect(SANDBOX_HINT).toContain("after 2.0.0-alpha.5");
+		expect(SANDBOX_HINT).not.toContain("\n");
 	});
 
 	test("a quoted answer from the proxy is unwrapped", () => {

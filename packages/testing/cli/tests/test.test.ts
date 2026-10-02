@@ -12,7 +12,7 @@ import {
 	runCli,
 	type FakeWindow,
 } from "./harness.ts";
-import type { StudioEntry } from "../src/studio.ts";
+import { SANDBOX_HINT, type StudioEntry } from "../src/studio.ts";
 
 /** The window a freshly opened local file gets: listed by file name, no place id. */
 const BUILT_STUDIO: StudioEntry = { id: "studio-4", name: "place.rbxl" };
@@ -1099,7 +1099,35 @@ describe("test", () => {
 			"the server's run failed: Workspace.FlameworkTests did not appear within 30 seconds: is the testing scope active",
 		);
 		expect(run.err).not.toContain("sabuiltin");
+		expect(run.err).not.toContain(SANDBOX_HINT);
 		expect(run.out).toContain("2 passed, 0 failed in 12ms (client)");
+		expect(run.out).toContain("play session stopped");
+		expect(run.closedWindows).toEqual(["place.rbxl"]);
+	});
+
+	test("a host Studio's sandboxed snippet may not invoke says to rebuild the place, once for both realms", async () => {
+		const refusal =
+			"The current thread cannot invoke 'FlameworkTests' since 'FlameworkTests' has additional values for the Capabilities property: LoadUnownedAsset (and 3 more)";
+		const studio = studioThatOpens(BUILT_STUDIO, { Server: "", Client: "" });
+		const answers = studio.fake.answers as Record<string, unknown>;
+		answers.execute_luau = () => {
+			throw new Error(
+				`execute_luau: sabuiltin_Assistant.rbxm.Assistant.Packages._Index.AssistantUI.AssistantUI.Tools.ExecuteLuauTool:66: sabuiltin_Assistant.rbxm.Assistant.Packages._Index.AssistantUI.AssistantUI.Util.CommandExecution:54: ${refusal}`,
+			);
+		};
+
+		const run = await runCli(["test", "place.rbxl"], {
+			files: { "place.rbxl": "built" },
+			studio: studio.fake,
+			onLaunch: studio.onLaunch,
+		});
+
+		expect(run.code).toBe(1);
+		const lines = run.err.split("\n");
+		expect(lines.indexOf(`the server's run failed: ${refusal}`)).toBe(0);
+		expect(lines[1]).toBe(SANDBOX_HINT);
+		expect(lines).toContain(`the client's run failed: ${refusal}`);
+		expect(lines.filter((line) => line === SANDBOX_HINT)).toHaveLength(1);
 		expect(run.out).toContain("play session stopped");
 		expect(run.closedWindows).toEqual(["place.rbxl"]);
 	});

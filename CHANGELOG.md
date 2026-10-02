@@ -73,6 +73,14 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 #### Fixed
 
+- `flamework-test` runs a place's tests in Studio again. Since 2026-10-01, Studio runs the Luau of
+  its MCP server (and its Assistant) sandboxed, and a sandboxed thread may only invoke a bindable
+  that is Sandboxed itself, so every run failed with `cannot invoke 'FlameworkTests' since
+  'FlameworkTests' has additional values for the Capabilities property`. The test host now makes
+  `Workspace.FlameworkTests` Sandboxed with no capabilities; its callback keeps the host's own, so
+  the tests run as before. For a place built with 2.0.0-alpha.5 or earlier, the CLI marks the
+  bindable itself before invoking it, for as long as Studio allows that; when it cannot, the run
+  says under the error to rebuild the place with this version.
 - `flamework-test`: Ctrl+C (and Ctrl+Break) no longer leaves the Studio window it opened, its play
   session, the window-name claim in `%TEMP%\flamework-test`, the patch's temp folder or its child
   processes behind. The run stops waiting, cleans up through its normal end-of-run steps (`--keep`
@@ -80,7 +88,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   finished) and ends on one line saying what it cleaned up and what it left. The CLI's own process
   exits 130 (149 for Ctrl+Break); through the bin the shell gets the shim's status at once and the
   cleanup's lines follow the prompt. A second Ctrl+C exits at once, naming what may be left. A cloud
-  task already created runs on (Open Cloud cannot cancel one), and the line names it.
+  task already created runs on (Open Cloud cannot cancel one), and the line names it. A window that
+  had already closed is named so, and a stop Studio keeps refusing gives up after about 40 seconds.
 
 #### Changed
 

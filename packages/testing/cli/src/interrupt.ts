@@ -36,8 +36,12 @@ export function interruptedExitCode(signal: string): number {
 	return 128 + (SIGNAL_NUMBERS[signal] ?? 2);
 }
 
-/** Lets go of something held: see {@link Interruption.hold}. Letting go twice does nothing. */
-export type Release = () => void;
+/**
+ * Lets go of something held: see {@link Interruption.hold}. Letting go twice does nothing. `instead`
+ * is what became of it when that is not what its undo says, for "cleaned up": a window the run
+ * meant to close that had already closed.
+ */
+export type Release = (instead?: string) => void;
 
 interface Held {
 	/** What is held, as "may be left" names it. */
@@ -162,17 +166,18 @@ export class Interruption {
 		this.nextHold += 1;
 		const within = options.within !== undefined ? this.ids.get(options.within) : undefined;
 		this.held.set(id, { what, undo, endsWithProcess: options.endsWithProcess === true, within });
-		const release: Release = () => this.letGo(id);
+		const release: Release = (instead) => this.letGo(id, instead);
 		this.ids.set(release, id);
 		return release;
 	}
 
-	private letGo(id: number): void {
+	private letGo(id: number, instead?: string): void {
 		const held = this.held.get(id);
 		if (held === undefined) return;
 		this.held.delete(id);
-		const undone = this.signal !== undefined && held.undo !== undefined;
-		if (undone) this.cleaned.push(held.undo!);
+		const said = instead ?? held.undo;
+		const undone = this.signal !== undefined && said !== undefined;
+		if (undone) this.cleaned.push(said);
 		for (const [inner, what] of [...this.held].filter(([, other]) => other.within === id)) {
 			this.held.delete(inner);
 			if (undone) this.cleaned.push(`${what.what} ended with it`);

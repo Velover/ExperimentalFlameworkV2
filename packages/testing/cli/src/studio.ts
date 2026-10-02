@@ -120,14 +120,32 @@ export function studioOpenArguments(target: { placeId: string; universeId: strin
 /**
  * The Luau that invokes the in-place test host and hands its result back as JSON, since
  * `execute_luau` returns text and a Lua table would arrive as `table: 0x...`.
+ *
+ * Studio runs it sandboxed, and a sandboxed thread may only invoke a bindable that is Sandboxed
+ * itself (see the host's `openToSandboxedCallers`). A host from 2.0.0-alpha.5 or earlier does not
+ * mark its bindable, so the snippet marks it before the invoke, for as long as Studio lets
+ * sandboxed code set the property; a place built since needs nothing of it.
  */
 export function renderStudioRun(filter: string, options: string): string {
 	return [
 		'local host = workspace:WaitForChild("FlameworkTests", 30)',
 		'if not host then error("Workspace.FlameworkTests did not appear within 30 seconds: is the testing scope active in this build, and is TestingPlugin included?") end',
+		"pcall(function() host.Sandboxed = true end)",
 		`return game:GetService("HttpService"):JSONEncode(host:Invoke(${filter}, ${options}))`,
 	].join("\n");
 }
+
+/** What Studio raises when a sandboxed thread invokes a bindable that is not Sandboxed. */
+export function isSandboxRefusal(message: string): boolean {
+	return /additional values? for the Capabilities property|Sandboxed property set to false/i.test(message);
+}
+
+/**
+ * The line a run adds under a realm's failure that {@link isSandboxRefusal}: the place's test host
+ * predates sandboxed MCP code, and Studio no longer lets the snippet mark it itself.
+ */
+export const SANDBOX_HINT =
+	"Studio runs MCP code sandboxed, and sandboxed code may only invoke a Sandboxed bindable, which the test host in this place does not make: rebuild the place with this version of @flamework-experimental/testing (any release after 2.0.0-alpha.5)";
 
 /**
  * The message of a failed call, without what Studio's Assistant wraps an `execute_luau` error in:

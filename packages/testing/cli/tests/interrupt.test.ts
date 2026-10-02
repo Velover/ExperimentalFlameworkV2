@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
+import { PLAY_STOP_ANSWER_MS, PLAY_STOP_RETRY_MS, PLAY_STOP_TIMEOUT_MS } from "../src/cli.ts";
 import { Interrupted, interruptedExitCode, Interruption } from "../src/interrupt.ts";
 import type { StudioEntry } from "../src/studio.ts";
 import {
@@ -15,6 +16,7 @@ import {
 	TASK_PATH,
 	TESTING_STUDIO,
 	type FakeStudio,
+	type FakeWindow,
 } from "./harness.ts";
 
 const BUILT_STUDIO: StudioEntry = { id: "studio-4", name: "place.rbxl" };
@@ -36,7 +38,8 @@ type Answer = string | Promise<string> | (() => string | Promise<string>);
  * `slowStart` is Studio's own start, which takes about five seconds: `onStart` runs when the start
  * is asked for (a Ctrl+C, say), and until the start has finished every stop is refused as Studio
  * refuses it, "Start play hasn't finished yet". It finishes once `refusals` stops have been
- * refused (Infinity: never).
+ * refused (Infinity: never). With `hangAfter`, Studio stops answering once that many stops have
+ * been refused: every stop after that waits out its timeout and fails, as the proxy fails it.
  */
 function studio(options: {
 	execute?: Record<string, Answer>;
@@ -44,7 +47,7 @@ function studio(options: {
 	onListing?: (listing: number) => boolean;
 	playing?: boolean;
 	window?: StudioEntry;
-	slowStart?: { onStart: () => void; refusals: number };
+	slowStart?: { onStart: () => void; refusals: number; hangAfter?: number };
 }) {
 	const window = options.window ?? BUILT_STUDIO;
 	let mode = options.playing ? "Play" : "Edit";
@@ -62,7 +65,7 @@ function studio(options: {
 		},
 		answers: {
 			get_studio_state: () => (mode === "Play" ? PLAYING : EDITING),
-			start_stop_play: (args) => {
+			start_stop_play: (args, call) => {
 				if (args.is_start && options.slowStart) {
 					const started = new Promise<string>((resolve) => {
 						starting = {
@@ -78,6 +81,10 @@ function studio(options: {
 					return started;
 				}
 				if (!args.is_start && starting) {
+					if (starting.refused >= (options.slowStart!.hangAfter ?? Infinity)) {
+						call.elapse(call.timeoutMs ?? 60_000);
+						throw new Error(`tools/call timed out after ${call.timeoutMs ?? 60_000}ms`);
+					}
 					starting.refused += 1;
 					if (starting.refused >= options.slowStart!.refusals) starting.finish();
 					throw new Error("start_stop_play: Start play hasn't finished yet");
@@ -457,6 +464,87 @@ describe("Ctrl+C during test", () => {
 			"interrupted by Ctrl+C: cleaned up: closed the Studio window it opened (PID 4001, place.rbxl); the play session it started ended with it; closed the MCP proxy (StudioMCP.exe)",
 		);
 		expect(run.err).not.toContain("left:");
+	});
+
+	test("a Studio that stops answering during the stop's retry holds the cleanup no longer than the retry", async () => {
+		const stops = (run: Awaited<ReturnType<typeof runCli>>) =>
+			run.studioCalls
+				.map((call, index) => ({ call, timeoutMs: run.studioCallTimeouts[index] }))
+				.filter(({ call }) => call.name === "start_stop_play" && call.args.is_start === false)
+				.map(({ timeoutMs }) => timeoutMs);
+
+		// Refused three times, half a second apart; the fourth stop gets what is left of the retry.
+		const early = fakeCtrlC();
+		const hangs = studio({ slowStart: { onStart: () => early.press(), refusals: Infinity, hangAfter: 3 } });
+		const run = await runCli(["test", "place.rbxl"], {
+			files: { "place.rbxl": "built" },
+			studio: hangs.fake,
+			onLaunch: hangs.onLaunch,
+			ctrlC: early,
+		});
+		expect(run.code).toBe(130);
+		expect(stops(run)).toEqual([
+			PLAY_STOP_TIMEOUT_MS,
+			PLAY_STOP_RETRY_MS - 500,
+			PLAY_STOP_RETRY_MS - 1000,
+			PLAY_STOP_RETRY_MS - 1500,
+		]);
+		expect(run.err).toContain(`error: tools/call timed out after ${PLAY_STOP_RETRY_MS - 1500}ms`);
+		expect(run.windows).toHaveLength(0);
+		expect(run.err).toContain(
+			"interrupted by Ctrl+C: cleaned up: closed the Studio window it opened (PID 4001, place.rbxl); the play session it started ended with it; closed the MCP proxy (StudioMCP.exe)",
+		);
+
+		// Near the end of the retry, a stop still gets the few seconds an accepted one takes to answer.
+		const late = fakeCtrlC();
+		const hangsLate = studio({ slowStart: { onStart: () => late.press(), refusals: Infinity, hangAfter: 59 } });
+		const lateRun = await runCli(["test", "place.rbxl"], {
+			files: { "place.rbxl": "built" },
+			studio: hangsLate.fake,
+			onLaunch: hangsLate.onLaunch,
+			ctrlC: late,
+		});
+		expect(lateRun.code).toBe(130);
+		const lateStops = stops(lateRun);
+		expect(lateStops).toHaveLength(60);
+		expect(lateStops.at(-1)).toBe(PLAY_STOP_ANSWER_MS);
+		expect(lateRun.err).toContain(`error: tools/call timed out after ${PLAY_STOP_ANSWER_MS}ms`);
+		expect(lateRun.windows).toHaveLength(0);
+	});
+
+	test("a window that had already closed when the cleanup reached it is named so, not as closed by the run", async () => {
+		const ctrlC = fakeCtrlC();
+		const windows: FakeWindow[] = [];
+		const place = studio({
+			execute: {
+				Server: () => {
+					ctrlC.press();
+					return never();
+				},
+			},
+		});
+		const run = await runCli(["test", "place.rbxl"], {
+			files: { "place.rbxl": "built" },
+			studio: place.fake,
+			onLaunch: place.onLaunch,
+			ctrlC,
+			windows,
+			// Closed by hand, or crashed, before the run came to close it.
+			onClose: (target) => {
+				if ("pid" in target) windows.splice(0, windows.length);
+			},
+		});
+
+		expect(run.code).toBe(130);
+		expect(run.closeTargets).toEqual(["file place.rbxl", "pid 4001 place.rbxl"]);
+		expect(run.closedWindows).toEqual([]);
+		expect(run.out).toContain(
+			"place.rbxl had already closed: the Studio this run started (PID 4001) no longer has it open",
+		);
+		expect(run.err).toContain(
+			"interrupted by Ctrl+C: cleaned up: stopped the play session it started; the Studio window it opened (PID 4001, place.rbxl) had already closed; closed the MCP proxy (StudioMCP.exe)",
+		);
+		expect(run.err).not.toContain("closed the Studio window it opened");
 	});
 
 	test("a second Ctrl+C names what it cuts short, and nothing that ends with the process", async () => {

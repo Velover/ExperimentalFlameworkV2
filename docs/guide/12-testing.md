@@ -258,6 +258,15 @@ A BindableFunction's callback is set per realm, so the one `Workspace.FlameworkT
 A client with the plugin answers on it for its own tests, and reaches the server's tests through
 `FlameworkTestsServer`. A second invoke while a run is in progress raises an error.
 
+The bindable is `Sandboxed`, with no `Capabilities`. Studio runs the Luau its MCP server and its
+Assistant execute in a sandboxed thread, which is how `flamework-test` reaches the host, and a
+sandboxed thread may only invoke a bindable that is Sandboxed itself and has no capability the
+thread lacks; one that is not Sandboxed counts as having them all. That decides only who may call
+it. The callback runs with the capabilities of the script that set it, so the tests keep
+`require`, `_G` and everything else. A place built with 2.0.0-alpha.5 or earlier lacks it: the CLI
+marks the bindable itself before calling it, for as long as Studio allows that, and otherwise says
+to rebuild the place; see [Troubleshooting](../testing/place.md#troubleshooting).
+
 ### Both realms in one session
 
 `flamework-test test` runs the server's sections and then the client's, in the same play session.

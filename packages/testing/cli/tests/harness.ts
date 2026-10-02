@@ -79,6 +79,8 @@ export interface Harness {
 	launched: string[][];
 	/** Every MCP tool call, in order. */
 	studioCalls: Array<{ name: string; args: Record<string, unknown> }>;
+	/** The timeout each of those calls was given, in the same order. */
+	studioCallTimeouts: Array<number | undefined>;
 	/** What each close asked for: `pid <n> <file name>`, `file <file name>` or `title <title>`. */
 	closeTargets: string[];
 	/** The windows the closes ended, by name (the file name, or the title before " - Roblox Studio"), in order. */
@@ -102,8 +104,19 @@ export interface Harness {
 export interface FakeStudio {
 	/** What the proxy lists; a function is asked on every listing, so windows can register mid-run. */
 	studios?: StudioEntry[] | (() => StudioEntry[]);
-	/** Answers by tool name; a function sees the arguments and may change state between calls. */
-	answers?: Record<string, string | ((args: Record<string, unknown>) => string | Promise<string>)>;
+	/**
+	 * Answers by tool name; a function sees the arguments and may change state between calls. It also
+	 * sees the timeout the call was given, and may let fake time pass (`elapse`): a call that never
+	 * answers elapses its timeout and throws, as the real proxy does.
+	 */
+	answers?: Record<string, string | ((args: Record<string, unknown>, call: FakeCall) => string | Promise<string>)>;
+}
+
+/** What a fake tool answer sees of the call. */
+export interface FakeCall {
+	timeoutMs: number | undefined;
+	/** Lets this much fake time pass, as `sleep` does. */
+	elapse: (ms: number) => void;
 }
 
 export const TESTING_STUDIO: StudioEntry = { id: "studio-1", name: `TestingExperience (placeId: ${PLACE})` };
@@ -153,6 +166,7 @@ export async function runCli(
 	const spawned: string[][] = [];
 	const launched: string[][] = [];
 	const studioCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+	const studioCallTimeouts: Array<number | undefined> = [];
 	const closeTargets: string[] = [];
 	const closedWindows: string[] = [];
 	const claims: string[] = [];
@@ -237,11 +251,15 @@ export async function runCli(
 			proxies.connected += 1;
 			proxies.open += 1;
 			return {
-				call: async (name, args = {}) => {
+				call: async (name, args = {}, timeoutMs) => {
 					studioCalls.push({ name, args });
+					studioCallTimeouts.push(timeoutMs);
 					const answer = fake.answers?.[name];
 					if (answer === undefined) throw new Error(`no canned answer for ${name}`);
-					return typeof answer === "function" ? await answer(args) : answer;
+					const elapse = (ms: number) => {
+						clock += ms;
+					};
+					return typeof answer === "function" ? await answer(args, { timeoutMs, elapse }) : answer;
 				},
 				studios: async () => (typeof fake.studios === "function" ? fake.studios() : (fake.studios ?? [])),
 				close: () => {
@@ -346,6 +364,7 @@ export async function runCli(
 		spawned,
 		launched,
 		studioCalls,
+		studioCallTimeouts,
 		closeTargets,
 		closedWindows,
 		windows,
