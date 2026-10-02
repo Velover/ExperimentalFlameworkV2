@@ -209,6 +209,16 @@
 				"entry": {
 					"type": "string",
 					"description": "Cloud runs only. The source path of a ModuleScript exporting `ignite()`, for example \"src/server/main\": an Open Cloud Luau execution task runs none of the place's Scripts, so the runner requires this module and ignites the game itself before invoking the bindable. Studio runs need none, the place runs itself. Compiled into the artifact as a tree path. Default: none, and a cloud run refuses to start without it."
+				},
+				"failOnSkip": {
+					"type": "boolean",
+					"default": false,
+					"description": "flamework-test only: a skipped test fails the run, for CI that must run everything. --fail-on-skip and FAIL_ON_SKIP come first. Never compiled into the place. Default: false."
+				},
+				"keepAwake": {
+					"type": "boolean",
+					"default": false,
+					"description": "flamework-test only: a Studio run (test, studio run) asks Windows to keep the display on while it lasts; RenderStepped stops while the display sleeps, which fails onRender tests in unattended runs. --keep-awake and KEEP_AWAKE come first. Not for cloud runs. Never compiled into the place. Default: false."
 				}
 			}
 		},

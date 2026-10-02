@@ -2,8 +2,8 @@
 
 Tests that run inside a real place, and the CLI that runs them. Two halves in one package:
 
-- **The roblox-ts side** (`out/`): `defineTests`, `test`, `defer`, `scratch`, the `expect*`
-  assertions, and `TestingPlugin`, which hosts the sections on `Workspace.FlameworkTests` (a
+- **The roblox-ts side** (`out/`): `defineTests`, `test` and `test.skip`, `defer`, `scratch`,
+  `skip`, the `expect*` assertions, and `TestingPlugin`, which hosts the sections on `Workspace.FlameworkTests` (a
   BindableFunction) and `Workspace.FlameworkTestsServer` (a RemoteFunction) under the `testing`
   scope. How to write the tests is in the guide's
   [Testing in the place](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/docs/guide/12-testing.md).
@@ -57,6 +57,8 @@ bunx flamework-test test place.rbxl                       # both realms
 bunx flamework-test test place.rbxl --realm client        # one of them
 bunx flamework-test test place.rbxl --sections economy    # a section, or economy/buys
 bunx flamework-test test place.rbxl --keep                # leave Studio and the play session open
+bunx flamework-test test place.rbxl --fail-on-skip        # a skipped test fails the run
+bunx flamework-test test place.rbxl --keep-awake          # keep the display on while it runs
 ```
 
 It needs Roblox Studio installed, with "MCP server" enabled in its Assistant settings. That setting
@@ -87,6 +89,21 @@ client as `not among the client's sections: coin`, which does not fail it, and t
 an entry no realm has (`MISS matched nothing in any realm: coins`). With `--realm`, the one realm
 judges alone.
 
+A skipped test (`skip(reason)` or `test.skip`) is not a failure, and is shown all the same: each
+realm's summary counts it (`9 passed, 0 failed, 1 skipped`) and lists it with its reason
+(`- name (skipped): reason`), and a run under several projects ends with each project's count
+(`projects: default passed (1 skipped), ...`). `--fail-on-skip` makes any skip fail the run, for
+CI that must run everything. A place built with 2.0.0-alpha.5 or earlier reports no skips, and
+`--fail-on-skip` then passes it with a note; an older CLI against a newer place leaves skips out of
+its summary, and never fails on one. See [Skipped tests](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/docs/testing/place.md#skipped-tests).
+
+`--keep-awake` asks Windows to keep the display on from the start of the run to its end, and lets
+go when the run ends, Ctrl+C included. While the display is off the engine renders nothing:
+`RenderStepped` stops, and with it `onRender`, which fails client tests that wait for a frame in a
+run nobody watches. A minimized Studio window still renders. It is off by default, changes no power
+setting, and does nothing (saying so) anywhere but Windows. See
+[Unattended runs](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/docs/testing/place.md#unattended-runs-keep-the-display-on).
+
 How `test` handles Studio windows:
 
 - A window whose title shows that very file is from an earlier build and would test stale code, so
@@ -104,7 +121,8 @@ How `test` handles Studio windows:
 - Ctrl+C stops the run and cleans up what it started, through the steps a finished run takes: it
   stops the play session it started (one Studio is still starting is stopped once the start has
   finished) and closes the window it opened (by its process; `--keep` keeps both), releases its
-  window-name claim, removes the patch's temp folder and stops lune and the MCP proxy. It runs
+  window-name claim, removes the patch's temp folder, stops lune and the MCP proxy, and lets go of
+  the `--keep-awake` request. It runs
   nothing more (not the other realm, not the next project) and ends on one line naming what it
   cleaned up and what it left; the CLI's own process exits 130. A second Ctrl+C exits at once,
   however soon it comes, naming what may be left. Through the `flamework-test` bin (and so
@@ -115,7 +133,7 @@ How `test` handles Studio windows:
 
 | Command | Does |
 |---|---|
-| `test <file> [--realm server\|client\|both] [--sections a,b] [--list] [--json] [--keep] [--original <rbxl>]` | The above. |
+| `test <file> [--realm server\|client\|both] [--sections a,b] [--list] [--json] [--keep] [--original <rbxl>] [--fail-on-skip] [--keep-awake]` | The above. |
 | `test <file> --project <a.project.json> [--project <b.project.json>]` | The above once per project, each in a place made under that project's `$properties`; see [Running under several Rojo projects](#running-under-several-rojo-projects). |
 | `test <file> --cloud` | The cloud run instead, see below. |
 | `patch <file> --original <rbxl> [--out <path>]` | Lays the build over a copy of the original and writes the result, without running anything. |
@@ -141,7 +159,7 @@ on in Studio.
 | `studio status` | Edit or play, and which data models exist. |
 | `studio play` / `studio stop` | Starts or ends a play session. |
 | `studio exec --code "<luau>"` / `--script <file>` `[--realm edit\|server\|client]` | Runs Luau in the chosen data model and prints what it returned. |
-| `studio run [--realm server\|client\|both] [--sections a,b] [--list] [--json] [--keep]` | Runs the tests in a play session, starting one if needed and stopping it afterwards unless `--keep`, without opening or closing anything. |
+| `studio run [--realm server\|client\|both] [--sections a,b] [--list] [--json] [--keep] [--fail-on-skip] [--keep-awake]` | Runs the tests in a play session, starting one if needed and stopping it afterwards unless `--keep`, without opening or closing anything. |
 
 ```console
 bunx flamework-test studio open                     # the testing place, from the cloud
@@ -161,7 +179,7 @@ the run's last line names the task's path.
 | Command | Does |
 |---|---|
 | `cloud publish <file> [--published] [--original <rbxl>]` | Uploads the place Rojo built (patched first when an original is named) to the testing place as a Saved version, and records the version number in `build/version.json`. |
-| `cloud run [--version N] [--sections a,b] [--list] [--timeout 120s] [--json]` | Submits the test shim against the recorded version, waits, prints the task's log and a summary, exits non-zero on any failure. |
+| `cloud run [--version N] [--sections a,b] [--list] [--timeout 120s] [--json] [--fail-on-skip]` | Submits the test shim against the recorded version, waits, prints the task's log and a summary, exits non-zero on any failure (and, with `--fail-on-skip`, on a skip). |
 | `cloud run --code "<luau>"` / `--script <file>` | Runs arbitrary Luau instead of the shim and prints what it returned: a hypothesis about a real server, answered in a minute. |
 | `cloud test <file>` | `cloud publish` the file, then `cloud run`. The same as `test <file> --cloud`. |
 | `cloud probe` | Reports what the task environment looks like from the inside. |
@@ -188,8 +206,8 @@ Each setting is taken from the first of these that has it:
 1. flags;
 2. the shell environment;
 3. `.env` and `.env.local` next to the nearest `flamework.config.json`;
-4. that file's `cloud` section, read the way the transformer reads it (so it may use `${NAME}`
-   itself).
+4. that file's `cloud` section, and the CLI's own keys in its `testing` section, read the way the
+   transformer reads them (so they may use `${NAME}` themselves).
 
 Everything is named *testing*, so nothing confuses it with the original place. A Studio run needs
 none of this, except, optionally, the original place.
@@ -216,6 +234,12 @@ compiled into the place. The flags `--testing-universe`, `--testing-place`, `--k
 `ORIGINAL_PLACE`, override it. Prefer the environment for the key: a flag ends up in the shell
 history. The Rojo projects a run follows come from `--project` or `ROJO_PROJECT`; see
 [Running under several Rojo projects](#running-under-several-rojo-projects).
+
+Two switches, off by default, follow the same order: `--fail-on-skip`, `FAIL_ON_SKIP`, then
+`"testing": { "failOnSkip": true }`; and `--keep-awake`, `KEEP_AWAKE`, then
+`"testing": { "keepAwake": true }`. A variable reads `true` or `false` (`1`, `0`, `yes`, `no`, `on`,
+`off`; empty is off), and `--fail-on-skip=false` or `--keep-awake=false` turns one off for a run.
+Only the CLI reads them; the place ignores them.
 
 ## Patching a copy of the original place
 
@@ -298,7 +322,8 @@ that project (`rojo build tests/big.project.json -o big.rbxl`) and run that file
 
 Inside the place, `getProject()` from `@flamework-experimental/testing` returns the name of the
 project the place was made under (`deferred`), or `undefined` in a place the CLI did not make. A test
-can use it to assert what that project changes, or to return early under the others. The run result
+can use it to assert what that project changes, or to `skip(reason)` under the others, which the
+summary lists (a plain `return` would count as a pass). The run result
 carries it as `project`, and the summary line prints it. To look at such a place in Studio, the
 `patch` command makes the same place without running it:
 `flamework-test patch place.rbxl --project tests/deferred.project.json`.
@@ -333,7 +358,11 @@ A run uses one task.
 | `the server's run failed: Workspace.FlameworkTests did not appear within 30 seconds` | The place was built without the `testing` scope active (`FLAMEWORK_SCOPES=testing` for that build), so the plugin stayed inert. The other realm still runs, and reports the same. |
 | `the server's run failed: The current thread cannot invoke 'FlameworkTests' since 'FlameworkTests' has additional values for the Capabilities property: ...` | Studio runs MCP code sandboxed, and the place was built with 2.0.0-alpha.5 or earlier, whose host does not make its bindable Sandboxed. A later CLI marks it before the invoke while Studio allows that; this error means it could not, or the CLI is that old too. Update the package and rebuild the place; a later CLI says so under the error. |
 | `MISS matched nothing in any realm: ...` | A `--sections` entry names no section or test in any realm that ran: a typo, or a section whose provider is not registered. |
-| `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started; the next line names the last test that reported, and the one after it in that section is the hanging one. |
+| `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started; the next line names the last test that reported (`PASS`, `FAIL` or `SKIP`), and the one after it in that section is the hanging one. |
+| `(skipped): RenderStepped doesn't fire: the display may be asleep` | The PC's display was off, so the engine rendered nothing; run with `--keep-awake`. |
+| `1 skipped, which fails the run under --fail-on-skip` | A test skipped under `--fail-on-skip` (or `FAIL_ON_SKIP`, `testing.failOnSkip`); the summary names it and its reason. |
+| `FAIL_ON_SKIP must be true or false` / `KEEP_AWAKE must be true or false` | The variable holds something else: `true`, `false`, `1`, `0`, `yes`, `no`, `on`, `off`, or empty for off. |
+| `--keep-awake is for Studio runs` | A cloud run has no display on this machine; drop the flag. |
 | `no Studio window has the testing place ... open` | Nothing has it open, or the window has "MCP server" disabled and so is not listed. |
 | Ctrl+C under `bun run` left Studio open and printed no `interrupted by Ctrl+C` line | The script runs the CLI's file with `bun` directly, and `bun run` ends that process at once; call the `flamework-test` bin. The next `test` of that file closes the window. |
 | After Ctrl+C the prompt came back at once, and the `interrupted by Ctrl+C` line came after it | Expected through the bin: its shim ends at once and the CLI cleans up after it. Run the CLI's file with `bun` to wait for it. |

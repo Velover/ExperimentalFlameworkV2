@@ -50,6 +50,19 @@ describe("loadCloudSettings", () => {
 		}
 	});
 
+	test("reads the CLI's own keys of the testing section, testing.keepAwake and testing.failOnSkip", () => {
+		const dir = scratch({
+			"flamework.config.json": JSON.stringify({ testing: { keepAwake: true, failOnSkip: false, timeout: 5 } }),
+		});
+		try {
+			const settings = loadCloudSettings(dir, {});
+			expect(settings.keepAwake).toBe(true);
+			expect(settings.failOnSkip).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("a directory with no config file gives empty settings", () => {
 		const dir = scratch({});
 		try {

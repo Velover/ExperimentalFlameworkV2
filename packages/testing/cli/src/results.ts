@@ -3,17 +3,30 @@
  * string in `output.results[0]`), plus parsing and human formatting for it.
  */
 
+/** What became of a test: a skip is not a failure, and is counted apart from the passes. */
+export type TestStatus = "passed" | "failed" | "skipped";
+
 export interface TestResult {
 	name: string;
+	/** Whether the test did not fail: true for a pass and for a skip. */
 	ok: boolean;
+	/**
+	 * What became of it. A runner from before skips (2.0.0-alpha.5 or earlier) sends no status,
+	 * and it is read off `ok`: passed or failed.
+	 */
+	status: TestStatus;
 	error?: string;
+	/** Why it was skipped, when it was: what was passed to `skip()`, or `"marked with test.skip"`. */
+	skipReason?: string;
 	durationMs?: number;
 }
 
 export interface SectionResult {
 	name: string;
+	/** Tests that passed; a skipped test is counted in `skipped`. */
 	passed: number;
 	failed: number;
+	skipped: number;
 	tests: TestResult[];
 }
 
@@ -22,8 +35,15 @@ export interface RunResult {
 	realm: "server" | "client";
 	/** The project the place was made under, read off Workspace's attribute; absent when the place was not patched. */
 	project?: string;
+	/** Tests that passed; a skipped test is counted in `skipped`. */
 	passed: number;
 	failed: number;
+	skipped: number;
+	/**
+	 * Whether the place's runner counts skips: false for a runner from before skips, whose results
+	 * have no `skipped` count, so that `--fail-on-skip` can say it had nothing to go on.
+	 */
+	reportsSkips: boolean;
 	durationMs: number;
 	sections: SectionResult[];
 	/** Requested names that matched nothing. Non-empty means `ok` is false. */
@@ -46,6 +66,9 @@ function truncate(value: string, max = 400): string {
 /**
  * Parses `output.results` from a COMPLETE task into a {@link RunResult}.
  * The runner returns one value - a JSON string - so we read `results[0]`.
+ *
+ * A result from a runner before skips has no status, no reason and no `skipped` count: each test's
+ * status is read off its `ok`, and every skipped count is 0.
  */
 export function parseRunResult(results: string[] | undefined): RunResult {
 	const raw = results?.[0];
@@ -73,6 +96,7 @@ export function parseRunResult(results: string[] | undefined): RunResult {
 		? value.sections.map((entry) => normalizeSection(entry))
 		: [];
 	const unknown: string[] = Array.isArray(value.unknown) ? value.unknown.map((name) => String(name)) : [];
+	const reportsSkips = isCount(value.skipped);
 
 	return {
 		ok: value.ok,
@@ -80,35 +104,58 @@ export function parseRunResult(results: string[] | undefined): RunResult {
 		...(typeof value.project === "string" ? { project: value.project } : {}),
 		passed: numberOr(value.passed, 0),
 		failed: numberOr(value.failed, 0),
+		skipped: numberOr(
+			value.skipped,
+			sections.reduce((sum, section) => sum + section.skipped, 0),
+		),
+		reportsSkips,
 		durationMs: numberOr(value.durationMs, 0),
 		sections,
 		unknown,
 	};
 }
 
+const STATUSES: readonly string[] = ["passed", "failed", "skipped"];
+
+function normalizeTest(test: unknown): TestResult {
+	const value = (test ?? {}) as Record<string, unknown>;
+	const ok = value.ok === true;
+	const status: TestStatus =
+		typeof value.status === "string" && STATUSES.includes(value.status)
+			? (value.status as TestStatus)
+			: ok
+				? "passed"
+				: "failed";
+	return {
+		name: String(value.name ?? "<unnamed>"),
+		ok,
+		status,
+		...(value.error === undefined ? {} : { error: String(value.error) }),
+		...(status === "skipped"
+			? { skipReason: value.skipReason === undefined ? "no reason given" : String(value.skipReason) }
+			: {}),
+		...(typeof value.durationMs === "number" ? { durationMs: value.durationMs } : {}),
+	};
+}
+
 function normalizeSection(entry: unknown): SectionResult {
 	const section = (entry ?? {}) as Record<string, unknown>;
-	const tests: TestResult[] = Array.isArray(section.tests)
-		? section.tests.map((test) => {
-				const value = (test ?? {}) as Record<string, unknown>;
-				return {
-					name: String(value.name ?? "<unnamed>"),
-					ok: value.ok === true,
-					...(value.error === undefined ? {} : { error: String(value.error) }),
-					...(typeof value.durationMs === "number" ? { durationMs: value.durationMs } : {}),
-				};
-			})
-		: [];
+	const tests: TestResult[] = Array.isArray(section.tests) ? section.tests.map(normalizeTest) : [];
 	return {
 		name: String(section.name ?? "<unnamed>"),
 		passed: numberOr(section.passed, 0),
 		failed: numberOr(section.failed, 0),
+		skipped: numberOr(section.skipped, tests.filter((test) => test.status === "skipped").length),
 		tests,
 	};
 }
 
+function isCount(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
 function numberOr(value: unknown, fallback: number): number {
-	return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+	return isCount(value) ? value : fallback;
 }
 
 function duration(ms: number | undefined): string {
@@ -116,22 +163,27 @@ function duration(ms: number | undefined): string {
 }
 
 /**
- * How a realm's result is judged when it is one of several realms run with the same filter: a
- * filter entry only the other realm has is not a miss, so it does not fail this one; an entry no
- * realm has (`missed`, see {@link missedEverywhere}) fails every realm it was given to.
+ * How a realm's result is judged. When it is one of several realms run with the same filter
+ * (`realmOfSeveral`), a filter entry only the other realm has is not a miss, so it does not fail
+ * this one; an entry no realm has (`missed`, see {@link missedEverywhere}) fails every realm it
+ * was given to. With `failOnSkip` (`--fail-on-skip`), a skipped test fails the realm too.
  */
-export interface RealmOfSeveral {
-	realmOfSeveral: true;
-	/** The filter entries that no realm matched. */
+export interface Judgement {
+	realmOfSeveral?: boolean;
+	/** The filter entries that no realm matched, when `realmOfSeveral`. */
 	missed?: readonly string[];
+	/** A skipped test fails the run: `--fail-on-skip`, `FAIL_ON_SKIP` or `testing.failOnSkip`. */
+	failOnSkip?: boolean;
 }
 
 /**
  * Whether a result passes: every test, and every filter entry naming something, in this realm
- * alone or, of several, in any of them.
+ * alone or, of several, in any of them; and, under `failOnSkip`, no test skipped. A result from a
+ * runner before skips counts none, and passes `failOnSkip`: such a runner had no way to skip.
  */
-export function resultPassed(result: RunResult, options?: RealmOfSeveral): boolean {
-	if (!options?.realmOfSeveral) return result.ok;
+export function resultPassed(result: RunResult, options?: Judgement): boolean {
+	if (options?.failOnSkip === true && result.skipped > 0) return false;
+	if (options?.realmOfSeveral !== true) return result.ok;
 	return result.failed === 0 && !result.unknown.some((entry) => options.missed?.includes(entry) === true);
 }
 
@@ -143,24 +195,39 @@ export function missedEverywhere(results: readonly RunResult[]): string[] {
 }
 
 /** The line that lists a result's unmatched filter entries. */
-function missLine(result: RunResult, options?: RealmOfSeveral): string {
-	return options?.realmOfSeveral
+function missLine(result: RunResult, options?: Judgement): string {
+	return options?.realmOfSeveral === true
 		? `not among the ${result.realm}'s sections: ${result.unknown.join(", ")}`
 		: `MISS matched nothing: ${result.unknown.join(", ")}`;
 }
 
-/** The per-section / per-failure summary printed after a run. */
-export function formatSummary(result: RunResult, options?: RealmOfSeveral): string[] {
+/** A failure's message or a skip's reason under its test's line, one indented line per line of it. */
+function detailLines(text: string): string[] {
+	return text.split("\n").map((line) => `         ${line}`);
+}
+
+/**
+ * The per-section summary printed after a run: each section's counts, then each of its failures
+ * with its message and each of its skips with its reason, in the order they ran.
+ */
+export function formatSummary(result: RunResult, options?: Judgement): string[] {
 	const lines: string[] = [];
 
 	for (const section of result.sections) {
 		const status = section.failed > 0 ? "FAIL" : "PASS";
-		lines.push(`${status} ${section.name}  ${section.passed} passed, ${section.failed} failed`);
+		lines.push(
+			`${status} ${section.name}  ${section.passed} passed, ${section.failed} failed, ${section.skipped} skipped`,
+		);
 		for (const test of section.tests) {
-			if (test.ok) continue;
-			lines.push(`       x ${test.name}${duration(test.durationMs)}`);
-			for (const line of (test.error ?? "<no error message>").split("\n")) {
-				lines.push(`         ${line}`);
+			if (test.status === "failed") {
+				lines.push(`       x ${test.name}${duration(test.durationMs)}`);
+				lines.push(...detailLines(test.error ?? "<no error message>"));
+			} else if (test.status === "skipped") {
+				// The reason is read off the result, not off the place's SKIP line, so one that runs
+				// over several lines arrives whole: its first line beside the name, the rest below.
+				const [first = "", ...rest] = (test.skipReason ?? "no reason given").split("\n");
+				lines.push(`       - ${test.name} (skipped): ${first}`);
+				if (rest.length > 0) lines.push(...detailLines(rest.join("\n")));
 			}
 		}
 	}
@@ -175,19 +242,41 @@ export function formatSummary(result: RunResult, options?: RealmOfSeveral): stri
 
 	lines.push("");
 	const where = result.project === undefined ? result.realm : `${result.realm}, project ${result.project}`;
-	lines.push(`${result.passed} passed, ${result.failed} failed in ${Math.round(result.durationMs)}ms (${where})`);
+	lines.push(
+		`${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped in ${Math.round(result.durationMs)}ms (${where})`,
+	);
+	if (options?.failOnSkip === true) {
+		if (result.skipped > 0) {
+			lines.push(`${result.skipped} skipped, which fails the run under --fail-on-skip`);
+		} else if (!result.reportsSkips) {
+			lines.push(
+				"note: this place's runner predates skips (2.0.0-alpha.5 or earlier) and reports none, so --fail-on-skip has nothing to fail on",
+			);
+		}
+	}
 	lines.push(resultPassed(result, options) ? "PASS" : "FAIL");
 	return lines;
 }
 
-/** What `--list` prints: every section with its test names. */
-export function formatList(result: RunResult, options?: RealmOfSeveral): string[] {
+/**
+ * What `--list` prints: every section with its test names. Nothing ran, so no test has an outcome;
+ * one registered with `test.skip` is marked, with its reason, as it would be skipped.
+ */
+export function formatList(result: RunResult, options?: Judgement): string[] {
 	const lines: string[] = [];
 	let count = 0;
+	let marked = 0;
 	for (const section of result.sections) {
 		lines.push(section.name);
 		for (const test of section.tests) {
-			lines.push(`  ${section.name}/${test.name}`);
+			if (test.status === "skipped") {
+				lines.push(
+					`  ${section.name}/${test.name}  (skipped: ${(test.skipReason ?? "no reason given").split("\n")[0]})`,
+				);
+				marked += 1;
+			} else {
+				lines.push(`  ${section.name}/${test.name}`);
+			}
 			count += 1;
 		}
 	}
@@ -195,6 +284,8 @@ export function formatList(result: RunResult, options?: RealmOfSeveral): string[
 		lines.push(missLine(result, options));
 	}
 	lines.push("");
-	lines.push(`${result.sections.length} sections, ${count} tests`);
+	lines.push(
+		`${result.sections.length} sections, ${count} tests${marked > 0 ? ` (${marked} marked with test.skip)` : ""}`,
+	);
 	return lines;
 }

@@ -197,7 +197,7 @@ test that runs over is cancelled and counted as failed, and the run moves on.
 
 Tests in a place leave things behind unless they clean up, and the next test would run against
 whatever was left. There are three cleanup tools, and all of them run whether the test passed,
-failed or timed out:
+failed, timed out or was skipped:
 
 | Tool | Does |
 |---|---|
@@ -215,6 +215,48 @@ becomes the test's failure. `eventually(predicate, what?, timeout?)` checks `pre
 for something the engine delivers later: a deferred signal, a replicated instance, a component built
 on the next resumption. Any other assertion library works too: a test fails when its body raises an
 error.
+
+## Skipping a test
+
+Some tests only make sense in some runs: in one realm, under one Rojo project, with a display that
+renders. `skip(reason)` stops the running test where it is and reports it as skipped, with the
+reason:
+
+```ts
+import { getProject, skip, test } from "@flamework-experimental/testing";
+
+test("ChildAdded is deferred past the write", () => {
+    if (getProject() !== "deferred") skip("only the deferred project defers signals");
+    // ...
+});
+```
+
+`test.skip(name, body)` registers a test that is reported as skipped without running, with the
+reason `marked with test.skip`. It is listed and selected by a filter like any other test, so
+dropping `.skip` brings it back as it was. `skip(reason)` is for a condition known only at run time;
+`test.skip` parks a test.
+
+A skip is not a failure: the run stays `ok`. It is counted apart from the passes, and every skip is
+listed with its reason, by the runner's `SKIP` line and in `flamework-test`'s summary.
+`flamework-test --fail-on-skip` makes any skip fail the run, for a CI job that must run everything.
+
+- Call `skip` from the test's body or a `beforeEach`. Skipped from a `beforeEach`, neither the
+  later hooks nor the body run.
+- The test's `defer` callbacks, its `scratch()` folder and the section's `afterEach` hooks still
+  run after a skip. One that raises fails the test, and the failure says it was skipped first.
+- `skip` stops the test by raising an error the runner tells apart from any other. A `pcall` around
+  it in the test (or `expectThrows`, `expectNoThrow`, a Promise) catches it like any error, and the
+  test goes on past it; it is still reported as skipped, with the first reason, and whatever it does
+  afterwards, a failure or a timeout included, is not reported. So keep `skip` out of such wrappers.
+  What they catch is a table whose `tostring` reads `the test was skipped: <reason>`, not a string.
+- Call it only from the test's own flow: its body, a `beforeEach`, or what they call and wait for.
+  The runner knows which test is running, not which test a thread belongs to, so a thread left
+  running past its test (a `task.spawn`, a `task.delay`, a connection) that calls `skip` later
+  marks whatever test is running then. From a thread the test started, it stops only that thread.
+- Called while no test runs, it raises at the caller; from a `defer` callback or an `afterEach`, it
+  raises a plain error there, which fails the test.
+- `test` is a callable table, since it carries `test.skip`: where only a function will do
+  (`task.spawn`, `coroutine.wrap`), wrap it in one.
 
 ## Running
 
@@ -238,20 +280,34 @@ as `not among the client's sections: coin`, and the run fails only on an entry t
 remote or `Testing.run`:
 
 ```lua
-{ ok = true, realm = "server", passed = 12, failed = 0, durationMs = 340,
-  sections = { { name = "economy", passed = 12, failed = 0,
-                 tests = { { name = "buying deducts the price", ok = true, durationMs = 3 }, ... } } },
+{ ok = true, realm = "server", passed = 11, failed = 0, skipped = 1, durationMs = 340,
+  sections = { { name = "economy", passed = 11, failed = 0, skipped = 1,
+                 tests = { { name = "buying deducts the price", ok = true, status = "passed", durationMs = 3 },
+                           { name = "refunds", ok = true, status = "skipped",
+                             skipReason = "marked with test.skip", durationMs = 0 }, ... } } },
   unknown = {} }  -- filter entries that named nothing in this realm; any makes ok false
 ```
 
-Every test also prints one line, such as
-`[FWTEST] server economy/buying deducts the price: PASS (3ms)`, and the run ends with a summary
-line. So the Output window and a task's log show the same as the table.
+Each test's `status` is `"passed"`, `"failed"` (with `error`) or `"skipped"` (with `skipReason`).
+`ok` is true for a pass and for a skip, and `passed` counts the passes alone. In a `list` result
+nothing ran: a test registered with `test.skip` reads `"skipped"`, every other `"passed"`, and
+every count is 0.
+
+Every test also prints one line: `[FWTEST] server economy/buying deducts the price: PASS (3ms)`,
+`... FAIL (3ms): <the error>` or `... SKIP (0ms): <the reason>`. The run ends with a summary line,
+`[FWTEST] server SUMMARY: 11 passed, 0 failed, 1 skipped (340ms)`. So the Output window and a task's
+log show the same as the table.
+
+In a run nobody watches, the PC's display may go to sleep, and while it is off the engine renders
+no frame: `RenderStepped` stops, and `onRender` with it, so a client test that waits for a frame
+fails. A minimized or unfocused Studio window still renders, at about 60 frames a second; only the
+display matters. `flamework-test test --keep-awake` asks Windows to keep the display on for the run;
+see [unattended runs](../testing/place.md#unattended-runs-keep-the-display-on).
 
 A place made by `flamework-test` knows which Rojo project it was made under. `getProject()` returns
 that project's name: `deferred` for `tests/deferred.project.json`, and `undefined` in a place opened
 by hand. The result carries it as `project`. A test that only holds under one project's `Workspace`
-settings (`SignalBehavior`, say) checks it and returns early under the others; see
+settings (`SignalBehavior`, say) checks it and calls `skip` under the others; see
 [several projects, one suite](../testing/place.md#several-projects-one-suite).
 
 A BindableFunction's callback is set per realm, so the one `Workspace.FlameworkTests` serves both.
@@ -307,9 +363,16 @@ are written this way.
   "enabled": true,             // when set, overrides the two above in either direction
   "autoRun": false,            // run everything right after ignition
   "timeout": 30,               // seconds per test
-  "entry": "src/server/main"   // cloud runs only: the ModuleScript exporting ignite()
+  "entry": "src/server/main",  // cloud runs only: the ModuleScript exporting ignite()
+  "failOnSkip": false,         // flamework-test: a skipped test fails the run (--fail-on-skip)
+  "keepAwake": false           // flamework-test: keep the display on during a Studio run (--keep-awake)
 }
 ```
+
+`failOnSkip` and `keepAwake` are read by `flamework-test` alone, never by the place. Its flags come
+first, then the `FAIL_ON_SKIP` and `KEEP_AWAKE` variables (`true` or `false`, `1` or `0`) from the
+shell, `.env` or `.env.local`. `--fail-on-skip=false` and `--keep-awake=false` turn them off for one
+run.
 
 `entry` exists for one reason. An Open Cloud task loads the place but runs none of its Scripts, so
 nothing ignites the game there. The runner has to require a ModuleScript and call its `ignite()`

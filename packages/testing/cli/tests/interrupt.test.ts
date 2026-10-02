@@ -338,8 +338,8 @@ describe("Ctrl+C during test", () => {
 
 		expect(run.code).toBe(130);
 		// The results came in and were printed, and the cleanup ran to the end.
-		expect(run.out).toContain("2 passed, 0 failed in 12ms (server)");
-		expect(run.out).toContain("2 passed, 0 failed in 12ms (client)");
+		expect(run.out).toContain("2 passed, 0 failed, 0 skipped in 12ms (server)");
+		expect(run.out).toContain("2 passed, 0 failed, 0 skipped in 12ms (client)");
 		expect(run.windows).toHaveLength(0);
 		expect(run.err).toContain(
 			"interrupted by Ctrl+C: cleaned up: stopped the play session it started; closed the Studio window it opened (PID 4001, place.rbxl); closed the MCP proxy (StudioMCP.exe)",

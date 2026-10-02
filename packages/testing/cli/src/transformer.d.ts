@@ -10,7 +10,7 @@ declare module "@flamework-experimental/transformer/out/util/projectConfig.js" {
 	}
 
 	export interface LoadedProjectConfig {
-		project: { cloud?: CloudConfig; testing?: { entry?: string } };
+		project: { cloud?: CloudConfig; testing?: { entry?: string; keepAwake?: boolean; failOnSkip?: boolean } };
 		configPath?: string;
 		env: Record<string, string>;
 	}

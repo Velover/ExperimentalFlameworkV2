@@ -192,8 +192,8 @@ describe("test under several projects", () => {
 		expect(run.windows).toHaveLength(0);
 
 		// The place reports the project it carries, and the summary says so.
-		expect(run.out).toContain("2 passed, 0 failed in 12ms (server, project deferred)");
-		expect(run.out).toContain("1 passed, 1 failed in 12ms (server, project streaming)");
+		expect(run.out).toContain("2 passed, 0 failed, 0 skipped in 12ms (server, project deferred)");
+		expect(run.out).toContain("1 passed, 1 failed, 0 skipped in 12ms (server, project streaming)");
 	});
 
 	test("ROJO_PROJECT lists the projects when no flag does, and an empty one is the plain run", async () => {
@@ -241,7 +241,7 @@ describe("test under several projects", () => {
 		expect(plain.spawned).toHaveLength(0);
 		expect(plain.launched.map((command) => basename(command[1]!))).toEqual(["place.rbxl"]);
 		expect(plain.out).not.toContain("projects:");
-		expect(plain.out).toContain("2 passed, 0 failed in 12ms (server)");
+		expect(plain.out).toContain("2 passed, 0 failed, 0 skipped in 12ms (server)");
 	});
 
 	test("a realm that hangs under one project is placed, and the other projects still run", async () => {
@@ -431,8 +431,8 @@ describe("test", () => {
 		]);
 		expect(run.studioCalls[3]!.args.datamodel_type).toBe("Server");
 		expect(run.studioCalls[4]!.args.datamodel_type).toBe("Client");
-		expect(run.out).toContain("2 passed, 0 failed in 12ms (server)");
-		expect(run.out).toContain("1 passed, 0 failed in 12ms (client)");
+		expect(run.out).toContain("2 passed, 0 failed, 0 skipped in 12ms (server)");
+		expect(run.out).toContain("1 passed, 0 failed, 0 skipped in 12ms (client)");
 		expect(run.out).toContain("play session stopped");
 		expect(run.closedWindows).toEqual(["place.rbxl"]);
 		expect(run.closeTargets).toEqual(["file place.rbxl", "pid 4001 place.rbxl"]);
@@ -472,7 +472,7 @@ describe("test", () => {
 
 		expect(run.code).toBe(1);
 		expect(run.out).toContain("the shop was empty");
-		expect(run.out).toContain("2 passed, 0 failed in 12ms (client)");
+		expect(run.out).toContain("2 passed, 0 failed, 0 skipped in 12ms (client)");
 		expect(run.studioCalls.filter((call) => call.name === "execute_luau")).toHaveLength(2);
 		// --keep: the session stays and so does the window.
 		expect(run.studioCalls.filter((call) => call.name === "start_stop_play")).toHaveLength(1);
@@ -573,7 +573,7 @@ describe("test", () => {
 
 		// The tests passed, but the window is still there, and the run says so instead of "closed".
 		expect(run.code).toBe(1);
-		expect(run.out).toContain("2 passed, 0 failed in 12ms (client)");
+		expect(run.out).toContain("2 passed, 0 failed, 0 skipped in 12ms (client)");
 		expect(run.out).not.toContain("closed place.rbxl");
 		expect(run.err).toContain("place.rbxl is still open (PID 4001, ");
 		expect(run.err).toContain("place.rbxl - Roblox Studio");
@@ -1100,7 +1100,7 @@ describe("test", () => {
 		);
 		expect(run.err).not.toContain("sabuiltin");
 		expect(run.err).not.toContain(SANDBOX_HINT);
-		expect(run.out).toContain("2 passed, 0 failed in 12ms (client)");
+		expect(run.out).toContain("2 passed, 0 failed, 0 skipped in 12ms (client)");
 		expect(run.out).toContain("play session stopped");
 		expect(run.closedWindows).toEqual(["place.rbxl"]);
 	});

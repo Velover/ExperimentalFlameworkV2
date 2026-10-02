@@ -23,9 +23,14 @@ They run once on start and print one line per check:
 
 ```
 [FWTEST] <server|client> <group>: <name>: PASS|FAIL (detail)
+[FWTEST] <server|client> <group>: <name>: SKIP (reason)
 [FWTEST] <server|client> <group>: <name>: INFO <detail>
-[FWTEST] <server|client> SUMMARY: <n> passed, <m> failed
+[FWTEST] <server|client> SUMMARY: <n> passed, <m> failed, <k> skipped
 ```
+
+A `SKIP` is a check the environment rules out, not a failure: `lifecycle: onRender fires on the
+client` skips when no frame renders at all (`RenderStepped doesn't fire: the display may be
+asleep`), and fails when frames render and `onRender` does not.
 
 | Group | Realm | What it proves |
 |---|---|---|
@@ -100,7 +105,7 @@ providers print on start, which the same proxy drives.
 
 `scripts/studio/run-studio-tests.mjs` drives Studio through the MCP proxy: it starts a play session,
 waits for the providers, prints every `[FWTEST]` line, stops the session and exits non-zero on a
-`FAIL` or a missing realm summary.
+`FAIL` or a missing realm summary. It counts the `SKIP` lines apart, and they do not fail it.
 
 ```console
 node scripts/studio/run-studio-tests.mjs                          # current Workspace settings
@@ -228,7 +233,7 @@ Each cell is one `run-studio-tests.mjs` invocation. Everything in the first two 
 | Streaming on, small radius | set `StreamingMinRadius`/`StreamingTargetRadius` to 64/128 by hand, then `--streaming on` | Unchanged: every part the checks rely on sits either right by the spawn or 6000 studs out, so no check depends on the radius. Tightening it only makes instances stream out sooner. |
 | Server-only (Run mode) | Studio's *Run* button, or `RunService:Run()` from a snippet (see above) | Server lines only; client lines absent. Confirms nothing server-side depends on a client. |
 | Team Test / multiple clients | Studio's *Team Test* with two clients | Both clients print their own summaries; the server's `Ping`/`Bump` handlers serve each. |
-| Play Solo focus | run with the Studio window minimised | `onRender fires on the client` may take longer: `PreRender` only fires while Studio renders the client viewport, which is why that check waits up to 15 s. |
+| Window and display | run with the Studio window minimised or unfocused, then with the PC's display off | A minimised or unfocused window still renders, at about 60 frames a second, so `onRender fires on the client` passes as usual (`PreRender` starts a few seconds after the LocalScripts, which is why the check waits up to 15 s). A display that is off stops `RenderStepped` and `PreRender` altogether: the check, and the in-place suite's client `onRender` case, report `SKIP` (`RenderStepped doesn't fire: the display may be asleep`). `flamework-test test --keep-awake` keeps the display on for a run; see [unattended runs](place.md#unattended-runs-keep-the-display-on). |
 
 Add a row whenever a scenario needs a property changed by hand; keep the automated rows to what the
 script can set and restore itself.
@@ -282,7 +287,8 @@ All three were invisible to the Lune suites and are fixed, each with a test that
    Reproduced in Lune with `__harness.deferTags`, which queues tag signals and delivers them in order.
 
 Not bugs, but worth knowing: `PreRender` starts a few seconds after the LocalScripts in Play Solo,
-so render checks need a longer window; and the game template the place was cut from had shared
+so render checks need a longer window, and no frame renders at all while the PC's display is off
+(a minimised window still renders); and the game template the place was cut from had shared
 modules that yielded at require time for `Assets`/`Sounds`, which stalled ignition in a place without
 them. The place carries none of them now, and the two folders come from the original place (see
 Prerequisites).

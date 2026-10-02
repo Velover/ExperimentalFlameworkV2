@@ -1,5 +1,5 @@
 import { OnStart, Provider } from "@flamework-experimental/core";
-import { defineTests, expectEqual, expectTrue, getProject, test } from "@flamework-experimental/testing";
+import { defineTests, expectEqual, expectTrue, getProject, skip, test } from "@flamework-experimental/testing";
 import { Workspace } from "@rbxts/services";
 import { describeSignalBehavior, measureSignalBehavior } from "./signalBehavior";
 
@@ -12,7 +12,7 @@ import { describeSignalBehavior, measureSignalBehavior } from "./signalBehavior"
  * attribute the CLI stamps on `Workspace`).
  *
  * A place the CLI did not make -- served by Rojo, opened by hand -- carries no name; the cases
- * report what they measured and assert nothing about it.
+ * skip there, with what they measured as the reason, and assert nothing about it.
  */
 const PROJECTS = ["default", "immediate", "deferred", "streaming"];
 
@@ -29,8 +29,7 @@ export class ProjectSpecs implements OnStart {
 			test("the place carries the name of the project it was made under", () => {
 				const project = getProject();
 				if (project === undefined) {
-					print("[projects] this place was not made by flamework-test; nothing about a project is asserted");
-					return;
+					skip("this place was not made by flamework-test, so it carries no project name");
 				}
 
 				expectTrue(PROJECTS.includes(project), `a project the suite knows: ${project}`);
@@ -40,7 +39,11 @@ export class ProjectSpecs implements OnStart {
 				const measured = measureSignalBehavior();
 				const project = getProject();
 				print(`[projects] ${project ?? "no project"}: ${describeSignalBehavior(measured)}`);
-				if (project === undefined) return;
+				if (project === undefined) {
+					skip(
+						`no project to compare with (not made by flamework-test); measured: ${describeSignalBehavior(measured)}`,
+					);
+				}
 
 				// `Deferred` defers all of them together, in one queue; `Immediate`, and `Default`
 				// as this engine reads it, delivers all of them inside the write. A place where some
@@ -60,7 +63,11 @@ export class ProjectSpecs implements OnStart {
 			test("StreamingEnabled follows the project", () => {
 				const project = getProject();
 				print(`[projects] ${project ?? "no project"}: StreamingEnabled=${Workspace.StreamingEnabled}`);
-				if (project === undefined) return;
+				if (project === undefined) {
+					skip(
+						`no project to compare with (not made by flamework-test); StreamingEnabled=${Workspace.StreamingEnabled}`,
+					);
+				}
 
 				// The one streaming property a script can read; the radii and the model behaviour
 				// show only in what reaches the client, which the client's `streaming` section is for.

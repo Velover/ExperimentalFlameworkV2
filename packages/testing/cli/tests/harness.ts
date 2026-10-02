@@ -98,6 +98,10 @@ export interface Harness {
 	exitedAtOnce: boolean;
 	/** How many MCP proxies the run connected, and how many of them it left unclosed. */
 	proxies: { connected: number; open: number };
+	/** Every state the run asked SetThreadExecutionState for, in order (0x80000003 keeps the display on, 0x80000000 lets go). */
+	executionStates: number[];
+	/** The thread's execution state when the run returned: 0x80000000 when nothing is held. */
+	executionState: number;
 }
 
 /** A canned Studio: what the proxy lists, and what each tool answers. */
@@ -157,6 +161,13 @@ export async function runCli(
 		onRemoveFile?: (path: string) => void;
 		/** Answers a request in place of the queued responses when it returns one: a request still in flight, say. */
 		onFetch?: (url: string) => Promise<Response> | undefined;
+		/** The platform the run sees; by default `win32`, whatever this machine is. */
+		platform?: string;
+		/**
+		 * Answers SetThreadExecutionState in place of the fake one, which returns the state before;
+		 * it may throw (the function could not be reached) or return 0 (Windows refused).
+		 */
+		setExecutionState?: (state: number) => number;
 	} = {},
 ): Promise<Harness> {
 	const out: string[] = [];
@@ -175,6 +186,9 @@ export async function runCli(
 	const removedFiles: string[] = [];
 	let refusedRemovals = 0;
 	const proxies = { connected: 0, open: 0 };
+	const executionStates: number[] = [];
+	// The thread's state as Windows keeps it: ES_CONTINUOUS alone is nothing held.
+	let executionState = 0x80000000;
 	let exitedAtOnce = false;
 	let exitAtOnce: (code: number) => void = () => {};
 	const exited = new Promise<number>((resolve) => (exitAtOnce = resolve));
@@ -301,6 +315,16 @@ export async function runCli(
 			exitedAtOnce = true;
 			exitAtOnce(code);
 		},
+		platform: options.platform ?? "win32",
+		// Never the real SetThreadExecutionState: what the run asks for is recorded, and answered
+		// the way Windows answers, with the state before.
+		setExecutionState: (state) => {
+			executionStates.push(state);
+			if (options.setExecutionState !== undefined) return options.setExecutionState(state);
+			const before = executionState;
+			executionState = state;
+			return before;
+		},
 	};
 
 	/** What the real close script does, over the fake machine's windows. */
@@ -374,6 +398,8 @@ export async function runCli(
 		removedFiles,
 		exitedAtOnce,
 		proxies,
+		executionStates,
+		executionState,
 	};
 }
 

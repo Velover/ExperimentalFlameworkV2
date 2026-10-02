@@ -12,11 +12,18 @@ export namespace FwTest {
 
 	let passed = 0;
 	let failed = 0;
+	let skipped = 0;
 
 	export function check(name: string, pass: boolean, detail?: string) {
 		if (pass) passed++;
 		else failed++;
 		print(`[FWTEST] ${realm} ${name}: ${pass ? "PASS" : "FAIL"}${detail !== undefined ? ` (${detail})` : ""}`);
+	}
+
+	/** A check the environment rules out: neither a pass nor a failure. */
+	export function skip(name: string, reason: string) {
+		skipped++;
+		print(`[FWTEST] ${realm} ${name}: SKIP (${reason})`);
 	}
 
 	export function info(name: string, detail: string) {
@@ -34,6 +41,6 @@ export namespace FwTest {
 	}
 
 	export function summary() {
-		print(`[FWTEST] ${realm} SUMMARY: ${passed} passed, ${failed} failed`);
+		print(`[FWTEST] ${realm} SUMMARY: ${passed} passed, ${failed} failed, ${skipped} skipped`);
 	}
 }

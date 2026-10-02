@@ -148,7 +148,16 @@ export interface TestingRuntimeConfig {
 	 * game by itself. A string here; the artifact carries it resolved to a tree path.
 	 */
 	entry?: string;
+
+	/** `flamework-test` only: a skipped test fails the run. After `--fail-on-skip` and `FAIL_ON_SKIP`. */
+	failOnSkip?: boolean;
+
+	/** `flamework-test` only: a Studio run keeps the display on. After `--keep-awake` and `KEEP_AWAKE`. */
+	keepAwake?: boolean;
 }
+
+/** Keys of the `testing` section only `flamework-test` reads, left out of the place's config. */
+const CLI_ONLY_TESTING_KEYS = ["failOnSkip", "keepAwake"] as const;
 
 /**
  * The sections the runtime packages read. Game projects get them written to
@@ -513,7 +522,13 @@ export function getRuntimeConfig(project: ProjectConfig): RuntimeConfig | undefi
 	let any = false;
 
 	for (const section of RUNTIME_SECTIONS) {
-		const value = project[section];
+		let value = project[section];
+		if (section === "testing" && value !== undefined) {
+			const placeOnly: Record<string, unknown> = { ...value };
+			for (const key of CLI_ONLY_TESTING_KEYS) delete placeOnly[key];
+			value = placeOnly as never;
+		}
+
 		if (value !== undefined) {
 			runtime[section] = value as never;
 			any = true;

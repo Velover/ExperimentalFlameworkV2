@@ -61,7 +61,11 @@ try {
 		for (const line of others) console.log("  " + line);
 	}
 
-	const failures = results.filter((line) => /: FAIL/.test(line));
+	// The status is the first one after the realm, so a skip's reason or a failure's message that
+	// reads ": FAIL" does not count as a failure of its own.
+	const statusOf = (line) => line.match(/\[FWTEST\] (?:server|client) .+?: (PASS|FAIL|SKIP|INFO)\b/)?.[1];
+	const failures = results.filter((line) => statusOf(line) === "FAIL");
+	const skips = results.filter((line) => statusOf(line) === "SKIP");
 	const summaries = ["server", "client"].filter((realm) =>
 		results.some((line) => line.includes(`] ${realm} SUMMARY:`)),
 	);
@@ -71,7 +75,9 @@ try {
 	if (missing.length > 0) {
 		console.log(`no SUMMARY line from: ${missing.join(", ")} -- ignition stalled or the run needs a longer --wait`);
 	}
-	console.log(`${failures.length} failing check(s), summaries from: ${summaries.join(", ") || "none"}`);
+	console.log(
+		`${failures.length} failing check(s), ${skips.length} skipped, summaries from: ${summaries.join(", ") || "none"}`,
+	);
 	exitCode = failures.length === 0 && missing.length === 0 ? 0 : 1;
 } finally {
 	if (started) await mcp.call("start_stop_play", { studio_id, is_start: false }, 90_000).catch(() => {});

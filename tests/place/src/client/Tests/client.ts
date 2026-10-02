@@ -18,10 +18,18 @@ import {
 	expectEqual,
 	expectThrows,
 	expectTrue,
+	skip,
 	test,
 } from "@flamework-experimental/testing";
 import { LogService, Players, ReplicatedStorage, RunService, Workspace } from "@rbxts/services";
 import { Events, Functions } from "client/Core/network";
+
+/** Waits up to `seconds` for `predicate` to hold, frame by frame, and says whether it did. */
+function within(seconds: number, predicate: () => boolean) {
+	const deadline = os.clock() + seconds;
+	while (!predicate() && os.clock() < deadline) task.wait();
+	return predicate();
+}
 
 /**
  * The half of the suite that needs a client: a real round trip over real remotes, and `onRender`,
@@ -110,7 +118,20 @@ export class ClientTests implements OnStart, OnRender, OnTick {
 
 			test("onRender fires on the client, where the server sees nothing", () => {
 				const before = this.renders;
-				eventually(() => this.renders > before, "onRender to fire");
+				if (within(5, () => this.renders > before)) return;
+
+				// The engine renders no frame while the display is off (a machine left to sleep during
+				// an unattended run; a minimized Studio still renders), and then onRender has nothing to
+				// fire on. A plain RenderStepped connection tells the two apart: no frame at all is the
+				// environment, a frame without onRender is Flamework's failure.
+				let frames = 0;
+				const connection = RunService.RenderStepped.Connect(() => frames++);
+				defer(() => connection.Disconnect());
+				if (!within(2, () => frames > 0)) {
+					skip("RenderStepped doesn't fire: the display may be asleep");
+				}
+
+				eventually(() => this.renders > before, "onRender to fire while RenderStepped does", 2);
 			});
 
 			test("onTick fires on the client too", () => {

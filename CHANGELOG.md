@@ -87,8 +87,23 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `SectionResult` and `RunResult`, and the types `TestStatus` and `TestFunction`. A skip keeps `ok`
   true and leaves `RunResult.ok` alone.
 - A `[FWTEST] <realm> <section>/<test>: SKIP (Nms): <reason>` line per skipped test.
+- `flamework-test` shows skips: each realm's summary counts them and lists each skipped test with
+  its reason, in Studio and cloud runs; a multi-project run's last line counts each project's
+  skips, and `--list` marks `test.skip` entries.
+- `--fail-on-skip` (or `FAIL_ON_SKIP`, `testing.failOnSkip`) on `test`, `studio run`, `cloud run` and
+  `cloud test` makes any skip fail the run. A place built with 2.0.0-alpha.5 or earlier passes it,
+  with a note.
+- `--keep-awake` (or `KEEP_AWAKE`, `testing.keepAwake`) on `test` and `studio run` asks Windows to
+  keep the display on from the start of the run to its end: RenderStepped stops while the display
+  sleeps, which fails `onRender` tests in unattended runs. Off by default; it changes no power
+  setting, and is released at the end, on a failure and on Ctrl+C (and by Windows when the process
+  exits). Other systems accept the flag and do nothing; `--cloud` refuses it. `testing.failOnSkip`
+  and `testing.keepAwake` are read by the CLI only and are not compiled into the place.
 
 #### Fixed
+
+- `flamework-test`'s report of a run that hangs names the last test that reported even when its
+  name has spaces (it said no test had reported), and counts SKIP lines.
 
 - `flamework-test` runs a place's tests in Studio again. Since 2026-10-01, Studio runs the Luau of
   its MCP server (and its Assistant) sandboxed, and a sandboxed thread may only invoke a bindable
@@ -112,8 +127,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 - `flamework-test` starts the MCP proxy and its PowerShell window scripts hidden in consoles of
   their own, and no longer blocks while closing or listing Studio windows.
-- A run's `passed` counts no longer include skipped tests, and the `[FWTEST]` SUMMARY line reads
-  `N passed, M failed, K skipped (…ms)`.
+- A run's `passed` counts no longer include skipped tests, and the `[FWTEST]` SUMMARY line and
+  `flamework-test`'s section and realm summaries read `N passed, M failed, K skipped`.
 
 ### Docs
 

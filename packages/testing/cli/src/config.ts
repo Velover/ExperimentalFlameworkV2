@@ -1,4 +1,5 @@
-// Where the CLI's settings come from: the `cloud` section of the project's flamework.config.json,
+// Where the CLI's settings come from: the `cloud` section of the project's flamework.config.json
+// (and its own keys in the `testing` section),
 // read through the transformer's own loader so that `${NAME}` references, `.env` and `.env.local`
 // behave exactly as they do for a build. Flags and environment variables sit on top.
 import { existsSync } from "node:fs";
@@ -18,11 +19,19 @@ export interface CloudSettings {
 	 * config's `testing.entry`; Studio needs none, the place runs itself.
 	 */
 	testingEntry?: string;
+	/**
+	 * `testing.keepAwake`: a Studio run asks Windows to keep the display on while it lasts. After
+	 * `--keep-awake` and `KEEP_AWAKE`.
+	 */
+	keepAwake?: boolean;
+	/** `testing.failOnSkip`: a skipped test fails the run. After `--fail-on-skip` and `FAIL_ON_SKIP`. */
+	failOnSkip?: boolean;
 	/** Where the settings were read from, when a file was found. */
 	configPath?: string;
 	/**
 	 * `.env`, then `.env.local`, then the process environment, later ones winning: the CLI reads
-	 * its own variables (ROBLOX_API_KEY, TESTING_UNIVERSE_ID, TESTING_PLACE_ID, ORIGINAL_PLACE)
+	 * its own variables (ROBLOX_API_KEY, TESTING_UNIVERSE_ID, TESTING_PLACE_ID, ORIGINAL_PLACE,
+	 * ROJO_PROJECT, KEEP_AWAKE, FAIL_ON_SKIP)
 	 * from here, so a `.env` works without the config file referencing it.
 	 */
 	env: Record<string, string>;
@@ -38,6 +47,8 @@ export function loadCloudSettings(cwd: string, env: Record<string, string | unde
 	const cloud = loaded.project.cloud ?? {};
 	const base = loaded.configPath !== undefined ? dirname(loaded.configPath) : cwd;
 	const entry = loaded.project.testing?.entry;
+	// The CLI's own keys in the `testing` section (the transformer leaves them out of the place).
+	const testing = loaded.project.testing ?? {};
 
 	return {
 		testingUniverseId: cloud.testingUniverseId,
@@ -49,6 +60,8 @@ export function loadCloudSettings(cwd: string, env: Record<string, string | unde
 				? resolve(base, cloud.originalPlace)
 				: undefined,
 		testingEntry: entry !== undefined && entry !== "" ? entry : undefined,
+		...(typeof testing.keepAwake === "boolean" ? { keepAwake: testing.keepAwake } : {}),
+		...(typeof testing.failOnSkip === "boolean" ? { failOnSkip: testing.failOnSkip } : {}),
 		configPath: loaded.configPath,
 		env: loaded.env,
 	};

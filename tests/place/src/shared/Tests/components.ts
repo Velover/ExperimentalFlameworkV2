@@ -20,6 +20,7 @@ import {
 	expectThrows,
 	expectTrue,
 	scratch,
+	skip,
 	test,
 } from "@flamework-experimental/testing";
 import { CollectionService, LogService, ReplicatedStorage, RunService } from "@rbxts/services";
@@ -4641,7 +4642,11 @@ export class ComponentSpecs implements OnStart {
 			test("names the instance guard in the warning when the reading at the flip is what holds a component down", () => {
 				// Contextual streaming on a server reads the tree once: the child moving away is not
 				// polled, so only the reading the flip to qualified is gated on sees that it is gone.
-				if (!RunService.IsServer()) return;
+				if (!RunService.IsServer()) {
+					skip(
+						"a server's case: a client watches the guard's tree, so no single reading holds the component down",
+					);
+				}
 
 				const components = createComponentModule();
 				const warnings = recordWarnings();

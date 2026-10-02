@@ -33,6 +33,8 @@ bunx flamework-test test place.rbxl --realm client         # one realm
 bunx flamework-test test place.rbxl --sections economy     # a section, or economy/buys
 bunx flamework-test test place.rbxl --list                 # what would run
 bunx flamework-test test place.rbxl --keep                 # leave Studio and the play session open
+bunx flamework-test test place.rbxl --fail-on-skip         # a skipped test fails the run
+bunx flamework-test test place.rbxl --keep-awake           # keep the display on while it runs
 ```
 
 It needs Studio installed with "MCP server" enabled in its Assistant settings, which is what lets
@@ -84,12 +86,68 @@ and `studio run [--realm server|client|both]`, which runs the tests in whatever 
 testing place open without opening or closing anything. See the package's
 [README](../../packages/testing/README.md) for each.
 
+### Skipped tests
+
+A test that calls `skip(reason)`, or is registered with `test.skip` (see
+[Skipping a test](../guide/12-testing.md#skipping-a-test)), is reported as skipped. That is not a
+failure, so the run stays green, but every skip is shown: each realm's summary counts the skips
+and lists each one with its reason, in the order the tests ran, beside the failures:
+
+```
+PASS client  11 passed, 0 failed, 1 skipped
+       - onRender fires on the client, where the server sees nothing (skipped): RenderStepped doesn't fire: the display may be asleep
+...
+
+181 passed, 0 failed, 2 skipped in 28159ms (client, project default)
+PASS
+```
+
+A run under several projects counts them on its last line too:
+`projects: default passed (1 skipped), deferred passed`.
+
+`--fail-on-skip` makes any skip fail the run, for a CI job that must run everything: the realm's
+summary then ends `1 skipped, which fails the run under --fail-on-skip` and `FAIL`, and the exit
+code is 1. The same comes from `FAIL_ON_SKIP=true` in the shell, `.env` or `.env.local`, or from
+`"testing": { "failOnSkip": true }` in `flamework.config.json`, in that order after the flag;
+`--fail-on-skip=false` turns it off for one run. `test`, `studio run`, `cloud run` and
+`cloud test` take it. `--list` marks a test registered with `test.skip`
+(`economy/refunds  (skipped: marked with test.skip)`) and is never failed by one, since nothing ran.
+`--json` prints each test's `status` and `skipReason` as the place gave them.
+
+Across versions: a place built with 2.0.0-alpha.5 or earlier has no skips to report, and
+`--fail-on-skip` passes it with a note saying so. An older `flamework-test` against a newer place
+reads each skip as a test that did not fail and leaves it out of its counts: skips neither fail
+its run nor show in its summary.
+
+### Unattended runs: keep the display on
+
+The engine renders no frame while the PC's display is off. `RenderStepped` and `PreRender` stop,
+Flamework's `onRender` never fires, and a client test that waits for a frame fails, in a run
+nobody watches once the screen has gone to sleep. A minimized or unfocused Studio window still
+renders, at about 60 frames a second: only the display matters.
+
+`--keep-awake` asks Windows to keep the display on, and the machine awake, from the start of the
+run to its end, through `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED |
+ES_SYSTEM_REQUIRED)`. It is a request of the CLI's own process, not a change to the power settings,
+and the run lets go of it when it ends, whether it passed, failed or was stopped by Ctrl+C (whose
+last line then names `let the display sleep again`). A second Ctrl+C exits at once without it, and
+Windows lets go of a process's request when the process exits, so nothing is left either way. It
+is off by default; `KEEP_AWAKE=true` or `"testing": { "keepAwake": true }` turn it on, with the
+same order as `--fail-on-skip`. `test` and `studio run` take it; a cloud run has no display on
+this machine, so `--cloud` refuses the flag and leaves the setting alone. On Linux and macOS the
+flag is accepted and does nothing, and says so in one line.
+
+This repository's place tells the two cases apart: its client `onRender` test checks, with a plain
+`RenderStepped` connection, whether the engine renders at all, and skips with
+`RenderStepped doesn't fire: the display may be asleep` when it does not, while an engine that
+renders and an `onRender` that does not fire still fail it.
+
 ### Ctrl+C
 
 Ctrl+C stops a run where it is and cleans up what the run started, through the same steps a run
 that finishes takes: the play session it started is stopped, the window it opened is closed by the
 process it started (never a window it did not open), its window-name claim is released, the patch's
-temp folder is removed, and lune and the MCP proxy are stopped. Nothing new starts afterwards: the
+temp folder is removed, lune and the MCP proxy are stopped, and the `--keep-awake` request is let go. Nothing new starts afterwards: the
 other realm and the other projects are not run. The CLI then exits 130 (but see
 [the exit code](#the-exit-code-and-the-prompt) for what a shell sees), ending on one line that says
 what it cleaned up and what it left:
@@ -256,8 +314,9 @@ the shell, else `.env` and `.env.local` next to the config file, else the `cloud
 config section at all.
 
 `cloud run` prints every log line the task produced, then a summary per section with each
-failure's message, and exits non-zero when a test failed, a filter entry matched nothing, or the
-task itself failed. `--json` prints the raw result table instead.
+failure's message and each skip's reason, and exits non-zero when a test failed, a filter entry
+matched nothing, the task itself failed, or, under `--fail-on-skip`, a test skipped. `--json`
+prints the raw result table instead.
 
 A version is published as `Saved`, which uploads it and gives it a number without making it live,
 and the tests run against that number. Nothing here publishes to players. The place has to be
@@ -353,14 +412,14 @@ ROJO_PROJECT=default.project.json,tests/deferred.project.json,tests/streaming.pr
 Each project is a run of both realms in a place of its own name (`place.deferred.rbxl`, laid
 over the original when one is named, else the build with the project's properties set on it),
 under a heading with the project's name, every one of them even after one fails, and a line at the
-end:
+end, which counts each project's skips:
 
 ```
 === deferred: tests/deferred.project.json ===
 ...
-2 passed, 0 failed in 340ms (server, project deferred)
+2 passed, 0 failed, 0 skipped in 340ms (server, project deferred)
 ...
-projects: default passed, deferred passed, streaming FAILED
+projects: default passed (1 skipped), deferred passed, streaming FAILED
 ```
 
 The exit code is the worst of them; `--timeout` and the hang report apply to each project's run.
@@ -374,14 +433,15 @@ place's services are set to, not what Rojo synced; a project with a different tr
 A test learns which project it runs under from `getProject()`, the name of the project file
 (`deferred`; `default` for the default project when an original was patched; `undefined` in a
 place the CLI did not make, such as one opened from Rojo by hand). The run result carries it as
-`project`. Assert per project, or return early under the others:
+`project`. Assert per project, or skip under the others, which the summary then lists with the
+reason (a plain `return` would count as a pass):
 
 ```ts
-import { defineTests, expectEqual, expectTrue, getProject, test } from "@flamework-experimental/testing";
+import { defineTests, expectEqual, expectTrue, getProject, skip, test } from "@flamework-experimental/testing";
 
 defineTests("signals", () => {
     test("ChildAdded is deferred past the write", () => {
-        if (getProject() !== "deferred") return;
+        if (getProject() !== "deferred") skip("only the deferred project defers signals");
         const folder = new Instance("Folder");
         let fired = false;
         folder.ChildAdded.Connect(() => (fired = true));
@@ -405,7 +465,13 @@ without running it, `place.deferred.rbxl`, to open in Studio and look at.
 | `the server's run failed: Workspace.FlameworkTests did not appear` | The build was made without the `testing` scope active (`FLAMEWORK_SCOPES=testing` for that build), so the plugin stayed inert. The client's run follows, and says the same. |
 | `the server's run failed: The current thread cannot invoke 'FlameworkTests' since 'FlameworkTests' has additional values for the Capabilities property: ...` | Studio runs MCP code sandboxed, and the place was built with `@flamework-experimental/testing` 2.0.0-alpha.5 or earlier, whose host does not make its bindable Sandboxed (see [In Studio](#in-studio-on-this-machine)). A later CLI marks it before the invoke while Studio allows that; this error means it could not, or the CLI is that old too. Update the package and rebuild the place. A later CLI says so under the error. |
 | `MISS matched nothing in any realm: ...` | A `--sections` entry named no section or test in any realm that ran. |
-| `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started. The next line names the last test that reported in Studio's output; the one after it in that section is the hanging one. |
+| `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started. The next line names the last test that reported in Studio's output (its `PASS`, `FAIL` or `SKIP` line); the one after it in that section is the hanging one. |
+| `- onRender fires on the client, where the server sees nothing (skipped): RenderStepped doesn't fire: the display may be asleep` | The PC's display was off during the run, so the engine rendered nothing. Run with `--keep-awake` (see [unattended runs](#unattended-runs-keep-the-display-on)), or keep the screen on. |
+| `1 skipped, which fails the run under --fail-on-skip` | A test skipped while `--fail-on-skip`, `FAIL_ON_SKIP` or `testing.failOnSkip` was on; the lines above it name the test and its reason. |
+| `note: this place's runner predates skips ...` | The place was built with `@flamework-experimental/testing` 2.0.0-alpha.5 or earlier, which has no skips, so `--fail-on-skip` had nothing to fail on. |
+| `FAIL_ON_SKIP must be true or false` / `KEEP_AWAKE must be true or false` | The variable holds something else; `true`, `false`, `1`, `0`, `yes`, `no`, `on` and `off` are read, and empty is off. |
+| `--keep-awake is for Studio runs` | A cloud run has no display on this machine to keep on; drop the flag. `KEEP_AWAKE` is left alone there. |
+| `warning: Windows refused to keep the display on` | `SetThreadExecutionState` returned 0; the run went on without the request. |
 | `lune is needed to set the properties of the project ...` | A chosen `--project` sets its `$properties` on a copy of the build under Lune; install it or set `LUNE_EXE`. |
 | `the Rojo project ... does not exist` / `two projects are both named ...` | A `--project` or `ROJO_PROJECT` entry names no file, or two files share a name; both are checked before the first run. |
 | `skipped Workspace.X (not a property the reflection database knows)` | Not a property of that class in Lune's reflection database; check the spelling against the Properties window. |

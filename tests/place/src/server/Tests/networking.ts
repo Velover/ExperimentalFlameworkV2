@@ -9,6 +9,7 @@ import {
 	expectNoThrow,
 	expectTrue,
 	scratch,
+	skip,
 	test,
 } from "@flamework-experimental/testing";
 import { Players, ReplicatedStorage, RunService, Workspace } from "@rbxts/services";
@@ -45,6 +46,10 @@ function publishedRemotes(): Array<Instance> {
 function somePlayer(): Player {
 	return scratch() as unknown as Player;
 }
+
+/** Why a case about the remotes skips where the place does not run, as in an Open Cloud task. */
+const NOT_RUNNING =
+	"no remote is published where the place does not run (an Open Cloud task): only the handlers were checked";
 
 /** Whether an event came from a player, rather than from `predict` with a stand-in. */
 function fromPlayer(player: Player): boolean {
@@ -302,7 +307,7 @@ export class NetworkingTests implements OnStart {
 					// Nothing is published where the place does not run; the handlers are still
 					// one per event.
 					expectTrue(server.setScore !== (server.rename as unknown), "distinct handlers");
-					return;
+					skip(NOT_RUNNING);
 				}
 
 				const setScore = expectDefined(findSpecRemote("setScore"), "the setScore remote");
@@ -314,7 +319,7 @@ export class NetworkingTests implements OnStart {
 			test("uses a single unprefixed remote for both directions", () => {
 				if (!RunService.IsRunning()) {
 					expectDefined(server.setScore, "the handler, where nothing is published");
-					return;
+					skip(NOT_RUNNING);
 				}
 
 				// Unlike a function, an event uses a single remote for both directions, so its id
@@ -341,7 +346,9 @@ export class NetworkingTests implements OnStart {
 
 			test("puts an unreliable event on an UnreliableRemoteEvent", () => {
 				expectDefined(server.tick, "the unreliable event's handler");
-				if (!RunService.IsRunning()) return;
+				if (!RunService.IsRunning()) {
+					skip(NOT_RUNNING);
+				}
 
 				const remote = expectDefined(findSpecRemote("unreliable:tick"), "unreliable remote");
 				expectEqual(remote.ClassName, "UnreliableRemoteEvent", "remote class");

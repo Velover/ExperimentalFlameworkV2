@@ -10,7 +10,7 @@ import {
 	Provider,
 	Serialization,
 } from "@flamework-experimental/core";
-import { CollectionService, Workspace } from "@rbxts/services";
+import { CollectionService, RunService, Workspace } from "@rbxts/services";
 import { Events, Functions } from "client/Core/network";
 import { FwTest } from "shared/Features/Testing/FwTest";
 import {
@@ -73,6 +73,15 @@ export class FwTestController implements OnInit, OnStart, OnTick, OnPhysics, OnR
 		task.spawn(() => this.run());
 	}
 
+	/** Whether the engine renders frames at all: RenderStepped fires within two seconds. */
+	private engineRenders() {
+		let frames = 0;
+		const connection = RunService.RenderStepped.Connect(() => frames++);
+		const fired = FwTest.eventually(() => frames > 0, 2);
+		connection.Disconnect();
+		return fired;
+	}
+
 	private run() {
 		FwTest.check("lifecycle: onInit ran before onStart", this.initialized);
 		FwTest.check("lifecycle: dependency onInit ran before dependent onInit", this.dependencyInitializedFirst);
@@ -108,13 +117,23 @@ export class FwTestController implements OnInit, OnStart, OnTick, OnPhysics, OnR
 			`physics=${this.physics}`,
 		);
 		// PreRender only starts once Studio shows the client in the viewport, a few seconds after the
-		// LocalScripts begin running, so this needs a longer window than the simulation events.
+		// LocalScripts begin running, so this needs a longer window than the simulation events. No
+		// frame renders at all while the display is off, which a plain RenderStepped connection tells
+		// apart from an onRender that does not fire.
 		const renderStart = os.clock();
-		FwTest.check(
-			"lifecycle: onRender fires on the client",
-			FwTest.eventually(() => this.renders > 0, 15),
-			`renders=${this.renders} after ${string.format("%.1f", os.clock() - renderStart)}s`,
-		);
+		const rendered = FwTest.eventually(() => this.renders > 0, 15);
+		if (!rendered && !this.engineRenders()) {
+			FwTest.skip(
+				"lifecycle: onRender fires on the client",
+				"RenderStepped doesn't fire: the display may be asleep",
+			);
+		} else {
+			FwTest.check(
+				"lifecycle: onRender fires on the client",
+				rendered,
+				`renders=${this.renders} after ${string.format("%.1f", os.clock() - renderStart)}s`,
+			);
+		}
 		FwTest.check(
 			"lifecycle: module.listen receives onTick",
 			FwTest.eventually(() => listened > 0, 2),

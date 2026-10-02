@@ -983,6 +983,12 @@ describe("runtime sections", () => {
 	test("are absent when the file only configures the transformer", () => {
 		expect(getRuntimeConfig({ transformer: { obfuscation: true } })).toBeUndefined();
 	});
+
+	test("leave out the testing keys only flamework-test reads", () => {
+		expect(getRuntimeConfig({ testing: { timeout: 5, keepAwake: true, failOnSkip: true } })).toEqual({
+			testing: { timeout: 5 },
+		});
+	});
 });
 
 describe("the fixture", () => {

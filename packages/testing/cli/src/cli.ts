@@ -37,6 +37,7 @@ import {
 	rethrowInterrupted,
 	type Release,
 } from "./interrupt.ts";
+import { keepDisplayAwake, setThreadExecutionState, type SetExecutionState } from "./keepAwake.ts";
 import { parseSections, renderFilter, renderOptions, renderShim, type Filter } from "./luau.ts";
 import {
 	patchCommand,
@@ -57,7 +58,7 @@ import {
 	parseRunResult,
 	resultPassed,
 	ResultParseError,
-	type RealmOfSeveral,
+	type Judgement,
 	type RunResult,
 } from "./results.ts";
 import {
@@ -138,6 +139,8 @@ const FLAGS: Record<string, FlagKind> = {
 	cloud: "boolean",
 	"dry-run": "boolean",
 	json: "boolean",
+	"fail-on-skip": "boolean",
+	"keep-awake": "boolean",
 	"testing-universe": "string",
 	"testing-place": "string",
 	key: "string",
@@ -152,11 +155,11 @@ const STUDIO_FLAGS = ["studio"];
 const FILE_COMMANDS = ["test", "patch", "studio open", "cloud publish", "cloud test"];
 const PATCH_FLAGS = ["original", "project"];
 const PUBLISH_FLAGS = ["file", "published", ...PATCH_FLAGS];
-const RUN_FLAGS = ["version", "sections", "list", "timeout", "code", "script", "dry-run", "json"];
-const REPORT_FLAGS = ["sections", "list", "json", "timeout"];
+const RUN_FLAGS = ["version", "sections", "list", "timeout", "code", "script", "dry-run", "json", "fail-on-skip"];
+const REPORT_FLAGS = ["sections", "list", "json", "timeout", "fail-on-skip"];
 
 const COMMANDS: Record<string, string[]> = {
-	test: ["file", "realm", "keep", "cloud", ...PATCH_FLAGS, ...REPORT_FLAGS, "published"],
+	test: ["file", "realm", "keep", "keep-awake", "cloud", ...PATCH_FLAGS, ...REPORT_FLAGS, "published"],
 	patch: ["file", "out", ...PATCH_FLAGS],
 	"studio open": ["file", "timeout"],
 	"studio close": STUDIO_FLAGS,
@@ -164,7 +167,7 @@ const COMMANDS: Record<string, string[]> = {
 	"studio play": STUDIO_FLAGS,
 	"studio stop": STUDIO_FLAGS,
 	"studio exec": ["code", "script", "realm", "timeout", ...STUDIO_FLAGS],
-	"studio run": ["realm", "keep", ...REPORT_FLAGS, ...STUDIO_FLAGS],
+	"studio run": ["realm", "keep", "keep-awake", ...REPORT_FLAGS, ...STUDIO_FLAGS],
 	"cloud publish": PUBLISH_FLAGS,
 	"cloud run": RUN_FLAGS,
 	"cloud test": [...PUBLISH_FLAGS, ...RUN_FLAGS],
@@ -195,6 +198,10 @@ export interface Flags {
 	cloud?: boolean;
 	"dry-run"?: boolean;
 	json?: boolean;
+	/** A skipped test fails the run; a run resolves it from FAIL_ON_SKIP and testing.failOnSkip too. */
+	"fail-on-skip"?: boolean;
+	/** A Studio run keeps the display on; after it, KEEP_AWAKE and testing.keepAwake. */
+	"keep-awake"?: boolean;
 	"testing-universe"?: string;
 	"testing-place"?: string;
 	key?: string;
@@ -366,11 +373,17 @@ Flags:
              --list                  list the tests instead of running them
              --json                  print the raw result JSON instead of a summary
              --timeout <120s>        per run
+             --fail-on-skip          a skipped test fails the run, for CI that must run everything
+                                     (default: $FAIL_ON_SKIP, else testing.failOnSkip; off)
+             --keep-awake            keep the display on while the run lasts: RenderStepped stops
+                                     while it sleeps, which fails onRender tests in a run nobody
+                                     watches; Windows only, not with --cloud (default: $KEEP_AWAKE,
+                                     else testing.keepAwake; off)
   patch      --out <path>            where the patched place goes; default <file>.patched.rbxl, or
                                      <file>.<project>.rbxl under a chosen --project (one project)
   studio run --realm server|client|both   default server
              --keep                  leave the play session running afterwards
-             --sections, --list, --json, --timeout   as for test
+             --sections, --list, --json, --timeout, --fail-on-skip, --keep-awake   as for test
   studio exec --realm edit|server|client  default edit
   studio *   --studio <name|id>      which window; default: the one with the testing place open,
                                      else the only one with a local place file open
@@ -380,7 +393,8 @@ Flags:
              --code "<luau>"         run this Luau instead of the test shim
              --script <file>         run this Luau file instead of the test shim
              --dry-run               print the request that would be sent, then stop
-             --sections, --list, --json, --timeout   as for test (timeout: the task's, max 300s)
+             --sections, --list, --json, --timeout, --fail-on-skip   as for test (timeout: the
+                                     task's, max 300s)
   common     --testing-universe <id> default: $TESTING_UNIVERSE_ID, else cloud.testingUniverseId
              --testing-place <id>    default: $TESTING_PLACE_ID, else cloud.testingPlaceId
              --key <apiKey>          default: $ROBLOX_API_KEY, else cloud.apiKey; prefer the
@@ -388,11 +402,14 @@ Flags:
              -h, --help
 
 Settings come from flags, then the shell environment, then .env and .env.local next to the
-nearest flamework.config.json, then that file's "cloud" section, which may itself use \${NAME}:
+nearest flamework.config.json, then that file's "cloud" section (and the "testing" keys below),
+which may itself use \${NAME}:
   "cloud": { "testingUniverseId": "...", "testingPlaceId": "...", "apiKey": "\${ROBLOX_API_KEY:-}",
              "originalPlace": "places/original.rbxl" }
 A cloud run also needs "testing": { "entry": "src/server/main" }, the ModuleScript that ignites
 the game: a cloud task runs none of the place's Scripts, so the runner has to. Studio needs nothing.
+"testing": { "failOnSkip": true, "keepAwake": true } turns those two on; --fail-on-skip=false and
+--keep-awake=false turn them off for one run.
 
 Environment (the shell, .env or .env.local):
   ROBLOX_API_KEY                          Open Cloud key: universe-places:write and
@@ -400,6 +417,7 @@ Environment (the shell, .env or .env.local):
   TESTING_UNIVERSE_ID, TESTING_PLACE_ID   the testing experience and the place inside it
   ORIGINAL_PLACE                          a copy of the original place, for --original
   ROJO_PROJECT                            the project(s) a run follows, comma-separated, for --project
+  FAIL_ON_SKIP, KEEP_AWAKE                true or false (1 or 0), for --fail-on-skip and --keep-awake
   LUNE_EXE, ROBLOX_STUDIO_EXE, STUDIO_MCP_EXE   overrides for the tools this finds by itself
 
 Examples:
@@ -411,8 +429,8 @@ Examples:
   flamework-test studio open && flamework-test studio run --realm client
 
 Ctrl+C stops a run and cleans up what it started: the play session, the Studio window it opened
-(unless --keep), its temp files and child processes; a second Ctrl+C exits at once. A task already
-created on Open Cloud runs on: Open Cloud cannot cancel one.
+(unless --keep), its temp files and child processes, and the keep-awake request; a second Ctrl+C
+exits at once. A task already created on Open Cloud runs on: Open Cloud cannot cancel one.
 
 Exit codes: 0 success, 1 failure, 2 bad usage, 130 interrupted by Ctrl+C. 130 is this process's own
 code: run through the flamework-test bin, the shell gets the bin's Ctrl+C status back at once, and
@@ -471,6 +489,10 @@ export interface CliDeps {
 	onInterrupt?: (handler: (signal: string) => void) => () => void;
 	/** Ends the process at once, for a second Ctrl+C during the cleanup. */
 	exit?: (code: number) => void;
+	/** `process.platform` by default: keep-awake asks only Windows. */
+	platform?: string;
+	/** kernel32's SetThreadExecutionState, through bun:ffi by default: what keep-awake calls. */
+	setExecutionState?: SetExecutionState;
 }
 
 interface Io extends Required<Omit<CliDeps, "fetch">> {
@@ -643,6 +665,8 @@ function resolveDeps(deps: CliDeps, interruption: Interruption): Io {
 				};
 			}),
 		exit: deps.exit ?? ((code) => process.exit(code)),
+		platform: deps.platform ?? process.platform,
+		setExecutionState: deps.setExecutionState ?? setThreadExecutionState,
 		interruption,
 	};
 }
@@ -661,6 +685,60 @@ function settingsOf(io: Io): CloudSettings {
 /** A variable from the shell, else from `.env` / `.env.local` next to the config file. */
 function envOf(io: Io, name: string): string | undefined {
 	return io.env[name] ?? settingsOf(io).env[name];
+}
+
+const TRUE_WORDS = ["1", "true", "yes", "on"];
+const FALSE_WORDS = ["", "0", "false", "no", "off"];
+
+/**
+ * A yes-or-no setting, from the first of: the flag (`--fail-on-skip`, or `--fail-on-skip=false` to
+ * turn off for one run what the others turn on), the variable from the shell, else from `.env` or
+ * `.env.local` (`1`, `true`, `yes`, `on`, or `0`, `false`, `no`, `off`; empty is off, as an empty
+ * `ROJO_PROJECT` is none), the config file's key; else off. Anything else in the variable is refused.
+ */
+function booleanSetting(flag: boolean | undefined, variable: string, configured: boolean | undefined, io: Io): boolean {
+	if (flag !== undefined) return flag;
+	const value = envOf(io, variable);
+	if (value !== undefined) {
+		const word = value.trim().toLowerCase();
+		if (TRUE_WORDS.includes(word)) return true;
+		if (FALSE_WORDS.includes(word)) return false;
+		throw new UsageError(`${variable} must be true or false (or 1 or 0), got "${value}"`);
+	}
+	return configured ?? false;
+}
+
+/** Whether a skipped test fails the run: `--fail-on-skip`, `FAIL_ON_SKIP`, `testing.failOnSkip`. */
+function failOnSkipOf(flags: Flags, io: Io): boolean {
+	return booleanSetting(flags["fail-on-skip"], "FAIL_ON_SKIP", settingsOf(io).failOnSkip, io);
+}
+
+/** Whether a Studio run keeps the display on: `--keep-awake`, `KEEP_AWAKE`, `testing.keepAwake`. */
+function keepAwakeOf(flags: Flags, io: Io): boolean {
+	return booleanSetting(flags["keep-awake"], "KEEP_AWAKE", settingsOf(io).keepAwake, io);
+}
+
+/**
+ * The flags of a run with `--fail-on-skip` resolved from its variable and config key too, so that a
+ * misspelt variable is refused before anything opens or uploads, and what runs reads one flag.
+ */
+function withRunSettings(flags: Flags, io: Io): Flags {
+	return { ...flags, "fail-on-skip": failOnSkipOf(flags, io) };
+}
+
+/**
+ * Runs `body` with the display kept on when `on` (see keepAwake.ts): from here to the run's end,
+ * whichever way it ends. The request is let go when `body` returns or throws, a failure or a Ctrl+C
+ * alike; a second Ctrl+C exits at once, and Windows lets go of the request with the process.
+ */
+async function withKeepAwake<T>(on: boolean, io: Io, body: () => Promise<T>): Promise<T> {
+	if (!on) return await body();
+	const release = keepDisplayAwake(io);
+	try {
+		return await body();
+	} finally {
+		release();
+	}
 }
 
 function makeClient(flags: Flags, io: Io): OpenCloudClient {
@@ -1039,6 +1117,7 @@ async function rawScript(flags: Flags, io: Io): Promise<{ script: string; label:
 
 async function cmdRun(flags: Flags, io: Io, kind: "run" | "probe" = "run"): Promise<number> {
 	const { script, scriptKind, label } = await buildScript(flags, io, kind);
+	if (scriptKind === "shim") flags = withRunSettings(flags, io);
 	const { version, source } = await resolveVersion(flags, io, kind === "run" && flags.version === undefined);
 	const timeout = flags.timeout ?? (kind === "probe" ? PROBE_TIMEOUT : DEFAULT_TIMEOUT);
 
@@ -1111,8 +1190,9 @@ function printRunResult(results: string[], flags: Flags, io: Io): number {
 	const result = readRunResult(results, io);
 	if (result === undefined) return 1;
 
-	printResult(result, results, flags, io);
-	return resultPassed(result) ? 0 : 1;
+	const judged: Judgement = { failOnSkip: flags["fail-on-skip"] === true };
+	printResult(result, results, flags, io, judged);
+	return resultPassed(result, judged) ? 0 : 1;
 }
 
 /** A run's result, or nothing when it cannot be read, which is reported. */
@@ -1131,8 +1211,15 @@ function readRunResult(results: string[], io: Io): RunResult | undefined {
 	}
 }
 
-/** Prints a result as `--json`, `--list` or the summary ask; `options` when it is one realm of several. */
-function printResult(result: RunResult, results: string[], flags: Flags, io: Io, options?: RealmOfSeveral): void {
+/**
+ * How many tests the results a run has printed skipped, for the line a run under several projects
+ * ends on.
+ */
+const skipTally = new WeakMap<Io, number>();
+
+/** Prints a result as `--json`, `--list` or the summary ask, judged as `options` says. */
+function printResult(result: RunResult, results: string[], flags: Flags, io: Io, options?: Judgement): void {
+	if (!flags.list) skipTally.set(io, (skipTally.get(io) ?? 0) + result.skipped);
 	if (flags.json) {
 		io.log(JSON.stringify(JSON.parse(results[0]!), null, 2));
 	} else {
@@ -1591,6 +1678,7 @@ async function runRealms(
 	const filter: Filter = parseSections(flags.sections);
 	const script = renderStudioRun(renderFilter(filter), renderOptions({ list: flags.list === true }));
 	const state = () => client.call("get_studio_state", { studio_id: studio.id }, 30_000);
+	const failOnSkip = flags["fail-on-skip"] === true;
 
 	let startedHere = false;
 	let releaseSession = () => {};
@@ -1679,8 +1767,9 @@ async function runRealms(
 			}
 
 			if (!several) {
-				printResult(result, results, flags, io);
-				code = Math.max(code, resultPassed(result) ? 0 : 1);
+				const judged: Judgement = { failOnSkip };
+				printResult(result, results, flags, io, judged);
+				code = Math.max(code, resultPassed(result, judged) ? 0 : 1);
 			} else {
 				answered.push({ result, results });
 			}
@@ -1692,7 +1781,7 @@ async function runRealms(
 		if (several) {
 			const missed =
 				answered.length === realms.length ? missedEverywhere(answered.map(({ result }) => result)) : [];
-			const judged: RealmOfSeveral = { realmOfSeveral: true, missed };
+			const judged: Judgement = { realmOfSeveral: true, missed, failOnSkip };
 			for (const { result, results } of answered) {
 				printResult(result, results, flags, io, judged);
 				code = Math.max(code, resultPassed(result, judged) ? 0 : 1);
@@ -1738,8 +1827,10 @@ async function stopPlay(client: StudioClient, studio: StudioEntry, io: Io): Prom
 
 /**
  * Where a realm's run that never answered got to, read off Studio's output: the last `[FWTEST]`
- * line names the last test that reported, so the one after it in that section is the one that has
- * not returned. No line at all means the host never started the run.
+ * line of a test (`PASS`, `FAIL` or `SKIP`, with its duration) names the last test that reported,
+ * so the one after it in that section is the one that has not returned. A test's name runs up to
+ * the first `: PASS (`, `: FAIL (` or `: SKIP (` and its milliseconds, spaces and all. No line at
+ * all means the host never started the run.
  */
 async function describeHangingTest(client: StudioClient, studio: StudioEntry, dataModel: string): Promise<string> {
 	const realm = dataModel.toLowerCase();
@@ -1754,7 +1845,7 @@ async function describeHangingTest(client: StudioClient, studio: StudioEntry, da
 
 	const reported = output
 		.split(/\r?\n/)
-		.map((line) => line.match(new RegExp(`\\[FWTEST\\] ${realm} (\\S+): (PASS|FAIL)`)))
+		.map((line) => line.match(new RegExp(`\\[FWTEST\\] ${realm} (.+?): (PASS|FAIL|SKIP) \\(\\d+ms\\)`)))
 		.filter((match): match is RegExpMatchArray => match !== null);
 
 	if (reported.length === 0) {
@@ -1767,7 +1858,10 @@ async function describeHangingTest(client: StudioClient, studio: StudioEntry, da
 
 async function cmdStudioRun(flags: Flags, io: Io): Promise<number> {
 	const realms = realmsOf(flags.realm, "server");
-	return await withStudio(flags, io, (client, studio) => runRealms(client, studio, realms, flags, io));
+	const settled = withRunSettings(flags, io);
+	return await withKeepAwake(keepAwakeOf(settled, io), io, () =>
+		withStudio(settled, io, (client, studio) => runRealms(client, studio, realms, settled, io)),
+	);
 }
 
 // -------------------------------------------------------------------- test
@@ -1783,12 +1877,23 @@ async function cmdTest(flags: Flags, io: Io): Promise<number> {
 	if (flags.published && !flags.cloud) {
 		throw new UsageError("--published is for the cloud: flamework-test test <file> --cloud --published");
 	}
+	if (flags.cloud && flags["keep-awake"] === true) {
+		throw new UsageError("--keep-awake is for Studio runs: a cloud run has no display on this machine to keep on");
+	}
 	if (flags.cloud) {
 		placeFileOf(flags, "cloud test");
 		requireCloudEntry(io);
 	}
 
+	flags = withRunSettings(flags, io);
+	// KEEP_AWAKE and testing.keepAwake are for the Studio runs: a cloud run leaves them alone.
+	const keepAwake = flags.cloud !== true && keepAwakeOf(flags, io);
 	const projects = projectsOf(flags, io);
+	return await withKeepAwake(keepAwake, io, () => testProjects(flags, io, projects));
+}
+
+/** Runs the tests under every project, and says how each fared when there are several. */
+async function testProjects(flags: Flags, io: Io, projects: ProjectChoice[]): Promise<number> {
 	if (projects.length === 1) {
 		return await testProject(flags, io, projects[0]!);
 	}
@@ -1796,18 +1901,25 @@ async function cmdTest(flags: Flags, io: Io): Promise<number> {
 	// Every project file is read before the first run, so a typo in the last does not cost the runs before it.
 	for (const project of projects) await readProject(project, io);
 
-	const outcomes: Array<{ project: ProjectChoice; code: number }> = [];
+	const outcomes: Array<{ project: ProjectChoice; code: number; skipped: number }> = [];
 	for (const project of projects) {
 		// A Ctrl+C during the last project's cleanup lets that finish; the next project does not start.
 		io.interruption.check();
 		io.log("");
 		io.log(`=== ${project.name}: ${relative(io.cwd, project.path)} ===`);
-		outcomes.push({ project, code: await testProject(flags, io, project) });
+		const before = skipTally.get(io) ?? 0;
+		const code = await testProject(flags, io, project);
+		outcomes.push({ project, code, skipped: (skipTally.get(io) ?? 0) - before });
 	}
 
 	io.log("");
 	io.log(
-		`projects: ${outcomes.map(({ project, code }) => `${project.name} ${code === 0 ? "passed" : "FAILED"}`).join(", ")}`,
+		`projects: ${outcomes
+			.map(
+				({ project, code, skipped }) =>
+					`${project.name} ${code === 0 ? "passed" : "FAILED"}${skipped > 0 ? ` (${skipped} skipped)` : ""}`,
+			)
+			.join(", ")}`,
 	);
 	return Math.max(...outcomes.map(({ code }) => code));
 }

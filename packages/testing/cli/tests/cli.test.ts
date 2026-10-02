@@ -139,7 +139,7 @@ describe("run", () => {
 		expect(run.out).toContain("  [place] boot");
 		expect(run.out).toContain("  [place] done");
 		expect(run.out).toContain("PASS economy  2 passed, 0 failed");
-		expect(run.out).toContain("2 passed, 0 failed in 12ms (server)");
+		expect(run.out).toContain("2 passed, 0 failed, 0 skipped in 12ms (server)");
 		expect(run.out.trimEnd().endsWith("PASS")).toBe(true);
 	});
 
