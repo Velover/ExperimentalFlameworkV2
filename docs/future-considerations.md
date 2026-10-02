@@ -186,22 +186,34 @@ raised at the same moment, for the same cause, and names the same two registrati
   transformer marks as generic), and update the Lune specs (packages/specs/src/specs/duplicateIds.ts)
   and the place cases (tests/place/src/server/Tests/duplicateIds.ts), which expect the sentence.
 
-## Small: `flamework-test` writes its results to a file
+## Small: results an AI agent can query instead of reading the whole output
 
 **Today** a run's results only go to the terminal (asked for on 2026-10-02). The summary lists each
 section's counts, every failure with its message and every skip with its reason, then a total per
 realm, and the exit code says pass or fail. `--json` prints the whole result object instead: every
-test's status, duration, error and skip reason, about 430 tests for the place's two realms, which is
-long to read. Nothing is written to a file, so an agent or a CI job that wants one test's outcome
-redirects the output itself and greps it.
+test's status, duration, error and skip reason, about 430 tests for the place's two realms. An AI
+agent (or a CI job) running the tests has to read all of that into its context, or redirect the
+output itself and grep it, to learn what one test did.
 
-**Idea:** `--results <file>` (and a setting next to `testing.failOnSkip`, read only by the CLI):
-print the summary as now, and also write the full result of every realm and project to the file as
-JSON, keyed by project and realm, so one test's status or error can be queried (`jq`, a grep, a
-script) without reading the whole output. A JUnit XML form (`--junit <file>`) is the same data for CI
-systems that show test reports. Decide whether the file is written on a failed or interrupted run
-too (it should be, with what ran), where it goes by default, and that it never lands in the Rojo
-tree or a place.
+**Idea:** make the run's output small and its details queryable.
+
+- **A results file per run, at a known place.** Every `test` / `studio run` / `cloud run` writes the
+  full result of each project and realm to a file (`--results <file>`, defaulting to something like
+  `.flamework-test/last-run.json` beside the config, outside the Rojo tree and gitignored), and the
+  last line of the run names it. Written on a failed or interrupted run too, with what ran.
+- **A line per test, made for grep.** Next to the JSON, a plain-text form with one line per test:
+  `<project> <realm> <section>/<test> PASS|FAIL|SKIP <ms>ms`, then the failure's message or the
+  skip's reason indented below it. An agent greps for `FAIL` or a test's name and reads only those
+  lines.
+- **A short terminal summary for agents** (`--brief`, or a setting): the totals, the names of the
+  failed tests and the results file's path, nothing else; the details stay in the file.
+- **A query command over the last run:** `flamework-test results [--failed] [--skipped]
+  [--section <name>] [--grep <text>] [--json]`, printing only the matching tests with their full
+  messages, so an agent asks for exactly what it needs instead of rerunning or reading everything.
+- **JUnit XML** (`--junit <file>`) is the same data for CI systems that show test reports.
+
+Decide the default location and name, how many runs are kept (the last one, or one per project
+and realm), and that nothing of it is read by the place.
 
 ## Next: obfuscating networking separately from everything else
 
