@@ -19,6 +19,28 @@ import { countWire } from "shared/Tests/wireCount";
 type SpecClient = ReturnType<typeof SpecEvents.createClient>;
 
 /**
+ * What a handler connected inside another handler got of an unreliable message sent right behind
+ * the reliable one, against what a plain connection made at the same point saw (`onRemote`).
+ * Under Immediate signals the plain connection sees it (in every run measured: the engine does
+ * not promise it for an unreliable message); under Deferred it usually does not.
+ * The handler usually gets nothing, since Flamework starts listening a moment after the first
+ * `connect`, but a message that lands a frame later reaches it too: never more often than the
+ * plain connection, which listens from the start, and only the message that was sent.
+ */
+function expectMissedOrLate(delivered: number[], onRemote: number, sent: number) {
+	if (signalsAreDeferred()) {
+		expectTrue(onRemote <= 1, `messages a plain connection made in the handler saw: ${onRemote}`);
+	} else {
+		expectEqual(onRemote, 1, "messages a plain connection made in the handler saw");
+	}
+
+	expectTrue(
+		delivered.size() <= onRemote && delivered.every((value) => value === sent),
+		`what the handler connected there was given: nothing, or the message itself, and no more often than the plain connection saw it (given [${delivered.join(", ")}], the plain connection saw ${onRemote})`,
+	);
+}
+
+/**
  * The Lune `networking` suite, client half: every case where something crosses the wire. The
  * server's `networking` section answers each event this sends, and `ask` has it send what a case
  * wants to watch arrive. What the remote carried is read off the remote itself, beside what the
@@ -373,11 +395,13 @@ export class NetworkingClientTests implements OnStart {
 				expectArrayEqual(unreliable, [], "the unreliable message");
 			});
 
-			test("misses an unreliable message sent right behind the one whose handler connects to it", () => {
+			test("may miss an unreliable message sent right behind the one whose handler connects to it", () => {
 				// Flamework listens to a remote a moment after the first `connect` (`task.defer`). Under
-				// Immediate signals, a handler connected from the handler of a reliable message misses an
-				// unreliable one sent right behind it, which a plain connection made there still gets.
-				// Under Deferred signals, the engine has dropped it before either handler runs.
+				// Immediate signals, a handler connected from the handler of a reliable message usually
+				// misses an unreliable one sent right behind it, which a plain connection made there still
+				// gets. Under Deferred signals, the engine has usually dropped it before either handler
+				// runs. Usually: the two travel on different channels, which nothing keeps in step, so
+				// now and then the unreliable one lands a frame later, when both are listening.
 				const remote = expectDefined(findSpecRemote("unreliable:burstUnreliable"), "the unreliable remote");
 				const delivered = new Array<number>();
 				let onRemote = 0;
@@ -398,15 +422,10 @@ export class NetworkingClientTests implements OnStart {
 				ask("burst", 9);
 				eventually(() => connections.size() > 1, "the reliable message");
 				task.wait(1);
-				expectEqual(
-					onRemote,
-					signalsAreDeferred() ? 0 : 1,
-					"messages a plain connection made in the handler saw",
-				);
-				expectArrayEqual(delivered, [], "what the handler connected there was given");
+				expectMissedOrLate(delivered, onRemote, 9);
 			});
 
-			test("the server misses an unreliable message sent right behind the one whose handler connects to it", () => {
+			test("the server may miss an unreliable message sent right behind the one whose handler connects to it", () => {
 				const heard = new Array<[number[], number]>();
 				const connection = handler().burstHeard.connect((delivered, onRemote) =>
 					heard.push([delivered, onRemote]),
@@ -417,12 +436,7 @@ export class NetworkingClientTests implements OnStart {
 				handler().burstUpUnreliable.fire(3);
 
 				eventually(() => heard.size() > 0, "the server's report");
-				expectEqual(
-					heard[0][1],
-					signalsAreDeferred() ? 0 : 1,
-					"messages a plain connection made in the handler saw",
-				);
-				expectArrayEqual(heard[0][0], [], "what the handler connected there was given");
+				expectMissedOrLate(heard[0][0], heard[0][1], 3);
 			});
 
 			test("the server keeps a reliable message sent before it listens, and drops an unreliable one", () => {
