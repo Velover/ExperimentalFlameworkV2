@@ -5,6 +5,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ## 2026-10-02: core, networking and testing 2.0.0-alpha.6; transformer 2.0.0-alpha.7
 
+Unchanged in this release: components 2.0.0-alpha.5 and transformer-plugin 2.0.0-alpha.3.
+
 ### Upgrade notes
 
 - **Rebuild a place you test in Studio with testing alpha.6.** Since 2026-10-01 Roblox runs the
