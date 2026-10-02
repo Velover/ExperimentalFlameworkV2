@@ -56,6 +56,21 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ### testing
 
+#### Added
+
+- `skip(reason)`, called in a test's body or a `beforeEach`, stops the test and reports it as
+  skipped with the reason: for what rules a test out only at run time (the realm, the project, a
+  display that is asleep). `defer` callbacks and `afterEach` hooks still run, and one that raises
+  fails the test. A `pcall` in the test that catches skip()'s error does not undo the skip. Calling
+  it outside a running test, or from cleanup, is an error. Call it from the test's own flow: a
+  thread that outlives its test and calls it marks whichever test is running then.
+- `test.skip(name, body)` registers a test that is reported as skipped without running (reason
+  "marked with test.skip"). It is listed and selected by filters like any other test.
+- `TestResult.status` (`"passed" | "failed" | "skipped"`) and `skipReason`, a `skipped` count on
+  `SectionResult` and `RunResult`, and the types `TestStatus` and `TestFunction`. A skip keeps `ok`
+  true and leaves `RunResult.ok` alone.
+- A `[FWTEST] <realm> <section>/<test>: SKIP (Nms): <reason>` line per skipped test.
+
 #### Fixed
 
 - `flamework-test`: Ctrl+C (and Ctrl+Break) no longer leaves the Studio window it opened, its play
@@ -71,6 +86,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 - `flamework-test` starts the MCP proxy and its PowerShell window scripts hidden in consoles of
   their own, and no longer blocks while closing or listing Studio windows.
+- A run's `passed` counts no longer include skipped tests, and the `[FWTEST]` SUMMARY line reads
+  `N passed, M failed, K skipped (…ms)`.
 
 ### Docs
 

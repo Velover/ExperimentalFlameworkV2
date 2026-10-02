@@ -409,15 +409,33 @@ function roblox.create(initialRealm: "Server" | "Client")
 				context.setGlobal(name, luneRoblox[name])
 			end
 		end
-		-- Recorded as well as printed, so a spec can assert on advice Flamework only warns about.
-		local warnings: { string } = {}
-		context.setGlobal("warn", function(...)
+		local function joined(...): string
 			local parts = {}
 			for index = 1, select("#", ...) do
 				table.insert(parts, tostring((select(index, ...))))
 			end
 
-			table.insert(warnings, table.concat(parts, " "))
+			return table.concat(parts, " ")
+		end
+
+		-- What `print` and `warn` wrote while a spec captures it (`__harness.captureOutput`), so it
+		-- can read the lines a module prints, such as the testing runner's `[FWTEST]` lines.
+		local captured: { string }? = nil
+		context.setGlobal("print", function(...)
+			if captured then
+				table.insert(captured, joined(...))
+			end
+			print(...)
+		end)
+
+		-- Recorded as well as printed, so a spec can assert on advice Flamework only warns about.
+		local warnings: { string } = {}
+		context.setGlobal("warn", function(...)
+			local text = joined(...)
+			table.insert(warnings, text)
+			if captured then
+				table.insert(captured, "[warn] " .. text)
+			end
 			print("[warn]", ...)
 		end)
 		-- `t.instanceIsA` (and roblox-ts's `typeIs`) gate on `typeof(value) == "Instance"`, so the
@@ -506,6 +524,20 @@ function roblox.create(initialRealm: "Server" | "Client")
 			end,
 			clearWarnings = function()
 				table.clear(warnings)
+			end,
+			--- Runs the callback and returns every line `print` and `warn` wrote while it ran, in
+			--- order, a warning's with `[warn] ` in front. They are printed all the same.
+			captureOutput = function(callback: () -> ()): { string }
+				local previous = captured
+				local lines = {}
+				captured = lines
+				local ok, err = pcall(callback)
+				captured = previous
+
+				if not ok then
+					error(err, 0)
+				end
+				return lines
 			end,
 			--- Every error a signal handler or a deferred thread raised since the last `clearErrors`.
 			--- The engine prints these rather than raising them out of whatever fired the signal, so

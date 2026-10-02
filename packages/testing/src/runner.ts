@@ -14,32 +14,62 @@ export interface RunOptions {
 	list?: boolean;
 }
 
+/**
+ * What became of a test. A skipped test is not a failure: it leaves the run's `ok` alone, and is
+ * counted apart from the passes.
+ */
+export type TestStatus = "passed" | "failed" | "skipped";
+
 export interface TestResult {
 	name: string;
+
+	/**
+	 * Whether the test did not fail: true when it passed and when it was skipped. `status` tells
+	 * the two apart; `ok` stays for what reads it alone, such as a `flamework-test` from before
+	 * skips, which then sees a skip as it saw one before skips had a status, as no failure.
+	 */
 	ok: boolean;
+
+	/**
+	 * What became of the test. In a listing nothing ran: a test marked with `test.skip` reads
+	 * `"skipped"`, with its reason, and every other test `"passed"`.
+	 */
+	status: TestStatus;
+
 	/** The failure: the raised message with a traceback, a timeout, or a cleanup that raised. */
 	error?: string;
+
+	/**
+	 * Why the test was skipped, when `status` is `"skipped"`: what was passed to `skip()`, or
+	 * `"marked with test.skip"`.
+	 */
+	skipReason?: string;
+
 	durationMs: number;
 }
 
 export interface SectionResult {
 	name: string;
+	/** Tests that passed. A skipped test is counted in `skipped`, not here. */
 	passed: number;
 	failed: number;
+	skipped: number;
 	tests: TestResult[];
 }
 
 /** JSON-safe, so it can travel through a RemoteFunction or be encoded for an Open Cloud task. */
 export interface RunResult {
-	/** No test failed and every filter entry matched something. */
+	/** No test failed and every filter entry matched something. A skipped test does not change it. */
 	ok: boolean;
 	realm: Realm;
 	/** The project the place was made under, `getProject()`; absent when it was not made by `flamework-test`. */
 	project?: string;
-	/** Set when `list` was asked for: nothing ran. */
+	/** Set when `list` was asked for: nothing ran, and every count is 0. */
 	listed?: boolean;
+	/** Tests that passed. A skipped test is counted in `skipped`, not here. */
 	passed: number;
 	failed: number;
+	skipped: number;
 	durationMs: number;
 	sections: SectionResult[];
 	/** Filter entries that named no section or test. Any makes `ok` false. */
@@ -59,6 +89,29 @@ const SCRATCH_NAME = "FlameworkTestScratch";
 interface ActiveTest {
 	deferred: Array<() => void>;
 	scratch?: Folder;
+
+	/** Where the test is: `skip()` is refused once its cleanup has started. */
+	phase: "setup" | "body" | "cleanup";
+
+	/**
+	 * The reason of the first `skip()` call. The runner reads the skip from here rather than from
+	 * the error that reaches it, so a pcall in the test that catches that error does not undo it.
+	 */
+	skipReason?: string;
+}
+
+/** What `skip()` raises to stop the test: a table, so that no ordinary error can pass for it. */
+interface SkipSignal {
+	readonly reason: string;
+}
+
+const SKIP_SIGNAL: LuaMetatable<SkipSignal> = {
+	// What a test that catches the error with pcall and prints it sees.
+	__tostring: (signal) => `the test was skipped: ${signal.reason}`,
+};
+
+function isSkipSignal(value: unknown): value is SkipSignal {
+	return typeIs(value, "table") && getmetatable(value) === SKIP_SIGNAL;
 }
 
 let activeTest: ActiveTest | undefined;
@@ -78,9 +131,9 @@ export const PROJECT_ATTRIBUTE = "FlameworkTestProject";
  * Which Rojo project this place was made under, when `flamework-test` made it: the name of the
  * project file, `default` for `default.project.json`. A run under several projects (`--project`
  * repeated) runs every test under each, and this is how a test tells them apart, to assert what
- * that project's Workspace properties change (`SignalBehavior`, streaming) or to return early
- * under the others. `undefined` in a place that was not patched: a build opened by hand, or run
- * as it is.
+ * that project's Workspace properties change (`SignalBehavior`, streaming) or to `skip()` under
+ * the others. `undefined` in a place that was not patched: a build opened by hand, or run as it
+ * is.
  */
 export function getProject(): string | undefined {
 	const value = Workspace.GetAttribute(PROJECT_ATTRIBUTE);
@@ -117,6 +170,52 @@ export function scratch(): Folder {
 	}
 
 	return activeTest.scratch;
+}
+
+/**
+ * Stops the running test and reports it as skipped, with `reason`: for what rules a test out only
+ * at run time, such as the realm, the project (`getProject()`), or a display that is asleep. Call
+ * it from the test's body or from a `beforeEach`; skipped from a `beforeEach`, neither the later
+ * `beforeEach` hooks nor the test's body run. The test's `defer` callbacks and the section's
+ * `afterEach` hooks still run after a skip, and one that raises fails the test. A skip is not a
+ * failure: the run stays ok.
+ *
+ * Call it only from the test's own flow: its body, a `beforeEach`, or what they call and wait for.
+ * The runner knows only which test is running, not which test a thread belongs to, so a thread
+ * that outlives its test (a `task.spawn`, `task.delay` or connection left running) and calls
+ * `skip()` later marks whichever test is running then, which hides that test's own failure.
+ *
+ * It stops the test by raising an error that the runner tells apart from any other: a table, whose
+ * `tostring` reads `the test was skipped: <reason>`. A `pcall` in the test around the call (or
+ * `expectThrows`, `expectNoThrow`, a Promise) catches that error like any other, and the test goes
+ * on running past it; but the runner has recorded the skip already, so the test is still reported
+ * as skipped, with the first `skip()`'s reason, whatever the rest of its body does: an error it
+ * raises afterwards, or a timeout, is not reported. Called outside any pcall, on the test's own
+ * thread, it keeps the code after it from running; called from a thread the test started, it
+ * stops only that thread.
+ *
+ * Called while no test is running, it raises at the caller. Called from a `defer` callback or an
+ * `afterEach`, it raises a plain error there, which fails the test.
+ */
+export function skip(reason: string): never {
+	const context = activeTest;
+	if (context === undefined) {
+		error("skip() can only be called while a test is running, from its body or a beforeEach", 2);
+	}
+
+	if (context.phase === "cleanup") {
+		error(
+			"skip() can only be called from a test's body or a beforeEach, not from a defer callback or an afterEach: the test has already run",
+			2,
+		);
+	}
+
+	const text = typeIs(reason, "string") ? reason : tostring(reason);
+	if (context.skipReason === undefined) {
+		context.skipReason = text;
+	}
+
+	error(setmetatable({ reason: text }, SKIP_SIGNAL));
 }
 
 interface Selected {
@@ -190,26 +289,46 @@ function selectTests(filter: TestFilter): Selection {
 	return { sections, unknown };
 }
 
+/** The handler of every xpcall here: a message with its traceback, or a skip's signal as it is. */
 function traceback(err: unknown) {
+	if (isSkipSignal(err)) {
+		return err;
+	}
+
 	return debug.traceback(tostring(err), 2);
 }
 
 function runOne(section: Section, definition: TestDefinition, timeout: number, realm: Realm): TestResult {
+	const label = `[FWTEST] ${realm} ${section.name}/${definition.name}`;
+
+	// Marked with test.skip: nothing of it runs, the section's hooks included.
+	if (definition.skip !== undefined) {
+		print(`${label}: SKIP (0ms): ${definition.skip}`);
+		return { name: definition.name, ok: true, status: "skipped", skipReason: definition.skip, durationMs: 0 };
+	}
+
 	const started = os.clock();
-	const context: ActiveTest = { deferred: [] };
+	const context: ActiveTest = { deferred: [], phase: "setup" };
 	activeTest = context;
 
 	const failures = new Array<string>();
 
+	// A skip stops the hooks and the body: whether or not its error got this far, it is recorded
+	// on the context, and what was raised after it is not the test's failure.
 	for (const hook of section.beforeEach) {
 		const [ok, err] = xpcall(hook, traceback);
+		if (context.skipReason !== undefined) {
+			break;
+		}
+
 		if (!ok) {
 			failures.push(`beforeEach raised: ${err}`);
 			break;
 		}
 	}
 
-	if (failures.isEmpty()) {
+	if (failures.isEmpty() && context.skipReason === undefined) {
+		context.phase = "body";
 		const state = { done: false, error: undefined as string | undefined };
 
 		// On its own thread so that a body which yields can be abandoned when it overruns; task.spawn
@@ -239,15 +358,23 @@ function runOne(section: Section, definition: TestDefinition, timeout: number, r
 
 		if (!state.done) {
 			pcall(() => task.cancel(thread));
-			failures.push(`timed out after ${timeout} seconds`);
-		} else if (state.error !== undefined) {
-			failures.push(state.error);
+		}
+
+		// Past a skip, the body went on only because a pcall in it caught the skip's error: what
+		// it did then -- raise, overrun -- is not the test's failure.
+		if (context.skipReason === undefined) {
+			if (!state.done) {
+				failures.push(`timed out after ${timeout} seconds`);
+			} else if (state.error !== undefined) {
+				failures.push(state.error);
+			}
 		}
 	}
 
 	// Cleanup is not optional: every registered callback runs, in reverse, and the scratch folder
-	// goes, whatever the body did. A cleanup that raises is a failure of its own, since the next
-	// test would run against whatever it left.
+	// goes, whatever the body did, a skip included. A cleanup that raises is a failure of its own,
+	// since the next test would run against whatever it left, and so fails a skipped test too.
+	context.phase = "cleanup";
 	for (let i = context.deferred.size() - 1; i >= 0; i--) {
 		const [ok, err] = xpcall(context.deferred[i], traceback);
 		if (!ok) {
@@ -270,20 +397,30 @@ function runOne(section: Section, definition: TestDefinition, timeout: number, r
 	activeTest = undefined;
 
 	const durationMs = math.round((os.clock() - started) * 1000);
-	const label = `[FWTEST] ${realm} ${section.name}/${definition.name}`;
-	if (failures.isEmpty()) {
-		print(`${label}: PASS (${durationMs}ms)`);
-		return { name: definition.name, ok: true, durationMs };
+	const skipReason = context.skipReason;
+	if (!failures.isEmpty()) {
+		if (skipReason !== undefined) {
+			failures.unshift(`skipped (${skipReason}), but its cleanup failed:`);
+		}
+
+		const message = failures.join("\n");
+		warn(`${label}: FAIL (${durationMs}ms): ${message}`);
+		return { name: definition.name, ok: false, status: "failed", error: message, durationMs };
 	}
 
-	const message = failures.join("\n");
-	warn(`${label}: FAIL (${durationMs}ms): ${message}`);
-	return { name: definition.name, ok: false, error: message, durationMs };
+	if (skipReason !== undefined) {
+		print(`${label}: SKIP (${durationMs}ms): ${skipReason}`);
+		return { name: definition.name, ok: true, status: "skipped", skipReason, durationMs };
+	}
+
+	print(`${label}: PASS (${durationMs}ms)`);
+	return { name: definition.name, ok: true, status: "passed", durationMs };
 }
 
 /**
  * Runs the selected tests, one after another, each on its own thread with `config.timeout`, and
- * returns the result. Prints one `[FWTEST]` line per test and a summary, so a console or a task
+ * returns the result. Prints one `[FWTEST]` line per test (`PASS`, `FAIL` with the failure, or
+ * `SKIP` with the reason) and a summary, so a console or a task
  * log reads the same as the returned table.
  */
 export function runTests(filter: TestFilter, options: RunOptions | undefined, config: RunnerConfig): RunResult {
@@ -303,12 +440,26 @@ export function runTests(filter: TestFilter, options: RunOptions | undefined, co
 			listed: true,
 			passed: 0,
 			failed: 0,
+			skipped: 0,
 			durationMs: 0,
 			sections: selection.sections.map(({ section, tests }) => ({
 				name: section.name,
 				passed: 0,
 				failed: 0,
-				tests: tests.map((definition) => ({ name: definition.name, ok: true, durationMs: 0 })),
+				skipped: 0,
+				tests: tests.map((definition): TestResult => {
+					if (definition.skip !== undefined) {
+						return {
+							name: definition.name,
+							ok: true,
+							status: "skipped",
+							skipReason: definition.skip,
+							durationMs: 0,
+						};
+					}
+
+					return { name: definition.name, ok: true, status: "passed", durationMs: 0 };
+				}),
 			})),
 			unknown: selection.unknown,
 		};
@@ -319,15 +470,18 @@ export function runTests(filter: TestFilter, options: RunOptions | undefined, co
 	const sections = new Array<SectionResult>();
 	let passed = 0;
 	let failed = 0;
+	let skipped = 0;
 
 	try {
 		for (const { section, tests } of selection.sections) {
-			const result: SectionResult = { name: section.name, passed: 0, failed: 0, tests: [] };
+			const result: SectionResult = { name: section.name, passed: 0, failed: 0, skipped: 0, tests: [] };
 			for (const definition of tests) {
 				const outcome = runOne(section, definition, config.timeout, realm);
 				result.tests.push(outcome);
-				if (outcome.ok) {
+				if (outcome.status === "passed") {
 					result.passed++;
+				} else if (outcome.status === "skipped") {
+					result.skipped++;
 				} else {
 					result.failed++;
 				}
@@ -335,6 +489,7 @@ export function runTests(filter: TestFilter, options: RunOptions | undefined, co
 
 			passed += result.passed;
 			failed += result.failed;
+			skipped += result.skipped;
 			sections.push(result);
 		}
 	} finally {
@@ -345,12 +500,12 @@ export function runTests(filter: TestFilter, options: RunOptions | undefined, co
 	const durationMs = math.round((os.clock() - started) * 1000);
 	const ok = failed === 0 && selection.unknown.isEmpty();
 	const note = selection.unknown.isEmpty() ? "" : `, unknown: ${selection.unknown.join(", ")}`;
-	const summary = `[FWTEST] ${realm} SUMMARY: ${passed} passed, ${failed} failed (${durationMs}ms)${note}`;
+	const summary = `[FWTEST] ${realm} SUMMARY: ${passed} passed, ${failed} failed, ${skipped} skipped (${durationMs}ms)${note}`;
 	if (ok) {
 		print(summary);
 	} else {
 		warn(summary);
 	}
 
-	return { ok, realm, project, passed, failed, durationMs, sections, unknown: selection.unknown };
+	return { ok, realm, project, passed, failed, skipped, durationMs, sections, unknown: selection.unknown };
 }

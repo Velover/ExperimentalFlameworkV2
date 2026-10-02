@@ -14,7 +14,27 @@ export interface SectionContext {
 export interface TestDefinition {
 	readonly name: string;
 	readonly body: TestBody;
+
+	/** Set for a test registered with `test.skip`: the reason it is reported as skipped without running. */
+	readonly skip?: string;
 }
+
+/** `test`, with `test.skip` beside it. */
+export interface TestFunction {
+	/** Registers a test in the section being defined. Names are unique within a section. */
+	(this: void, name: string, body: TestBody): void;
+
+	/**
+	 * Registers a test that is reported as skipped without running: neither its body nor the
+	 * section's hooks run, and its result reads `"marked with test.skip"` as the reason. It is
+	 * listed, and selected by a filter, like any other test, so dropping `.skip` brings it back as
+	 * it was. For a condition known only at run time, call `skip(reason)` in the test instead.
+	 */
+	readonly skip: (this: void, name: string, body: TestBody) => void;
+}
+
+/** The skip reason of a test registered with `test.skip`. */
+const MARKED_SKIP = "marked with test.skip";
 
 /**
  * A named group of tests. The same name in several files is one section: `defineTests` merges
@@ -81,23 +101,46 @@ export function defineTests(section: string | undefined, body: (context: Section
 	}
 }
 
-function requireBody(what: string): Section {
+/** `level` counts from here: 3 is the caller of the function that calls this. */
+function requireBody(what: string, level = 3): Section {
 	if (current === undefined) {
-		error(`${what} can only be called inside a defineTests body`, 3);
+		error(`${what} can only be called inside a defineTests body`, level);
 	}
 
 	return current;
 }
 
-/** Registers a test in the section being defined. Names are unique within a section. */
-export function test(name: string, body: TestBody) {
-	const section = requireBody("test()");
+/**
+ * What `test` and `test.skip` both do. Called straight from either, so level 3 from here is
+ * whoever called `test`: the `__call` metamethod is a frame of its own, as `test.skip` is.
+ */
+function register(what: string, name: string, body: TestBody, skip: string | undefined) {
+	const section = requireBody(what, 4);
 	if (section.tests.some((existing) => existing.name === name)) {
-		error(`section '${section.name}' already has a test named '${name}'`, 2);
+		error(`section '${section.name}' already has a test named '${name}'`, 3);
 	}
 
-	section.tests.push({ name, body });
+	section.tests.push(skip === undefined ? { name, body } : { name, body, skip });
 }
+
+/**
+ * Registers a test in the section being defined. Names are unique within a section.
+ * `test.skip(name, body)` registers one that is reported as skipped without running.
+ *
+ * A table that is called rather than a function, since a function cannot carry `skip`.
+ */
+export const test = setmetatable(
+	{
+		skip: (name: string, body: TestBody) => {
+			register("test.skip()", name, body, MARKED_SKIP);
+		},
+	},
+	{
+		__call: (_, name, body) => {
+			register("test()", name as string, body as TestBody, undefined);
+		},
+	},
+) as unknown as TestFunction;
 
 /** Runs before every test of the section being defined. Raising fails the test. */
 export function beforeEach(callback: () => void) {

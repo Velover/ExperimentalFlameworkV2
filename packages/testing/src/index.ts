@@ -1,15 +1,24 @@
 // Defining tests
 export { defineTests, test, beforeEach, afterEach, getSections, DEFAULT_SECTION } from "./registry";
-export type { Section, SectionContext, TestBody, TestDefinition } from "./registry";
+export type { Section, SectionContext, TestBody, TestDefinition, TestFunction } from "./registry";
 
 // Inside a test
-export { defer, scratch } from "./runner";
+export { defer, scratch, skip } from "./runner";
 export * from "./expect";
 
 // Running
 export { Testing, BINDABLE_NAME, REMOTE_NAME } from "./host";
 export { runTests, getRealm, getProject, DEFAULT_TIMEOUT, PROJECT_ATTRIBUTE } from "./runner";
-export type { Realm, RunOptions, RunResult, RunnerConfig, SectionResult, TestFilter, TestResult } from "./runner";
+export type {
+	Realm,
+	RunOptions,
+	RunResult,
+	RunnerConfig,
+	SectionResult,
+	TestFilter,
+	TestResult,
+	TestStatus,
+} from "./runner";
 
 // The plugin
 export { TestingPlugin, createTestingPlugin, resolveTestingOptions, DEFAULT_TESTING_SCOPE } from "./plugin";
