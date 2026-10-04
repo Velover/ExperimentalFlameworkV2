@@ -17,8 +17,10 @@ material:
 
 The guide also ships inside the core package, for the version you installed:
 `node_modules/@flamework-experimental/core/docs/README.md` is its index, and the pages are in
-`node_modules/@flamework-experimental/core/docs/guide/`. Instructions for a coding assistant can
-point there, so that it reads the docs for your version.
+`node_modules/@flamework-experimental/core/docs/guide/`. Core also ships instructions for a coding
+assistant, for the same version: a project's `CLAUDE.md` loads them with the line
+`@node_modules/@flamework-experimental/core/docs/ai/flamework.md` (see
+[For a coding assistant](docs/README.md#for-a-coding-assistant)).
 
 The Flamework website documents v1, most of which no longer applies:
 

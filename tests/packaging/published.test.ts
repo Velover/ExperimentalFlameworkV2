@@ -192,7 +192,13 @@ const guide = fs
 	.map((name) => `docs/guide/${name}`)
 	.sort();
 
-const coreShipped = ["README.md", "docs/README.md", ...guide];
+const ai = fs
+	.readdirSync(path.join(ROOT, "docs", "ai"))
+	.filter((name) => name.endsWith(".md"))
+	.map((name) => `docs/ai/${name}`)
+	.sort();
+
+const coreShipped = ["README.md", "docs/README.md", ...ai, ...guide];
 
 describe("core's docs", () => {
 	beforeAll(() => {
@@ -201,11 +207,19 @@ describe("core's docs", () => {
 		run("node", [path.join(ROOT, "scripts", "copy-docs.mjs")], ROOT);
 	});
 
-	test.each(PACKERS)("%s packs the index and every guide page", (packer) => {
+	test.each(PACKERS)("%s packs the index, the assistant's instructions and every guide page", (packer) => {
 		expect(guide.length).toBe(12);
+		expect(ai).toEqual([
+			"docs/ai/components.md",
+			"docs/ai/flamework.md",
+			"docs/ai/networking.md",
+			"docs/ai/plugins.md",
+			"docs/ai/providers.md",
+			"docs/ai/testing.md",
+		]);
 
 		const files = packed("core", packer);
-		expect(files.filter((file) => file.startsWith("docs/"))).toEqual(["docs/README.md", ...guide]);
+		expect(files.filter((file) => file.startsWith("docs/"))).toEqual(["docs/README.md", ...ai, ...guide]);
 	});
 
 	// A pack or publish made without `prepare:docs` shipped no docs, and neither packer said so:
@@ -218,6 +232,7 @@ describe("core's docs", () => {
 		expect(files.filter((file) => file.startsWith("docs/") || file === "README.md")).toEqual([
 			"README.md",
 			"docs/README.md",
+			...ai,
 			...guide,
 		]);
 	});

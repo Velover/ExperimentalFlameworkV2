@@ -3,6 +3,20 @@
 Notable changes to the `@flamework-experimental` packages. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### core
+
+#### Added
+
+- **Instructions for a coding assistant ship in core,** in `docs/ai/`, next to the guide, so they
+  match the installed version. `flamework.md` holds the rules every project follows. A project's
+  `CLAUDE.md` loads it, in every session, with the line
+  `@node_modules/@flamework-experimental/core/docs/ai/flamework.md`. It sends the assistant to the
+  file for an area before it works there: `providers.md`, `components.md`, `networking.md`,
+  `testing.md` and `plugins.md`, the last for a plugin or a package that other games install. A
+  place gets one more empty Folder for them, `core.docs.ai`, as it does for the guide.
+
 ## 2026-10-02: core, networking and testing 2.0.0-alpha.6; transformer 2.0.0-alpha.7
 
 Unchanged in this release: components 2.0.0-alpha.5 and transformer-plugin 2.0.0-alpha.3.

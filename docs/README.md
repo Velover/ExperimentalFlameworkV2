@@ -29,6 +29,20 @@ the end.
 | 11 | [Scopes](guide/11-scopes.md) | Build scopes from `.env`: test scenarios, debug tools and stand-ins that exist only in the builds that ask for them. |
 | 12 | [Testing in the place](guide/12-testing.md) | Sections of tests that run inside a real place through a bindable, a remote or a cloud task, with cleanup that always runs. |
 
+## For a coding assistant
+
+[`ai/`](ai/flamework.md) holds instructions for a coding assistant such as Claude Code. They ship in
+core next to this guide, so they match the version a project installed. A project loads them with
+one line in its `CLAUDE.md`:
+
+```
+@node_modules/@flamework-experimental/core/docs/ai/flamework.md
+```
+
+That file is the rules every project follows, loaded in every session. Before the assistant works on
+providers, components, networking, tests or a plugin, it sends it to the file for that area
+(`providers.md`, `components.md`, `networking.md`, `testing.md`, `plugins.md`).
+
 ## Reference
 
 - [Internals](reference/internals.md) -- what the transformer does to your code, and what the
@@ -61,3 +75,4 @@ the end.
 | …send something to the server | [Networking](guide/06-networking.md) |
 | …understand why an argument is `nil` | [Macros › when a macro does not fire](guide/07-macros.md#when-a-macro-does-not-fire) |
 | …know what an error means | the **Caveats** section of the guide page for that topic lists them (pages 1–9 and 11 have one) |
+| …give Claude Code the rules for my version | [For a coding assistant](#for-a-coding-assistant) |

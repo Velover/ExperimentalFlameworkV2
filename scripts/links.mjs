@@ -180,15 +180,19 @@ export function withoutRepositoryOnly(text) {
 	return result;
 }
 
-/** What core ships of the docs, as repository paths: the index and every guide page. */
+/**
+ * What core ships of the docs, as repository paths: the index, the instructions for a coding
+ * assistant (`docs/ai`) and every guide page.
+ */
 export function coreDocs() {
-	const guide = fs
-		.readdirSync(path.join(ROOT, "docs", "guide"))
-		.filter((name) => name.endsWith(".md"))
-		.sort()
-		.map((name) => `docs/guide/${name}`);
+	const pages = (folder) =>
+		fs
+			.readdirSync(path.join(ROOT, "docs", folder))
+			.filter((name) => name.endsWith(".md"))
+			.sort()
+			.map((name) => `docs/${folder}/${name}`);
 
-	return ["docs/README.md", ...guide];
+	return ["docs/README.md", ...pages("ai"), ...pages("guide")];
 }
 
 /** Every Markdown file a package ships at the same path as in the repository. */
