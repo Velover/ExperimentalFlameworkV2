@@ -65,6 +65,7 @@ import PATCH_TASK from "../tasks/patch-place.lune" with { type: "text" };
 import PROBE_TASK from "../tasks/probe.lune" with { type: "text" };
 import RUN_TESTS_TASK from "../tasks/run-tests.lune" with { type: "text" };
 import {
+	concurrencyNote,
 	formatList,
 	formatSummary,
 	missedEverywhere,
@@ -196,6 +197,7 @@ const FLAGS: Record<string, FlagKind> = {
 	sections: "string",
 	list: "boolean",
 	timeout: "string",
+	concurrency: "string",
 	code: "string",
 	script: "string",
 	realm: "string",
@@ -229,8 +231,19 @@ const LOCK_FLAGS = ["lock-timeout", "hold"];
 const FILE_COMMANDS = ["test", "patch", "studio open", "cloud publish", "cloud test"];
 const PATCH_FLAGS = ["original", "project"];
 const PUBLISH_FLAGS = ["file", "published", ...PATCH_FLAGS];
-const RUN_FLAGS = ["version", "sections", "list", "timeout", "code", "script", "dry-run", "json", "fail-on-skip"];
-const REPORT_FLAGS = ["sections", "list", "json", "timeout", "fail-on-skip"];
+const RUN_FLAGS = [
+	"version",
+	"sections",
+	"list",
+	"timeout",
+	"concurrency",
+	"code",
+	"script",
+	"dry-run",
+	"json",
+	"fail-on-skip",
+];
+const REPORT_FLAGS = ["sections", "list", "json", "timeout", "concurrency", "fail-on-skip"];
 
 const COMMANDS: Record<string, string[]> = {
 	test: ["file", "realm", "keep", "keep-awake", "cloud", ...PATCH_FLAGS, ...REPORT_FLAGS, "published", ...LOCK_FLAGS],
@@ -270,6 +283,8 @@ export interface Flags {
 	sections?: string;
 	list?: boolean;
 	timeout?: string;
+	/** The most concurrent tests that run at once, over the place's `testing.concurrency`. */
+	concurrency?: string;
 	code?: string;
 	script?: string;
 	realm?: string;
@@ -499,6 +514,9 @@ Flags:
              --list                  list the tests instead of running them
              --json                  print the raw result JSON instead of a summary
              --timeout <120s>        per run
+             --concurrency <n>       the most concurrent tests (test.concurrent) that run at once,
+                                     over the place's testing.concurrency (4 by default); 1 runs
+                                     every test alone
              --fail-on-skip          a skipped test fails the run, for CI that must run everything
                                      (default: $FAIL_ON_SKIP, else testing.failOnSkip; off)
              --keep-awake            keep the display on while the run lasts: RenderStepped stops
@@ -515,7 +533,8 @@ Flags:
                                      <file>.<project>.rbxl under a chosen --project (one project)
   studio run --realm server|client|both   default server
              --keep                  leave the play session running afterwards
-             --sections, --list, --json, --timeout, --fail-on-skip, --keep-awake   as for test
+             --sections, --list, --json, --timeout, --concurrency, --fail-on-skip,
+             --keep-awake            as for test
   studio exec --realm edit|server|client  default edit
   studio open --json                 print the window as JSON;  --lock-timeout, --hold  as for test
   studio call --args-file <file>     the tool's arguments as JSON in a file (no shell quoting)
@@ -538,8 +557,8 @@ Flags:
              --code "<luau>"         run this Luau instead of the test shim
              --script <file>         run this Luau file instead of the test shim
              --dry-run               print the request that would be sent, then stop
-             --sections, --list, --json, --timeout, --fail-on-skip   as for test (timeout: the
-                                     task's, max 300s)
+             --sections, --list, --json, --timeout, --concurrency, --fail-on-skip   as for test
+                                     (timeout: the task's, max 300s)
   common     --testing-universe <id> default: $TESTING_UNIVERSE_ID, else cloud.testingUniverseId
              --testing-place <id>    default: $TESTING_PLACE_ID, else cloud.testingPlaceId
              --key <apiKey>          default: $ROBLOX_API_KEY, else cloud.apiKey; prefer the
@@ -1025,10 +1044,27 @@ function holdOf(flags: Flags, io: Io): number {
 }
 
 /**
+ * `--concurrency`: the most concurrent tests that run at once, a whole number, 1 or more, sent to
+ * the place as the run's `concurrency` option; nothing when not given, so the place's own
+ * `testing.concurrency` holds. Only a flag: the config key is the place's, compiled into it.
+ */
+function concurrencyOf(flags: Flags): number | undefined {
+	if (flags.concurrency === undefined) return undefined;
+	const trimmed = flags.concurrency.trim();
+	const value = Number(trimmed);
+	if (!/^\d+$/.test(trimmed) || value < 1) {
+		throw new UsageError(`--concurrency must be a whole number, 1 or more, got "${flags.concurrency}"`);
+	}
+	return value;
+}
+
+/**
  * The flags of a run with `--fail-on-skip` resolved from its variable and config key too, so that a
- * misspelt variable is refused before anything opens or uploads, and what runs reads one flag.
+ * misspelt variable is refused before anything opens or uploads, and what runs reads one flag;
+ * `--concurrency` is checked here for the same reason.
  */
 function withRunSettings(flags: Flags, io: Io): Flags {
+	concurrencyOf(flags);
 	return { ...flags, "fail-on-skip": failOnSkipOf(flags, io) };
 }
 
@@ -1419,7 +1455,7 @@ async function buildScript(
 	requireCloudEntry(io);
 
 	const filter: Filter = parseSections(flags.sections);
-	const script = renderShim(RUN_TESTS_TASK, filter, { list: flags.list === true });
+	const script = renderShim(RUN_TESTS_TASK, filter, { list: flags.list === true, concurrency: concurrencyOf(flags) });
 	return { script, scriptKind: "shim", label: "the test shim" };
 }
 
@@ -1565,12 +1601,15 @@ const skipTally = new WeakMap<Io, number>();
  */
 function printResult(result: RunResult, results: string[], flags: Flags, io: Io, options?: Judgement): void {
 	if (!flags.list) skipTally.set(io, (skipTally.get(io) ?? 0) + result.skipped);
+	const ignored = concurrencyNote(result, concurrencyOf(flags), flags.list === true);
 	if (flags.json) {
 		io.log(JSON.stringify(JSON.parse(results[0]!), null, 2));
 		const note = flags.list ? undefined : skipFailureNote(result, options);
 		if (note !== undefined) io.error(note);
+		if (ignored !== undefined) io.error(ignored);
 	} else {
 		io.log("");
+		if (ignored !== undefined) io.log(ignored);
 		for (const line of flags.list ? formatList(result, options) : formatSummary(result, options)) {
 			io.log(line);
 		}
@@ -3021,7 +3060,10 @@ async function runRealms(
 	activity: () => Promise<void> = async () => {},
 ): Promise<number> {
 	const filter: Filter = parseSections(flags.sections);
-	const script = renderStudioRun(renderFilter(filter), renderOptions({ list: flags.list === true }));
+	const script = renderStudioRun(
+		renderFilter(filter),
+		renderOptions({ list: flags.list === true, concurrency: concurrencyOf(flags) }),
+	);
 	const state = () => client.call("get_studio_state", { studio_id: studio.id }, 30_000);
 	const failOnSkip = flags["fail-on-skip"] === true;
 
@@ -3072,6 +3114,9 @@ async function runRealms(
 		let hinted = false;
 		const several = realms.length > 1;
 		const answered: Array<{ result: RunResult; results: string[] }> = [];
+		// Whether a realm that does not answer may have had concurrent tests in flight: not under
+		// `--concurrency 1`, nor once a realm of this place answered as a runner before them.
+		let mayOverlap = concurrencyOf(flags) !== 1;
 		for (const dataModel of realms) {
 			const realm = dataModel.toLowerCase();
 			await activity();
@@ -3092,7 +3137,7 @@ async function runRealms(
 					// Every test has `testing.timeout` of its own, so a realm that does not answer is
 					// stuck somewhere the runner cannot see: the last test that reported places it.
 					io.error(`the ${realm}'s run did not finish within ${timeout} (--timeout)`);
-					io.error(await describeHangingTest(client, studio, dataModel));
+					io.error(await describeHangingTest(client, studio, dataModel, mayOverlap));
 				} else {
 					const message = luauErrorMessage(error);
 					io.error(`the ${realm}'s run failed: ${message}`);
@@ -3112,6 +3157,7 @@ async function runRealms(
 				continue;
 			}
 
+			if (result.concurrency === undefined) mayOverlap = false;
 			if (!several) {
 				const judged: Judgement = { failOnSkip };
 				printResult(result, results, flags, io, judged);
@@ -3178,8 +3224,19 @@ async function stopPlay(client: StudioClient, studio: StudioEntry, io: Io): Prom
  * so the one after it in that section is the one that has not returned. A test's name runs up to
  * the first `: PASS (`, `: FAIL (` or `: SKIP (` and its milliseconds, spaces and all. No line at
  * all means the host never started the run.
+ *
+ * Concurrent tests report as each ends, not in order, so among them the hanging one may be any
+ * that has not reported. The output cannot say whether that section's tests were concurrent (the
+ * runner prints nothing as a test starts), so where some may have been in flight (`mayOverlap`)
+ * the message says so conditionally; it leaves that out where none can have been: under
+ * `--concurrency 1`, or a runner before concurrent tests.
  */
-async function describeHangingTest(client: StudioClient, studio: StudioEntry, dataModel: string): Promise<string> {
+async function describeHangingTest(
+	client: StudioClient,
+	studio: StudioEntry,
+	dataModel: string,
+	mayOverlap: boolean,
+): Promise<string> {
 	const realm = dataModel.toLowerCase();
 
 	let output: string;
@@ -3200,7 +3257,10 @@ async function describeHangingTest(client: StudioClient, studio: StudioEntry, da
 	}
 
 	const last = reported[reported.length - 1]!;
-	return `last test that reported: ${last[1]} (${last[2]}); the test after it in that section is hanging, past its own timeout`;
+	const hanging = `last test that reported: ${last[1]} (${last[2]}); the test after it in that section is hanging, past its own timeout`;
+	return mayOverlap
+		? `${hanging} (if that section runs concurrent tests, which report as each ends: any of them that has not reported)`
+		: hanging;
 }
 
 async function cmdStudioRun(flags: Flags, io: Io): Promise<number> {

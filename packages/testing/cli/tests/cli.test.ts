@@ -109,6 +109,17 @@ describe("dry run", () => {
 		expect(run.out).toContain(".run(nil, { list = true })");
 	});
 
+	test("--concurrency is passed to the runner, and a bad value is bad usage", async () => {
+		const run = await runCli(["cloud", "run", "--dry-run", "--concurrency", "3"]);
+		expect(run.out).toContain(".run(nil, { concurrency = 3 })");
+
+		for (const bad of ["0", "1.5", "two"]) {
+			const refused = await runCli(["cloud", "run", "--dry-run", "--concurrency", bad]);
+			expect(refused.code).toBe(2);
+			expect(refused.err).toContain(`--concurrency must be a whole number, 1 or more, got "${bad}"`);
+		}
+	});
+
 	test("--code replaces the shim", async () => {
 		const run = await runCli(["cloud", "run", "--dry-run", "--code", "return 1 + 1"]);
 		expect(run.out).toContain("return 1 + 1");

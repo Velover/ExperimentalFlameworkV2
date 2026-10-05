@@ -144,6 +144,12 @@ export interface TestingRuntimeConfig {
 	timeout?: number;
 
 	/**
+	 * The most concurrent tests (`test.concurrent`, or a section defined with `{ concurrent: true }`)
+	 * that run at once; 1 runs every test alone. A run's `concurrency` option comes first.
+	 */
+	concurrency?: number;
+
+	/**
 	 * The source path of a ModuleScript exporting `ignite()`, for runs where nothing starts the
 	 * game by itself. A string here; the artifact carries it resolved to a tree path.
 	 */

@@ -206,6 +206,12 @@
 					"description": "Seconds a single test may take before it is cancelled and counted as failed. Default: 30.",
 					"default": 30
 				},
+				"concurrency": {
+					"type": "integer",
+					"minimum": 1,
+					"description": "The most concurrent tests that run at once: tests registered with test.concurrent, or in a section defined with { concurrent: true }, run alongside the concurrent tests next to them, up to this many; a plain test always runs alone. 1 runs every test alone, one after another. A run's concurrency option overrides it (RunOptions.concurrency, flamework-test --concurrency). Compiled into the place. Default: 4.",
+					"default": 4
+				},
 				"entry": {
 					"type": "string",
 					"description": "Cloud runs only. The source path of a ModuleScript exporting `ignite()`, for example \"src/server/main\": an Open Cloud Luau execution task runs none of the place's Scripts, so the runner requires this module and ignites the game itself before invoking the bindable. Studio runs need none, the place runs itself. Compiled into the artifact as a tree path. Default: none, and a cloud run refuses to start without it."

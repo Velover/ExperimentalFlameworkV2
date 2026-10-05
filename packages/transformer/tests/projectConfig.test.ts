@@ -218,6 +218,22 @@ describe("reading flamework.config.json", () => {
 		remove("flamework.config.json");
 	});
 
+	test("accepts testing.concurrency as a whole number, 1 or more, from the environment too", () => {
+		const file = write("flamework.config.json", `{ "testing": { "concurrency": 2 } }`);
+		expect(readProjectConfig(file)).toEqual({ testing: { concurrency: 2 } });
+
+		write("flamework.config.json", `{ "testing": { "concurrency": "${"${CONCURRENCY:-4}"}" } }`);
+		expect(readProjectConfig(file, {})).toEqual({ testing: { concurrency: 4 } });
+		expect(readProjectConfig(file, { CONCURRENCY: "1" })).toEqual({ testing: { concurrency: 1 } });
+		expect(() => readProjectConfig(file, { CONCURRENCY: "many" })).toThrow(/\/testing\/concurrency.*not a number/);
+
+		for (const bad of ["0", "1.5", "-2"]) {
+			write("flamework.config.json", `{ "testing": { "concurrency": ${bad} } }`);
+			expect(() => readProjectConfig(file)).toThrow(/\/testing\/concurrency must be (>= 1|integer)/);
+		}
+		remove("flamework.config.json");
+	});
+
 	test("reports a parse error with the file name", () => {
 		const file = write("flamework.config.json", `{ "transformer": `);
 		expect(() => readProjectConfig(file)).toThrow(/Failed to parse .*flamework\.config\.json/);
@@ -984,13 +1000,20 @@ describe("runtime sections", () => {
 		expect(getRuntimeConfig({ transformer: { obfuscation: true } })).toBeUndefined();
 	});
 
-	test("leave out the testing keys only flamework-test reads", () => {
+	test("leave out the testing keys only flamework-test reads, and keep the place's", () => {
 		expect(
 			getRuntimeConfig({
-				testing: { timeout: 5, keepAwake: true, failOnSkip: true, lockTimeout: 60, lockHold: 30 },
+				testing: {
+					timeout: 5,
+					concurrency: 2,
+					keepAwake: true,
+					failOnSkip: true,
+					lockTimeout: 60,
+					lockHold: 30,
+				},
 			}),
 		).toEqual({
-			testing: { timeout: 5 },
+			testing: { timeout: 5, concurrency: 2 },
 		});
 	});
 });

@@ -35,6 +35,7 @@ bunx flamework-test test place.rbxl --list                 # what would run
 bunx flamework-test test place.rbxl --keep                 # leave Studio and the play session open
 bunx flamework-test test place.rbxl --fail-on-skip         # a skipped test fails the run
 bunx flamework-test test place.rbxl --keep-awake           # keep the display on while it runs
+bunx flamework-test test place.rbxl --concurrency 1        # concurrent tests one at a time
 ```
 
 It needs Studio installed with "MCP server" enabled in its Assistant settings, which is what lets
@@ -481,7 +482,7 @@ without running it, `place.deferred.rbxl`, to open in Studio and look at.
 | `the server's run failed: Workspace.FlameworkTests did not appear` | The build was made without the `testing` scope active (`FLAMEWORK_SCOPES=testing` for that build), so the plugin stayed inert. The client's run follows, and says the same. |
 | `the server's run failed: The current thread cannot invoke 'FlameworkTests' since 'FlameworkTests' has additional values for the Capabilities property: ...` | Studio ran MCP code sandboxed, as it may, and the place was built with `@flamework-experimental/testing` 2.0.0-alpha.5 or earlier, whose host does not make its bindable Sandboxed (see [In Studio](#in-studio-on-this-machine)). A later CLI marks it before the invoke while Studio allows that; this error means it could not, or the CLI is that old too. Update the package and rebuild the place. A later CLI says so under the error. |
 | `MISS matched nothing in any realm: ...` | A `--sections` entry named no section or test in any realm that ran. |
-| `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started. The next line names the last test that reported in Studio's output (its `PASS`, `FAIL` or `SKIP` line); the one after it in that section is the hanging one. |
+| `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started. The next line names the last test that reported in Studio's output (its `PASS`, `FAIL` or `SKIP` line); the one after it in that section is the hanging one, or, if that section runs concurrent tests, which report as each ends, any of them that has not reported. |
 | `- onRender fires on the client, where the server sees nothing (skipped): RenderStepped doesn't fire: the display may be asleep` | The PC's display was off during the run, so the engine rendered nothing. Run with `--keep-awake` (see [unattended runs](#unattended-runs-keep-the-display-on)), or keep the screen on. |
 | `1 skipped, which fails the run under --fail-on-skip` (with `--json`, on stderr: `1 skipped on the client, which fails the run ...`) | A test skipped while `--fail-on-skip`, `FAIL_ON_SKIP` or `testing.failOnSkip` was on; the lines above it name the test and its reason, under its section's `FAIL` (with `--json`, the JSON's `status` and `skipReason` do). |
 | `note: this place's runner predates skips ...` | The place was built with `@flamework-experimental/testing` 2.0.0-alpha.5 or earlier, which has no skips, so `--fail-on-skip` had nothing to fail on. |

@@ -47,6 +47,10 @@ export class ShopTests implements OnStart {
   display that is asleep). A plain `return` would count as a pass. `test.skip(name, body)` parks a
   test without running it. Cleanup still runs after a skip. Keep `skip` out of `pcall`,
   `expectThrows` and threads that outlive the test: guide 12, "Skipping a test".
+- **Concurrent:** independent tests that mostly wait can overlap:
+  `test.concurrent(name, (t) => ...)`, or `defineTests(name, { concurrent: true }, ...)` for a
+  section; a plain `test` runs alone. In one, use `t.defer`, `t.scratch`, `t.skip` (the bare ones
+  raise) and share no state: guide 12.
 - `test` is a callable table: where only a function will do (`task.spawn`, `coroutine.wrap`), wrap
   it in one.
 
@@ -86,7 +90,8 @@ export class ShopTests implements OnStart {
   the build over an original place (`--original tests/place.rbxlx`).
 - Flags: `--sections shop` (or `shop/<test name>`, comma-separated), `--realm server|client`,
   `--fail-on-skip` (a skip fails the run), `--keep-awake` (Windows: keeps the display on, since
-  while it sleeps RenderStepped stops and `onRender` tests fail), `--list`, `--keep`, `--timeout`.
+  while it sleeps RenderStepped stops and `onRender` tests fail), `--list`, `--keep`, `--timeout`,
+  `--concurrency 1` (concurrent tests one at a time).
 - `--sections` is judged across both realms: an entry only one realm has is listed for the other
   as `not among the client's sections: ...` without failing, and an entry no realm has fails the
   run with `MISS matched nothing in any realm: ...`. With `--realm`, the one realm judges alone.

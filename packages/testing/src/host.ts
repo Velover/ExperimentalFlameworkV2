@@ -1,5 +1,12 @@
 import { RunService, Workspace } from "@rbxts/services";
-import { DEFAULT_TIMEOUT, runTests, type RunOptions, type RunResult, type TestFilter } from "./runner";
+import {
+	DEFAULT_CONCURRENCY,
+	DEFAULT_TIMEOUT,
+	runTests,
+	type RunOptions,
+	type RunResult,
+	type TestFilter,
+} from "./runner";
 
 /** The BindableFunction in Workspace that runs this realm's tests: `Invoke(filter?, options?)`. */
 export const BINDABLE_NAME = "FlameworkTests";
@@ -12,6 +19,7 @@ const CLIENT_WAIT = 10;
 
 export interface HostConfig {
 	timeout: number;
+	concurrency: number;
 }
 
 interface Host {
@@ -131,7 +139,11 @@ export function __isAttached() {
 export namespace Testing {
 	/** Runs this realm's tests directly, without going through the instances. */
 	export function run(filter?: TestFilter, options?: RunOptions): RunResult {
-		return runTests(filter, options, host?.config ?? { timeout: DEFAULT_TIMEOUT });
+		return runTests(
+			filter,
+			options,
+			host?.config ?? { timeout: DEFAULT_TIMEOUT, concurrency: DEFAULT_CONCURRENCY },
+		);
 	}
 
 	/** The selected sections and tests, without running anything. */

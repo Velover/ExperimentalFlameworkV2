@@ -1,6 +1,15 @@
 // Defining tests
 export { defineTests, test, beforeEach, afterEach, getSections, DEFAULT_SECTION } from "./registry";
-export type { Section, SectionContext, TestBody, TestDefinition, TestFunction } from "./registry";
+export type {
+	Section,
+	SectionContext,
+	SectionOptions,
+	TestBody,
+	TestContext,
+	TestDefinition,
+	TestFunction,
+	TestHook,
+} from "./registry";
 
 // Inside a test
 export { defer, scratch, skip } from "./runner";
@@ -8,7 +17,7 @@ export * from "./expect";
 
 // Running
 export { Testing, BINDABLE_NAME, REMOTE_NAME } from "./host";
-export { runTests, getRealm, getProject, DEFAULT_TIMEOUT, PROJECT_ATTRIBUTE } from "./runner";
+export { runTests, getRealm, getProject, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT, PROJECT_ATTRIBUTE } from "./runner";
 export type {
 	Realm,
 	RunOptions,

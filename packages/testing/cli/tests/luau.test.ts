@@ -57,6 +57,12 @@ describe("option literals", () => {
 	test("--list becomes { list = true }", () => {
 		expect(renderOptions({ list: true })).toBe("{ list = true }");
 	});
+
+	test("--concurrency becomes { concurrency = n }, beside list", () => {
+		expect(renderOptions({ concurrency: 2 })).toBe("{ concurrency = 2 }");
+		expect(renderOptions({ list: true, concurrency: 1 })).toBe("{ list = true, concurrency = 1 }");
+		expect(renderOptions({ concurrency: undefined })).toBe("nil");
+	});
 });
 
 describe("parseSections", () => {

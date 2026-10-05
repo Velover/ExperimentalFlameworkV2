@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+	concurrencyNote,
 	formatList,
 	formatSummary,
 	parseRunResult,
@@ -396,6 +397,98 @@ describe("formatList", () => {
 		]);
 		// A listing runs nothing, so a test marked to skip never fails it, even under --fail-on-skip.
 		expect(resultPassed(listed, { failOnSkip: true })).toBe(true);
+	});
+
+	test("a concurrent test is marked, and the totals count them with the run's limit", () => {
+		const listed = parseRunResult([
+			JSON.stringify({
+				ok: true,
+				realm: "server",
+				listed: true,
+				passed: 0,
+				failed: 0,
+				skipped: 0,
+				durationMs: 0,
+				concurrency: 4,
+				sections: [
+					{
+						name: "replication",
+						passed: 0,
+						failed: 0,
+						skipped: 0,
+						tests: [
+							{ name: "arrives", ok: true, status: "passed", concurrent: true, durationMs: 0 },
+							{
+								name: "later",
+								ok: true,
+								status: "skipped",
+								skipReason: "marked with test.skip",
+								concurrent: true,
+								durationMs: 0,
+							},
+							{ name: "alone", ok: true, status: "passed", durationMs: 0 },
+						],
+					},
+				],
+				unknown: [],
+			}),
+		]);
+		expect(formatList(listed)).toEqual([
+			"replication",
+			"  replication/arrives  (concurrent)",
+			"  replication/later  (concurrent; skipped: marked with test.skip)",
+			"  replication/alone",
+			"",
+			"1 sections, 3 tests (1 marked with test.skip, 2 concurrent, up to 4 at once)",
+		]);
+	});
+});
+
+describe("concurrent tests", () => {
+	test("a result keeps which tests were concurrent and the run's limit; a runner before them sends neither", () => {
+		const parsed = parseRunResult([
+			JSON.stringify({
+				ok: true,
+				realm: "server",
+				passed: 2,
+				failed: 0,
+				skipped: 0,
+				durationMs: 5,
+				concurrency: 3,
+				sections: [
+					{
+						name: "economy",
+						passed: 2,
+						failed: 0,
+						skipped: 0,
+						tests: [
+							{ name: "buys", ok: true, status: "passed", concurrent: true, durationMs: 4 },
+							{ name: "sells", ok: true, status: "passed", durationMs: 1 },
+						],
+					},
+				],
+				unknown: [],
+			}),
+		]);
+		expect(parsed.concurrency).toBe(3);
+		expect(parsed.sections[0]!.tests.map((test) => test.concurrent)).toEqual([true, undefined]);
+
+		const older = parseRunResult([JSON.stringify({ ok: true, realm: "server", sections: [], unknown: [] })]);
+		expect(older.concurrency).toBeUndefined();
+	});
+
+	test("--concurrency against a runner before concurrent tests gets a note, and nothing otherwise", () => {
+		expect(concurrencyNote(PASSING, 2)).toBe(
+			"note: the server's runner predates concurrent tests and ignored --concurrency: it ran every test alone",
+		);
+		expect(concurrencyNote(PASSING, undefined)).toBeUndefined();
+		expect(concurrencyNote({ ...PASSING, concurrency: 2 }, 2)).toBeUndefined();
+
+		// A listing ran nothing: the note says how that runner runs tests.
+		expect(concurrencyNote(PASSING, 2, true)).toBe(
+			"note: the server's runner predates concurrent tests and ignored --concurrency: it runs every test alone",
+		);
+		expect(concurrencyNote({ ...PASSING, concurrency: 2 }, 2, true)).toBeUndefined();
 	});
 });
 

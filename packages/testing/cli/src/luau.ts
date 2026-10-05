@@ -8,6 +8,11 @@ export type Filter = string[] | undefined;
 export interface ShimOptions {
 	/** `--list`: ask the runner to enumerate tests instead of running them. */
 	list?: boolean;
+	/**
+	 * `--concurrency`: the most concurrent tests that run at once, over the place's
+	 * `testing.concurrency`. A runner from before concurrent tests ignores it.
+	 */
+	concurrency?: number;
 }
 
 function isControl(code: number): boolean {
@@ -57,11 +62,12 @@ export function renderFilter(filter: Filter): string {
 	return `{ ${names.map(escapeLuauString).join(", ")} }`;
 }
 
-/** `{ list = true }` or `nil`. */
+/** `{ list = true }`, `{ concurrency = 2 }`, both, or `nil`. */
 export function renderOptions(options: ShimOptions | undefined): string {
 	if (!options) return "nil";
 	const entries: string[] = [];
 	if (options.list) entries.push("list = true");
+	if (options.concurrency !== undefined) entries.push(`concurrency = ${options.concurrency}`);
 	return entries.length === 0 ? "nil" : `{ ${entries.join(", ")} }`;
 }
 

@@ -499,6 +499,45 @@ describe("test", () => {
 		expect(bad.err).toContain("--realm must be server, client or both");
 	});
 
+	test("--concurrency reaches the host, a runner before concurrent tests gets a note, and a bad value opens nothing", async () => {
+		// The place answers as a runner before concurrent tests does: no `concurrency` in its result.
+		const older = studioThatOpens(BUILT_STUDIO, { Server: JSON.stringify(resultJson()) });
+		const run = await runCli(["test", "place.rbxl", "--realm", "server", "--concurrency", "2"], {
+			files: { "place.rbxl": "built" },
+			studio: older.fake,
+			onLaunch: older.onLaunch,
+		});
+		expect(run.code).toBe(0);
+		const execs = run.studioCalls.filter((call) => call.name === "execute_luau");
+		expect(execs[0]!.args.code).toContain("host:Invoke(nil, { concurrency = 2 })");
+		expect(run.out).toContain("note: the server's runner predates concurrent tests and ignored --concurrency");
+
+		// A listing ran nothing, and its note does not say it did.
+		const olderListed = studioThatOpens(BUILT_STUDIO, { Server: JSON.stringify(resultJson()) });
+		const listing = await runCli(["test", "place.rbxl", "--realm", "server", "--list", "--concurrency", "2"], {
+			files: { "place.rbxl": "built" },
+			studio: olderListed.fake,
+			onLaunch: olderListed.onLaunch,
+		});
+		expect(listing.code).toBe(0);
+		expect(listing.out).toContain("ignored --concurrency: it runs every test alone");
+		expect(listing.out).not.toContain("it ran every test alone");
+
+		const newer = studioThatOpens(BUILT_STUDIO, { Server: JSON.stringify(resultJson({ concurrency: 2 })) });
+		const current = await runCli(["test", "place.rbxl", "--realm", "server", "--concurrency", "2"], {
+			files: { "place.rbxl": "built" },
+			studio: newer.fake,
+			onLaunch: newer.onLaunch,
+		});
+		expect(current.code).toBe(0);
+		expect(current.out).not.toContain("predates concurrent tests");
+
+		const bad = await runCli(["test", "place.rbxl", "--concurrency", "0"], { files: { "place.rbxl": "built" } });
+		expect(bad.code).toBe(2);
+		expect(bad.err).toContain('--concurrency must be a whole number, 1 or more, got "0"');
+		expect(bad.launched).toHaveLength(0);
+	});
+
 	test("a window left over from an earlier build of the same file is closed before the fresh one opens", async () => {
 		const studio = studioThatOpens(BUILT_STUDIO, {
 			Server: JSON.stringify(resultJson()),
@@ -1024,6 +1063,40 @@ describe("test", () => {
 		expect(run.err).toContain("the client's run did not finish within 1s");
 		expect(run.err).toContain("last test that reported: economy/sells (PASS)");
 		expect(run.out).toContain("play session stopped");
+		// The server answered as a runner before concurrent tests: no test of this place overlaps.
+		expect(run.err).not.toContain("concurrent tests");
+	});
+
+	test("a run that does not answer mentions concurrent tests only where some may have been in flight", async () => {
+		const hanging = async (serverResult: string, extra: string[] = []) => {
+			const studio = studioThatOpens(BUILT_STUDIO, { Server: serverResult, Client: "" });
+			const answers = studio.fake.answers as Record<string, unknown>;
+			answers.execute_luau = (args: Record<string, unknown>) => {
+				if (args.datamodel_type === "Client") throw new Error("execute_luau timed out after 1000ms");
+				return serverResult;
+			};
+			answers.get_console_output = () => "[FWTEST] client economy/buys: PASS (2ms)";
+			return await runCli(["test", "place.rbxl", "--timeout", "1s", ...extra], {
+				files: { "place.rbxl": "built" },
+				studio: studio.fake,
+				onLaunch: studio.onLaunch,
+			});
+		};
+		const NOTE =
+			"(if that section runs concurrent tests, which report as each ends: any of them that has not reported)";
+
+		// The output has no line as a test starts, so the CLI cannot tell: it says so conditionally.
+		const current = await hanging(JSON.stringify(resultJson({ concurrency: 4 })));
+		expect(current.code).toBe(1);
+		expect(current.err).toContain(
+			`last test that reported: economy/buys (PASS); the test after it in that section is hanging, past its own timeout ${NOTE}`,
+		);
+
+		// One at a time, the test after the last that reported is the hanging one.
+		const serial = await hanging(JSON.stringify(resultJson({ concurrency: 1 })), ["--concurrency", "1"]);
+		expect(serial.code).toBe(1);
+		expect(serial.err).toContain("last test that reported: economy/buys (PASS)");
+		expect(serial.err).not.toContain(NOTE);
 	});
 
 	test("a --sections entry only one realm has passes, and one that no realm has fails the run", async () => {

@@ -18,6 +18,12 @@ export interface TestResult {
 	error?: string;
 	/** Why it was skipped, when it was: what was passed to `skip()`, or `"marked with test.skip"`. */
 	skipReason?: string;
+	/**
+	 * Set on a concurrent test (`test.concurrent`, or a section defined with `{ concurrent: true }`),
+	 * which may have run alongside others. Absent on a plain test, and from a runner before
+	 * concurrent tests.
+	 */
+	concurrent?: boolean;
 	durationMs?: number;
 }
 
@@ -48,6 +54,12 @@ export interface RunResult {
 	sections: SectionResult[];
 	/** Requested names that matched nothing. Non-empty means `ok` is false. */
 	unknown: string[];
+	/**
+	 * The most concurrent tests the run let run at once (`--concurrency`, else the place's
+	 * `testing.concurrency`). Absent from a runner before concurrent tests, which runs every test
+	 * alone.
+	 */
+	concurrency?: number;
 }
 
 export class ResultParseError extends Error {
@@ -112,6 +124,7 @@ export function parseRunResult(results: string[] | undefined): RunResult {
 		durationMs: numberOr(value.durationMs, 0),
 		sections,
 		unknown,
+		...(isCount(value.concurrency) ? { concurrency: value.concurrency } : {}),
 	};
 }
 
@@ -134,6 +147,7 @@ function normalizeTest(test: unknown): TestResult {
 		...(status === "skipped"
 			? { skipReason: value.skipReason === undefined ? "no reason given" : String(value.skipReason) }
 			: {}),
+		...(value.concurrent === true ? { concurrent: true } : {}),
 		...(typeof value.durationMs === "number" ? { durationMs: value.durationMs } : {}),
 	};
 }
@@ -208,7 +222,8 @@ function detailLines(text: string): string[] {
 
 /**
  * The per-section summary printed after a run: each section's counts, then each of its failures
- * with its message and each of its skips with its reason, in the order they ran. A section heads
+ * with its message and each of its skips with its reason, in the result's order, the order the
+ * tests started, however concurrent tests ended. A section heads
  * `FAIL` when a test in it failed, or, under `failOnSkip`, when one skipped.
  */
 export function formatSummary(result: RunResult, options?: Judgement): string[] {
@@ -271,23 +286,27 @@ export function skipFailureNote(result: RunResult, options?: Judgement): string 
 
 /**
  * What `--list` prints: every section with its test names. Nothing ran, so no test has an outcome;
- * one registered with `test.skip` is marked, with its reason, as it would be skipped.
+ * one registered with `test.skip` is marked, with its reason, as it would be skipped, and a
+ * concurrent one is marked as such.
  */
 export function formatList(result: RunResult, options?: Judgement): string[] {
 	const lines: string[] = [];
 	let count = 0;
 	let marked = 0;
+	let concurrent = 0;
 	for (const section of result.sections) {
 		lines.push(section.name);
 		for (const test of section.tests) {
-			if (test.status === "skipped") {
-				lines.push(
-					`  ${section.name}/${test.name}  (skipped: ${(test.skipReason ?? "no reason given").split("\n")[0]})`,
-				);
-				marked += 1;
-			} else {
-				lines.push(`  ${section.name}/${test.name}`);
+			const notes: string[] = [];
+			if (test.concurrent === true) {
+				notes.push("concurrent");
+				concurrent += 1;
 			}
+			if (test.status === "skipped") {
+				notes.push(`skipped: ${(test.skipReason ?? "no reason given").split("\n")[0]}`);
+				marked += 1;
+			}
+			lines.push(`  ${section.name}/${test.name}${notes.length > 0 ? `  (${notes.join("; ")})` : ""}`);
 			count += 1;
 		}
 	}
@@ -295,8 +314,25 @@ export function formatList(result: RunResult, options?: Judgement): string[] {
 		lines.push(missLine(result, options));
 	}
 	lines.push("");
+	const totals: string[] = [];
+	if (marked > 0) totals.push(`${marked} marked with test.skip`);
+	if (concurrent > 0) {
+		const limit = result.concurrency === undefined ? "" : `, up to ${result.concurrency} at once`;
+		totals.push(`${concurrent} concurrent${limit}`);
+	}
 	lines.push(
-		`${result.sections.length} sections, ${count} tests${marked > 0 ? ` (${marked} marked with test.skip)` : ""}`,
+		`${result.sections.length} sections, ${count} tests${totals.length > 0 ? ` (${totals.join(", ")})` : ""}`,
 	);
 	return lines;
+}
+
+/**
+ * What a run that asked for `--concurrency` adds when the place's runner predates concurrent tests
+ * (its result has no `concurrency`): the runner ignored the option. Nothing otherwise. A `listing`
+ * (`--list`) ran nothing, so its note says how the runner runs tests rather than how it ran them.
+ */
+export function concurrencyNote(result: RunResult, asked: number | undefined, listing = false): string | undefined {
+	if (asked === undefined || result.concurrency !== undefined) return undefined;
+	const how = listing ? "it runs every test alone" : "it ran every test alone";
+	return `note: the ${result.realm}'s runner predates concurrent tests and ignored --concurrency: ${how}`;
 }

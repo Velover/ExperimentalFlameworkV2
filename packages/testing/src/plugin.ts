@@ -5,10 +5,11 @@ import {
 	type Module,
 	type PluginDefinition,
 	type ScopeCondition,
+	type TestingRuntimeConfig,
 } from "@flamework-experimental/core";
 import { attach, detach, Testing } from "./host";
 import { __getCurrentModule, __setCurrentModule } from "./registry";
-import { DEFAULT_TIMEOUT } from "./runner";
+import { DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT } from "./runner";
 
 /** The scope tests are on under when the config names none. */
 export const DEFAULT_TESTING_SCOPE = "testing";
@@ -35,6 +36,13 @@ export interface TestingOptions {
 
 	/** Seconds a single test may take before it is cancelled and counted as failed. */
 	timeout?: number;
+
+	/**
+	 * The most concurrent tests (`test.concurrent`, or a section defined with `{ concurrent: true }`)
+	 * that run at once; 1 runs every test alone. A run's `concurrency` option overrides it. Defaults
+	 * to 4.
+	 */
+	concurrency?: number;
 }
 
 /** The options in effect: what was given in code, else the config file, else the defaults. */
@@ -44,10 +52,11 @@ export interface ResolvedTestingOptions {
 	condition: ScopeCondition;
 	autoRun: boolean;
 	timeout: number;
+	concurrency: number;
 }
 
 export function resolveTestingOptions(options?: TestingOptions): ResolvedTestingOptions {
-	const config = getRuntimeConfig().testing ?? {};
+	const config: TestingRuntimeConfig = getRuntimeConfig().testing ?? {};
 	return {
 		enabled: options?.enabled ?? config.enabled,
 		condition: {
@@ -56,6 +65,7 @@ export function resolveTestingOptions(options?: TestingOptions): ResolvedTesting
 		},
 		autoRun: options?.autoRun ?? config.autoRun ?? false,
 		timeout: options?.timeout ?? config.timeout ?? DEFAULT_TIMEOUT,
+		concurrency: options?.concurrency ?? config.concurrency ?? DEFAULT_CONCURRENCY,
 	};
 }
 
@@ -104,7 +114,7 @@ export function createTestingPlugin(options?: TestingOptions): PluginDefinition 
 		let attached = false;
 		target.onPostIgnite(
 			() => {
-				attach({ timeout: resolved.timeout });
+				attach({ timeout: resolved.timeout, concurrency: resolved.concurrency });
 				attached = true;
 
 				// Deferred rather than spawned: a run that never yields would otherwise complete inside

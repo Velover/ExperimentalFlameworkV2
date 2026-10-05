@@ -52,6 +52,12 @@ export interface TestingRuntimeConfig {
 	timeout?: number;
 
 	/**
+	 * The most concurrent tests (`test.concurrent`, or a section defined with `{ concurrent: true }`)
+	 * that run at once; 1 runs every test alone. A run's `concurrency` option comes first.
+	 */
+	concurrency?: number;
+
+	/**
 	 * The tree path of a ModuleScript exporting `ignite()`, resolved by the transformer from the
 	 * source path in `flamework.config.json`, for runs where nothing starts the game by itself.
 	 */

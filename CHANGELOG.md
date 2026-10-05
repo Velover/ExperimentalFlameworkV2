@@ -44,6 +44,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   has gone. Running alpha.6 and this version side by side is not supported: alpha.6 takes no lock.
 - **`studio call` of a tool whose arguments have no `studio_id` needs `--any-window`,** except
   `list_roblox_studios`, which acts on no window: which window such a tool acts on cannot be told.
+- **`testing.concurrency` needs the next transformer.** Its schema has it; 2.0.0-alpha.7 refuses a
+  `flamework.config.json` with it. `--concurrency` and a run's `concurrency` option need nothing.
 
 ### core
 
@@ -56,6 +58,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   file for an area before it works there: `providers.md`, `components.md`, `networking.md`,
   `testing.md` and `plugins.md`, the last for a plugin or a package that other games install. A
   place gets one more empty Folder for them, `core.docs.ai`, as it does for the guide.
+- **`TestingRuntimeConfig.concurrency`,** the type of the compiled `testing.concurrency` key that
+  testing reads.
 
 ### testing
 
@@ -119,6 +123,32 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   share. `studio unlock` frees a stale or
   expired lock, closing an expired window; a live one is refused, naming the holder and when its
   hold runs out, unless `--force`, which closes that window (flamework-test's only).
+- **Concurrent tests, opt-in.** `test.concurrent(name, body)` registers a test that may run
+  alongside others, and `defineTests(name, { concurrent: true }, body)` makes every test that body
+  registers concurrent (`defineTests(name, body)` is unchanged). Tests start in the order they were
+  declared; consecutive concurrent tests in a section run together, up to `testing.concurrency` at
+  once (4 by default; `RunOptions.concurrency` and `flamework-test --concurrency` override it for a
+  run, and 1 runs every test alone). A plain test is a barrier: it waits for the tests before it,
+  runs alone, and the ones after it wait for it, as does the end of a section. A test marked with
+  `test.skip` holds nothing up. Each test keeps its own timeout, scratch folder, `defer` order and
+  `afterEach` hooks: one that fails fails alone, and one that overruns holds up only its own slot,
+  until its timeout. `PASS`, `FAIL` and `SKIP` lines print as each test ends; the result keeps the
+  tests in the order they started (declaration order, or a filter's), marks a concurrent test's
+  result `concurrent: true`, and carries the run's limit as `concurrency`.
+- **The test's context, `t`,** passed to every test body and `beforeEach` and `afterEach` hook:
+  `t.name`, `t.section`, `t.concurrent`, and `t.defer`, `t.scratch` and `t.skip`, bound to that
+  test, so they work from any thread it starts and raise once it is over. `defer`, `scratch` and
+  `skip` work as before in a plain test, and raise in a concurrent one (whatever the limit), naming
+  the context's: the runner cannot tell which test a thread belongs to. Exported types
+  `TestContext`, `TestHook` and `SectionOptions`, and `DEFAULT_CONCURRENCY`.
+- **`flamework-test --concurrency <n>`** (`test`, `studio run`, `cloud run`, `cloud test`): sent to
+  the place as the run's `concurrency` option, a whole number, 1 or more, checked before anything
+  opens. `--list` marks concurrent tests and counts them with the run's limit; the summaries and
+  `--json` keep the order the tests started in. Against a place built before concurrent tests,
+  which ignores the option, the summary says so (on stderr with `--json`); an older CLI against a
+  newer place reads its results as before. A run that does not answer in time names the last test
+  that reported and, unless `--concurrency 1` or a place before concurrent tests rules them out,
+  adds that among concurrent tests the hanging one may be any that has not reported.
 
 #### Changed
 
@@ -149,6 +179,9 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - `testing.lockTimeout` and `testing.lockHold` in `flamework.config.json`'s schema: the Studio
   lock's wait (seconds) and hold (minutes), read by `flamework-test` alone and left out of the
   place's config, as `failOnSkip` and `keepAwake` are.
+- `testing.concurrency` in `flamework.config.json`'s schema: the most concurrent tests that run at
+  once, a whole number, 1 or more (4 by default). A key of the place's, compiled into
+  `include/flamework/config.json` as `timeout` is.
 
 ## 2026-10-02: core, networking and testing 2.0.0-alpha.6; transformer 2.0.0-alpha.7
 

@@ -191,7 +191,8 @@ injected.
 
 A test may yield (`task.wait`, `WaitForChild`, a signal), and a Promise it returns is awaited.
 Each test runs on its own thread, with a timeout of `testing.timeout` seconds (30 by default). A
-test that runs over is cancelled and counted as failed, and the run moves on.
+test that runs over is cancelled and counted as failed, and the run moves on. Tests run one after
+another, in the order they were declared, unless they are [concurrent](#concurrent-tests).
 
 ## Cleanup
 
@@ -201,8 +202,8 @@ failed, timed out or was skipped:
 
 | Tool | Does |
 |---|---|
-| `defer(fn)` | Registers cleanup for the running test: a connection to disconnect, an instance to destroy, a state to restore. Runs in reverse order after the test. |
-| `scratch()` | A Folder in Workspace for whatever the test builds, made on first use and destroyed with everything in it afterwards. |
+| `defer(fn)` | Registers cleanup for the running test: a connection to disconnect, an instance to destroy, a state to restore. Runs in reverse order after the test. `t.defer(fn)` in a [concurrent test](#concurrent-tests). |
+| `scratch()` | A Folder in Workspace for whatever the test builds, made on first use and destroyed with everything in it afterwards. `t.scratch()` in a concurrent test. |
 | `afterEach(fn)` | A section-level hook, run after every test of the section. |
 
 A cleanup that raises fails the test, since whatever it was meant to remove is still there.
@@ -253,10 +254,100 @@ listed with its reason, by the runner's `SKIP` line and in `flamework-test`'s su
   The runner knows which test is running, not which test a thread belongs to, so a thread left
   running past its test (a `task.spawn`, a `task.delay`, a connection) that calls `skip` later
   marks whatever test is running then. From a thread the test started, it stops only that thread.
+  `t.skip(reason)`, on the test's [context](#the-tests-context), is bound to its test: it follows
+  the same rules, raises once its test is over, and is the one that works in a concurrent test.
 - Called while no test runs, it raises at the caller; from a `defer` callback or an `afterEach`, it
   raises a plain error there, which fails the test.
 - `test` is a callable table, since it carries `test.skip`: where only a function will do
   (`task.spawn`, `coroutine.wrap`), wrap it in one.
+
+## Concurrent tests
+
+Most tests in a place spend their time waiting: on `eventually`, a replicated instance, a round
+trip, a delay. One after another, a section of them takes the sum of its waits. Tests that do not
+depend on each other can wait together instead:
+
+```ts
+defineTests("replication", { concurrent: true }, () => {
+    test("a part reaches the client", (t) => {
+        const part = new Instance("Part");
+        part.Parent = t.scratch();
+        // ...
+    });
+});
+
+defineTests("economy", () => {
+    test.concurrent("a refund arrives", (t) => {
+        // ...
+    });
+    test("the shop's stock", () => {
+        // a plain test: runs alone
+    });
+});
+```
+
+`test.concurrent(name, body)` registers one concurrent test, and
+`defineTests(name, { concurrent: true }, body)` makes every test that body registers concurrent; the
+same section defined elsewhere without the option keeps its own tests plain. `test.skip` parks
+either kind.
+
+- Tests start in the order they are declared (a `--sections` list naming a section's tests in
+  another order runs them in its own). Consecutive concurrent tests in a section run together, up
+  to `testing.concurrency` at once (4 by default), and the next starts as soon as one ends.
+- A plain `test` is a barrier: it waits for every test before it, runs alone, and the tests after
+  it wait for it. Sections run one after another, so the end of a section is a barrier too. A test
+  marked with `test.skip` runs nothing and holds nothing up.
+- Each test keeps its own timeout, `scratch` folder and `defer` order, and runs the section's
+  `beforeEach` and `afterEach` hooks for itself, alongside the other tests'. One that overruns holds
+  up only its own slot, until its timeout; one that fails fails alone.
+- Each `PASS`, `FAIL` or `SKIP` line prints as its test ends, so their order varies. The result,
+  `flamework-test`'s summaries and `--json` keep the tests in the order they started. A concurrent
+  test's result carries `concurrent: true`, and its `durationMs` includes the time it shared.
+- `flamework-test --concurrency <n>` (`Testing.run(filter, { concurrency: n })`, or
+  `{ concurrency = n }` as an invoke's options) overrides the limit for one run. `1` runs every
+  test alone, which is the first thing to try when a concurrent section fails.
+
+Four is enough for tests that mostly wait to overlap their waits, and few enough that the frames
+they share stay short for a test that counts frames or measures time. Raise it in the config for a
+section of many such tests.
+
+### The test's context
+
+Every test body, and every `beforeEach` and `afterEach` hook, receives its test's context, `t`:
+
+| Member | Is |
+|---|---|
+| `t.name`, `t.section` | The test's name, and its section's. |
+| `t.concurrent` | Whether the test is concurrent. |
+| `t.defer(fn)` | `defer(fn)` for this test. |
+| `t.scratch()` | `scratch()` for this test: a folder of its own. |
+| `t.skip(reason)` | `skip(reason)` for this test, from its body or a `beforeEach`, under the same rules. |
+
+In a plain test, the functions and the context's do the same. In a concurrent test only the
+context's work: `defer`, `scratch` and `skip` raise there, naming `t.defer`, `t.scratch` and
+`t.skip`. Luau cannot tell which test a calling thread belongs to, so with several tests running
+the runner cannot know whose cleanup it is given. They raise in every concurrent test, even one that
+runs alone (`--concurrency 1`), so a section that passes at one passes at four as far as they go.
+The context's functions are bound to their test, so they work from any thread the test starts too;
+once the test is over, they raise.
+
+### Shared state
+
+Concurrent tests share the place. What they share is what makes a test unfit to run alongside
+others:
+
+- A value a `beforeEach` stores for the body (`let shop`, assigned in the hook): the next test's
+  hook overwrites it. Keep per-test state in the test.
+- Counts and logs a test reads back: a signal's count, `LogService` messages, warnings. Another
+  test adds to them in the middle.
+- Anything the place has one of: a named folder in Workspace, a tag on a fixed part, a module-level
+  singleton, a remote whose handler answers whoever sends. Build under `t.scratch()`, and tell
+  messages apart with a nonce. Every test's scratch folder has the same name, so use the folder
+  `t.scratch()` returns, never look it up by name.
+- Time: a test that expects something within a number of frames shares those frames.
+
+Keep such tests plain. A plain test between concurrent ones also keeps the ones before it apart from
+the ones after it.
 
 ## Running
 
@@ -370,6 +461,7 @@ are written this way.
   "enabled": true,             // when set, overrides the two above in either direction
   "autoRun": false,            // run everything right after ignition
   "timeout": 30,               // seconds per test
+  "concurrency": 4,            // concurrent tests that run at once; 1 runs every test alone
   "entry": "src/server/main",  // cloud runs only: the ModuleScript exporting ignite()
   "failOnSkip": false,         // flamework-test: a skipped test fails the run (--fail-on-skip)
   "keepAwake": false,          // flamework-test: keep the display on during a Studio run (--keep-awake)

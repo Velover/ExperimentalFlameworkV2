@@ -1,5 +1,5 @@
 import { RunService, Workspace } from "@rbxts/services";
-import { getSections, type Section, type TestDefinition } from "./registry";
+import { getSections, type Section, type TestContext, type TestDefinition } from "./registry";
 
 export type Realm = "server" | "client";
 
@@ -12,6 +12,13 @@ export type TestFilter = string | readonly string[] | undefined;
 export interface RunOptions {
 	/** Report the selected sections and tests without running anything. */
 	list?: boolean;
+
+	/**
+	 * The most concurrent tests that run at once in this run, a whole number, 1 or more: overrides
+	 * `testing.concurrency`. With 1, every test runs alone, one after another. A runner from before
+	 * concurrent tests ignores it.
+	 */
+	concurrency?: number;
 }
 
 /**
@@ -45,6 +52,13 @@ export interface TestResult {
 	 */
 	skipReason?: string;
 
+	/**
+	 * Set on a concurrent test, one registered with `test.concurrent` or in a section defined with
+	 * `{ concurrent: true }`, which may have run alongside others: its `durationMs` then counts the
+	 * time they took as well. Absent on a plain test, and from a runner before concurrent tests.
+	 */
+	concurrent?: boolean;
+
 	durationMs: number;
 }
 
@@ -74,24 +88,46 @@ export interface RunResult {
 	sections: SectionResult[];
 	/** Filter entries that named no section or test. Any makes `ok` false. */
 	unknown: string[];
+	/**
+	 * The most concurrent tests the run let run at once (in a listing, would have): `RunOptions`'
+	 * `concurrency`, else `testing.concurrency`. Absent from a runner before concurrent tests.
+	 */
+	concurrency: number;
 }
 
 export interface RunnerConfig {
 	/** Seconds a single test may take before it is cancelled and counted as failed. */
 	timeout: number;
+
+	/** The most concurrent tests that run at once; {@link DEFAULT_CONCURRENCY} when left out. */
+	concurrency?: number;
 }
 
 /** The default `testing.timeout`. */
 export const DEFAULT_TIMEOUT = 30;
 
+/**
+ * The default `testing.concurrency`. Concurrent tests are opt-in, so this only bounds the ones
+ * marked so: enough for tests that mostly wait to overlap their waits, few enough that the frames
+ * they share stay short and a test that measures time is not starved by many others.
+ */
+export const DEFAULT_CONCURRENCY = 4;
+
 const SCRATCH_NAME = "FlameworkTestScratch";
 
 interface ActiveTest {
+	readonly name: string;
+	readonly section: string;
+	readonly concurrent: boolean;
+
 	deferred: Array<() => void>;
 	scratch?: Folder;
 
-	/** Where the test is: `skip()` is refused once its cleanup has started. */
-	phase: "setup" | "body" | "cleanup";
+	/**
+	 * Where the test is: `skip()` is refused once its cleanup has started, and its context's
+	 * functions once it is done.
+	 */
+	phase: "setup" | "body" | "cleanup" | "done";
 
 	/**
 	 * The reason of the first `skip()` call. The runner reads the skip from here rather than from
@@ -114,7 +150,16 @@ function isSkipSignal(value: unknown): value is SkipSignal {
 	return typeIs(value, "table") && getmetatable(value) === SKIP_SIGNAL;
 }
 
-let activeTest: ActiveTest | undefined;
+/** The plain test that is running, alone, which `defer`, `scratch` and `skip` act on. */
+let exclusiveTest: ActiveTest | undefined;
+
+/**
+ * How many concurrent tests are running. While any is, `defer`, `scratch` and `skip` raise: the
+ * runner cannot tell which test the calling thread belongs to (Luau has no way to find the thread
+ * that started another), so only the test's context can name it.
+ */
+let concurrentRunning = 0;
+
 let running = false;
 
 export function getRealm(): Realm {
@@ -141,35 +186,111 @@ export function getProject(): string | undefined {
 }
 
 /**
+ * The test `defer`, `scratch` or `skip` acts on: the plain test that is running. Raises at their
+ * caller (level 3 from here) while concurrent tests run, and while nothing runs.
+ */
+function globalTarget(name: string, idle: string): ActiveTest {
+	if (concurrentRunning > 0) {
+		error(
+			`${name}() cannot tell which test called it while concurrent tests are running: call t.${name}() on the context the test receives, as in test.concurrent("...", (t) => t.${name}(...)); its beforeEach and afterEach hooks receive it too`,
+			3,
+		);
+	}
+
+	if (exclusiveTest === undefined) {
+		error(idle, 3);
+	}
+
+	return exclusiveTest;
+}
+
+/**
+ * What `t.defer`, `t.scratch` and `t.skip` raise once their test is over: at their caller, level 4
+ * from here (this, `deferOn` or the like, the context's function).
+ */
+function refuseFinished(test: ActiveTest, name: string): never {
+	error(
+		`${name} was called after the test '${test.section}/${test.name}' had finished, from a thread that outlived it`,
+		4,
+	);
+}
+
+function deferOn(test: ActiveTest, callback: () => void, name: string) {
+	if (test.phase === "done") {
+		refuseFinished(test, name);
+	}
+
+	test.deferred.push(callback);
+}
+
+function scratchOf(test: ActiveTest, name: string): Folder {
+	if (test.phase === "done") {
+		refuseFinished(test, name);
+	}
+
+	if (test.scratch === undefined) {
+		const folder = new Instance("Folder");
+		folder.Name = SCRATCH_NAME;
+		folder.Parent = Workspace;
+		test.scratch = folder;
+	}
+
+	return test.scratch;
+}
+
+function skipOn(test: ActiveTest, reason: string, name: string): never {
+	if (test.phase === "done") {
+		refuseFinished(test, name);
+	}
+
+	if (test.phase === "cleanup") {
+		error(
+			`${name} can only be called from a test's body or a beforeEach, not from a defer callback or an afterEach: the test has already run`,
+			3,
+		);
+	}
+
+	const text = typeIs(reason, "string") ? reason : tostring(reason);
+	if (test.skipReason === undefined) {
+		test.skipReason = text;
+	}
+
+	error(setmetatable({ reason: text }, SKIP_SIGNAL));
+}
+
+/** The context a test's body and hooks receive: its own `defer`, `scratch` and `skip`. */
+function createContext(test: ActiveTest): TestContext {
+	return {
+		name: test.name,
+		section: test.section,
+		concurrent: test.concurrent,
+		defer: (callback) => deferOn(test, callback, "t.defer()"),
+		scratch: () => scratchOf(test, "t.scratch()"),
+		skip: (reason) => skipOn(test, reason, "t.skip()"),
+	};
+}
+
+/**
  * Registers cleanup for the running test: a connection to disconnect, an instance to destroy, a
  * state to restore. Deferred callbacks run in reverse order once the test is over, whether it
  * passed, failed or timed out, and one that raises fails the test.
+ *
+ * In a plain test only: while concurrent tests run it raises, and they use `t.defer`, on the
+ * context they receive, instead.
  */
 export function defer(callback: () => void) {
-	if (activeTest === undefined) {
-		error("defer() can only be called while a test is running", 2);
-	}
-
-	activeTest.deferred.push(callback);
+	deferOn(globalTarget("defer", "defer() can only be called while a test is running"), callback, "defer()");
 }
 
 /**
  * A Folder in Workspace for whatever the running test needs to build, created on first use and
  * destroyed with everything in it once the test is over.
+ *
+ * In a plain test only: while concurrent tests run it raises, and they use `t.scratch`, on the
+ * context they receive, which gives each test its own folder.
  */
 export function scratch(): Folder {
-	if (activeTest === undefined) {
-		error("scratch() can only be called while a test is running", 2);
-	}
-
-	if (activeTest.scratch === undefined) {
-		const folder = new Instance("Folder");
-		folder.Name = SCRATCH_NAME;
-		folder.Parent = Workspace;
-		activeTest.scratch = folder;
-	}
-
-	return activeTest.scratch;
+	return scratchOf(globalTarget("scratch", "scratch() can only be called while a test is running"), "scratch()");
 }
 
 /**
@@ -184,6 +305,7 @@ export function scratch(): Folder {
  * The runner knows only which test is running, not which test a thread belongs to, so a thread
  * that outlives its test (a `task.spawn`, `task.delay` or connection left running) and calls
  * `skip()` later marks whichever test is running then, which hides that test's own failure.
+ * `t.skip`, on the context the test receives, is bound to its test and has no such trap.
  *
  * It stops the test by raising an error that the runner tells apart from any other: a table, whose
  * `tostring` reads `the test was skipped: <reason>`. A `pcall` in the test around the call (or
@@ -195,27 +317,15 @@ export function scratch(): Folder {
  * stops only that thread.
  *
  * Called while no test is running, it raises at the caller. Called from a `defer` callback or an
- * `afterEach`, it raises a plain error there, which fails the test.
+ * `afterEach`, it raises a plain error there, which fails the test. While concurrent tests run it
+ * raises a plain error, which fails the test that called it: they use `t.skip`.
  */
 export function skip(reason: string): never {
-	const context = activeTest;
-	if (context === undefined) {
-		error("skip() can only be called while a test is running, from its body or a beforeEach", 2);
-	}
-
-	if (context.phase === "cleanup") {
-		error(
-			"skip() can only be called from a test's body or a beforeEach, not from a defer callback or an afterEach: the test has already run",
-			2,
-		);
-	}
-
-	const text = typeIs(reason, "string") ? reason : tostring(reason);
-	if (context.skipReason === undefined) {
-		context.skipReason = text;
-	}
-
-	error(setmetatable({ reason: text }, SKIP_SIGNAL));
+	return skipOn(
+		globalTarget("skip", "skip() can only be called while a test is running, from its body or a beforeEach"),
+		reason,
+		"skip()",
+	);
 }
 
 interface Selected {
@@ -298,25 +408,51 @@ function traceback(err: unknown) {
 	return debug.traceback(tostring(err), 2);
 }
 
+/** A result, marked as a concurrent test's when it is one. */
+function kindOf(result: TestResult, definition: TestDefinition): TestResult {
+	if (definition.concurrent === true) {
+		result.concurrent = true;
+	}
+
+	return result;
+}
+
 function runOne(section: Section, definition: TestDefinition, timeout: number, realm: Realm): TestResult {
 	const label = `[FWTEST] ${realm} ${section.name}/${definition.name}`;
 
 	// Marked with test.skip: nothing of it runs, the section's hooks included.
 	if (definition.skip !== undefined) {
 		print(`${label}: SKIP (0ms): ${definition.skip}`);
-		return { name: definition.name, ok: true, status: "skipped", skipReason: definition.skip, durationMs: 0 };
+		return kindOf(
+			{ name: definition.name, ok: true, status: "skipped", skipReason: definition.skip, durationMs: 0 },
+			definition,
+		);
 	}
 
 	const started = os.clock();
-	const context: ActiveTest = { deferred: [], phase: "setup" };
-	activeTest = context;
+	const concurrent = definition.concurrent === true;
+	const context: ActiveTest = {
+		name: definition.name,
+		section: section.name,
+		concurrent,
+		deferred: [],
+		phase: "setup",
+	};
+	const t = createContext(context);
+
+	// A plain test runs alone, so the functions act on it; while a concurrent one runs, they raise.
+	if (concurrent) {
+		concurrentRunning++;
+	} else {
+		exclusiveTest = context;
+	}
 
 	const failures = new Array<string>();
 
 	// A skip stops the hooks and the body: whether or not its error got this far, it is recorded
 	// on the context, and what was raised after it is not the test's failure.
 	for (const hook of section.beforeEach) {
-		const [ok, err] = xpcall(hook, traceback);
+		const [ok, err] = xpcall(() => hook(t), traceback);
 		if (context.skipReason !== undefined) {
 			break;
 		}
@@ -335,7 +471,7 @@ function runOne(section: Section, definition: TestDefinition, timeout: number, r
 		// runs it inline until its first yield, so a body that never yields is done before the loop.
 		const thread = task.spawn(() => {
 			const [ok, err] = xpcall(() => {
-				const value = definition.body();
+				const value = definition.body(t);
 				if (Promise.is(value)) {
 					const [status, result] = (value as Promise<unknown>).awaitStatus();
 					if (status !== Promise.Status.Resolved) {
@@ -388,13 +524,18 @@ function runOne(section: Section, definition: TestDefinition, timeout: number, r
 	}
 
 	for (const hook of section.afterEach) {
-		const [ok, err] = xpcall(hook, traceback);
+		const [ok, err] = xpcall(() => hook(t), traceback);
 		if (!ok) {
 			failures.push(`afterEach raised: ${err}`);
 		}
 	}
 
-	activeTest = undefined;
+	context.phase = "done";
+	if (concurrent) {
+		concurrentRunning--;
+	} else {
+		exclusiveTest = undefined;
+	}
 
 	const durationMs = math.round((os.clock() - started) * 1000);
 	const skipReason = context.skipReason;
@@ -405,23 +546,132 @@ function runOne(section: Section, definition: TestDefinition, timeout: number, r
 
 		const message = failures.join("\n");
 		warn(`${label}: FAIL (${durationMs}ms): ${message}`);
-		return { name: definition.name, ok: false, status: "failed", error: message, durationMs };
+		return kindOf({ name: definition.name, ok: false, status: "failed", error: message, durationMs }, definition);
 	}
 
 	if (skipReason !== undefined) {
 		print(`${label}: SKIP (${durationMs}ms): ${skipReason}`);
-		return { name: definition.name, ok: true, status: "skipped", skipReason, durationMs };
+		return kindOf({ name: definition.name, ok: true, status: "skipped", skipReason, durationMs }, definition);
 	}
 
 	print(`${label}: PASS (${durationMs}ms)`);
-	return { name: definition.name, ok: true, status: "passed", durationMs };
+	return kindOf({ name: definition.name, ok: true, status: "passed", durationMs }, definition);
 }
 
 /**
- * Runs the selected tests, one after another, each on its own thread with `config.timeout`, and
- * returns the result. Prints one `[FWTEST]` line per test (`PASS`, `FAIL` with the failure, or
- * `SKIP` with the reason) and a summary, so a console or a task
- * log reads the same as the returned table.
+ * Whether a test may run alongside its neighbours: a concurrent one, or one marked with
+ * `test.skip`, which runs nothing and so holds nothing up.
+ */
+function runsAlongside(definition: TestDefinition) {
+	return definition.concurrent === true || definition.skip !== undefined;
+}
+
+/**
+ * Runs `tests[first..last]`, consecutive tests that run alongside each other, at most `limit` at a
+ * time, and returns once all of them have finished. Each worker takes the next test in order, so
+ * they start in the order of `tests`, and the next starts as soon as one ends. Each test
+ * keeps its own timeout, so one that overruns holds up only its own worker, until it times out.
+ */
+function runTogether(
+	section: Section,
+	tests: readonly TestDefinition[],
+	first: number,
+	last: number,
+	outcomes: TestResult[],
+	timeout: number,
+	limit: number,
+	realm: Realm,
+) {
+	let cursor = first;
+	let working = 0;
+
+	const work = () => {
+		while (cursor <= last) {
+			const index = cursor;
+			cursor++;
+
+			const definition = tests[index];
+			const [ok, outcome] = pcall(() => runOne(section, definition, timeout, realm));
+			// runOne catches whatever the test raises; should the runner itself raise, the test fails
+			// rather than leaving the run waiting for a worker that is gone.
+			outcomes[index] = ok
+				? outcome
+				: kindOf(
+						{
+							name: definition.name,
+							ok: false,
+							status: "failed",
+							error: `the test runner raised: ${outcome}`,
+							durationMs: 0,
+						},
+						definition,
+					);
+		}
+
+		working--;
+	};
+
+	const workers = math.min(limit, last - first + 1);
+	for (let i = 0; i < workers; i++) {
+		working++;
+		task.spawn(work);
+	}
+
+	while (working > 0) {
+		task.wait();
+	}
+}
+
+/**
+ * Runs a section's selected tests and returns their results in the order they started. A plain test
+ * runs alone: it waits for every test before it and the tests after it wait for it. Consecutive
+ * concurrent tests run together, up to `limit` at once.
+ */
+function runSection(
+	section: Section,
+	tests: readonly TestDefinition[],
+	timeout: number,
+	limit: number,
+	realm: Realm,
+): TestResult[] {
+	const outcomes = new Array<TestResult>();
+	let index = 0;
+	while (index < tests.size()) {
+		if (!runsAlongside(tests[index])) {
+			outcomes[index] = runOne(section, tests[index], timeout, realm);
+			index++;
+			continue;
+		}
+
+		let last = index;
+		while (last + 1 < tests.size() && runsAlongside(tests[last + 1])) {
+			last++;
+		}
+
+		runTogether(section, tests, index, last, outcomes, timeout, limit, realm);
+		index = last + 1;
+	}
+
+	return outcomes;
+}
+
+/** The run's limit on concurrent tests: the run's option, else the config's, else the default. */
+function concurrencyOf(options: RunOptions | undefined, config: RunnerConfig): number {
+	const value = options?.concurrency ?? config.concurrency ?? DEFAULT_CONCURRENCY;
+	if (!typeIs(value, "number") || value < 1 || value % 1 !== 0) {
+		error(`concurrency must be a whole number, 1 or more, got ${tostring(value)}`, 3);
+	}
+
+	return value;
+}
+
+/**
+ * Runs the selected tests, each on its own thread with `config.timeout`, and returns the result.
+ * Sections run one after another, and so do the plain tests in them; consecutive concurrent tests
+ * run together, up to `concurrency` at once (`options`, else `config`). Prints one `[FWTEST]` line
+ * per test as it ends (`PASS`, `FAIL` with the failure, or `SKIP` with the reason) and a summary,
+ * so a console or a task log reads the same as the returned table, which lists every section and
+ * test in the order they started (declaration order, or the filter's), however they finished.
  */
 export function runTests(filter: TestFilter, options: RunOptions | undefined, config: RunnerConfig): RunResult {
 	if (running) {
@@ -430,6 +680,7 @@ export function runTests(filter: TestFilter, options: RunOptions | undefined, co
 
 	const realm = getRealm();
 	const project = getProject();
+	const concurrency = concurrencyOf(options, config);
 	const selection = selectTests(filter);
 
 	if (options?.list === true) {
@@ -449,19 +700,23 @@ export function runTests(filter: TestFilter, options: RunOptions | undefined, co
 				skipped: 0,
 				tests: tests.map((definition): TestResult => {
 					if (definition.skip !== undefined) {
-						return {
-							name: definition.name,
-							ok: true,
-							status: "skipped",
-							skipReason: definition.skip,
-							durationMs: 0,
-						};
+						return kindOf(
+							{
+								name: definition.name,
+								ok: true,
+								status: "skipped",
+								skipReason: definition.skip,
+								durationMs: 0,
+							},
+							definition,
+						);
 					}
 
-					return { name: definition.name, ok: true, status: "passed", durationMs: 0 };
+					return kindOf({ name: definition.name, ok: true, status: "passed", durationMs: 0 }, definition);
 				}),
 			})),
 			unknown: selection.unknown,
+			concurrency,
 		};
 	}
 
@@ -474,10 +729,9 @@ export function runTests(filter: TestFilter, options: RunOptions | undefined, co
 
 	try {
 		for (const { section, tests } of selection.sections) {
-			const result: SectionResult = { name: section.name, passed: 0, failed: 0, skipped: 0, tests: [] };
-			for (const definition of tests) {
-				const outcome = runOne(section, definition, config.timeout, realm);
-				result.tests.push(outcome);
+			const outcomes = runSection(section, tests, config.timeout, concurrency, realm);
+			const result: SectionResult = { name: section.name, passed: 0, failed: 0, skipped: 0, tests: outcomes };
+			for (const outcome of outcomes) {
 				if (outcome.status === "passed") {
 					result.passed++;
 				} else if (outcome.status === "skipped") {
@@ -494,7 +748,8 @@ export function runTests(filter: TestFilter, options: RunOptions | undefined, co
 		}
 	} finally {
 		running = false;
-		activeTest = undefined;
+		exclusiveTest = undefined;
+		concurrentRunning = 0;
 	}
 
 	const durationMs = math.round((os.clock() - started) * 1000);
@@ -507,5 +762,16 @@ export function runTests(filter: TestFilter, options: RunOptions | undefined, co
 		warn(summary);
 	}
 
-	return { ok, realm, project, passed, failed, skipped, durationMs, sections, unknown: selection.unknown };
+	return {
+		ok,
+		realm,
+		project,
+		passed,
+		failed,
+		skipped,
+		durationMs,
+		sections,
+		unknown: selection.unknown,
+		concurrency,
+	};
 }
