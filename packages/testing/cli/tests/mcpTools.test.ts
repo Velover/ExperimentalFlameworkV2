@@ -350,6 +350,7 @@ describe("studio list", () => {
 			project: THIS_PROJECT,
 			thisProject: false,
 			holdsLock: true,
+			hidden: false,
 		});
 		expect(parsed.studios).toContainEqual({
 			studio_id: "studio-1",
@@ -358,6 +359,7 @@ describe("studio list", () => {
 			project: null,
 			thisProject: false,
 			holdsLock: false,
+			hidden: false,
 		});
 		expect(parsed.studioProcesses).toEqual([
 			{ pid: 4001, title: expect.stringContaining("place.rbxl - Roblox Studio") },

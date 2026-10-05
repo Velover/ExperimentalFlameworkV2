@@ -29,6 +29,7 @@ import {
 	type VersionType,
 } from "./openCloud.ts";
 import { findProjectRoot, loadCloudSettings, type CloudSettings } from "./config.ts";
+import { launchOnDesktop } from "./desktop.ts";
 import {
 	describeSignal,
 	Interrupted,
@@ -228,6 +229,7 @@ const FLAGS: Record<string, FlagKind> = {
 	json: "boolean",
 	"fail-on-skip": "boolean",
 	"keep-awake": "boolean",
+	show: "boolean",
 	"testing-universe": "string",
 	"testing-place": "string",
 	key: "string",
@@ -272,6 +274,7 @@ const COMMANDS: Record<string, string[]> = {
 		"realm",
 		"keep",
 		"keep-awake",
+		"show",
 		"cloud",
 		"parallel",
 		...PATCH_FLAGS,
@@ -333,6 +336,11 @@ export interface Flags {
 	"fail-on-skip"?: boolean;
 	/** A Studio run keeps the display on; after it, KEEP_AWAKE and testing.keepAwake. */
 	"keep-awake"?: boolean;
+	/**
+	 * A Studio `test` opens its windows where they can be seen, rather than on the hidden desktop;
+	 * after it, FLAMEWORK_TEST_SHOW and testing.showWindows.
+	 */
+	show?: boolean;
 	"testing-universe"?: string;
 	"testing-place"?: string;
 	key?: string;
@@ -529,13 +537,13 @@ Studio (needs "MCP server" enabled in Studio's Assistant settings):
   studio lock         who holds the Studio lock, and whether it is live, expired or stale
   studio unlock       free a stale or expired lock (closing an expired window); --force: a live one
 
-One Studio window opened through flamework-test at a time on this machine: test and studio open
-take the Studio lock before they launch Studio and wait while another project holds it. A running
-command holds it to its end; a window left open holds it until it closes, or until it has been
-idle past its hold (then the next taker closes it). The lock lives in %LOCALAPPDATA%\\flamework-test
-on Windows ($FLAMEWORK_TEST_STATE_DIR moves it). close, play, stop, exec, run and call act only on
-the window flamework-test opened for this project; --any-window acts on another, and needs the
-user's go-ahead for a window they have open.
+One flamework-test command uses Studio at a time on this machine (with its one window, or a test
+--parallel's several): test and studio open take the Studio lock before they launch Studio and
+wait while another project holds it. A running command holds it to its end; a window left open
+holds it until it closes, or until it has been idle past its hold (then the next taker closes it).
+The lock lives in %LOCALAPPDATA%\\flamework-test on Windows ($FLAMEWORK_TEST_STATE_DIR moves it).
+close, play, stop, exec, run and call act only on the window flamework-test opened for this
+project; --any-window acts on another, and needs the user's go-ahead for a window they have open.
 
 Cloud (a testing place and an Open Cloud key; the server's tests only):
   cloud publish <file>  upload the place Rojo built to the testing place as a new version
@@ -545,7 +553,12 @@ Cloud (a testing place and an Open Cloud key; the server's tests only):
 
 Flags:
   test       --realm server|client|both  which realm's tests; default both
-             --keep                  leave Studio and the play session open afterwards
+             --show                  open Studio where it can be seen; by default a run opens its
+                                     windows on a hidden desktop of their own, so no window pops
+                                     up or takes the focus (Windows; elsewhere nothing is hidden)
+                                     (default: $FLAMEWORK_TEST_SHOW, else testing.showWindows; off)
+             --keep                  leave Studio and the play session open afterwards: hidden
+                                     unless --show, driven by the studio commands
              --cloud                 run in the cloud instead of Studio
              --original <place.rbxl> patch a copy of this place with the build first, and run that
                                      (needs lune; default: $ORIGINAL_PLACE, cloud.originalPlace)
@@ -626,7 +639,7 @@ the game: a cloud task runs none of the place's Scripts, so the runner has to. S
 "testing": { "failOnSkip": true, "keepAwake": true } turns those two on; --fail-on-skip=false and
 --keep-awake=false turn them off for one run. "testing": { "lockTimeout": 300, "lockHold": 15 } sets
 the Studio lock's wait (seconds) and hold (minutes); "testing": { "parallel": 2 } runs two projects'
-windows at once.
+windows at once; "testing": { "showWindows": true } opens a test's windows where they can be seen.
 
 Environment (the shell, .env or .env.local):
   ROBLOX_API_KEY                          Open Cloud key: universe-places:write and
@@ -638,6 +651,7 @@ Environment (the shell, .env or .env.local):
   FLAMEWORK_TEST_LOCK_TIMEOUT             seconds, for --lock-timeout
   FLAMEWORK_TEST_LOCK_HOLD                minutes, for --hold
   FLAMEWORK_TEST_PARALLEL                 windows at once, for --parallel
+  FLAMEWORK_TEST_SHOW                     true or false (1 or 0), for --show
   FLAMEWORK_TEST_STATE_DIR                where the Studio lock lives; every project must agree on it,
                                           so set it in the shell, never in a project's .env (Bun loads
                                           the .env of the folder a command runs in, which moves it)
@@ -680,8 +694,11 @@ export interface CliDeps {
 	 * project's run beside others, whose lines are kept together).
 	 */
 	spawn?: (command: string[], cwd: string, timeoutMs?: number, output?: ChildOutput) => Promise<number>;
-	/** Starts a program and returns at once, leaving it running; resolves with its process id when known. */
-	launch?: (command: string[]) => Promise<number | undefined>;
+	/**
+	 * Starts a program and returns at once, leaving it running; resolves with its process id when
+	 * known. `hidden`: on the hidden desktop (see desktop.ts), where none of its windows is seen.
+	 */
+	launch?: (command: string[], options?: LaunchOptions) => Promise<number | undefined>;
 	/**
 	 * Closes the Studio windows the target matches, and only those, checking each is gone
 	 * afterwards; what became of every one of them (none matched: an empty list).
@@ -741,6 +758,11 @@ export interface CliDeps {
 	writeBinaryFile?: (path: string, data: Uint8Array) => Promise<void>;
 }
 
+/** How a program is launched: `hidden` on the hidden desktop (Windows), or where the user sees it. */
+export interface LaunchOptions {
+	hidden: boolean;
+}
+
 /** This process: its PID, its name (`bun`) and when it started (milliseconds since the epoch). */
 export interface SelfInfo {
 	pid: number;
@@ -761,6 +783,11 @@ interface Io extends Required<Omit<CliDeps, "fetch">> {
 	memo: { settings?: CloudSettings; project?: string };
 	/** How many tests the results printed through this view skipped: one project's, for its line at the end. */
 	tally: { skipped: number };
+	/**
+	 * Whether this view's project left its window open because it would not close: the window keeps
+	 * its place among the windows a run has open at once, so the run opens no other in its stead.
+	 */
+	left: { open: boolean };
 }
 
 /**
@@ -878,7 +905,9 @@ function resolveDeps(deps: CliDeps, interruption: Interruption): Io {
 			}));
 	const launch =
 		deps.launch ??
-		(async ([exe, ...args]: string[]) => {
+		(async ([exe, ...args]: string[], options?: LaunchOptions) => {
+			// On the hidden desktop: CreateProcessW (see desktop.ts), which gives the process's PID too.
+			if (options?.hidden === true) return launchOnDesktop([exe!, ...args]);
 			// Detached, or Windows takes Studio down with this process when it exits.
 			const child = spawn(exe!, args, { detached: true, stdio: "ignore", windowsHide: false });
 			child.unref();
@@ -937,10 +966,10 @@ function resolveDeps(deps: CliDeps, interruption: Interruption): Io {
 				release();
 			}
 		},
-		launch: async (command) => {
+		launch: async (command, options) => {
 			// Never raced: the process it starts is known only by what it returns.
 			interruption.check();
-			return await launch(command);
+			return await launch(command, options);
 		},
 		closeWindow: deps.closeWindow ?? ((target) => runCloseScript(target)),
 		claimWindowName: async (name, onWait) => {
@@ -1029,6 +1058,7 @@ function resolveDeps(deps: CliDeps, interruption: Interruption): Io {
 		progress: () => {},
 		memo: {},
 		tally: { skipped: 0 },
+		left: { open: false },
 	};
 }
 
@@ -1072,6 +1102,22 @@ function failOnSkipOf(flags: Flags, io: Io): boolean {
 /** Whether a Studio run keeps the display on: `--keep-awake`, `KEEP_AWAKE`, `testing.keepAwake`. */
 function keepAwakeOf(flags: Flags, io: Io): boolean {
 	return booleanSetting(flags["keep-awake"], "KEEP_AWAKE", settingsOf(io).keepAwake, io);
+}
+
+/**
+ * Whether a Studio `test` opens its windows where they can be seen: `--show`, `FLAMEWORK_TEST_SHOW`,
+ * `testing.showWindows`; else on the hidden desktop.
+ */
+function showOf(flags: Flags, io: Io): boolean {
+	return booleanSetting(flags.show, "FLAMEWORK_TEST_SHOW", settingsOf(io).showWindows, io);
+}
+
+/**
+ * Whether a Studio `test` opens its windows on the hidden desktop: on Windows, unless shown (see
+ * {@link showOf}, resolved into `flags.show` by the run). Anywhere else nothing is hidden.
+ */
+function hiddenOf(flags: Flags, io: Io): boolean {
+	return io.platform === "win32" && flags.show !== true;
 }
 
 /**
@@ -1964,9 +2010,9 @@ class LockSlot {
 		readonly window: LockWindow,
 	) {}
 
-	/** Studio was launched on its place, as `pid`. */
-	async launched(pid: number | undefined): Promise<void> {
-		await this.lock.launched(this, pid);
+	/** Studio was launched on its place, as `pid`; `hidden`: on the hidden desktop. */
+	async launched(pid: number | undefined, hidden = false): Promise<void> {
+		await this.lock.launched(this, pid, hidden);
 	}
 
 	async connected(mcpId: string): Promise<void> {
@@ -2054,9 +2100,11 @@ class HeldLock {
 	 * ended it holds the lock under its lease, where a window any other command leaves open was left
 	 * by a run cut short, and may be closed at once.
 	 */
-	async launched(slot: LockSlot, pid: number | undefined): Promise<void> {
+	async launched(slot: LockSlot, pid: number | undefined, hidden = false): Promise<void> {
 		slot.open = true;
 		delete slot.window.mcpId;
+		if (hidden) slot.window.hidden = true;
+		else delete slot.window.hidden;
 		if (pid !== undefined) {
 			slot.window.studioPid = pid;
 			slot.window.studioStartedAt = iso(this.io.now().getTime());
@@ -2392,6 +2440,16 @@ function lockTimedOut(view: LockView, timeoutMs: number, io: Io): CliError {
 	);
 }
 
+/**
+ * How closed windows are had again: `studio open` for one; for several, which only a `test
+ * --parallel` opens, the command that opened them (a `studio open` would give one window, of one file).
+ */
+function openAgain(owner: LockOwner, windows: readonly LockWindow[]): string {
+	if (windows.length > 1) return `\`${owner.command}\` opened them: run it again for new ones`;
+	const file = windows.find((window) => window.placeFile !== undefined)?.placeFile;
+	return `open it again: flamework-test studio open${file !== undefined ? ` ${file}` : ""}`;
+}
+
 /** Windows closed for another project's sake, or found closed by it, as their owner's next command explains it. */
 function closedWindowError(entry: ClosedWindowRecord): CliError {
 	const owner = entry.owner;
@@ -2402,8 +2460,7 @@ function closedWindowError(entry: ClosedWindowRecord): CliError {
 				`${window.place}, Studio PID ${window.studioPid}${window.mcpId !== undefined ? `, MCP id ${window.mcpId}` : ""}`,
 		)
 		.join("; ");
-	const file = entry.windows.find((window) => window.placeFile !== undefined)?.placeFile;
-	const again = `open it again: flamework-test studio open${file !== undefined ? ` ${file}` : ""}`;
+	const again = openAgain(owner, entry.windows);
 	if (entry.reason === "gone") {
 		return new CliError(
 			`the Studio ${words.window} flamework-test opened for this project (${named}) ${words.has} closed: closed by hand, or Studio exited; flamework-test for ${entry.by.project} (${entry.by.command}) found ${words.it} so at ${entry.closedAt}, and ${entry.by.command.startsWith("studio unlock") ? "freed" : "took over"} its Studio lock`,
@@ -2500,8 +2557,10 @@ async function ownWindowClosed(io: Io, ours: LockOwner, view: LockView): Promise
 			"open one first: flamework-test studio open [file]",
 		);
 	}
-	const file = launched.find((entry) => entry.window.placeFile !== undefined)?.window.placeFile;
-	const again = `open it again: flamework-test studio open${file !== undefined ? ` ${file}` : ""}`;
+	const again = openAgain(
+		ours,
+		launched.map((entry) => entry.window),
+	);
 	if (launched.length === 1) {
 		const { window, fate, reusedBy } = launched[0]!;
 		return new CliError(
@@ -2662,9 +2721,12 @@ async function noWindow(
 		}
 		if (launched.length > 0) {
 			const words = windowWord(launched.length);
+			const hidden = launched.some((window) => window.hidden === true)
+				? `. Opened on the hidden desktop, ${words.it} may be showing a dialog nobody can see there (a login, an update): close ${words.it}, and run with --show to see the next`
+				: "";
 			return new CliError(
 				`the Studio ${words.window} flamework-test opened for this project (${describeProcesses(launched)}) ${launched.length === 1 ? "is" : "are"} open but not on the MCP proxy`,
-				`${launched.length === 1 ? "its" : "their"} "MCP server" setting is probably off: ask the user to turn it on in Studio's Assistant settings, then run this again; \`flamework-test studio close\` closes ${words.it}`,
+				`${launched.length === 1 ? "its" : "their"} "MCP server" setting is probably off: ask the user to turn it on in Studio's Assistant settings, then run this again; \`flamework-test studio close\` closes ${words.it}${hidden}`,
 			);
 		}
 	}
@@ -2682,7 +2744,7 @@ async function noWindow(
 		const running = await io.studioWindows();
 		if (running.length > 0) {
 			return new CliError(
-				`Roblox Studio is running (${running.length === 1 ? "1 window" : `${running.length} windows`}: ${running.map((window) => `PID ${window.pid}, "${window.title}"`).join("; ")}), but the MCP proxy reaches none of them`,
+				`Roblox Studio is running (${running.length === 1 ? "1 window" : `${running.length} windows`}: ${running.map(describeProcess).join("; ")}), but the MCP proxy reaches none of them`,
 				'their "MCP server" setting is probably off: ask the user to turn it on in Studio\'s Assistant settings (it lets flamework-test and AI assistants drive a window), then run this again',
 			);
 		}
@@ -2848,7 +2910,7 @@ async function waitForStudio(
  * file's window by its file name alone and says nothing of the process behind it.
  */
 function cannotTell(name: string, why: string, others: StudioWindow[]): CliError {
-	const listed = others.map((window) => `PID ${window.pid}, "${window.title}"`).join("; ");
+	const listed = others.map(describeProcess).join("; ");
 	return new CliError(
 		`cannot tell which ${name} window on the MCP proxy is the one this run opened: ${why}${listed ? ` (${listed})` : ""}, and the proxy lists a local file's window by its file name alone`,
 		"close that window, or let it finish opening, and run again",
@@ -2858,11 +2920,18 @@ function cannotTell(name: string, why: string, others: StudioWindow[]): CliError
 /**
  * A window flamework-test launched that never showed up on the proxy. What the hint says of the
  * window: left `open` (`--keep`), `closed` again, or nothing (`unstated`) when that close failed
- * and has said so itself. Written for whoever reads it next, an AI agent as often as a person.
+ * and has said so itself. A window on the hidden desktop may be held up by a dialog nobody can see,
+ * which `--show` shows. Written for whoever reads it next, an AI agent as often as a person.
  */
-function neverConnected(what: string, window: "open" | "closed" | "unstated" = "open", pid?: number): CliError {
-	const advice =
-		'Studio\'s "MCP server" setting is probably off, and a window with it off is never listed: ask the user to enable "MCP server" in Studio\'s Assistant settings, then run this again';
+function neverConnected(
+	what: string,
+	window: "open" | "closed" | "unstated" = "open",
+	pid?: number,
+	hidden = false,
+): CliError {
+	const advice = hidden
+		? 'it opened on the hidden desktop, where nobody sees it: it may be showing a dialog there that nobody can answer (a login, an update, a crash report), so run again with --show to see it. Showing none, Studio\'s "MCP server" setting is probably off, and a window with it off is never listed: ask the user to enable "MCP server" in Studio\'s Assistant settings'
+		: 'Studio\'s "MCP server" setting is probably off, and a window with it off is never listed: ask the user to enable "MCP server" in Studio\'s Assistant settings, then run this again';
 	return new CliError(
 		`Studio started${pid !== undefined ? ` (PID ${pid})` : ""} but ${what} never showed up on the MCP proxy`,
 		window === "open"
@@ -3001,7 +3070,8 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 				// Whatever the proxy lists now is not this command's window, even when it has the same name.
 				const before = new Set((await client.studios()).map((entry) => entry.id));
 				await lock.check();
-				pid = await io.launch([exe, ...studioOpenArguments(launch)]);
+				// Where it can be seen: looking at it is what `studio open` is for.
+				pid = await io.launch([exe, ...studioOpenArguments(launch)], { hidden: false });
 				await slot.launched(pid);
 				// The window is what was asked for: Ctrl+C stops the wait for it, and leaves it.
 				const window = io.interruption.hold(
@@ -3109,6 +3179,11 @@ async function closeLaunchedWindow(
 /** How a window is named in what the CLI prints: `PID 30020, "…\place.rbxl - Roblox Studio"`. */
 function describeWindow(window: ClosedWindow): string {
 	return `PID ${window.pid}, "${window.title}"`;
+}
+
+/** A Studio process as the CLI prints it, as {@link describeWindow} does, saying so when it is on the hidden desktop. */
+function describeProcess(window: StudioWindow): string {
+	return `PID ${window.pid}, "${window.title}"${window.hidden === true ? " (on the hidden desktop)" : ""}`;
 }
 
 /**
@@ -3674,7 +3749,8 @@ async function cmdStudioList(flags: Flags, io: Io): Promise<number> {
 	const running = await io.studioWindows();
 
 	const rows = studios.map((studio) => {
-		const opened = lockWindowOf(holder, studio) !== undefined;
+		const window = lockWindowOf(holder, studio);
+		const opened = window !== undefined;
 		return {
 			studio_id: studio.id,
 			name: studio.name,
@@ -3682,6 +3758,7 @@ async function cmdStudioList(flags: Flags, io: Io): Promise<number> {
 			project: opened ? holder!.project : null,
 			thisProject: opened && samePath(holder!.project, project, io),
 			holdsLock: opened && view.state !== "stale",
+			hidden: window?.hidden === true,
 		};
 	});
 	const lockLine =
@@ -3710,6 +3787,7 @@ async function cmdStudioList(flags: Flags, io: Io): Promise<number> {
 										place: window.place,
 										studioPid: window.studioPid ?? null,
 										studio_id: window.mcpId ?? null,
+										hidden: window.hidden === true,
 									})),
 									since: holder.since,
 									lastActivity: holder.lastActivity,
@@ -3740,13 +3818,13 @@ async function cmdStudioList(flags: Flags, io: Io): Promise<number> {
 							? "holds the Studio lock, expired"
 							: "holds the Studio lock"
 						: "its lock is stale"
-				}`
+				}${row.hidden ? "; on the hidden desktop" : ""}`
 			: "not opened by flamework-test for any project (the user's, an older flamework-test's, or opened by hand)";
 		io.log(`${row.studio_id}  ${row.name || "(still loading)"}  [${flamework}]`);
 	}
 	if (studios.length === 0 && running.length > 0) {
 		io.error(
-			`Roblox Studio is running (${running.map((window) => `PID ${window.pid}, "${window.title}"`).join("; ")}), but the MCP proxy reaches none of it: its "MCP server" setting is probably off; ask the user to turn it on in Studio's Assistant settings, then run this again`,
+			`Roblox Studio is running (${running.map(describeProcess).join("; ")}), but the MCP proxy reaches none of it: its "MCP server" setting is probably off; ask the user to turn it on in Studio's Assistant settings, then run this again`,
 		);
 	} else if (unreachable > 0) {
 		io.error(
@@ -4058,7 +4136,7 @@ async function cmdStudioLock(flags: Flags, io: Io): Promise<number> {
 						: entry.fate === "reused"
 							? `no longer that Studio (PID reused${entry.reusedBy !== undefined ? ` by ${entry.reusedBy}` : ""})`
 							: "no longer running"
-				}`;
+				}${entry.window.hidden === true ? ", on the hidden desktop" : ""}`;
 	const proxyOf = (entry: WindowView): string => {
 		const found = proxy.get(entry.window) ?? "not checked";
 		return found === "listed"
@@ -4085,6 +4163,7 @@ async function cmdStudioLock(flags: Flags, io: Io): Promise<number> {
 						placeFile: entry.window.placeFile ?? null,
 						studioPid: entry.window.studioPid ?? null,
 						studioProcess: entry.window.studioPid !== undefined ? (entry.fate ?? null) : null,
+						hidden: entry.window.hidden === true,
 						studio_id: entry.window.mcpId ?? null,
 						proxy: proxy.get(entry.window) ?? "not checked",
 					})),
@@ -4200,6 +4279,9 @@ async function cmdTest(flags: Flags, io: Io): Promise<number> {
 	if (flags.cloud && flags["keep-awake"] === true) {
 		throw new UsageError("--keep-awake is for Studio runs: a cloud run has no display on this machine to keep on");
 	}
+	if (flags.cloud && flags.show === true) {
+		throw new UsageError("--show is for Studio runs: a cloud run opens no window on this machine to show");
+	}
 	if (flags.cloud && (flags["lock-timeout"] !== undefined || flags.hold !== undefined)) {
 		throw new UsageError(
 			`--${flags.hold !== undefined ? "hold" : "lock-timeout"} is for Studio runs: a cloud run opens no Studio window and takes no lock`,
@@ -4231,8 +4313,10 @@ async function cmdTest(flags: Flags, io: Io): Promise<number> {
 			"--keep leaves a Studio window open, and flamework-test keeps one window open at a time: keep one project's (--project <file> --keep)",
 		);
 	}
-	// Misspelt settings are refused before anything is patched or opened.
+	// Misspelt settings are refused before anything is patched or opened; FLAMEWORK_TEST_SHOW and
+	// testing.showWindows are read into the flag here, as the cloud run leaves them alone.
 	lockTimeoutOf(flags, io);
+	flags = { ...flags, show: showOf(flags, io) };
 	const parallel = parallelOf(flags, io, projects.length);
 	const lock = new LazyStudioLock(io, flags, {
 		command: flags.keep === true ? "test --keep" : parallel > 1 ? `test --parallel ${parallel}` : "test",
@@ -4268,13 +4352,18 @@ class LazyStudioLock {
 		return this.held !== undefined ? await this.held.open(place) : undefined;
 	}
 
-	/** The project's window in the lock, taking the lock for it when no project has yet. */
-	async take(slot: LockSlot | undefined, place: LockPlace): Promise<LockSlot> {
+	/**
+	 * The project's window in the lock, taking the lock for it when no project has yet. `io` is the
+	 * project's: what the take says (a wait, a takeover, windows it closed) is among that project's
+	 * lines, and said as progress too while they wait for another project's to print.
+	 */
+	async take(slot: LockSlot | undefined, place: LockPlace, io: Io = this.io): Promise<LockSlot> {
 		if (slot !== undefined) return slot;
 		if (this.taking === undefined) {
-			this.taking = takeStudioLock(this.io, this.flags, { ...this.request, window: place }, (line) =>
-				this.io.log(line),
-			).then(
+			this.taking = takeStudioLock(io, this.flags, { ...this.request, window: place }, (line) => {
+				io.log(line);
+				io.progress(line);
+			}).then(
 				(held) => {
 					this.held = held;
 					return held;
@@ -4343,7 +4432,10 @@ function projectHeading(project: ProjectChoice, io: Io): string {
 	return `=== ${project.name}: ${relative(io.cwd, project.path)} ===`;
 }
 
-/** Several projects one after another: a project's error ends the run, as it always has. */
+/**
+ * Several projects one after another: a project's error ends the run, as it always has. A window
+ * that would not close is still open, so the projects after it are not run (see {@link notRun}).
+ */
 async function testInTurn(
 	flags: Flags,
 	io: Io,
@@ -4351,17 +4443,39 @@ async function testInTurn(
 	lock?: LazyStudioLock,
 ): Promise<ProjectOutcome[]> {
 	const outcomes: ProjectOutcome[] = [];
+	const stuck: ProjectChoice[] = [];
 	for (const project of projects) {
 		// A Ctrl+C during the last project's cleanup lets that finish; the next project does not start.
 		io.interruption.check();
 		io.log("");
 		io.log(projectHeading(project, io));
+		if (stuck.length > 0) {
+			notRun(stuck, 1, io);
+			outcomes.push({ project, code: 1, skipped: 0 });
+			continue;
+		}
 		// Its own tally of skips, for its part of the line the run ends on.
-		const view: Io = { ...io, tally: { skipped: 0 } };
+		const view: Io = { ...io, tally: { skipped: 0 }, left: { open: false } };
 		const code = await testProject(flags, view, project, lock);
 		outcomes.push({ project, code, skipped: view.tally.skipped });
+		if (view.left.open) stuck.push(project);
 	}
 	return outcomes;
+}
+
+/**
+ * Says why a project was not run: the windows of `stuck` would not close, and are still open, so
+ * as many windows as the run opens at once (`--parallel`, 1 by default) are open already. A
+ * run never opens more, even in a case that is failing anyway: each window takes about 3 GB.
+ */
+function notRun(stuck: readonly ProjectChoice[], parallel: number, io: Io): void {
+	const words = windowWord(stuck.length);
+	io.error(
+		`error: not run: the Studio ${words.window} of ${stuck.map((project) => project.name).join(", ")} would not close, and this run opens no more than ${parallel === 1 ? "one window" : `${parallel} windows`} at once (--parallel)`,
+	);
+	io.error(
+		`close ${words.it} by hand (or with \`flamework-test studio close\`), then run the projects that were not run: --project <file>`,
+	);
 }
 
 /**
@@ -4426,6 +4540,8 @@ async function testSideBySide(
 ): Promise<ProjectOutcome[]> {
 	const output = new ProjectOutput(io, projects.length);
 	const outcomes: ProjectOutcome[] = [];
+	/** The projects whose window would not close, each keeping a worker's place. */
+	const stuck: ProjectChoice[] = [];
 	let next = 0;
 	let stop: unknown;
 	let hasStopped = false;
@@ -4460,6 +4576,7 @@ async function testSideBySide(
 					if (!output.live(index)) io.error(`[${project.name}] ${line}`);
 				},
 				tally: { skipped: 0 },
+				left: { open: false },
 			};
 			const startedAt = io.now().getTime();
 			view.log("");
@@ -4485,11 +4602,31 @@ async function testSideBySide(
 				}`,
 			);
 			output.finish(index);
+			// A window that would not close is still open, in this worker's place: the worker stops,
+			// so no more windows are open at once than asked, and the others run on.
+			if (view.left.open) {
+				stuck.push(project);
+				return;
+			}
 		}
 	};
 
 	await Promise.all(Array.from({ length: parallel }, () => worker()));
 	if (hasStopped) throw stop;
+	// What no worker was left to run: every place among the windows is held by one that would not close.
+	for (const [index, project] of projects.entries()) {
+		if (outcomes[index] !== undefined) continue;
+		const view: Io = {
+			...io,
+			log: (message) => output.write(index, false, message),
+			error: (message) => output.write(index, true, message),
+		};
+		view.log("");
+		view.log(projectHeading(project, io));
+		notRun(stuck, parallel, view);
+		outcomes[index] = { project, code: 1, skipped: 0 };
+		output.finish(index);
+	}
 	return outcomes;
 }
 
@@ -4517,22 +4654,42 @@ async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice, l
 		const name = basename(file);
 		const exe = requireStudioExe(io);
 		const keep = flags.keep === true;
-		slot = await lock.take(slot, { place: file, placeFile: file });
+		slot = await lock.take(slot, { place: file, placeFile: file }, io);
 		const held = slot;
-		return await studioTestWindow(flags, io, { file, label, name, exe, keep, realms }, held);
+		const hidden = hiddenOf(flags, io);
+		return await studioTestWindow(flags, io, { file, label, name, exe, keep, realms, hidden }, held);
 	} finally {
 		await slot?.settle();
+		// A window that would not close is still open, and keeps its place among the run's windows.
+		if (slot?.open === true && flags.keep !== true) io.left.open = true;
 	}
 }
+
+/**
+ * What `test --keep` says of the window it leaves on the hidden desktop. It stays there: Windows
+ * moves no window from one desktop to another, and an agent keeps a window to drive it through the
+ * MCP proxy, which reaches it there as anywhere.
+ */
+export const KEPT_HIDDEN =
+	"it is on the hidden desktop, where nobody sees it: the studio commands drive it (exec, run, call screen_capture), and `flamework-test studio close` closes it; to look at a kept window, run with --show --keep";
 
 /** One project's window: opened, run on both realms, and closed again (unless `--keep`). */
 async function studioTestWindow(
 	flags: Flags,
 	io: Io,
-	run: { file: string; label: string; name: string; exe: string; keep: boolean; realms: Array<"Server" | "Client"> },
+	run: {
+		file: string;
+		label: string;
+		name: string;
+		exe: string;
+		keep: boolean;
+		realms: Array<"Server" | "Client">;
+		/** Opened on the hidden desktop. */
+		hidden: boolean;
+	},
 	slot: LockSlot,
 ): Promise<number> {
-	const { file, label, name, exe, keep, realms } = run;
+	const { file, label, name, exe, keep, realms, hidden } = run;
 	const client = await io.connectStudio();
 	try {
 		const staleLabel = `the window left from an earlier build of ${name}`;
@@ -4576,15 +4733,26 @@ async function studioTestWindow(
 			// both every time (2026-10-05), and each run takes only an entry of its own file's name.
 			const before = new Set((await client.studios()).map((entry) => entry.id));
 			await slot.lock.check();
-			pid = await io.launch([exe, ...studioOpenArguments({ file })]);
+			try {
+				pid = await io.launch([exe, ...studioOpenArguments({ file })], { hidden });
+			} catch (error) {
+				// Windows would not make the hidden desktop or start Studio on it: shown, it may still open.
+				if (!hidden || error instanceof Interrupted) throw error;
+				throw new CliError(
+					error instanceof Error ? error.message : String(error),
+					"run again with --show to open Studio on your desktop instead",
+				);
+			}
 			launched = true;
-			await slot.launched(pid);
+			await slot.launched(pid, hidden);
 			const window = ownWindow(pid, name);
 			releaseWindow = keep
 				? io.interruption.hold(`${window}, which --keep leaves open`)
 				: io.interruption.hold(window, `closed ${window}`);
-			io.log(`opening ${label} in Studio; waiting for it to connect...`);
-			io.progress(`opening ${name} in Studio (PID ${pid ?? "unknown"})`);
+			io.log(
+				`opening ${label} in Studio${hidden ? ", on the hidden desktop (--show shows it)" : ""}; waiting for it to connect...`,
+			);
+			io.progress(`opening ${name} in Studio (PID ${pid ?? "unknown"}${hidden ? ", hidden" : ""})`);
 
 			const found = await findLaunchedWindow(client, { file }, pid, before, flags, io);
 			studio = found.studio;
@@ -4596,7 +4764,7 @@ async function studioTestWindow(
 							"another Studio window showing a file of that name has not registered with it",
 							found.others,
 						)
-					: neverConnected(label, keep ? "open" : closed ? "closed" : "unstated", pid);
+					: neverConnected(label, keep ? "open" : closed ? "closed" : "unstated", pid, hidden);
 			}
 			release();
 			release = undefined;
@@ -4618,6 +4786,7 @@ async function studioTestWindow(
 			io.log(
 				`it holds the Studio lock until \`flamework-test studio close\`, or until it has sat unused for ${slot.lock.owner.holdMinutes} min (--hold)`,
 			);
+			if (hidden) io.log(KEPT_HIDDEN);
 			return code;
 		}
 		try {

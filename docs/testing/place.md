@@ -46,6 +46,10 @@ the package was installed. The place has to be built with the `testing` scope ac
 every build reads), or the test providers are not registered and `Workspace.FlameworkTests` never
 appears.
 
+On Windows the window opens on a hidden desktop of its own, so a run never shows a window or takes
+the focus; `--show` (`FLAMEWORK_TEST_SHOW`, `testing.showWindows`) opens it on yours, see the
+package's [README](../../packages/testing/README.md#hidden-windows).
+
 Studio may run the Luau its MCP server executes in a sandboxed thread (it did from 2026-10-01; on
 2026-10-05 it did not), and the host and the CLI work either way. A sandboxed thread may only
 invoke a bindable that is Sandboxed itself and has no capability the thread lacks. So the host
@@ -442,6 +446,12 @@ projects: default passed (1 skipped), deferred passed, streaming FAILED
 ```
 
 The exit code is the worst of them; `--timeout` and the hang report apply to each project's run.
+Without a project named, the run is the plain one, and `ROJO_PROJECT=` turns a listed set off
+again. A chosen project needs `lune` even without an original: the build came from `rojo build`
+with `default.project.json`, so its properties are set on a copy first. The tree still comes from
+the build, since the CLI does not wrap `rojo build`: a project chosen for a run changes what the
+place's services are set to, not what Rojo synced; a project with a different tree is built with
+`rojo build tests/big.project.json -o big.rbxl` and that file is run.
 
 `--parallel` runs two projects' windows side by side (`--parallel 3`: three, at most 4), the next
 project starting as one's window closes. Each project's lines are still printed together, in
@@ -452,12 +462,6 @@ See the package's [README](../../packages/testing/README.md#side-by-side).
 ```console
 bunx flamework-test test place.rbxl --project default.project.json,tests/deferred.project.json --parallel
 ```
-Without a project named, the run is the plain one, and `ROJO_PROJECT=` turns a listed set off
-again. A chosen project needs `lune` even without an original: the build came from `rojo build`
-with `default.project.json`, so its properties are set on a copy first. The tree still comes from
-the build, since the CLI does not wrap `rojo build`: a project chosen for a run changes what the
-place's services are set to, not what Rojo synced; a project with a different tree is built with
-`rojo build tests/big.project.json -o big.rbxl` and that file is run.
 
 A test learns which project it runs under from `getProject()`, the name of the project file
 (`deferred`; `default` for the default project when an original was patched; `undefined` in a
@@ -490,7 +494,7 @@ without running it, `place.deferred.rbxl`, to open in Studio and look at.
 | Symptom | Cause |
 |---|---|
 | `RobloxStudioBeta.exe was not found` | Studio is not installed here; set `ROBLOX_STUDIO_EXE`, or run with `--cloud`. |
-| `... never showed up on the MCP proxy` | The window opened but "MCP server" is disabled in Studio's Assistant settings. |
+| `... never showed up on the MCP proxy` | The window opened but "MCP server" is disabled in Studio's Assistant settings, or, on the hidden desktop, it is showing a dialog nobody can see there (a login, an update): run again with `--show` to see which. |
 | `the server's run failed: Workspace.FlameworkTests did not appear` | The build was made without the `testing` scope active (`FLAMEWORK_SCOPES=testing` for that build), so the plugin stayed inert. The client's run follows, and says the same. |
 | `the server's run failed: The current thread cannot invoke 'FlameworkTests' since 'FlameworkTests' has additional values for the Capabilities property: ...` | Studio ran MCP code sandboxed, as it may, and the place was built with `@flamework-experimental/testing` 2.0.0-alpha.5 or earlier, whose host does not make its bindable Sandboxed (see [In Studio](#in-studio-on-this-machine)). A later CLI marks it before the invoke while Studio allows that; this error means it could not, or the CLI is that old too. Update the package and rebuild the place. A later CLI says so under the error. |
 | `MISS matched nothing in any realm: ...` | A `--sections` entry named no section or test in any realm that ran. |

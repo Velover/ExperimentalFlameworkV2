@@ -598,7 +598,7 @@ describe("test", () => {
 		expect(execs.map((call) => call.args.studio_id)).toEqual(["studio-4", "studio-4"]);
 	});
 
-	test("a window that will not close fails the run and is named, and the next project still runs", async () => {
+	test("a window that will not close fails the run and is named, and keeps its place: the next project is not run", async () => {
 		const studio = studioThatOpens(BUILT_STUDIO, {
 			Server: JSON.stringify(resultJson()),
 			Client: JSON.stringify(resultJson({ realm: "client" })),
@@ -644,11 +644,16 @@ describe("test", () => {
 				closeOutcome: "open",
 			},
 		);
+		// The window that would not close is still open: a second at once would be one more than the run
+		// opens, so the next project is not run, and fails saying why.
 		expect(projects.code).toBe(1);
-		expect(projects.launched).toHaveLength(2);
+		expect(projects.launched).toHaveLength(1);
 		expect(projects.out).toContain("projects: deferred FAILED, streaming FAILED");
 		expect(projects.err).toContain("place.deferred.rbxl is still open (PID 4001");
-		expect(projects.err).toContain("place.streaming.rbxl is still open (PID 4002");
+		expect(projects.err).toContain(
+			"error: not run: the Studio window of deferred would not close, and this run opens no more than one window at once (--parallel)",
+		);
+		expect(projects.windows.map((window) => window.pid)).toEqual([4001]);
 	});
 
 	test("the run's own window is ended without a word about asking; a stale one that does not close when asked says so; one already gone is not claimed closed", async () => {

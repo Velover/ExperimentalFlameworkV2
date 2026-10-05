@@ -57,6 +57,7 @@ bunx flamework-test test place.rbxl                       # both realms
 bunx flamework-test test place.rbxl --realm client        # one of them
 bunx flamework-test test place.rbxl --sections economy    # a section, or economy/buys
 bunx flamework-test test place.rbxl --keep                # leave Studio and the play session open
+bunx flamework-test test place.rbxl --show                # open Studio where you can see it
 bunx flamework-test test place.rbxl --fail-on-skip        # a skipped test fails the run
 bunx flamework-test test place.rbxl --keep-awake          # keep the display on while it runs
 bunx flamework-test test place.rbxl --concurrency 1       # concurrent tests one at a time
@@ -117,15 +118,41 @@ run nobody watches. A minimized Studio window still renders. It is off by defaul
 setting, and does nothing (saying so) anywhere but Windows. See
 [Unattended runs](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/docs/testing/place.md#unattended-runs-keep-the-display-on).
 
+### Hidden windows
+
+On Windows, `test` opens Studio on a hidden desktop of its own, `flamework-test`, so a run never
+shows a window or takes the focus: not its splash, not its main window, not a dialog. Every run and
+project uses that one desktop, `--parallel` windows included. `--show` opens the windows on your
+desktop as before, and so do `FLAMEWORK_TEST_SHOW=1` and `"testing": { "showWindows": true }`,
+after the flag. `studio open` always shows its window, since looking at it is what it is for.
+Anywhere but Windows nothing is hidden, and the flag changes nothing.
+
+- **The same run.** The MCP proxy reaches a hidden window as any other, the play session runs, and
+  the client renders: a screen capture of one shows the scene. A hidden window costs what a shown
+  one does. Both render at Studio's own frame-rate cap (240 frames a second, measured on a 144 Hz
+  display), with about 1.2 cores busy while a play session idles, 0.8 to 0.9 in edit mode, a fifth
+  of the GPU's 3D engine, and 3.1 to 3.3 GB at most (2026-10-05). A minimized window would render
+  at 60 and cost about half, but it draws no 3D scene, which a test could tell, so nothing is
+  minimized.
+- **A window that never connects** may be showing a dialog nobody can see there (a login, an
+  update, a crash report). The error says so: run again with `--show` to see it.
+- **`--keep` leaves the window hidden.** Windows moves no window from one desktop to another, and a
+  window is kept mostly to be driven: `studio exec`, `run`, `call screen_capture` and the rest
+  reach it there, and `studio close` closes it. To look at a kept window, run with `--show --keep`.
+- `studio lock` and `studio list` say which windows are on the hidden desktop. The desktop is
+  Windows' to remove once its last window has closed and no flamework-test holds it.
+
 How `test` handles Studio windows:
 
-- It takes the [Studio lock](#the-studio-lock) before it launches Studio, so that one window opened
-  through flamework-test is open at a time on this machine, and waits while another project's
-  window or run holds it. It holds the lock across all its projects, and frees it once its last
-  window has closed.
+- It takes the [Studio lock](#the-studio-lock) before it launches Studio, so that one
+  flamework-test command uses Studio at a time on this machine (its one window, or a
+  `--parallel` run's several), and waits while another project's window or run holds it. It holds
+  the lock across all its projects, and frees it once its last window has closed.
 - A window whose title shows that very file is from an earlier build and would test stale code, so
-  it is closed first: asked, then ended after ten seconds. The title alone decides. A window since
-  saved elsewhere or retitled is left open, like every window of another file, whatever its name.
+  it is closed first: asked, then ended after ten seconds. The title decides. A window since saved
+  elsewhere or retitled is left open, like every window of another file, whatever its name. A
+  window on the hidden desktop, which only flamework-test opens, is matched by the command line it
+  was started with too, and ended without asking.
 - The window `test` opens is closed by ending the Studio process that `test` started, without
   asking first. Asking never closes it: Studio marks a place file it opens as changed the moment it
   has loaded it, before any play session or Luau, so the ask only raises its "Save changes to
@@ -151,7 +178,7 @@ How `test` handles Studio windows:
 
 | Command | Does |
 |---|---|
-| `test <file> [--realm server\|client\|both] [--sections a,b] [--list] [--json] [--keep [--hold <minutes>]] [--original <rbxl>] [--concurrency <n>] [--fail-on-skip] [--keep-awake] [--lock-timeout <seconds>]` | The above. `--keep` prints the window's `studio_id=<id> pid=<pid>` line, and keeps one project's window only. |
+| `test <file> [--realm server\|client\|both] [--sections a,b] [--list] [--json] [--keep [--hold <minutes>]] [--show] [--original <rbxl>] [--concurrency <n>] [--fail-on-skip] [--keep-awake] [--lock-timeout <seconds>]` | The above, on the hidden desktop unless `--show`. `--keep` prints the window's `studio_id=<id> pid=<pid>` line, and keeps one project's window only. |
 | `test <file> --project <a.project.json> [--project <b.project.json>]` | The above once per project, each in a place made under that project's `$properties`; see [Running under several Rojo projects](#running-under-several-rojo-projects). |
 | `test <file> --project <a> --project <b> --parallel [n]` | Up to n projects' windows side by side (no number: 2; at most 4, and no more than there are projects), each project's lines printed together, in project order; see [Side by side](#side-by-side). |
 | `test <file> --cloud` | The cloud run instead, see below. |
@@ -198,10 +225,10 @@ once the user has said so. `status`, `list`, `tools` and `lock` read, and work o
 | `studio play` / `studio stop` | Starts or ends a play session. |
 | `studio exec --code "<luau>"` / `--script <file>` `[--realm edit\|server\|client]` | Runs Luau in the chosen data model and prints what it returned. |
 | `studio run [--realm server\|client\|both] [--sections a,b] [--list] [--json] [--keep] [--concurrency <n>] [--fail-on-skip] [--keep-awake]` | Runs the tests in a play session, starting one if needed and stopping it afterwards unless `--keep`, without opening or closing anything. |
-| `studio list [--json]` | The windows the MCP proxy reaches: each one's id and place, whether flamework-test opened it (and for which project), and whether it holds the Studio lock, under a line on the lock. Studio processes the proxy reaches none of are named, with the setting that is probably off. |
+| `studio list [--json]` | The windows the MCP proxy reaches: each one's id and place, whether flamework-test opened it (and for which project), whether it holds the Studio lock, and whether it is on the hidden desktop, under a line on the lock. Studio processes the proxy reaches none of are named, with the setting that is probably off. |
 | `studio tools [name] [--json]` | The tools Studio's MCP proxy offers, read live from it, so the list is what this Studio has: each one's name and the first line of its description. With a name, its whole description and its arguments (a JSON schema). |
 | `studio call <tool> [json-args \| --args-file <file>] [--studio <id>] [--out <dir>] [--json]` | Calls any tool. `studio_id`, which every tool but `list_roblox_studios` takes, is filled in from `--studio` (else this project's window); a `studio_id` in the arguments names the window the same way, and is refused the same way. A tool whose arguments have no `studio_id` is sent without a window only when it is known to act on none (`list_roblox_studios`), else only with `--any-window`, since which window it acts on cannot be told. Text is printed; images are written to files in `--out`, by default `<temp>/flamework-test/captures`, named by their type (`screen_capture` answers a JPEG: `.jpg`), and each path printed; `--json` prints the raw answer. A tool's error exits 1 with its message, without the Studio Assistant's own locations. `studio call <tool> --help` is `studio tools <tool>`. |
-| `studio lock [--json] [--check-window]` | Who holds the Studio lock (project, place, command, since, last use, when its hold runs out), whether its command and its Studio process still run, and whether the lock is live, expired or stale. With `--check-window`, whether its window is on the MCP proxy too: not asked unless wanted, since starting a proxy joins the hub other clients share. |
+| `studio lock [--json] [--check-window]` | Who holds the Studio lock (project, command, since, last use, when its hold runs out), whether its command still runs, each window it has open or is opening (place, Studio PID, whether that process still runs, whether it is on the hidden desktop, MCP id), and whether the lock is live, expired or stale. With `--check-window`, whether each window is on the MCP proxy too: not asked unless wanted, since starting a proxy joins the hub other clients share. |
 | `studio unlock [--force]` | Frees a stale lock, and an expired one, closing its window (flamework-test's only). Refuses a live one, naming the holder and when its hold runs out; `--force` closes that window too. |
 
 ```console
@@ -218,20 +245,20 @@ reaches the game through a Sandboxed bindable, as the test host does, works eith
 
 ## The Studio lock
 
-One Studio window opened through flamework-test is open at a time on this machine, across projects
-and agents. `test` and `studio open` take the lock before they launch Studio; a cloud run opens no
-window and takes nothing. The lock is a folder, `studio-lock`, in a per-user folder every project
-and agent shares: `%LOCALAPPDATA%\flamework-test` on Windows
-(`~/Library/Application Support/flamework-test` on macOS, `$XDG_STATE_HOME/flamework-test` or
-`~/.local/state/flamework-test` elsewhere), never the temp folder, which an agent's harness may set
-per agent. `FLAMEWORK_TEST_STATE_DIR` moves it. Every project has to agree on it, so set it in the
-shell, never in a project's `.env`: flamework-test does not read it from the `.env` files next to
-`flamework.config.json`, but Bun loads a `.env` (and `.env.local`) from the folder a command runs
-in before flamework-test starts, and one there would move the lock for the commands run from it.
-The folder holds a record of who took it: the CLI's PID, the project directory, the command, since
-when, its last use and when its hold runs out, and every window the command has open or is opening,
-each with its place, its Studio PID once launched and its MCP id. The window-name claims live
-beside it, and the notes of windows closed for another project.
+One flamework-test command uses Studio at a time on this machine, across projects and agents: its
+one window, or the several of a `test --parallel`. `test` and `studio open` take the lock before
+they launch Studio; a cloud run opens no window and takes nothing. The lock is a folder,
+`studio-lock`, in a per-user folder every project and agent shares: `%LOCALAPPDATA%\flamework-test`
+on Windows (`~/Library/Application Support/flamework-test` on macOS,
+`$XDG_STATE_HOME/flamework-test` or `~/.local/state/flamework-test` elsewhere), never the temp
+folder, which an agent's harness may set per agent. `FLAMEWORK_TEST_STATE_DIR` moves it. Every
+project has to agree on it, so set it in the shell, never in a project's `.env`: flamework-test does
+not read it from the `.env` files next to `flamework.config.json`, but Bun loads a `.env` (and
+`.env.local`) from the folder a command runs in before flamework-test starts, and one there would
+move the lock for the commands run from it. The folder holds a record of who took it: the CLI's PID,
+the project directory, the command, since when, its last use and when its hold runs out, and every
+window the command has open or is opening, each with its place, its Studio PID once launched and its
+MCP id. The window-name claims live beside it, and the notes of windows closed for another project.
 
 - **How long.** A command holds it while it runs, window or not: `test` keeps it from its first
   project's window to its last (with `--parallel`, several of them open at once), and frees it once
@@ -299,6 +326,9 @@ bunx flamework-test studio close                    # closes it and frees the St
 
 - Put a tool's arguments in a file and pass `--args-file`: a shell may strip the quotes inside an
   argument (Windows PowerShell does).
+- `test` opens its window on a hidden desktop (Windows): nothing shows, and the user's focus is
+  left alone. `test --keep` leaves it there, where the studio commands drive it (`studio call
+  screen_capture` included). `studio open` shows its window.
 - `refusing to ... the Studio window ...` means the window is not the one flamework-test opened for
   this project. Open your own with `studio open`. Use `--any-window` on a window the user has open
   only after asking the user. ``refusing to ... this project's Studio window ...: `test` is running
@@ -396,10 +426,12 @@ Two switches, off by default, follow the same order: `--fail-on-skip`, `FAIL_ON_
 The [Studio lock](#the-studio-lock)'s two numbers do too: `--lock-timeout`,
 `FLAMEWORK_TEST_LOCK_TIMEOUT`, then `"testing": { "lockTimeout": 300 }` (seconds); and `--hold`,
 `FLAMEWORK_TEST_LOCK_HOLD`, then `"testing": { "lockHold": 15 }` (minutes, one at least: a window in
-use renews its hold every 30 seconds). So does `--parallel`: `FLAMEWORK_TEST_PARALLEL`, then
-`"testing": { "parallel": 2 }` (a whole number, 1 or more; a cloud run reads neither). Only the CLI
-reads them; the place ignores them. The three config keys need a
-`@flamework-experimental/transformer` released after 2.0.0-alpha.7, whose schema has them.
+use renews its hold every 30 seconds). So do `--parallel`: `FLAMEWORK_TEST_PARALLEL`, then
+`"testing": { "parallel": 2 }` (a whole number, 1 or more), and `--show`: `FLAMEWORK_TEST_SHOW`,
+then `"testing": { "showWindows": true }` (a switch, as above; see [Hidden
+windows](#hidden-windows)). A cloud run reads neither variable nor key. Only the CLI reads them; the
+place ignores them. The four config keys need a `@flamework-experimental/transformer` released after
+2.0.0-alpha.7, whose schema has them.
 
 ## Patching a copy of the original place
 
@@ -465,8 +497,11 @@ bunx flamework-test test place.rbxl --project tests/deferred.project.json --proj
 ```
 
 Each project gets one run of every realm, in a place named after it (`place.deferred.rbxl`), under
-its own heading. Every project runs even after one fails. The output ends with
-`projects: deferred passed, streaming FAILED`, and the exit code is the worst of them.
+its own heading. Every project runs even after one fails, but for a window that would not close: it
+is still open, and keeps its place among the windows the run has open at once (one, or
+`--parallel`'s n), so the projects that would need another are not run, and fail saying why. The
+output ends with `projects: deferred passed, streaming FAILED`, and the exit code is the worst of
+them.
 
 - `--project` may be repeated or comma-separated.
   `ROJO_PROJECT=tests/deferred.project.json,tests/streaming.project.json` in `.env` does the same
@@ -491,13 +526,16 @@ projects took 7 min 20 s one after another and about 5 min with `--parallel 2` (
   another.
 - The lines read as a run one after another prints them: each project's lines together, lune's
   included, in project order. While a later project runs, short lines on stderr say how it is
-  getting on (`[deferred] connected: ...`, `[deferred] passed in 1 min 40s; its lines follow
+  getting on (`[deferred] connected: ...`, `[deferred] passed in 2 min; its lines follow
   default's`). `--json` prints on stdout what a run one after another prints, in the same order.
+  What taking the Studio lock says (a wait, a window closed) is among the lines of the project that
+  took it.
 - A project that fails (a window that never connects, a realm that errs or hangs) fails alone,
   among its own lines; the others run on. The `projects:` line and the exit code are as ever.
-- One run holds the [Studio lock](#the-studio-lock) for all of its windows, and Ctrl+C closes every
-  one of them. `--keep` still keeps one project's window only, and a cloud run refuses
-  `--parallel`: every project's cloud run publishes to the one testing place.
+- One run holds the [Studio lock](#the-studio-lock) for all of its windows, all on the one hidden
+  desktop unless `--show`, and Ctrl+C closes every one of them. `--keep` still keeps one project's
+  window only, and a cloud run refuses `--parallel`: every project's cloud run publishes to the one
+  testing place.
 - Windows that share the machine share its time: each project's realms took up to 2.6 s longer than
   one after another (35 to 39 s on the server, 30 to 31 s on the client), its window was open about
   10 % longer, and no test failed in two runs of `--parallel 2` (2026-10-05).
@@ -540,7 +578,8 @@ A run uses one task.
 | Symptom | Cause |
 |---|---|
 | `RobloxStudioBeta.exe was not found` / `StudioMCP.exe, Roblox Studio's MCP proxy, was not found` | Studio is not installed here; set `ROBLOX_STUDIO_EXE` / `STUDIO_MCP_EXE`, or run in the cloud with `--cloud`. |
-| `... never showed up on the MCP proxy` | The window opened but "MCP server" is disabled in Studio's Assistant settings. `studio open` and `test` close it again (`test --keep` leaves it). |
+| `... never showed up on the MCP proxy` | The window opened but "MCP server" is disabled in Studio's Assistant settings, or, on the hidden desktop, it is showing a dialog nobody can see there (a login, an update, a crash report): run again with `--show` to see which. `studio open` and `test` close it again (`test --keep` leaves it). |
+| `could not start ... on the hidden desktop flamework-test (CreateProcessW: error N)` / `could not make the hidden desktop` | Windows refused the hidden launch; `--show` opens Studio on your desktop instead. |
 | `Roblox Studio is running (...), but the MCP proxy reaches none of them` | The same setting, off in every running Studio: turn it on, then retry. |
 | `waiting for the Studio lock, held by flamework-test for <project> ...` | Another project's flamework-test window is open; the command waits for it (see [The Studio lock](#the-studio-lock)). |
 | `the Studio lock is still held after waiting 5 min` | It still was: wait longer (`--lock-timeout`), ask whoever uses it to `studio close` it, or wait for its hold to run out. `studio lock` shows it. |
@@ -557,11 +596,12 @@ A run uses one task.
 | `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started; the next line names the last test that reported (`PASS`, `FAIL` or `SKIP`), and the one after it in that section is the hanging one (if that section runs concurrent tests, which report as each ends: any of them that has not reported). |
 | `(skipped): RenderStepped doesn't fire: the display may be asleep` | The PC's display was off, so the engine rendered nothing; run with `--keep-awake`. |
 | `1 skipped, which fails the run under --fail-on-skip` (with `--json`, on stderr: `1 skipped on the client, ...`) | A test skipped under `--fail-on-skip` (or `FAIL_ON_SKIP`, `testing.failOnSkip`); the summary names it and its reason, under a section that heads `FAIL`. |
-| `FAIL_ON_SKIP must be true or false` / `KEEP_AWAKE must be true or false` | The variable holds something else: `true`, `false`, `1`, `0`, `yes`, `no`, `on`, `off`, or empty for off. |
-| `--keep-awake is for Studio runs` | A cloud run has no display on this machine; drop the flag. |
+| `FAIL_ON_SKIP must be true or false` / `KEEP_AWAKE must be true or false` / `FLAMEWORK_TEST_SHOW must be true or false` | The variable holds something else: `true`, `false`, `1`, `0`, `yes`, `no`, `on`, `off`, or empty for off. |
+| `--keep-awake is for Studio runs` / `--show is for Studio runs` | A cloud run has no display or window on this machine; drop the flag. |
 | `--parallel is for Studio runs` | Every project's cloud run publishes to the one testing place, so they run one after another; drop the flag. |
 | `note: --parallel 6 is more than the 4 Studio windows flamework-test opens at once` | It runs 4 at a time: each window takes about 3 GB. |
-| `[deferred] passed in 1 min 40s; its lines follow default's` (stderr) | Not a problem: under `--parallel`, a project that has ended waits for the ones before it to print theirs, so each project's lines stay together. |
+| `[deferred] passed in 2 min; its lines follow default's` (stderr) | Not a problem: under `--parallel`, a project that has ended waits for the ones before it to print theirs, so each project's lines stay together. |
+| `not run: the Studio window of default would not close, and this run opens no more than one window at once (--parallel)` | That window is still open, after the line naming it (`... is still open`): close it by hand or with `studio close`, then run the projects that were not run. |
 | `no Studio window has the testing place ... open` | Nothing has it open, or the window has "MCP server" disabled and so is not listed. `studio list` shows what is. |
 | Ctrl+C under `bun run` left Studio open and printed no `interrupted by Ctrl+C` line | The script runs the CLI's file with `bun` directly, and `bun run` ends that process at once; call the `flamework-test` bin. The next `test` of that file closes the window. |
 | After Ctrl+C the prompt came back at once, and the `interrupted by Ctrl+C` line came after it | Expected through the bin: its shim ends at once and the CLI cleans up after it. Run the CLI's file with `bun` to wait for it. |

@@ -19,6 +19,7 @@ declare module "@flamework-experimental/transformer/out/util/projectConfig.js" {
 				lockTimeout?: number;
 				lockHold?: number;
 				parallel?: number;
+				showWindows?: boolean;
 			};
 		};
 		configPath?: string;

@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { hiddenTitles } from "./desktop.ts";
 import type { ProcessInfo } from "./lock.ts";
 
 /** One entry of `list_roblox_studios`: the id every other call takes, and a name carrying the place id. */
@@ -251,7 +252,9 @@ export function unquoteLuauResult(text: string): string {
  *   (`-placeId <id>`) as a word of its own.
  * - `file` alone: every window whose title shows that very file (Studio titles a local file's window
  *   with its full path). By the title only: a window started on the file and since saved elsewhere
- *   or published shows its new name and is left alone, and so is one whose title has changed.
+ *   or published shows its new name and is left alone, and so is one whose title has changed. A
+ *   window on the hidden desktop (see desktop.ts) also by its command line, since only flamework-test
+ *   opens windows there and nobody can be using one.
  * - `title`: the window titled exactly so, or whose title is a path ending in it. Several are
  *   ambiguous, and all of them are left `untouched`.
  */
@@ -290,16 +293,29 @@ function powershellString(value: string): string {
  * is really gone: a window is only reported closed once it is. `processName` is for the tests,
  * which close processes of their own; the CLI only ever closes Roblox Studio.
  *
+ * `hidden` is the windows on the hidden desktop, by PID, with their titles (see
+ * {@link hiddenTitles}): PowerShell on the user's desktop reads an empty `MainWindowTitle` for each,
+ * so the script reads the title from here. Such a window is never asked: `CloseMainWindow` reaches
+ * only the windows of the script's own desktop, and a save prompt on the hidden one would be seen by
+ * nobody. It is ended, as a run's own window is.
+ *
  * The process a run started (a `pid` target) is ended without asking. Asking never closes it: Studio
  * marks a place file it opens from disk as changed the moment it loads it, before any play session
  * or Luau, so the ask only raises "Save changes to place.rbxl?" and the close waited out its ten
  * seconds on every run (measured 2026-09-28). Nothing a run makes is kept, and the prompt's buttons
  * are not reachable from outside the window, so the wait bought nothing.
  */
-export function closeWindowScript(target: CloseTarget, processName = "RobloxStudioBeta"): string {
+export function closeWindowScript(
+	target: CloseTarget,
+	processName = "RobloxStudioBeta",
+	hidden: ReadonlyMap<number, string> = new Map(),
+): string {
 	const pid = "pid" in target ? target.pid : 0;
 	const file = "file" in target ? target.file : "";
 	const title = "title" in target ? target.title : "";
+	const hiddenLines = [...hidden]
+		.map(([id, shown]) => `$hidden[${Math.trunc(id)}] = ${powershellString(shown)}`)
+		.join("\n");
 	return `
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $name = ${powershellString(processName)}
@@ -311,11 +327,16 @@ $title = ${powershellString(title)}
 # would take "Straße" for "Strasse".
 function Shown([string]$t) { return ($t -replace '\\s+-\\s+Roblox Studio$', '') }
 function Same([string]$a, [string]$b) { return [string]::Equals($a, $b, [System.StringComparison]::OrdinalIgnoreCase) }
+# The windows on flamework-test's hidden desktop, by process, and their titles, which this script,
+# on the user's desktop, cannot read itself.
+$hidden = @{}
+${hiddenLines}
+function TitleOf($p) { $t = [string]$p.MainWindowTitle; if ($t -eq '' -and $hidden.ContainsKey([int]$p.Id)) { $t = $hidden[[int]$p.Id] }; return $t }
 $lines = @{}
 Get-CimInstance Win32_Process -Filter ("Name='" + $name + ".exe'") -ErrorAction SilentlyContinue | ForEach-Object { $lines[[int]$_.ProcessId] = [string]$_.CommandLine }
 function HasFile($p, [bool]$started) {
 	if ($file -eq '') { return $false }
-	if (Same (Shown $p.MainWindowTitle) $file) { return $true }
+	if (Same (Shown (TitleOf $p)) $file) { return $true }
 	if (-not $started) { return $false }
 	$line = $lines[[int]$p.Id]
 	if (-not $line) { return $false }
@@ -329,7 +350,8 @@ function Report($p, [string]$seen, [string]$outcome, [string]$err) {
 	return [pscustomobject]@{ pid = [int]$p.Id; title = $seen; outcome = $outcome; error = $err }
 }
 function CloseOne($p, [bool]$ask) {
-	$seen = [string]$p.MainWindowTitle
+	$seen = TitleOf $p
+	if ($hidden.ContainsKey([int]$p.Id)) { $ask = $false }
 	$asked = $false
 	if ($ask) { try { $asked = $p.CloseMainWindow() } catch { } }
 	if ($asked) { for ($i = 0; $i -lt 20; $i++) { if (Gone $p) { break }; Start-Sleep -Milliseconds 500 } }
@@ -347,15 +369,15 @@ if ($wantPid -gt 0) {
 	$act = @($procs | Where-Object { $_.Id -eq $wantPid -and (HasFile $_ $true) })
 	$leave = @($procs | Where-Object { $_.Id -ne $wantPid -and (HasFile $_ $false) })
 } elseif ($file -ne '') {
-	$act = @($procs | Where-Object { HasFile $_ $false })
+	$act = @($procs | Where-Object { HasFile $_ ($hidden.ContainsKey([int]$_.Id)) })
 } else {
 	$want = Shown $title
-	$act = @($procs | Where-Object { $t = Shown $_.MainWindowTitle; (Same $t $want) -or $t.EndsWith('\\' + $want, [System.StringComparison]::OrdinalIgnoreCase) })
+	$act = @($procs | Where-Object { $t = Shown (TitleOf $_); (Same $t $want) -or $t.EndsWith('\\' + $want, [System.StringComparison]::OrdinalIgnoreCase) })
 	if ($act.Count -gt 1) { $leave = $act; $act = @() }
 }
 $out = @()
 foreach ($p in $act) { $out += CloseOne $p ($wantPid -le 0) }
-foreach ($p in $leave) { $out += Report $p ([string]$p.MainWindowTitle) 'untouched' '' }
+foreach ($p in $leave) { $out += Report $p (TitleOf $p) 'untouched' '' }
 ${powershellString(CLOSE_MARKER)} + (ConvertTo-Json -InputObject @($out) -Compress)
 `;
 }
@@ -418,9 +440,16 @@ async function runPowerShell(
 	}
 }
 
-/** Runs the close script in Windows PowerShell and returns what became of each window it matched. */
-export async function runCloseScript(target: CloseTarget, processName?: string): Promise<ClosedWindow[]> {
-	const result = await runPowerShell(closeWindowScript(target, processName), 90_000);
+/**
+ * Runs the close script in Windows PowerShell and returns what became of each window it matched;
+ * the windows on the hidden desktop are looked at first, for their titles.
+ */
+export async function runCloseScript(
+	target: CloseTarget,
+	processName?: string,
+	hidden: ReadonlyMap<number, string> = hiddenTitles(),
+): Promise<ClosedWindow[]> {
+	const result = await runPowerShell(closeWindowScript(target, processName, hidden), 90_000);
 	try {
 		return parseClosedWindows(result.stdout);
 	} catch (error) {
@@ -435,10 +464,19 @@ export async function runCloseScript(target: CloseTarget, processName?: string):
 export interface StudioWindow {
 	pid: number;
 	title: string;
+	/** Its window is on the hidden desktop, where nobody sees it (see desktop.ts). */
+	hidden?: boolean;
 }
 
-/** Every Roblox Studio process on this machine, with its window's title; read-only. */
-export async function listStudioWindows(processName = "RobloxStudioBeta"): Promise<StudioWindow[]> {
+/**
+ * Every Roblox Studio process on this machine, with its window's title; read-only. A window on the
+ * hidden desktop is read from that desktop, since PowerShell on the user's desktop sees no title
+ * for it, and is marked `hidden`.
+ */
+export async function listStudioWindows(
+	processName = "RobloxStudioBeta",
+	hidden: () => ReadonlyMap<number, string> = hiddenTitles,
+): Promise<StudioWindow[]> {
 	const script = `
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $out = @(Get-Process -Name ${powershellString(processName)} -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ pid = [int]$_.Id; title = [string]$_.MainWindowTitle } })
@@ -454,9 +492,11 @@ ${powershellString(CLOSE_MARKER)} + (ConvertTo-Json -InputObject @($out) -Compre
 			`could not list the Studio windows${result.error ? `: ${result.error.message}` : result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
 		);
 	}
+	const titles = hidden();
 	return (JSON.parse(line.slice(CLOSE_MARKER.length)) as StudioWindow[]).map((window) => ({
 		pid: window.pid,
-		title: window.title ?? "",
+		title: window.title || (titles.get(window.pid) ?? ""),
+		...(titles.has(window.pid) ? { hidden: true } : {}),
 	}));
 }
 

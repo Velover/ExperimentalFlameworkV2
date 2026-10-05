@@ -230,7 +230,7 @@
 					"type": "number",
 					"minimum": 0,
 					"default": 300,
-					"description": "flamework-test only: seconds a command that opens a Studio window (test, studio open) waits for the Studio lock while another project's flamework-test run or window holds it; 0 does not wait. flamework-test keeps one Studio window open at a time on the machine. --lock-timeout and FLAMEWORK_TEST_LOCK_TIMEOUT come first. Never compiled into the place. Default: 300."
+					"description": "flamework-test only: seconds a command that opens a Studio window (test, studio open) waits for the Studio lock while another project's flamework-test run or window holds it; 0 does not wait. One flamework-test command uses Studio at a time on the machine. --lock-timeout and FLAMEWORK_TEST_LOCK_TIMEOUT come first. Never compiled into the place. Default: 300."
 				},
 				"lockHold": {
 					"type": "number",
@@ -243,6 +243,11 @@
 					"minimum": 1,
 					"default": 1,
 					"description": "flamework-test only: how many projects' Studio windows a test of several Rojo projects (--project, ROJO_PROJECT) runs side by side, each project's lines still printed together in project order; 1 runs them one after another. At most 4 at once, and no more than there are projects: each window takes about 3 GB with its play session. Not for cloud runs. --parallel and FLAMEWORK_TEST_PARALLEL come first. Never compiled into the place. Default: 1."
+				},
+				"showWindows": {
+					"type": "boolean",
+					"default": false,
+					"description": "flamework-test only: a Studio test opens its windows on the user's desktop, where they can be seen, instead of on a hidden desktop of their own, where a run never shows a window or takes the focus (Windows; elsewhere nothing is hidden). studio open always shows its window. --show and FLAMEWORK_TEST_SHOW come first. Not for cloud runs. Never compiled into the place. Default: false."
 				}
 			}
 		},

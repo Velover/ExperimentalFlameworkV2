@@ -250,6 +250,22 @@ describe("reading flamework.config.json", () => {
 		remove("flamework.config.json");
 	});
 
+	test("accepts testing.showWindows, flamework-test's, as a boolean, from the environment too", () => {
+		const file = write("flamework.config.json", `{ "testing": { "showWindows": true } }`);
+		expect(readProjectConfig(file)).toEqual({ testing: { showWindows: true } });
+
+		write("flamework.config.json", `{ "testing": { "showWindows": "${"${SHOW:-false}"}" } }`);
+		expect(readProjectConfig(file, {})).toEqual({ testing: { showWindows: false } });
+		expect(readProjectConfig(file, { SHOW: "1" })).toEqual({ testing: { showWindows: true } });
+		expect(() => readProjectConfig(file, { SHOW: "sometimes" })).toThrow(/\/testing\/showWindows.*not a boolean/);
+
+		write("flamework.config.json", `{ "testing": { "showWindows": "yes" } }`);
+		expect(() => readProjectConfig(file)).toThrow(/\/testing\/showWindows.*not a boolean/);
+		write("flamework.config.json", `{ "testing": { "showWindows": 1 } }`);
+		expect(() => readProjectConfig(file)).toThrow(/\/testing\/showWindows must be boolean/);
+		remove("flamework.config.json");
+	});
+
 	test("reports a parse error with the file name", () => {
 		const file = write("flamework.config.json", `{ "transformer": `);
 		expect(() => readProjectConfig(file)).toThrow(/Failed to parse .*flamework\.config\.json/);
@@ -1027,6 +1043,7 @@ describe("runtime sections", () => {
 					lockTimeout: 60,
 					lockHold: 30,
 					parallel: 2,
+					showWindows: true,
 				},
 			}),
 		).toEqual({

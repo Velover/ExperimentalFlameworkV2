@@ -48,6 +48,16 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `flamework.config.json` with it. `--concurrency` and a run's `concurrency` option need nothing.
 - **`testing.parallel` needs the next transformer.** Its schema has it; 2.0.0-alpha.7 refuses a
   `flamework.config.json` with it. `--parallel` and `FLAMEWORK_TEST_PARALLEL` need nothing.
+- **`test` no longer shows its Studio windows (Windows).** It opens them on a hidden desktop of
+  their own, so a run never pops up a window or takes the focus. `--show`, `FLAMEWORK_TEST_SHOW=1`
+  or `"testing": { "showWindows": true }` opens them where they are seen, as before. `test --keep`
+  leaves its window hidden, driven by the studio commands; `--show --keep` keeps one to look at.
+  `studio open` still shows its window.
+- **`testing.showWindows` needs the next transformer.** Its schema has it; 2.0.0-alpha.7 refuses a
+  `flamework.config.json` with it. `--show` and `FLAMEWORK_TEST_SHOW` need nothing.
+- **A window that will not close keeps its place.** A run of several projects whose window would not
+  close no longer opens the next project's window beside it: the projects that would need one more
+  window than the run opens at once (one, or `--parallel`'s n) are not run, and fail saying why.
 
 ### core
 
@@ -67,30 +77,30 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 #### Added
 
-- **The Studio lock: one Studio window opened through `flamework-test` at a time on the machine,**
-  across projects and agents. `test` and `studio open` take it before they launch Studio. It is a
-  folder in a per-user folder every project and agent shares, never the temp folder, which an
-  agent's harness may set per agent: `%LOCALAPPDATA%\flamework-test` on Windows
-  (`~/Library/Application Support/flamework-test` on macOS, `$XDG_STATE_HOME/flamework-test`
-  elsewhere), or `FLAMEWORK_TEST_STATE_DIR`, which every project must agree on: set it in the shell,
-  never in a project's `.env` (Bun loads the `.env` of the folder a command runs in, which would
-  move the lock for the commands run from there). It holds who took it: the CLI's PID, the
-  project, the command, since when, and every window the command has open or is opening (its
-  place, its Studio PID, its MCP id), each judged on its own. A
-  command that finds it held says whose once and then every minute, and waits up to
-  `--lock-timeout` seconds (`FLAMEWORK_TEST_LOCK_TIMEOUT`, `testing.lockTimeout`; 300 by default),
-  then fails naming the holder and how it is freed; Ctrl+C during the wait exits 130 holding
-  nothing. A command holds it while it runs: `test` across all its projects, freeing it once its
-  last window has closed (Ctrl+C included); `test --keep` and `studio open` leave it to the window
-  they leave open, until `studio close`. A lock whose command has ended and whose Studio process has
-  exited, or whose PID is another process now (by name and start time), is taken over with one
-  line; Studio's own lock file beside the place, when it names that dead window, is removed, and the
-  owner's next command says its window has closed (closed by hand, or Studio exited) and who took
-  the lock over. A window a command cut short left open is closed by the next taker at once. Every
-  change to the lock is made under a short sub-lock of its own, so a renewal never lands on another
-  command's record; the sub-lock names its process and is broken only once that process has gone,
-  so a slow holder is waited for, never overwritten. What a killed process left set aside beside
-  the lock is removed by the next taker.
+- **The Studio lock: one `flamework-test` command uses Studio at a time on the machine,** across
+  projects and agents, with its one window or a `test --parallel`'s several. `test` and `studio
+  open` take it before they launch Studio. It is a folder in a per-user folder every project and
+  agent shares, never the temp folder, which an agent's harness may set per agent:
+  `%LOCALAPPDATA%\flamework-test` on Windows (`~/Library/Application Support/flamework-test` on
+  macOS, `$XDG_STATE_HOME/flamework-test` elsewhere), or `FLAMEWORK_TEST_STATE_DIR`, which every
+  project must agree on: set it in the shell, never in a project's `.env` (Bun loads the `.env` of
+  the folder a command runs in, which would move the lock for the commands run from there). It holds
+  who took it: the CLI's PID, the project, the command, since when, and every window the command has
+  open or is opening (its place, its Studio PID, its MCP id), each judged on its own. A command that
+  finds it held says whose once and then every minute, and waits up to `--lock-timeout` seconds
+  (`FLAMEWORK_TEST_LOCK_TIMEOUT`, `testing.lockTimeout`; 300 by default), then fails naming the
+  holder and how it is freed; Ctrl+C during the wait exits 130 holding nothing. A command holds it
+  while it runs: `test` across all its projects, freeing it once its last window has closed (Ctrl+C
+  included); `test --keep` and `studio open` leave it to the window they leave open, until `studio
+  close`. A lock whose command has ended and whose Studio process has exited, or whose PID is
+  another process now (by name and start time), is taken over with one line; Studio's own lock file
+  beside the place, when it names that dead window, is removed, and the owner's next command says
+  its window has closed (closed by hand, or Studio exited) and who took the lock over. A window a
+  command cut short left open is closed by the next taker at once. Every change to the lock is made
+  under a short sub-lock of its own, so a renewal never lands on another command's record; the
+  sub-lock names its process and is broken only once that process has gone, so a slow holder is
+  waited for, never overwritten. What a killed process left set aside beside the lock is removed by
+  the next taker.
 - **A hold on a window left open.** It may sit unused for 15 minutes (`--hold <minutes>` on `studio
   open` and `test --keep`, one at least; `FLAMEWORK_TEST_LOCK_HOLD`, `testing.lockHold`), renewed
   by every command that uses it and all along a running `test`. Past it, the next command that
@@ -105,41 +115,40 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - **`studio tools [name]`**: the MCP proxy's tools, read live (`tools/list`); with a name, its whole
   description and input schema. `--json` for both.
 - **`studio call <tool> [json-args | --args-file <file>]`**: calls any of Studio's MCP tools, with
-  `studio_id` filled in from `--studio` (else this project's window); a `studio_id` in the
-  arguments names the window the same way and is refused the same way. A tool whose arguments have
-  no `studio_id` is sent without a window only when it is known to act on none
-  (`list_roblox_studios`, tried again while a new proxy joins the hub), else only with
-  `--any-window`. Text is printed; images
-  (`screen_capture`) are written to files (`--out <dir>`, by default `<temp>/flamework-test/captures`,
-  outside the project) and their paths printed; `--json` prints the raw answer. A tool's error
-  exits 1 with its message, without the Studio Assistant's own locations; a snippet that Studio's
-  sandbox refused (Studio may run MCP code sandboxed; it did from 2026-10-01) gets a line saying so,
-  through `studio exec` too. `studio call <tool> --help` is `studio tools <tool>`. So an agent
-  without Studio's MCP server in its own harness can use every tool.
+  `studio_id` filled in from `--studio` (else this project's window); a `studio_id` in the arguments
+  names the window the same way and is refused the same way. A tool whose arguments have no
+  `studio_id` is sent without a window only when it is known to act on none (`list_roblox_studios`,
+  tried again while a new proxy joins the hub), else only with `--any-window`. Text is printed;
+  images (`screen_capture`) are written to files (`--out <dir>`, by default
+  `<temp>/flamework-test/captures`, outside the project) and their paths printed; `--json` prints
+  the raw answer. A tool's error exits 1 with its message, without the Studio Assistant's own
+  locations; a snippet that Studio's sandbox refused (Studio may run MCP code sandboxed; it did from
+  2026-10-01) gets a line saying so, through `studio exec` too. `studio call <tool> --help` is
+  `studio tools <tool>`. So an agent without Studio's MCP server in its own harness can use every
+  tool.
 - **lune is given a timeout:** `lune --version` one minute, the patch five. A lune that hangs is
   stopped, and the run fails saying so, rather than holding the run (and, between two projects, the
   Studio lock) for as long as the CLI lives.
 - **`studio lock` and `studio unlock`.** `studio lock` names the holder (project, command, since,
   last use, when its hold runs out, and each of its windows: place, Studio PID, MCP id), whether its
-  command and each window's Studio process still run,
-  and whether the lock is live, expired or stale; `--check-window` also asks the MCP proxy whether
-  its window is on it, which is not done unasked, since starting a proxy joins the hub other clients
-  share. `studio unlock` frees a stale or
-  expired lock, closing an expired window; a live one is refused, naming the holder and when its
+  command and each window's Studio process still run, and whether the lock is live, expired or
+  stale; `--check-window` also asks the MCP proxy whether each window is on it, which is not done
+  unasked, since starting a proxy joins the hub other clients share. `studio unlock` frees a stale
+  or expired lock, closing an expired window; a live one is refused, naming the holder and when its
   hold runs out, unless `--force`, which closes that window (flamework-test's only).
 - **Concurrent tests, opt-in.** `test.concurrent(name, body)` registers a test that may run
   alongside others, and `defineTests(name, { concurrent: true }, body)` makes every test that body
   registers concurrent (`defineTests(name, body)` is unchanged). Tests start in the order they were
   declared (a `--sections` list naming a section's tests in another order runs them in its own);
-  consecutive concurrent tests in a section run together, up to `testing.concurrency` at
-  once (4 by default; `RunOptions.concurrency` and `flamework-test --concurrency` override it for a
-  run, and 1 runs every test alone). A plain test is a barrier: it waits for the tests before it,
-  runs alone, and the ones after it wait for it, as does the end of a section. A test marked with
-  `test.skip` holds nothing up. Each test keeps its own timeout, scratch folder, `defer` order and
-  `afterEach` hooks: one that fails fails alone, and one that overruns holds up only its own slot,
-  until its timeout. `PASS`, `FAIL` and `SKIP` lines print as each test ends; the result keeps the
-  tests in the order they started (declaration order, or a filter's), marks a concurrent test's
-  result `concurrent: true`, and carries the run's limit as `concurrency`.
+  consecutive concurrent tests in a section run together, up to `testing.concurrency` at once (4 by
+  default; `RunOptions.concurrency` and `flamework-test --concurrency` override it for a run, and 1
+  runs every test alone). A plain test is a barrier: it waits for the tests before it, runs alone,
+  and the ones after it wait for it, as does the end of a section. A test marked with `test.skip`
+  holds nothing up. Each test keeps its own timeout, scratch folder, `defer` order and `afterEach`
+  hooks: one that fails fails alone, and one that overruns holds up only its own slot, until its
+  timeout. `PASS`, `FAIL` and `SKIP` lines print as each test ends; the result keeps the tests in
+  the order they started (declaration order, or a filter's), marks a concurrent test's result
+  `concurrent: true`, and carries the run's limit as `concurrency`.
 - **The test's context, `t`,** passed to every test body and `beforeEach` and `afterEach` hook:
   `t.name`, `t.section`, `t.concurrent`, and `t.defer`, `t.scratch` and `t.skip`, bound to that
   test, so they work from any thread it starts and raise once it is over. `defer`, `scratch` and
@@ -157,7 +166,6 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `--concurrency 1`, or for a realm after one that answered from a place before concurrent tests,
   or with a concurrency of 1 (the place's own `testing.concurrency`). Before any realm of the run
   has answered, it cannot know the place, and adds it.
-
 - **`flamework-test test --parallel [n]`**: a run of several Rojo projects (`--project`,
   `ROJO_PROJECT`) runs up to n of their Studio windows side by side (`--parallel` alone: 2), in
   project order, a project starting as another's window closes; this repository's four projects took
@@ -165,14 +173,35 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   window takes about 3 GB with its play session); also `FLAMEWORK_TEST_PARALLEL` and
   `testing.parallel`, after the flag, checked before anything opens; 1 by default. Each project's
   lines, lune's included, are printed together, in project order, as one after another prints them,
-  with short progress lines on stderr for the projects waiting to print; `--json` prints the same
-  stdout. A project that fails fails alone; the `projects:` line and the exit code are as ever. One
-  run holds the Studio lock for all its windows, and Ctrl+C closes every one. `--keep` under several
-  projects is still refused, and so is `--parallel` with `--cloud` (one testing place); the variable
-  and the key are not a cloud run's.
+  with short progress lines on stderr for the projects waiting to print; what taking the Studio lock
+  says is among the lines of the project that took it; `--json` prints the same stdout. A project
+  that fails fails alone; the `projects:` line and the exit code are as ever. One run holds the
+  Studio lock for all its windows, and Ctrl+C closes every one. `--keep` under several projects is
+  still refused, and so is `--parallel` with `--cloud` (one testing place); the variable and the key
+  are not a cloud run's.
+- **Hidden windows: on Windows, `flamework-test test` opens Studio on a desktop of its own,**
+  `flamework-test`, so a run never shows a window, a splash or a dialog, and never takes the focus;
+  every run and project uses that one desktop, `--parallel` windows included. The launch calls
+  `CreateDesktopW` and `CreateProcessW` through `bun:ffi` and returns the Studio PID as before. The
+  MCP proxy reaches a hidden window as any other, and its client renders, at the same cost as a
+  shown window (both at Studio's own frame-rate cap: about 1.2 cores while a play session idles, 3.1
+  to 3.3 GB). Nothing on the user's desktop sees such a window, so each is found by its PID and the
+  command line it was started with, its title read from the hidden desktop; it is closed by its
+  process without asking, and the close of a window left from an earlier build matches a hidden one
+  by its command line too. `studio lock` and `studio list` say which windows are hidden. A hidden
+  window that never connects may be showing a dialog nobody can see, and the error says so, with
+  `--show`. `--show` (`FLAMEWORK_TEST_SHOW`, `testing.showWindows`, after the flag; refused with
+  `--cloud`, whose run reads neither) opens the windows where they are seen. `test --keep` leaves
+  its window hidden, where `studio exec`, `call screen_capture` and `close` reach it. `studio open`
+  always shows its window. Anywhere but Windows nothing is hidden.
 
 #### Changed
 
+- **A window that will not close keeps its place among a run's windows.** It is still open, so a run
+  of several projects opens no other in its stead: no more windows are open at once than the run
+  opens (one, or `--parallel`'s n), and the projects left that would need another are not run, each
+  failing with `not run: the Studio window of <project> would not close`. Before, the next project
+  opened its window beside the one that would not close.
 - **Commands that change a window act only on the one flamework-test opened for this project**
   (`close`, `play`, `stop`, `exec`, `run`, `call`), compared by the project directory the lock
   records: the nearest folder holding a `flamework.config.json`, else the nearest holding a
@@ -206,6 +235,9 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - `testing.parallel` in `flamework.config.json`'s schema: how many Rojo projects' Studio windows
   `flamework-test test` runs side by side, a whole number, 1 or more (1 by default), read by
   `flamework-test` alone and left out of the place's config, as `lockTimeout` is.
+- `testing.showWindows` in `flamework.config.json`'s schema: `flamework-test test` opens its Studio
+  windows where they are seen rather than on a hidden desktop (false by default), read by
+  `flamework-test` alone and left out of the place's config, as `keepAwake` is.
 
 ## 2026-10-02: core, networking and testing 2.0.0-alpha.6; transformer 2.0.0-alpha.7
 

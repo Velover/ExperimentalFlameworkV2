@@ -95,6 +95,9 @@ export class ShopTests implements OnStart {
 - `--parallel [n]` runs a run of several Rojo projects with that many windows side by side (each
   about 3 GB). Add it only when the user wants a multi-project run anyway: it is no reason to run
   more.
+- On Windows `test` opens Studio on a hidden desktop, so it never interrupts the user; `test --keep`
+  leaves the window there for the studio commands. Pass `--show` only when the user wants to watch,
+  or when a hidden window `never showed up on the MCP proxy` (a dialog may be waiting there).
 - `--sections` is judged across both realms: an entry only one realm has is listed for the other
   as `not among the client's sections: ...` without failing, and an entry no realm has fails the
   run with `MISS matched nothing in any realm: ...`. With `--realm`, the one realm judges alone.
@@ -113,7 +116,7 @@ export class ShopTests implements OnStart {
 
 ## Driving Studio
 
-- `flamework-test` keeps one Studio window open at a time on the machine, across projects: `test`
+- `flamework-test` lets one command use Studio at a time on the machine, across projects: `test`
   and `studio open` wait for the Studio lock while another project's window holds it, saying whose
   (300 seconds, `--lock-timeout`). Never close a window you did not open; `studio lock` shows the
   holder.

@@ -178,10 +178,23 @@ export interface TestingRuntimeConfig {
 	 * After `--parallel` and `FLAMEWORK_TEST_PARALLEL`.
 	 */
 	parallel?: number;
+
+	/**
+	 * `flamework-test` only: a Studio `test` opens its windows where they can be seen, rather than on
+	 * a hidden desktop. After `--show` and `FLAMEWORK_TEST_SHOW`.
+	 */
+	showWindows?: boolean;
 }
 
 /** Keys of the `testing` section only `flamework-test` reads, left out of the place's config. */
-const CLI_ONLY_TESTING_KEYS = ["failOnSkip", "keepAwake", "lockTimeout", "lockHold", "parallel"] as const;
+const CLI_ONLY_TESTING_KEYS = [
+	"failOnSkip",
+	"keepAwake",
+	"lockTimeout",
+	"lockHold",
+	"parallel",
+	"showWindows",
+] as const;
 
 /**
  * The sections the runtime packages read. Game projects get them written to

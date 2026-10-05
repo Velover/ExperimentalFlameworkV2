@@ -120,6 +120,7 @@ async function runSideBySide(
 		settings?: Partial<CloudSettings>;
 		ctrlC?: ReturnType<typeof fakeCtrlC>;
 		closeOutcome?: (target: CloseTarget) => "closed" | "open";
+		spawnCode?: (command: string[]) => number | Promise<number>;
 	} = {},
 ) {
 	const machine = setup.machine ?? fakeMachine();
@@ -136,6 +137,7 @@ async function runSideBySide(
 		...(setup.env !== undefined ? { env: setup.env } : {}),
 		...(setup.settings !== undefined ? { settings: setup.settings } : {}),
 		...(setup.ctrlC !== undefined ? { ctrlC: setup.ctrlC } : {}),
+		...(setup.spawnCode !== undefined ? { spawnCode: setup.spawnCode } : {}),
 	};
 	options.onClose = (target) => {
 		studio.onClose(target);
@@ -200,7 +202,7 @@ describe("--parallel: several projects' windows side by side", () => {
 		// While a runs, the others say how they get on, briefly, on stderr.
 		const err = parallel.run.err;
 		expect(err).toContain("[b] started");
-		expect(err).toContain("[b] opening place.b.rbxl in Studio (PID 4002)");
+		expect(err).toContain("[b] opening place.b.rbxl in Studio (PID 4002, hidden)");
 		expect(err).toContain("[b] connected: place.b.rbxl (studio-place.b.rbxl)");
 		expect(err).toContain("[b] server: 2 passed, 0 failed, 0 skipped");
 		expect(err).toMatch(/\[b\] passed in \d+s; its lines follow a's/);
@@ -398,6 +400,7 @@ describe("--parallel: the Studio lock with several windows", () => {
 				studioPid: 4001,
 				studioStartedAt: expect.any(String),
 				mcpId: "studio-place.a.rbxl",
+				hidden: true,
 			},
 			{
 				place: placeB,
@@ -405,6 +408,7 @@ describe("--parallel: the Studio lock with several windows", () => {
 				studioPid: 4002,
 				studioStartedAt: expect.any(String),
 				mcpId: "studio-place.b.rbxl",
+				hidden: true,
 			},
 		]);
 
@@ -412,15 +416,15 @@ describe("--parallel: the Studio lock with several windows", () => {
 		expect(lock!.out).toContain(`live: its \`test --parallel 2\` is running (flamework-test PID ${run.cliPid})`);
 		expect(lock!.out).toContain("  window 1 of 2:");
 		expect(lock!.out).toContain(`  place:    ${placeA}`);
-		expect(lock!.out).toContain("  studio:   PID 4001, running");
+		expect(lock!.out).toContain("  studio:   PID 4001, running, on the hidden desktop");
 		expect(lock!.out).toContain("  mcp:      studio-place.a.rbxl, on the MCP proxy");
 		expect(lock!.out).toContain("  window 2 of 2:");
 		expect(lock!.out).toContain("  mcp:      studio-place.b.rbxl, on the MCP proxy");
 		expect(list!.out).toContain(
-			`studio-place.a.rbxl  place.a.rbxl  [opened by flamework-test for ${THIS_PROJECT}; holds the Studio lock]`,
+			`studio-place.a.rbxl  place.a.rbxl  [opened by flamework-test for ${THIS_PROJECT}; holds the Studio lock; on the hidden desktop]`,
 		);
 		expect(list!.out).toContain(
-			`studio-place.b.rbxl  place.b.rbxl  [opened by flamework-test for ${THIS_PROJECT}; holds the Studio lock]`,
+			`studio-place.b.rbxl  place.b.rbxl  [opened by flamework-test for ${THIS_PROJECT}; holds the Studio lock; on the hidden desktop]`,
 		);
 		// This project's own windows, while its run uses them: refused before anything is sent.
 		expect(exec!.code).toBe(1);
@@ -444,14 +448,19 @@ describe("--parallel: the Studio lock with several windows", () => {
 	test("a window that will not close stays in the record with its own file, and the next taker closes it (L2)", async () => {
 		const names = ["a", "b"];
 		const machine = fakeMachine();
-		// One after another, as the case was found: a's window will not close; b's does.
+		// One after another, as the case was found: a's window will not close, and is still open, so b,
+		// which would be a second window at once, is not run.
 		const { run } = await runSideBySide(names, [], {
 			machine,
 			closeOutcome: (target) => ("pid" in target && target.pid === 4001 ? "open" : "closed"),
 		});
 		expect(run.code).toBe(1);
 		expect(run.err).toContain("place.a.rbxl is still open");
-		expect(run.out).toContain("projects: a FAILED, b passed");
+		expect(run.err).toContain(
+			"error: not run: the Studio window of a would not close, and this run opens no more than one window at once (--parallel)",
+		);
+		expect(run.launched).toHaveLength(1);
+		expect(run.out).toContain("projects: a FAILED, b FAILED");
 		// The window that would not close holds the lock, named by its own process and file, never
 		// b's; the lock is left to it under the lease.
 		const placeA = join(THIS_PROJECT, "place.a.rbxl");
@@ -463,6 +472,7 @@ describe("--parallel: the Studio lock with several windows", () => {
 				studioPid: 4001,
 				studioStartedAt: expect.any(String),
 				mcpId: "studio-place.a.rbxl",
+				hidden: true,
 			},
 		]);
 
@@ -556,6 +566,90 @@ describe("--parallel: the Studio lock with several windows", () => {
 		expect(told.err).toContain(
 			"because the `test --parallel 2` that opened them (flamework-test PID 8001) had ended without closing them",
 		);
+		// Had again by the run that opened them: `studio open` would give one window, of one file.
+		expect(told.err).toContain("`test --parallel 2` opened them: run it again for new ones");
+		expect(told.err).not.toContain("flamework-test studio open");
+	});
+
+	test("a window that will not close keeps its place: no more windows at once than asked, and what cannot start is not run", async () => {
+		const names = ["a", "b", "c"];
+		// a's window will not close: its worker stops, and b and c run in the other place, one after another.
+		const one = await runSideBySide(names, ["--parallel", "2"], {
+			delay: { "place.a.rbxl": 2, "place.b.rbxl": 20, "place.c.rbxl": 2 },
+			closeOutcome: (target) => ("pid" in target && target.pid === 4001 ? "open" : "closed"),
+		});
+		expect(one.run.code).toBe(1);
+		expect(one.studio.mostOpen()).toBe(2);
+		expect(one.studio.timeline).toEqual([
+			"launch place.a.rbxl",
+			"launch place.b.rbxl",
+			"close place.a.rbxl",
+			"close place.b.rbxl",
+			"launch place.c.rbxl",
+			"close place.c.rbxl",
+		]);
+		expect(one.run.out).toContain("projects: a FAILED, b passed, c passed");
+
+		// a's and b's will not close: both places are held, and c is not run, saying why among its own lines.
+		const both = await runSideBySide(names, ["--parallel", "2"], {
+			closeOutcome: (target) => ("pid" in target && target.pid !== 4003 ? "open" : "closed"),
+		});
+		expect(both.run.code).toBe(1);
+		expect(both.run.launched).toHaveLength(2);
+		expect(both.run.err).toContain(
+			"error: not run: the Studio windows of a, b would not close, and this run opens no more than 2 windows at once (--parallel)",
+		);
+		expect(both.run.err).toContain("close them by hand (or with `flamework-test studio close`)");
+		const out = both.run.out;
+		expect(out.indexOf("=== c: ")).toBeGreaterThan(out.indexOf("=== b: "));
+		expect(out).toContain("projects: a FAILED, b FAILED, c FAILED");
+		expect(both.machine.lock.owner!.windows.map((window) => window.studioPid)).toEqual([4001, 4002]);
+	});
+
+	test("what taking the lock says is among the lines of the project that took it", async () => {
+		const machine = fakeMachine();
+		const now = machine.time.now;
+		const otherFile = "D:\\other\\test.rbxl";
+		// Another project's window, idle past its hold: whoever takes the lock closes it, saying so.
+		machine.windows.push({
+			pid: 5001,
+			title: `${otherFile} - Roblox Studio`,
+			startedWith: otherFile,
+			startedAt: now - 30 * MINUTE,
+		});
+		machine.lock.owner = fromFlat({
+			token: "other-token",
+			cliPid: 8001,
+			cliName: "bun",
+			cliStartedAt: iso(now - 30 * MINUTE),
+			studioPid: 5001,
+			studioStartedAt: iso(now - 30 * MINUTE),
+			mcpId: "studio-other",
+			project: OTHER_PROJECT,
+			command: "studio open",
+			place: otherFile,
+			placeFile: otherFile,
+			since: iso(now - 30 * MINUTE),
+			lastActivity: iso(now - 20 * MINUTE),
+			expires: iso(now - 5 * MINUTE),
+			holdMinutes: 15,
+			kept: true,
+		});
+		// a's patch takes longer, so b, the later project, takes the lock while a's lines are the live ones.
+		const { run } = await runSideBySide(["a", "b"], ["--parallel", "2"], {
+			machine,
+			spawnCode: async (command) => {
+				if (command.some((arg) => arg.endsWith("place.a.rbxl"))) await ticks(40);
+				return 0;
+			},
+		});
+		expect(run.code).toBe(0);
+		const out = run.out;
+		const closedLine = out.indexOf(`closed the Studio window flamework-test opened for ${OTHER_PROJECT}`);
+		expect(closedLine).toBeGreaterThan(out.indexOf("=== b: "));
+		expect(out.indexOf("=== b: ")).toBeGreaterThan(out.indexOf("=== a: "));
+		// Said as b's progress meanwhile, while a's lines were the ones printing.
+		expect(run.err).toContain(`[b] closed the Studio window flamework-test opened for ${OTHER_PROJECT}`);
 	});
 
 	test("every window gone: the lock is taken over, each one's Studio lock file removed; one still open keeps it", async () => {

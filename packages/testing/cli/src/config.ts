@@ -41,13 +41,18 @@ export interface CloudSettings {
 	 * After `--parallel` and `FLAMEWORK_TEST_PARALLEL`; never read by a cloud run.
 	 */
 	parallel?: number;
+	/**
+	 * `testing.showWindows`: a Studio `test` opens its windows where they can be seen, rather than
+	 * on the hidden desktop. After `--show` and `FLAMEWORK_TEST_SHOW`; never read by a cloud run.
+	 */
+	showWindows?: boolean;
 	/** Where the settings were read from, when a file was found. */
 	configPath?: string;
 	/**
 	 * `.env`, then `.env.local`, then the process environment, later ones winning: the CLI reads
 	 * its own variables (ROBLOX_API_KEY, TESTING_UNIVERSE_ID, TESTING_PLACE_ID, ORIGINAL_PLACE,
 	 * ROJO_PROJECT, KEEP_AWAKE, FAIL_ON_SKIP, FLAMEWORK_TEST_LOCK_TIMEOUT, FLAMEWORK_TEST_LOCK_HOLD,
-	 * FLAMEWORK_TEST_PARALLEL)
+	 * FLAMEWORK_TEST_PARALLEL, FLAMEWORK_TEST_SHOW)
 	 * from here, so a `.env` works without the config file referencing it.
 	 */
 	env: Record<string, string>;
@@ -81,6 +86,7 @@ export function loadCloudSettings(cwd: string, env: Record<string, string | unde
 		...(typeof testing.lockTimeout === "number" ? { lockTimeout: testing.lockTimeout } : {}),
 		...(typeof testing.lockHold === "number" ? { lockHold: testing.lockHold } : {}),
 		...(typeof testing.parallel === "number" ? { parallel: testing.parallel } : {}),
+		...(typeof testing.showWindows === "boolean" ? { showWindows: testing.showWindows } : {}),
 		configPath: loaded.configPath,
 		env: loaded.env,
 	};

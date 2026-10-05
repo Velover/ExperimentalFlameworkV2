@@ -108,14 +108,19 @@ With `--parallel 2` the run holds the Studio lock for both of its windows at onc
 
 ```
 Studio lock (...\flamework-test\studio-lock): live: its `test --parallel 2` is running (flamework-test PID 37972); ...
+  project:  ...\tests\place
   command:  test --parallel 2
+  since:    2026-10-05T22:06:10.835Z
+  used:     2026-10-05T22:06:21.778Z (6s ago)
+  expires:  2026-10-05T22:21:21.778Z (in 15 min; a 15-minute hold)
+  run:      flamework-test PID 37972, running
   window 1 of 2:
   place:    ...\tests\place\place.default.rbxl
-  studio:   PID 38416, running
+  studio:   PID 38416, running, on the hidden desktop
   mcp:      ab311083-..., on the MCP proxy        (with --check-window)
   window 2 of 2:
   place:    ...\tests\place\place.deferred.rbxl
-  studio:   PID 39412, running
+  studio:   PID 39412, running, on the hidden desktop
   mcp:      0d72f123-..., on the MCP proxy
 ```
 
@@ -123,6 +128,72 @@ A run cut short with both windows up (a second Ctrl+C, a killed process) leaves 
 command that opens a window, which closes both, each by its own Studio process, and says so in one
 line; `studio close` from `tests/place` closes them too. One that would not close stays in the
 lock's record with its own place file, for the next taker.
+
+### Hidden windows
+
+`flamework-test test` opens its windows on a desktop of its own
+(`packages/testing/cli/src/desktop.ts`), so a run in this repository never shows a window or takes
+the focus, whatever else the machine is doing. `--show` opens them on the user's desktop, as before,
+and is the first thing to try when a hidden run misbehaves: a hidden window can show nothing to
+anyone.
+
+- **The launch.** `CreateDesktopW` makes `WinSta0\flamework-test` (it opens the desktop when it
+  exists already), and `CreateProcessW` starts Studio there, `STARTUPINFOW.lpDesktop` naming it and
+  `wShowWindow` `SW_SHOWNOACTIVATE`, with the creation flags of a detached libuv spawn. Both through
+  `bun:ffi`, the structures built in buffers; Bun's own spawn (libuv) can pass neither a desktop nor
+  a show command other than hidden or default. The launch takes about 12 ms and returns the Studio
+  PID, as the spawn did. Every run and project uses the one desktop, `--parallel` windows included.
+- **Finding a window.** The user's desktop sees nothing of one: `EnumWindows` lists no window of it,
+  and Windows PowerShell's `MainWindowTitle` is empty. The CLI knows each window it opened by the
+  PID its launch returned, recorded in the Studio lock (now with `hidden: true`), and by the command
+  line Studio was started with (`Win32_Process`), as it always has. Where a title is needed (`studio
+  list`'s processes, the check that no other window of the same file name is opening, the close of
+  a window left from an earlier build), it is read from the hidden desktop itself: `OpenDesktopW`,
+  `EnumDesktopWindows`, `GetWindowTextW`, which take well under a millisecond.
+- **Closing a window.** By its process, as every window flamework-test opened: the close script
+  matches it by PID and command line, and ends it without asking. `CloseMainWindow` reaches only
+  the windows of the caller's own desktop, and a save prompt on the hidden one would be seen by
+  nobody. The close of a window left from an earlier build matches a hidden process by its command
+  line as well as by its title, since only flamework-test opens windows there; a window on the
+  user's desktop is still matched by its title only. Studio writes its `.rbxl.lock` beside the file
+  wherever it runs, and the CLI removes it once it has ended the process, as before.
+- **What was checked, 2026-10-05,** with a poller of the user's desktop and its foreground window
+  running alongside: a scoped run, a `--parallel 2` run, a run whose CLI was ended with `taskkill
+  /F` (its hidden window was left, `studio lock` showed it `running, on the hidden desktop`, and the
+  next run closed it by its process and removed its `.rbxl.lock`), `test --keep` followed by `studio
+  list`, `studio lock --check-window`, `studio exec`, `studio call screen_capture` (which captured
+  the rendered scene) and `studio close`, and the whole suite with `--parallel 2`. No Roblox window
+  appeared on the user's desktop and the foreground never moved; with `--show`, the window appeared
+  and took the foreground mid-run, as it always has.
+- **The desktop object** goes away by itself: the CLI keeps its handle until it exits (Studio has to
+  attach to the desktop after the launch), and Windows removes a desktop once no handle and no
+  thread of a process is left on it. After the last window had closed and the CLI had exited,
+  `OpenDesktopW("flamework-test")` failed with error 2 (no such desktop). While it exists it takes
+  some of the session's desktop heap, one desktop's worth, however many windows it holds.
+- **A window that never connects** may be held up by a dialog on the hidden desktop (a login, an
+  update, a crash report), which the error names, with `--show` to see it.
+- **`--keep`** leaves the window hidden: Windows moves no window between desktops, and a kept
+  window is there to be driven through the MCP proxy, which reaches it as any other.
+
+What a window costs, measured with a scoped run (`--sections concurrent`, both realms) of
+`tests/place`, the Studio process's CPU time over each phase, its working set, and its GPU engines'
+running time (`\GPU Engine(pid_<pid>_*)\Running Time`), on an i5-12400 with an RTX 3060 and a
+144 Hz display:
+
+| Window | Client frames a second | CPU, play session idle | CPU, edit mode idle | GPU 3D engine, play idle | Peak working set | Run (launch to end) |
+|---|---|---|---|---|---|---|
+| Shown, as before | 240 | 126 % | 94 % | 18 % | 3.26 GB | 18.9 s |
+| Minimized, not activated | 60 | 75 % | 47 % | 0.8 % | 3.19 GB | 19.4 s |
+| Hidden desktop | 240 | 111 to 119 % | 74 to 80 % | 22 % | 3.24 to 3.28 GB | 18.9 to 24.1 s |
+| Hidden desktop, minimized | 60 | 65 to 69 % | 42 to 47 % | 0.4 % | 3.16 GB | 18.8 to 19.1 s |
+
+CPU is in percent of one core; the server's `Heartbeat` ran at 240 a second in every row. The first
+hidden launch took 15 s to connect, every other 10.4 to 10.9 s. A shown window and a hidden one both
+render at Studio's own cap, not the display's rate, and cost the same. Minimized, a window renders
+at 60 and costs about half the CPU, but draws no 3D scene: a `screen_capture` of one shows an empty
+viewport under the top bar, where a hidden, shown window's shows the place. A minimized window
+changes what a test sees, so the CLI does not minimize, and no other cap a run could set without the
+user's Studio settings was found.
 
 What follows is the older battletest of `[FWTEST]` lines the place's providers print on start,
 which the same proxy drives.

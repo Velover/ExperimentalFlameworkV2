@@ -48,6 +48,11 @@ export interface LockWindow {
 	studioStartedAt?: string;
 	/** The window's id on the MCP proxy, once it has connected. */
 	mcpId?: string;
+	/**
+	 * Studio was launched on the hidden desktop (`test` without `--show`), where nobody sees it:
+	 * it is found and closed by its process, as every window flamework-test opened is.
+	 */
+	hidden?: boolean;
 }
 
 /** The owner record, `owner.json` in the lock's folder. Times are ISO strings. */

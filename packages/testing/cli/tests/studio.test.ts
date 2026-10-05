@@ -237,7 +237,8 @@ describe("closing a window", () => {
 		expect(byPid).toContain("if ($ask) { try { $asked = $p.CloseMainWindow() } catch { } }");
 		expect(byPid).toContain("$(if ($ask) { 'forced' } else { 'ended' })");
 		expect(byPid).toContain("$_.Id -ne $wantPid -and (HasFile $_ $false)");
-		expect(byPid).toContain("$act = @($procs | Where-Object { HasFile $_ $false })");
+		// A window on the hidden desktop is matched by its command line too: only flamework-test opens one there.
+		expect(byPid).toContain("$act = @($procs | Where-Object { HasFile $_ ($hidden.ContainsKey([int]$_.Id)) })");
 		// A failed Stop-Process is caught and reported, and a window is only reported gone once it is.
 		expect(byPid).toContain("Stop-Process -Id $p.Id -Force -ErrorAction Stop");
 		expect(byPid).toContain("return Report $p $seen 'open' $err");

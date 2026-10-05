@@ -1,7 +1,7 @@
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
-import { main, type CliDeps } from "../src/cli.ts";
+import { main, type CliDeps, type LaunchOptions } from "../src/cli.ts";
 import type { CloudSettings } from "../src/config.ts";
 import {
 	normalizeOwner,
@@ -50,6 +50,11 @@ export interface FakeWindow {
 	startedAt?: number;
 	/** The process's name; `RobloxStudioBeta` when not given. */
 	processName?: string;
+	/**
+	 * On the hidden desktop: what the real close script reads of it is its title from that desktop
+	 * and its command line, so the fake close matches it by either.
+	 */
+	hidden?: boolean;
 }
 
 /**
@@ -216,6 +221,8 @@ export interface Harness {
 	spawnTimeouts: Array<number | undefined>;
 	/** Every program the CLI started and left running. */
 	launched: string[][];
+	/** How each of those was launched, in the same order: `{ hidden }`, or nothing said. */
+	launchOptions: Array<LaunchOptions | undefined>;
 	/** Every MCP tool call, in order. */
 	studioCalls: Array<{ name: string; args: Record<string, unknown> }>;
 	/** The timeout each of those calls was given, in the same order. */
@@ -352,6 +359,8 @@ export async function runCli(
 		claimHolder?: number;
 		/** Runs when the CLI launches a program, with the command, so a fake Studio can start listing the window it opened. */
 		onLaunch?: (command: string[]) => void;
+		/** Why Windows refuses a launch, as the real launch throws it (the hidden desktop could not be made, say); none by default. */
+		refuseLaunch?: (command: string[], how: LaunchOptions | undefined) => string | undefined;
 		/** How many removals of a file fail first, as Windows refuses to remove a file an ended process still holds. */
 		removalsRefused?: number;
 		/** The terminal's Ctrl+C; without one, nothing interrupts the run. */
@@ -389,6 +398,7 @@ export async function runCli(
 	const spawned: string[][] = [];
 	const spawnTimeouts: Array<number | undefined> = [];
 	const launched: string[][] = [];
+	const launchOptions: Array<LaunchOptions | undefined> = [];
 	const studioCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
 	const studioCallTimeouts: Array<number | undefined> = [];
 	const closeTargets: string[] = [];
@@ -464,26 +474,35 @@ export async function runCli(
 			const code = options.spawnCode ?? 0;
 			return typeof code === "function" ? await code(command, timeoutMs) : code;
 		},
-		launch: async (command) => {
+		launch: async (command, how) => {
+			const refused = options.refuseLaunch?.(command, how);
+			if (refused !== undefined) throw new Error(refused);
 			launched.push(command);
+			launchOptions.push(how);
 			options.onLaunch?.(command);
 			// A file is launched as [exe, file]; a cloud place with -task EditPlace and its ids.
 			const pid = machine.nextStudioPid;
 			machine.nextStudioPid += 1;
 			const file = command.length === 2 ? command[1]! : undefined;
 			const placeId = command[command.indexOf("-placeId") + 1];
-			windows.push(
-				file !== undefined
+			windows.push({
+				...(file !== undefined
 					? { pid, title: `${file} - Roblox Studio`, startedWith: file, startedAt: time.now }
-					: { pid, title: "TestingExperience - Roblox Studio", startedWith: placeId, startedAt: time.now },
-			);
+					: { pid, title: "TestingExperience - Roblox Studio", startedWith: placeId, startedAt: time.now }),
+				...(how?.hidden === true ? { hidden: true } : {}),
+			});
 			return pid;
 		},
 		closeWindow: async (target) => {
 			options.onClose?.(target);
 			return closeFakeWindows(target);
 		},
-		studioWindows: async () => windows.map((window) => ({ pid: window.pid, title: window.title })),
+		studioWindows: async () =>
+			windows.map((window) => ({
+				pid: window.pid,
+				title: window.title,
+				...(window.hidden === true ? { hidden: true } : {}),
+			})),
 		claimWindowName: async (name, onWait) => {
 			if (options.claimHolder !== undefined) onWait(options.claimHolder);
 			claims.push(`claim ${name} (launched ${launched.length}, closed ${closedWindows.length})`);
@@ -610,9 +629,12 @@ export async function runCli(
 			);
 			leave = windows.filter((window) => window.pid !== target.pid && titled(window, target.file));
 		} else if ("file" in target) {
-			// A window the run did not open: by its title only.
+			// A window the run did not open: by its title, and on the hidden desktop by its command line too.
 			closeTargets.push(`file ${basename(target.file)}`);
-			act = windows.filter((window) => titled(window, target.file));
+			act = windows.filter(
+				(window) =>
+					titled(window, target.file) || (window.hidden === true && same(window.startedWith, target.file)),
+			);
 		} else {
 			closeTargets.push(`title ${target.title}`);
 			const title = target.title.toLowerCase();
@@ -662,6 +684,7 @@ export async function runCli(
 		spawned,
 		spawnTimeouts,
 		launched,
+		launchOptions,
 		studioCalls,
 		studioCallTimeouts,
 		closeTargets,
