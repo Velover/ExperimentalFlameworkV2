@@ -331,11 +331,11 @@ describe("skips in a Studio run", () => {
 			studios: [TESTING_STUDIO],
 			answers: { get_studio_state: PLAYING, execute_luau: skipping("server") },
 		};
-		const run = await runCli(["studio", "run"], { studio });
+		const run = await runCli(["studio", "run", "--any-window"], { studio });
 		expect(run.code).toBe(0);
 		expect(run.out).toContain("- StreamingEnabled follows the project (skipped): only under the streaming project");
 
-		const strict = await runCli(["studio", "run", "--fail-on-skip"], { studio });
+		const strict = await runCli(["studio", "run", "--fail-on-skip", "--any-window"], { studio });
 		expect(strict.code).toBe(1);
 		expect(strict.out).toContain("1 skipped, which fails the run under --fail-on-skip");
 	});

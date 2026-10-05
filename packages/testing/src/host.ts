@@ -32,16 +32,17 @@ function answer(current: Host, filter: unknown, options: unknown): RunResult {
 }
 
 /**
- * Lets sandboxed code invoke the bindable. Studio runs the Luau its MCP server and its Assistant
+ * Lets sandboxed code invoke the bindable. Studio may run the Luau its MCP server and its Assistant
  * execute (which is how `flamework-test` reaches the host) in a sandboxed thread, without
- * capabilities such as LoadUnownedAsset or ScriptGlobals, and a sandboxed thread may only invoke a
- * bindable that is Sandboxed itself with no capability the thread lacks: one that is not Sandboxed
- * counts as having them all ("cannot invoke 'FlameworkTests' since 'FlameworkTests' has additional
- * values for the Capabilities property"). Sandboxed with no capabilities (an instance's
- * `Capabilities` are empty until something sets them, and nothing here does), any thread that can
- * reach it may invoke it. That is only who may call it: the callback runs with the capabilities of the script
- * that set it, so the tests keep `require`, `_G` and the rest. In a pcall, so an engine without
- * the property still hosts the tests.
+ * capabilities such as LoadUnownedAsset or ScriptGlobals; it did from 2026-10-01. A sandboxed thread
+ * may only invoke a bindable that is Sandboxed itself with no capability the thread lacks: one that
+ * is not Sandboxed counts as having them all ("cannot invoke 'FlameworkTests' since
+ * 'FlameworkTests' has additional values for the Capabilities property"). Sandboxed with no
+ * capabilities (an instance's `Capabilities` are empty until something sets them, and nothing here
+ * does), any thread that can reach it may invoke it, sandboxed or not. That is only who may call
+ * it: the callback runs with the capabilities of the script that set it, so the tests keep
+ * `require`, `_G` and the rest. In a pcall, so an engine without the property still hosts the
+ * tests.
  */
 function openToSandboxedCallers(bindable: BindableFunction) {
 	pcall(() => {

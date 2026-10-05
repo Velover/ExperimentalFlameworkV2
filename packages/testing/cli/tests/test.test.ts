@@ -979,8 +979,9 @@ describe("test", () => {
 	});
 
 	test("the local test and the studio run find the testing place the same way", async () => {
-		// `studio run` still drives the cloud place's window, found by its place id.
-		const run = await runCli(["studio", "run", "--realm", "both"], {
+		// `studio run` still drives the cloud place's window, found by its place id: one the user
+		// opened, so only with --any-window.
+		const run = await runCli(["studio", "run", "--realm", "both", "--any-window"], {
 			studio: {
 				studios: [TESTING_STUDIO],
 				answers: {

@@ -138,8 +138,8 @@ Everything a project needs, in the order it is needed:
      place, `test.<project>.rbxl` under `--project`), which the same line covers;
    - `build/version.json`, which `cloud publish` writes, and so `cloud test` and `test --cloud`;
    - Studio's lock file beside a place it has open, `test.rbxl.lock`. `flamework-test` removes the
-     lock of a window it ends, but one left by a Studio closed any other way stays, so ignore
-     `*.rbxl.lock` too.
+     lock of a window it ends, and of one it finds gone when it takes the Studio lock over, but one
+     left by a Studio closed any other way can stay, so ignore `*.rbxl.lock` too.
 
    The files a patch needs while it runs go to a folder of the system's temp directory, one per
    run, removed when the patch is done.
@@ -270,6 +270,12 @@ listed with its reason, by the runner's `SKIP` line and in `flamework-test`'s su
 | A client, for the server's tests | `Testing.runOnServer(filter?)`, over `Workspace.FlameworkTestsServer` |
 | Start-up | `"autoRun": true` in the config runs everything right after ignition |
 
+`flamework-test` opens one Studio window at a time on the machine, across projects: a Studio run
+takes the Studio lock first, and waits while another project's run or window holds it. A command
+that changes a window (`studio exec`, `close`, ...) acts only on the one it opened for this
+project, and not while another process's run of this project uses it; see
+[the Studio lock](../../packages/testing/README.md#the-studio-lock).
+
 A filter is nothing (every section), one section name, one `section/test` name, or a list of
 those; `--sections a,b` on the command line. Passing `{ list = true }` as the options reports the
 selection without running it. In one realm, an entry that names nothing there makes the run fail.
@@ -314,10 +320,11 @@ A BindableFunction's callback is set per realm, so the one `Workspace.FlameworkT
 A client with the plugin answers on it for its own tests, and reaches the server's tests through
 `FlameworkTestsServer`. A second invoke while a run is in progress raises an error.
 
-The bindable is `Sandboxed`, with no `Capabilities`. Studio runs the Luau its MCP server and its
-Assistant execute in a sandboxed thread, which is how `flamework-test` reaches the host, and a
-sandboxed thread may only invoke a bindable that is Sandboxed itself and has no capability the
-thread lacks; one that is not Sandboxed counts as having them all. That decides only who may call
+The bindable is `Sandboxed`, with no `Capabilities`. Studio may run the Luau its MCP server and
+its Assistant execute in a sandboxed thread (it did from 2026-10-01), which is how `flamework-test`
+reaches the host; the host and the CLI work either way. A sandboxed thread may only invoke a
+bindable that is Sandboxed itself and has no capability the thread lacks; one that is not
+Sandboxed counts as having them all. That decides only who may call
 it. The callback runs with the capabilities of the script that set it, so the tests keep
 `require`, `_G` and everything else. A place built with 2.0.0-alpha.5 or earlier lacks it: the CLI
 marks the bindable itself before calling it, for as long as Studio allows that, and otherwise says
@@ -365,12 +372,15 @@ are written this way.
   "timeout": 30,               // seconds per test
   "entry": "src/server/main",  // cloud runs only: the ModuleScript exporting ignite()
   "failOnSkip": false,         // flamework-test: a skipped test fails the run (--fail-on-skip)
-  "keepAwake": false           // flamework-test: keep the display on during a Studio run (--keep-awake)
+  "keepAwake": false,          // flamework-test: keep the display on during a Studio run (--keep-awake)
+  "lockTimeout": 300,          // flamework-test: seconds to wait for the Studio lock (--lock-timeout)
+  "lockHold": 15               // flamework-test: minutes a window it left open may sit unused (--hold)
 }
 ```
 
-`failOnSkip` and `keepAwake` are read by `flamework-test` alone, never by the place. Its flags come
-first, then the `FAIL_ON_SKIP` and `KEEP_AWAKE` variables (`true` or `false`, `1` or `0`) from the
+`failOnSkip`, `keepAwake`, `lockTimeout` and `lockHold` are read by `flamework-test` alone, never by
+the place. Its flags come first, then the `FAIL_ON_SKIP` and `KEEP_AWAKE` variables (`true` or
+`false`, `1` or `0`), and `FLAMEWORK_TEST_LOCK_TIMEOUT` and `FLAMEWORK_TEST_LOCK_HOLD`, from the
 shell, `.env` or `.env.local`. `--fail-on-skip=false` and `--keep-awake=false` turn them off for one
 run.
 

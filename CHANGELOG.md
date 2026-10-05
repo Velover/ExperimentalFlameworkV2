@@ -5,6 +5,46 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ## Unreleased
 
+### Upgrade notes
+
+- **`studio close`, `play`, `stop`, `exec` and `run` act only on the window flamework-test opened
+  for this project.** Any other window is refused before anything is sent to it, naming the window
+  and `--any-window`: a window the user opened (the testing place's included), one opened by
+  flamework-test 2.0.0-alpha.6 or earlier, and another project's flamework-test window. A script
+  that drives such a window needs `--any-window`. Without `--studio` they act on this project's
+  window, and with none of this project's open they say so, where 2.0.0-alpha.6 took the window
+  with the testing place open, or the only one with a local place file open (`studio status` still
+  does).
+- **This project's own window is refused while another process's command of this project uses
+  it.** `studio close`, `play`, `stop`, `exec`, `run` and `call` refuse, naming that run, while a
+  `test`, `test --keep` or `studio open` run by another process (another agent, a second shell) is
+  running in the window or between two of its windows, where 2.0.0-alpha.6 acted on it mid-run.
+  Once that run has ended, the window it left open (`--keep`, `studio open`) is this project's to
+  use. `--any-window` acts on it anyway.
+- **`studio close` ends this project's Studio process without asking.** 2.0.0-alpha.6 asked the
+  window to close (`CloseMainWindow`) and ended it only when it did not close within ten seconds;
+  now the window flamework-test opened is ended at once, by its Studio process, as `test` ends its
+  own: asking only ever raised Studio's "Save changes?" prompt, and nothing a run makes is kept. A
+  change made by hand in that window is lost without a prompt. A window closed with `--any-window`
+  is still asked first.
+- **`studio open` takes only the window it launched.** A window of that place or file listed before
+  the launch is never taken for it, where the first one listed was before. A window that never
+  shows up on the MCP proxy is closed again (it was left open), and a second `studio open` while
+  this project's window is open refuses, naming it.
+- **Studio runs of two projects on one machine take turns.** `test` and `studio open` wait up to 300
+  seconds for the Studio lock while another project's window holds it, then fail naming it;
+  `--lock-timeout 0` fails at once instead. `test --keep` under several projects is refused: one
+  window is kept at a time.
+- **`testing.lockTimeout` and `testing.lockHold` need the next transformer.** Its schema has them;
+  2.0.0-alpha.7 refuses a `flamework.config.json` with them. The flags and the variables need
+  nothing.
+- **The window-name claims moved out of the temp folder,** to the per-user folder the Studio lock
+  lives in (`%LOCALAPPDATA%\flamework-test` on Windows). A claim 2.0.0-alpha.6 left in
+  `<temp>/flamework-test` is not looked at; only alpha.6 reads it, and takes it over once its process
+  has gone. Running alpha.6 and this version side by side is not supported: alpha.6 takes no lock.
+- **`studio call` of a tool whose arguments have no `studio_id` needs `--any-window`,** except
+  `list_roblox_studios`, which acts on no window: which window such a tool acts on cannot be told.
+
 ### core
 
 #### Added
@@ -16,6 +56,99 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   file for an area before it works there: `providers.md`, `components.md`, `networking.md`,
   `testing.md` and `plugins.md`, the last for a plugin or a package that other games install. A
   place gets one more empty Folder for them, `core.docs.ai`, as it does for the guide.
+
+### testing
+
+#### Added
+
+- **The Studio lock: one Studio window opened through `flamework-test` at a time on the machine,**
+  across projects and agents. `test` and `studio open` take it before they launch Studio. It is a
+  folder in a per-user folder every project and agent shares, never the temp folder, which an
+  agent's harness may set per agent: `%LOCALAPPDATA%\flamework-test` on Windows
+  (`~/Library/Application Support/flamework-test` on macOS, `$XDG_STATE_HOME/flamework-test`
+  elsewhere), or `FLAMEWORK_TEST_STATE_DIR`, which every project must agree on: set it in the shell,
+  never in a project's `.env` (Bun loads the `.env` of the folder a command runs in, which would
+  move the lock for the commands run from there). It holds who took it: the
+  CLI and Studio PIDs, the window's MCP id, the project, the place, the command, since when. A
+  command that finds it held says whose once and then every minute, and waits up to
+  `--lock-timeout` seconds (`FLAMEWORK_TEST_LOCK_TIMEOUT`, `testing.lockTimeout`; 300 by default),
+  then fails naming the holder and how it is freed; Ctrl+C during the wait exits 130 holding
+  nothing. A command holds it while it runs: `test` across all its projects, freeing it once its
+  last window has closed (Ctrl+C included); `test --keep` and `studio open` leave it to the window
+  they leave open, until `studio close`. A lock whose command has ended and whose Studio process has
+  exited, or whose PID is another process now (by name and start time), is taken over with one
+  line; Studio's own lock file beside the place, when it names that dead window, is removed, and the
+  owner's next command says its window has closed (closed by hand, or Studio exited) and who took
+  the lock over. A window a command cut short left open is closed by the next taker at once. Every
+  change to the lock is made under a short sub-lock of its own, so a renewal never lands on another
+  command's record; the sub-lock names its process and is broken only once that process has gone,
+  so a slow holder is waited for, never overwritten. What a killed process left set aside beside
+  the lock is removed by the next taker.
+- **A hold on a window left open.** It may sit unused for 15 minutes (`--hold <minutes>` on `studio
+  open` and `test --keep`, one at least; `FLAMEWORK_TEST_LOCK_HOLD`, `testing.lockHold`), renewed
+  by every command that uses it and all along a running `test`. Past it, the next command that
+  opens a window closes it, by the Studio process flamework-test launched and never another, says so
+  in one line, and takes the lock; the owner's next command on that window says it was closed, after
+  how long idle, and to open it again. Such a note is shown until the project takes the lock again.
+- **`studio open` prints the window's MCP id** on a line of its own, `studio_id=<id> pid=<pid>`, and
+  as JSON with `--json`; `test --keep` prints the same line.
+- **`studio list`**: the windows the MCP proxy reaches, with each one's id and place, whether
+  flamework-test opened it and for which project, and whether it holds the lock. Studio processes
+  the proxy reaches none of are named, with the setting that is probably off.
+- **`studio tools [name]`**: the MCP proxy's tools, read live (`tools/list`); with a name, its whole
+  description and input schema. `--json` for both.
+- **`studio call <tool> [json-args | --args-file <file>]`**: calls any of Studio's MCP tools, with
+  `studio_id` filled in from `--studio` (else this project's window); a `studio_id` in the
+  arguments names the window the same way and is refused the same way. A tool whose arguments have
+  no `studio_id` is sent without a window only when it is known to act on none
+  (`list_roblox_studios`, tried again while a new proxy joins the hub), else only with
+  `--any-window`. Text is printed; images
+  (`screen_capture`) are written to files (`--out <dir>`, by default `<temp>/flamework-test/captures`,
+  outside the project) and their paths printed; `--json` prints the raw answer. A tool's error
+  exits 1 with its message, without the Studio Assistant's own locations; a snippet that Studio's
+  sandbox refused (Studio may run MCP code sandboxed; it did from 2026-10-01) gets a line saying so,
+  through `studio exec` too. `studio call <tool> --help` is `studio tools <tool>`. So an agent
+  without Studio's MCP server in its own harness can use every tool.
+- **lune is given a timeout:** `lune --version` one minute, the patch five. A lune that hangs is
+  stopped, and the run fails saying so, rather than holding the run (and, between two projects, the
+  Studio lock) for as long as the CLI lives.
+- **`studio lock` and `studio unlock`.** `studio lock` names the holder (project, place, command,
+  since, last use, when its hold runs out), whether its command and its Studio process still run,
+  and whether the lock is live, expired or stale; `--check-window` also asks the MCP proxy whether
+  its window is on it, which is not done unasked, since starting a proxy joins the hub other clients
+  share. `studio unlock` frees a stale or
+  expired lock, closing an expired window; a live one is refused, naming the holder and when its
+  hold runs out, unless `--force`, which closes that window (flamework-test's only).
+
+#### Changed
+
+- **Commands that change a window act only on the one flamework-test opened for this project**
+  (`close`, `play`, `stop`, `exec`, `run`, `call`), compared by the project directory the lock
+  records: the nearest folder holding a `flamework.config.json`, else the nearest holding a
+  `package.json`, else where the command runs. The window is known by its MCP id and the place it
+  was launched on, so an id the proxy has since given another window is not taken for it.
+  `--any-window` acts on another. The refusal comes before any call to that window, names it and
+  the flag, and says to ask the user before using the flag on a window they have open. This
+  project's window is refused too while a command of this project run by another process (`test`,
+  `test --keep`, `studio open`) is running in it or between two of its windows. With none of this
+  project's open, they say so instead of taking another window to refuse. `status`, `list`,
+  `tools` and `lock` read, and work on any window.
+- **The MCP proxy is let go of in order:** its stdin is ended first, which ends an MCP stdio server,
+  and its process only after two seconds if it has not exited, so that it can leave the hub other
+  clients' proxies share.
+- **The messages for Studio's "MCP server" setting are written for an agent.** A window
+  flamework-test launched that never shows up on the proxy, and Studio running with no window on the
+  proxy, both say the setting is probably off, to ask the user to turn it on in Studio's Assistant
+  settings, and to retry. `StudioMCP.exe` not found says what the file is, where it was looked for,
+  and to install Studio or set `STUDIO_MCP_EXE`.
+
+### transformer
+
+#### Added
+
+- `testing.lockTimeout` and `testing.lockHold` in `flamework.config.json`'s schema: the Studio
+  lock's wait (seconds) and hold (minutes), read by `flamework-test` alone and left out of the
+  place's config, as `failOnSkip` and `keepAwake` are.
 
 ## 2026-10-02: core, networking and testing 2.0.0-alpha.6; transformer 2.0.0-alpha.7
 

@@ -388,7 +388,7 @@ describe("Ctrl+C during test", () => {
 		expect(run.exitedAtOnce).toBe(true);
 		expect(run.windows.map((window) => window.pid)).toEqual([4001]);
 		expect(run.err).toContain(
-			"Ctrl+C again: exiting without finishing the cleanup; may be left: the Studio window it opened (PID 4001, place.rbxl); the play session it started",
+			`Ctrl+C again: exiting without finishing the cleanup; may be left: the Studio lock, which the next command takes over once this run and its window have gone; the Studio window it opened (PID 4001, place.rbxl); the play session it started`,
 		);
 	});
 
@@ -414,7 +414,7 @@ describe("Ctrl+C during test", () => {
 		expect(run.exitedAtOnce).toBe(true);
 		expect(run.err.match(/stopping, and cleaning up/g)).toHaveLength(1);
 		expect(run.err).toContain(
-			"Ctrl+C again: exiting without finishing the cleanup; may be left: the Studio window it opened (PID 4001, place.rbxl); the play session it started",
+			`Ctrl+C again: exiting without finishing the cleanup; may be left: the Studio lock, which the next command takes over once this run and its window have gone; the Studio window it opened (PID 4001, place.rbxl); the play session it started`,
 		);
 	});
 
@@ -577,7 +577,7 @@ describe("Ctrl+C during test", () => {
 		});
 		expect(stale.exitedAtOnce).toBe(true);
 		expect(stale.err).toContain(
-			"Ctrl+C again: exiting without finishing the cleanup; may be left: the window left from an earlier build of place.rbxl, if there is one: its close was cut short, and it may still be open, showing its save prompt",
+			`Ctrl+C again: exiting without finishing the cleanup; may be left: the Studio lock, which the next command takes over once this run and its window have gone; the window left from an earlier build of place.rbxl, if there is one: its close was cut short, and it may still be open, showing its save prompt`,
 		);
 		expect(stale.err).not.toContain("MCP proxy");
 
@@ -598,7 +598,7 @@ describe("Ctrl+C during test", () => {
 		});
 		expect(loaded.exitedAtOnce).toBe(true);
 		expect(loaded.err).toMatch(
-			/may be left: the claim on the window name place\.rbxl \(a file in \S+flamework-test, which the next run takes over\); the Studio window it opened \(PID 4001, place\.rbxl\)$/m,
+			/may be left: the Studio lock, which the next command takes over once this run and its window have gone; the claim on the window name place\.rbxl \(a file in \S+flamework-test, which the next run takes over\); the Studio window it opened \(PID 4001, place\.rbxl\)$/m,
 		);
 
 		// Once its process has been ended, the window is gone: only Studio's lock beside the file may be left.
@@ -617,7 +617,7 @@ describe("Ctrl+C during test", () => {
 		});
 		expect(unlocked.exitedAtOnce).toBe(true);
 		expect(unlocked.err).toMatch(
-			/may be left: Studio's lock file \S+place\.rbxl\.lock, which names a process that has ended$/m,
+			/may be left: the Studio lock, which the next command takes over once this run and its window have gone; Studio's lock file \S+place\.rbxl\.lock, which names a process that has ended$/m,
 		);
 		expect(unlocked.err).not.toContain("the Studio window it opened");
 	});
@@ -702,7 +702,10 @@ describe("Ctrl+C during the studio commands", () => {
 			},
 		});
 		started.onLaunch();
-		const run = await runCli(["studio", "run", "--studio", "place.rbxl"], { studio: started.fake, ctrlC });
+		const run = await runCli(["studio", "run", "--studio", "place.rbxl", "--any-window"], {
+			studio: started.fake,
+			ctrlC,
+		});
 		expect(run.code).toBe(130);
 		expect(started.mode).toBe("Edit");
 		expect(run.proxies.open).toBe(0);
@@ -721,7 +724,10 @@ describe("Ctrl+C during the studio commands", () => {
 			},
 		});
 		running.onLaunch();
-		const left = await runCli(["studio", "run", "--studio", "place.rbxl"], { studio: running.fake, ctrlC: found });
+		const left = await runCli(["studio", "run", "--studio", "place.rbxl", "--any-window"], {
+			studio: running.fake,
+			ctrlC: found,
+		});
 		expect(left.code).toBe(130);
 		expect(running.mode).toBe("Play");
 		expect(left.studioCalls.filter((call) => call.name === "start_stop_play")).toHaveLength(0);
@@ -733,7 +739,10 @@ describe("Ctrl+C during the studio commands", () => {
 		const ctrlC = fakeCtrlC();
 		const slow = studio({ slowStart: { onStart: () => ctrlC.press(), refusals: 2 } });
 		slow.onLaunch();
-		const run = await runCli(["studio", "run", "--studio", "place.rbxl"], { studio: slow.fake, ctrlC });
+		const run = await runCli(["studio", "run", "--studio", "place.rbxl", "--any-window"], {
+			studio: slow.fake,
+			ctrlC,
+		});
 		expect(run.code).toBe(130);
 		expect(slow.mode).toBe("Edit");
 		expect(run.err).not.toContain("error:");
@@ -745,7 +754,7 @@ describe("Ctrl+C during the studio commands", () => {
 		const stuck = fakeCtrlC();
 		const stuckStudio = studio({ slowStart: { onStart: () => stuck.press(), refusals: Infinity } });
 		stuckStudio.onLaunch();
-		const left = await runCli(["studio", "run", "--studio", "place.rbxl"], {
+		const left = await runCli(["studio", "run", "--studio", "place.rbxl", "--any-window"], {
 			studio: stuckStudio.fake,
 			ctrlC: stuck,
 		});
@@ -758,7 +767,7 @@ describe("Ctrl+C during the studio commands", () => {
 
 	test("studio exec stops waiting for its Luau, and says it runs on in Studio", async () => {
 		const ctrlC = fakeCtrlC();
-		const run = await runCli(["studio", "exec", "--code", "while true do task.wait() end"], {
+		const run = await runCli(["studio", "exec", "--code", "while true do task.wait() end", "--any-window"], {
 			studio: {
 				studios: [TESTING_STUDIO],
 				answers: {
@@ -779,10 +788,13 @@ describe("Ctrl+C during the studio commands", () => {
 
 	test("studio open stops waiting and leaves the window it was asked to open", async () => {
 		const ctrlC = fakeCtrlC();
+		let listings = 0;
 		const run = await runCli(["studio", "open"], {
 			studio: {
+				// The first listing is the one before the launch; Ctrl+C comes while the window loads.
 				studios: () => {
-					ctrlC.press();
+					listings += 1;
+					if (listings === 2) ctrlC.press();
 					return [OTHER_STUDIO];
 				},
 			},

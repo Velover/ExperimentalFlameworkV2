@@ -834,7 +834,7 @@ export = suite("testing", [
 				Workspace.FindFirstChild("FlameworkTestsServer"),
 				"the remote",
 			) as RemoteFunction;
-			// Studio runs its MCP server's Luau sandboxed, which may only invoke a Sandboxed bindable.
+			// Studio may run its MCP server's Luau sandboxed, which may only invoke a Sandboxed bindable.
 			expectTrue(bindable.Sandboxed, "the bindable is Sandboxed, for Studio's sandboxed MCP code");
 
 			const viaBindable = bindable.Invoke("hosted") as RunResult;

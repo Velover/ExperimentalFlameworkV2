@@ -219,6 +219,18 @@
 					"type": "boolean",
 					"default": false,
 					"description": "flamework-test only: a Studio run (test, studio run) asks Windows to keep the display on while it lasts; RenderStepped stops while the display sleeps, which fails onRender tests in unattended runs. --keep-awake and KEEP_AWAKE come first. Not for cloud runs. Never compiled into the place. Default: false."
+				},
+				"lockTimeout": {
+					"type": "number",
+					"minimum": 0,
+					"default": 300,
+					"description": "flamework-test only: seconds a command that opens a Studio window (test, studio open) waits for the Studio lock while another project's flamework-test run or window holds it; 0 does not wait. flamework-test keeps one Studio window open at a time on the machine. --lock-timeout and FLAMEWORK_TEST_LOCK_TIMEOUT come first. Never compiled into the place. Default: 300."
+				},
+				"lockHold": {
+					"type": "number",
+					"minimum": 1,
+					"default": 15,
+					"description": "flamework-test only: minutes a Studio window flamework-test opened may sit unused before another project's command may close it and take the Studio lock; one at least. Every flamework-test command that uses the window renews it. --hold (studio open, test --keep) and FLAMEWORK_TEST_LOCK_HOLD come first. Never compiled into the place. Default: 15."
 				}
 			}
 		},

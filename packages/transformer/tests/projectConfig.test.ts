@@ -985,7 +985,11 @@ describe("runtime sections", () => {
 	});
 
 	test("leave out the testing keys only flamework-test reads", () => {
-		expect(getRuntimeConfig({ testing: { timeout: 5, keepAwake: true, failOnSkip: true } })).toEqual({
+		expect(
+			getRuntimeConfig({
+				testing: { timeout: 5, keepAwake: true, failOnSkip: true, lockTimeout: 60, lockHold: 30 },
+			}),
+		).toEqual({
 			testing: { timeout: 5 },
 		});
 	});

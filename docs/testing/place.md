@@ -45,9 +45,9 @@ the package was installed. The place has to be built with the `testing` scope ac
 every build reads), or the test providers are not registered and `Workspace.FlameworkTests` never
 appears.
 
-Studio runs the Luau its MCP server executes in a sandboxed thread (since 2026-10-01), and a
-sandboxed thread may only invoke a bindable that is Sandboxed itself and has no capability the
-thread lacks. So the host makes `Workspace.FlameworkTests` Sandboxed, with no capabilities. That
+Studio may run the Luau its MCP server executes in a sandboxed thread (it did from 2026-10-01; on
+2026-10-05 it did not), and the host and the CLI work either way. A sandboxed thread may only
+invoke a bindable that is Sandboxed itself and has no capability the thread lacks. So the host makes `Workspace.FlameworkTests` Sandboxed, with no capabilities. That
 decides only who may call it: the callback runs with the capabilities of the script that set it,
 so the tests keep `require`, `_G` and everything else. A place built with 2.0.0-alpha.5 or earlier
 has a bindable that is not Sandboxed. The CLI marks it before the invoke for as long as Studio
@@ -73,6 +73,14 @@ on the proxy before the run looks; one that is still opening (a double-click, `s
 own the entry the run is waiting for, so the run waits for it, and refuses, closing its own window,
 when it cannot tell the two apart.
 
+One Studio window opened through flamework-test is open at a time on the machine, across projects
+and agents: `test` takes the Studio lock before it launches Studio, holds it across all its
+projects, and waits (300 seconds, `--lock-timeout`) while another project's run or window holds it,
+saying whose. A window left open (`--keep`, `studio open`) holds the lock until it closes, or until
+it has sat unused past its hold (15 minutes, `--hold`), when the next command closes it. The lock
+lives in `%LOCALAPPDATA%\flamework-test` on Windows, shared by every project and agent. See the
+package's [README](../../packages/testing/README.md#the-studio-lock).
+
 Both realms share the one play session, so the client's sections run against a server whose own
 tests have already run. A RemoteEvent message fired at a client before it connected
 `OnClientEvent` is queued by the engine and delivered on the first connection, so a server test
@@ -82,9 +90,13 @@ client's tests. Predict with a stand-in and skip it in the answering handler; se
 
 The pieces `test` is made of are commands of their own, for driving a window by hand: `studio
 open [file]`, `studio close`, `studio status`, `studio play`, `studio stop`, `studio exec --code`
-and `studio run [--realm server|client|both]`, which runs the tests in whatever window has the
-testing place open without opening or closing anything. See the package's
-[README](../../packages/testing/README.md) for each.
+and `studio run [--realm server|client|both]`, which runs the tests in the window without opening
+or closing anything. `studio call <tool>` calls any of Studio's MCP tools (`studio tools` lists
+them), `studio list` lists the windows, and `studio lock` shows who holds the lock. The commands
+that change a window act only on the one flamework-test opened for this project, unless
+`--any-window`, and not while another process's command of this project is running in it (a
+`test`, `test --keep`, `studio open`). See the package's [README](../../packages/testing/README.md)
+for each.
 
 ### Skipped tests
 
@@ -149,24 +161,25 @@ renders and an `onRender` that does not fire still fail it.
 
 Ctrl+C stops a run where it is and cleans up what the run started, through the same steps a run
 that finishes takes: the play session it started is stopped, the window it opened is closed by the
-process it started (never a window it did not open), its window-name claim is released, the patch's
-temp folder is removed, lune and the MCP proxy are stopped, and the `--keep-awake` request is let
-go. Nothing new starts afterwards: the other realm and the other projects are not run. The CLI then
-exits 130 (but see [the exit code](#the-exit-code-and-the-prompt) for what a shell sees), ending on
-one line that says what it cleaned up and what it left:
+process it started (never a window it did not open), its window-name claim is released and the
+Studio lock freed, the patch's temp folder is removed, lune and the MCP proxy are stopped, and the
+`--keep-awake` request is let go. Nothing new starts afterwards: the other realm and the other
+projects are not run. The CLI then exits 130 (but see [the exit code](#the-exit-code-and-the-prompt)
+for what a shell sees), ending on one line that says what it cleaned up and what it left:
 
 ```
 Ctrl+C: stopping, and cleaning up what this run started (Ctrl+C again exits at once)
 play session stopped (--keep leaves it running)
 closed place.rbxl (PID 38332)
-interrupted by Ctrl+C: cleaned up: stopped the play session it started; closed the Studio window it opened (PID 38332, place.rbxl); closed the MCP proxy (StudioMCP.exe, PID 35580)
+interrupted by Ctrl+C: cleaned up: stopped the play session it started; closed the Studio window it opened (PID 38332, place.rbxl); closed the MCP proxy (StudioMCP.exe, PID 35580); released the Studio lock
 ```
 
 A Ctrl+C while Studio starts the play session (which takes it about five seconds) stops waiting for
 the start at once, but Studio refuses to stop a session it is still starting (`Start play hasn't
 finished yet`), so the stop is tried again, half a second apart, until the start has finished:
 `the play session is still starting; it is stopped once it has`. After 30 seconds of refusals (40
-at most, when the last stop is slow to answer) the stop gives up and says why; `test` then closes its window all the same, and the session ends with it.
+at most, when the last stop is slow to answer) the stop gives up and says why; `test` then closes
+its window all the same, and the session ends with it.
 
 `--keep` keeps the window and the session then too, and the line names them as left. A Ctrl+C
 during the cleanup a finished run does anyway (stopping the session, closing the window) lets it
@@ -466,7 +479,7 @@ without running it, `place.deferred.rbxl`, to open in Studio and look at.
 | `RobloxStudioBeta.exe was not found` | Studio is not installed here; set `ROBLOX_STUDIO_EXE`, or run with `--cloud`. |
 | `... never showed up on the MCP proxy` | The window opened but "MCP server" is disabled in Studio's Assistant settings. |
 | `the server's run failed: Workspace.FlameworkTests did not appear` | The build was made without the `testing` scope active (`FLAMEWORK_SCOPES=testing` for that build), so the plugin stayed inert. The client's run follows, and says the same. |
-| `the server's run failed: The current thread cannot invoke 'FlameworkTests' since 'FlameworkTests' has additional values for the Capabilities property: ...` | Studio runs MCP code sandboxed, and the place was built with `@flamework-experimental/testing` 2.0.0-alpha.5 or earlier, whose host does not make its bindable Sandboxed (see [In Studio](#in-studio-on-this-machine)). A later CLI marks it before the invoke while Studio allows that; this error means it could not, or the CLI is that old too. Update the package and rebuild the place. A later CLI says so under the error. |
+| `the server's run failed: The current thread cannot invoke 'FlameworkTests' since 'FlameworkTests' has additional values for the Capabilities property: ...` | Studio ran MCP code sandboxed, as it may, and the place was built with `@flamework-experimental/testing` 2.0.0-alpha.5 or earlier, whose host does not make its bindable Sandboxed (see [In Studio](#in-studio-on-this-machine)). A later CLI marks it before the invoke while Studio allows that; this error means it could not, or the CLI is that old too. Update the package and rebuild the place. A later CLI says so under the error. |
 | `MISS matched nothing in any realm: ...` | A `--sections` entry named no section or test in any realm that ran. |
 | `the client's run did not finish within 120s (--timeout)` | A test is stuck past `testing.timeout`, or the host never started. The next line names the last test that reported in Studio's output (its `PASS`, `FAIL` or `SKIP` line); the one after it in that section is the hanging one. |
 | `- onRender fires on the client, where the server sees nothing (skipped): RenderStepped doesn't fire: the display may be asleep` | The PC's display was off during the run, so the engine rendered nothing. Run with `--keep-awake` (see [unattended runs](#unattended-runs-keep-the-display-on)), or keep the screen on. |

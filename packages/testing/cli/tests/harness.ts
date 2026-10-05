@@ -3,8 +3,17 @@ import { basename, join } from "node:path";
 
 import { main, type CliDeps } from "../src/cli.ts";
 import type { CloudSettings } from "../src/config.ts";
+import type { ClosedWindowRecord, LockOwner, LockRecord, LockStore, ProcessInfo } from "../src/lock.ts";
 import type { FetchLike } from "../src/openCloud.ts";
-import type { ClosedWindow, CloseTarget, StudioClient, StudioEntry } from "../src/studio.ts";
+import {
+	textOf,
+	type ClosedWindow,
+	type CloseTarget,
+	type StudioClient,
+	type StudioEntry,
+	type ToolInfo,
+	type ToolResult,
+} from "../src/studio.ts";
 
 export const SECRET = "secret-key-that-must-never-be-printed";
 export const UNIVERSE = "10765968722";
@@ -24,8 +33,103 @@ export interface FakeWindow {
 	pid: number;
 	/** A local file's window is titled with the file's full path: `<file> - Roblox Studio`. */
 	title: string;
-	/** The place file on the command line it was started with, if any; it may have another open since. */
+	/**
+	 * The place file on the command line it was started with, if any (or the cloud place's id, for a
+	 * window opened on the testing place); it may have another open since.
+	 */
 	startedWith?: string;
+	/** When the process started, as the fake machine's clock read; unknown when not given. */
+	startedAt?: number;
+	/** The process's name; `RobloxStudioBeta` when not given. */
+	processName?: string;
+}
+
+/**
+ * The Studio lock in memory, as the real one keeps it in a folder: `owner` is the record, and
+ * `unreadable` a folder whose record cannot be read (being written, or left half-made).
+ */
+export interface FakeLockStore extends LockStore {
+	owner: LockOwner | undefined;
+	unreadable: { since: number } | undefined;
+	closed: ClosedWindowRecord[];
+}
+
+export function fakeLockStore(now: () => number = () => Date.now()): FakeLockStore {
+	const store: FakeLockStore = {
+		where: "C:/Users/me/AppData/Local/flamework-test/studio-lock",
+		owner: undefined,
+		unreadable: undefined,
+		closed: [],
+		take: async (owner) => {
+			if (store.owner !== undefined || store.unreadable !== undefined) return false;
+			store.owner = structuredClone(owner);
+			return true;
+		},
+		read: async (): Promise<LockRecord> => {
+			if (store.owner !== undefined) return { kind: "held", owner: structuredClone(store.owner) };
+			if (store.unreadable !== undefined) return { kind: "unreadable", ageMs: now() - store.unreadable.since };
+			return { kind: "free" };
+		},
+		update: async (token, patch) => {
+			if (store.owner === undefined || store.owner.token !== token) return false;
+			const record = store.owner as unknown as Record<string, unknown>;
+			for (const [key, value] of Object.entries(patch)) {
+				if (value === undefined) delete record[key];
+				else record[key] = value;
+			}
+			return true;
+		},
+		free: async (token) => {
+			if (store.owner === undefined) {
+				if (store.unreadable === undefined || token !== undefined) return false;
+				store.unreadable = undefined;
+				return true;
+			}
+			if (store.owner.token !== token) return false;
+			store.owner = undefined;
+			return true;
+		},
+		recordClosed: async (entry) => {
+			store.closed.unshift(structuredClone(entry));
+		},
+		closedWindows: async () => structuredClone(store.closed),
+		forgetClosed: async (tokens) => {
+			store.closed = store.closed.filter((entry) => !tokens.includes(entry.owner.token));
+		},
+	};
+	return store;
+}
+
+/**
+ * One machine several runs share: its Studio windows, the Studio lock, a clock that only sleeping
+ * (and `advance`) moves, and the flamework-test processes running on it. Each run is a process of
+ * its own (PIDs from 9001), running while it runs; Studio windows get PIDs from 4001.
+ */
+export interface FakeMachine {
+	windows: FakeWindow[];
+	lock: FakeLockStore;
+	time: { now: number };
+	nextStudioPid: number;
+	nextCliPid: number;
+	/** The flamework-test processes running now, with when each started. */
+	clis: Map<number, number>;
+	/** Lets time pass between runs. */
+	advance: (ms: number) => void;
+}
+
+export function fakeMachine(options: { windows?: FakeWindow[] } = {}): FakeMachine {
+	const time = { now: new Date("2026-09-11T12:00:00.000Z").getTime() };
+	return {
+		windows: options.windows ?? [],
+		lock: fakeLockStore(() => time.now),
+		time,
+		nextStudioPid: 4001,
+		nextCliPid: 9001,
+		clis: new Map(),
+		advance: (ms) => {
+			time.now += ms;
+		},
+	};
 }
 
 /**
@@ -75,6 +179,8 @@ export interface Harness {
 	written: Record<string, string>;
 	/** Every child process the CLI ran, with inherited output. */
 	spawned: string[][];
+	/** The timeout each of those was given, in the same order. */
+	spawnTimeouts: Array<number | undefined>;
 	/** Every program the CLI started and left running. */
 	launched: string[][];
 	/** Every MCP tool call, in order. */
@@ -87,6 +193,12 @@ export interface Harness {
 	closedWindows: string[];
 	/** The Studio windows still open when the run returned. */
 	windows: FakeWindow[];
+	/** The machine the run ran on: its lock, its windows, its clock. */
+	machine: FakeMachine;
+	/** The PID this run had as a flamework-test process. */
+	cliPid: number;
+	/** The files of bytes the run wrote (`studio call`'s images), by path with forward slashes. */
+	binaries: Record<string, Uint8Array>;
 	/** Every window-name claim and release, with how many programs had been launched at that point. */
 	claims: string[];
 	/** The folders the run made for a patch's files, in order, and the ones it removed again. */
@@ -111,10 +223,56 @@ export interface FakeStudio {
 	/**
 	 * Answers by tool name; a function sees the arguments and may change state between calls. It also
 	 * sees the timeout the call was given, and may let fake time pass (`elapse`): a call that never
-	 * answers elapses its timeout and throws, as the real proxy does.
+	 * answers elapses its timeout and throws, as the real proxy does. A string is the answer's text;
+	 * a whole answer (images, `isError`) can be given too.
 	 */
-	answers?: Record<string, string | ((args: Record<string, unknown>, call: FakeCall) => string | Promise<string>)>;
+	answers?: Record<
+		string,
+		| string
+		| ToolResult
+		| ((args: Record<string, unknown>, call: FakeCall) => string | ToolResult | Promise<string | ToolResult>)
+	>;
+	/** What `tools/list` answers; by default {@link FAKE_TOOLS}. */
+	tools?: ToolInfo[];
 }
+
+const STUDIO_ID = {
+	type: "string",
+	description: "Selects Roblox Studio instance, use the list_roblox_studios tool to get available instances",
+};
+
+/** A few of the tools Studio's MCP proxy offers, shaped as it describes them. */
+export const FAKE_TOOLS: ToolInfo[] = [
+	{
+		name: "list_roblox_studios",
+		description:
+			"Lists the connected Roblox Studio instances so a call can be directed at one.\nEach result has an id.",
+		inputSchema: { type: "object", properties: {} },
+	},
+	{
+		name: "execute_luau",
+		description: "Executes Luau code in Roblox Studio.",
+		inputSchema: {
+			type: "object",
+			properties: { code: { type: "string" }, datamodel_type: { type: "string" }, studio_id: STUDIO_ID },
+			required: ["code", "datamodel_type", "studio_id"],
+		},
+	},
+	{
+		name: "get_studio_state",
+		description: "Get the state of the studio.",
+		inputSchema: { type: "object", properties: { studio_id: STUDIO_ID }, required: ["studio_id"] },
+	},
+	{
+		name: "screen_capture",
+		description: "Capture current edit-time screen, return the image data.",
+		inputSchema: {
+			type: "object",
+			properties: { capture_id: { type: "string" }, studio_id: STUDIO_ID },
+			required: ["capture_id", "studio_id"],
+		},
+	},
+];
 
 /** What a fake tool answer sees of the call. */
 export interface FakeCall {
@@ -138,8 +296,11 @@ export async function runCli(
 		env?: Record<string, string | undefined>;
 		/** What the config reader answers; by default nothing, so no real .env is read. */
 		settings?: Partial<CloudSettings>;
-		/** Exit code of every spawned process; a function may decide per command, and answer later. */
-		spawnCode?: number | ((command: string[]) => number | Promise<number>);
+		/**
+		 * Exit code of every spawned process; a function may decide per command (and its timeout), answer
+		 * later, or throw as the real spawn does (`ChildTimedOut` past the timeout).
+		 */
+		spawnCode?: number | ((command: string[], timeoutMs?: number) => number | Promise<number>);
 		studio?: FakeStudio;
 		/** Where Roblox Studio is; undefined means not installed. */
 		studioExe?: string | undefined;
@@ -163,6 +324,17 @@ export async function runCli(
 		onFetch?: (url: string) => Promise<Response> | undefined;
 		/** The platform the run sees; by default `win32`, whatever this machine is. */
 		platform?: string;
+		/** The machine, shared with other runs; by default a fresh one, with `windows` open on it. */
+		machine?: FakeMachine;
+		/** Where the run runs, which is its project; by default the fixture's folder. */
+		cwd?: string;
+		/** The project a run in a folder runs for; by default that folder itself. */
+		projectRoot?: (cwd: string) => string;
+		/**
+		 * `false`: no fake proxy, so the CLI looks for the real StudioMCP.exe where `env` points
+		 * (LOCALAPPDATA, STUDIO_MCP_EXE). Only for a run that must not find one.
+		 */
+		proxy?: false;
 		/**
 		 * Answers SetThreadExecutionState in place of the fake one, which returns the state before;
 		 * it may throw (the function could not be reached) or return 0 (Windows refused).
@@ -175,6 +347,7 @@ export async function runCli(
 	const calls: Call[] = [];
 	const written: Record<string, string> = {};
 	const spawned: string[][] = [];
+	const spawnTimeouts: Array<number | undefined> = [];
 	const launched: string[][] = [];
 	const studioCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
 	const studioCallTimeouts: Array<number | undefined> = [];
@@ -192,9 +365,17 @@ export async function runCli(
 	let exitedAtOnce = false;
 	let exitAtOnce: (code: number) => void = () => {};
 	const exited = new Promise<number>((resolve) => (exitAtOnce = resolve));
+	if (options.machine !== undefined && options.windows !== undefined) {
+		throw new Error("give the windows to the machine, not to the run");
+	}
 	// The caller's own array, so a test can open or retitle a window mid-run.
-	const windows: FakeWindow[] = options.windows ?? [];
-	let clock = new Date("2026-09-11T12:00:00.000Z").getTime();
+	const machine = options.machine ?? fakeMachine({ windows: options.windows ?? [] });
+	const windows: FakeWindow[] = machine.windows;
+	const time = machine.time;
+	const cliPid = machine.nextCliPid;
+	machine.nextCliPid += 1;
+	machine.clis.set(cliPid, time.now);
+	const binaries: Record<string, Uint8Array> = {};
 	const queue = [...(options.responses ?? [])];
 	const files = options.files ?? {};
 
@@ -220,7 +401,7 @@ export async function runCli(
 		fetch: fetchImpl,
 		// A clock that only sleeping advances, so a wait for a deadline ends without wall time passing.
 		sleep: async (ms) => {
-			clock += ms;
+			time.now += ms;
 		},
 		readFile: async () => new Uint8Array([0x89, 0x01]).buffer,
 		readTextFile: async (path) => {
@@ -232,21 +413,24 @@ export async function runCli(
 			written[path.replaceAll("\\", "/")] = text;
 		},
 		exists: async (path) => find(path) !== undefined,
-		spawn: async (command) => {
+		spawn: async (command, _cwd, timeoutMs) => {
 			spawned.push(command);
+			spawnTimeouts.push(timeoutMs);
 			const code = options.spawnCode ?? 0;
-			return typeof code === "function" ? await code(command) : code;
+			return typeof code === "function" ? await code(command, timeoutMs) : code;
 		},
 		launch: async (command) => {
 			launched.push(command);
 			options.onLaunch?.(command);
 			// A file is launched as [exe, file]; a cloud place with -task EditPlace and its ids.
-			const pid = 4000 + launched.length;
+			const pid = machine.nextStudioPid;
+			machine.nextStudioPid += 1;
 			const file = command.length === 2 ? command[1]! : undefined;
+			const placeId = command[command.indexOf("-placeId") + 1];
 			windows.push(
 				file !== undefined
-					? { pid, title: `${file} - Roblox Studio`, startedWith: file }
-					: { pid, title: "TestingExperience - Roblox Studio" },
+					? { pid, title: `${file} - Roblox Studio`, startedWith: file, startedAt: time.now }
+					: { pid, title: "TestingExperience - Roblox Studio", startedWith: placeId, startedAt: time.now },
 			);
 			return pid;
 		},
@@ -261,20 +445,34 @@ export async function runCli(
 			return () => claims.push(`release ${name} (launched ${launched.length}, closed ${closedWindows.length})`);
 		},
 		connectStudio: async (): Promise<StudioClient> => {
+			if (options.proxy === false) throw new Error("replaced below");
 			const fake = options.studio ?? {};
 			proxies.connected += 1;
 			proxies.open += 1;
+			const callRaw = async (
+				name: string,
+				args: Record<string, unknown> = {},
+				timeoutMs?: number,
+			): Promise<ToolResult> => {
+				studioCalls.push({ name, args });
+				studioCallTimeouts.push(timeoutMs);
+				const answer = fake.answers?.[name];
+				if (answer === undefined) throw new Error(`no canned answer for ${name}`);
+				const elapse = (ms: number) => {
+					time.now += ms;
+				};
+				const value = typeof answer === "function" ? await answer(args, { timeoutMs, elapse }) : answer;
+				return typeof value === "string" ? { content: [{ type: "text", text: value }] } : value;
+			};
 			return {
 				call: async (name, args = {}, timeoutMs) => {
-					studioCalls.push({ name, args });
-					studioCallTimeouts.push(timeoutMs);
-					const answer = fake.answers?.[name];
-					if (answer === undefined) throw new Error(`no canned answer for ${name}`);
-					const elapse = (ms: number) => {
-						clock += ms;
-					};
-					return typeof answer === "function" ? await answer(args, { timeoutMs, elapse }) : answer;
+					const result = await callRaw(name, args, timeoutMs);
+					const text = textOf(result);
+					if (result.isError) throw new Error(`${name}: ${text}`);
+					return text;
 				},
+				callRaw,
+				tools: async () => fake.tools ?? FAKE_TOOLS,
 				studios: async () => (typeof fake.studios === "function" ? fake.studios() : (fake.studios ?? [])),
 				close: () => {
 					proxies.open -= 1;
@@ -285,7 +483,7 @@ export async function runCli(
 		log: (message) => out.push(message),
 		error: (message) => err.push(message),
 		env: options.env ?? ENV,
-		cwd: FIXTURE_CWD,
+		cwd: options.cwd ?? FIXTURE_CWD,
 		// A folder of its own per patch, as mkdtemp makes one; nothing is written to it for real.
 		makeTempDir: async () => {
 			const dir = `${tmpdir().replaceAll("\\", "/")}/flamework-test-fake${madeDirs.length + 1}`;
@@ -307,7 +505,7 @@ export async function runCli(
 				if (normalized.endsWith(key)) delete files[key];
 			}
 		},
-		now: () => new Date(clock),
+		now: () => new Date(time.now),
 		loadSettings: () => ({ env: {}, ...options.settings }),
 		// Never the real process's signals: a run hears only the Ctrl+C a test presses.
 		onInterrupt: (handler) => (options.ctrlC ? options.ctrlC.listen(handler) : () => {}),
@@ -325,7 +523,31 @@ export async function runCli(
 			executionState = state;
 			return before;
 		},
+		studioLock: machine.lock,
+		projectRoot: options.projectRoot ?? ((cwd) => cwd),
+		// What runs on the fake machine: its Studio windows, and the flamework-test runs going on.
+		probeProcesses: async (pids) => {
+			const found = new Map<number, ProcessInfo>();
+			for (const pid of pids) {
+				const window = windows.find((entry) => entry.pid === pid);
+				if (window !== undefined) {
+					found.set(pid, {
+						name: window.processName ?? "RobloxStudioBeta",
+						...(window.startedAt !== undefined ? { startedAt: window.startedAt } : {}),
+					});
+				} else if (machine.clis.has(pid)) {
+					found.set(pid, { name: "bun", startedAt: machine.clis.get(pid)! });
+				}
+			}
+			return found;
+		},
+		self: () => ({ pid: cliPid, name: "bun", startedAt: machine.clis.get(cliPid) ?? time.now }),
+		writeBinaryFile: async (path, data) => {
+			binaries[path.replaceAll("\\", "/")] = data;
+		},
 	};
+
+	if (options.proxy === false) delete deps.connectStudio;
 
 	/** What the real close script does, over the fake machine's windows. */
 	function closeFakeWindows(target: CloseTarget): ClosedWindow[] {
@@ -377,7 +599,13 @@ export async function runCli(
 	}
 
 	// A second Ctrl+C ends the process at once, whatever the run is still waiting for.
-	const code = await Promise.race([main(argv, deps), exited]);
+	let code: number;
+	try {
+		code = await Promise.race([main(argv, deps), exited]);
+	} finally {
+		// The run's process has ended.
+		machine.clis.delete(cliPid);
+	}
 	return {
 		code,
 		out: out.join("\n"),
@@ -386,12 +614,16 @@ export async function runCli(
 		calls,
 		written,
 		spawned,
+		spawnTimeouts,
 		launched,
 		studioCalls,
 		studioCallTimeouts,
 		closeTargets,
 		closedWindows,
 		windows,
+		machine,
+		cliPid,
+		binaries,
 		claims,
 		madeDirs,
 		removedDirs,

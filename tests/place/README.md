@@ -28,9 +28,12 @@ bun run test          # rbxtsc, rojo build, make original.rbxl if missing, flame
 bun run test:cloud    # the same build, published to the testing place and run there
 bun run original      # remake original.rbxl, the stand-in for a game's own place file
 bun run studio        # open the testing place from the cloud in Roblox Studio
-bun run test:studio   # run the server's sections in whatever window has it open; add --realm client
+bun run test:studio   # run the server's sections in the window bun run studio opened; add --realm client
 bun run build         # rbxtsc only; bun run watch to keep compiling
 ```
+
+`test:studio` acts only on the window `bun run studio` opened from here: a window opened by hand is
+refused (`bun run test:studio -- --any-window` once the user has said it may be used).
 
 `bun run test` opens each build in Roblox Studio, runs the server's sections and then the
 client's in one play session, and closes the window again. It needs Roblox Studio with "MCP

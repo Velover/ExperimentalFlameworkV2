@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { ChildTimedOut, LUNE_VERSION_TIMEOUT_MS, PATCH_TIMEOUT_MS, runInheriting } from "../src/cli.ts";
 import { defaultPatchedPath, patchedPathFor, planPatch, projectNameOf } from "../src/patch.ts";
 import { FIXTURE_CWD, json, runCli } from "./harness.ts";
 
@@ -198,6 +199,48 @@ describe("patch", () => {
 		expect(run.err).toContain("nothing was run or uploaded");
 		expect(run.calls).toHaveLength(0);
 	});
+
+	test("lune is given a timeout, checking it and patching alike, and one that hangs is stopped, saying so", async () => {
+		const files = { "place.rbxl": "built", "original.rbxl": "orig", "default.project.json": PROJECT };
+		const run = await runCli(["patch", "place.rbxl", "--original", "original.rbxl"], { files });
+		expect(run.code).toBe(0);
+		expect(run.spawnTimeouts).toEqual([LUNE_VERSION_TIMEOUT_MS, PATCH_TIMEOUT_MS]);
+
+		// The real spawn rejects so past its timeout, having ended the child.
+		const hangs = (part: string) => (command: string[], timeoutMs?: number) => {
+			if (command[1] === part) throw new ChildTimedOut(command, timeoutMs!);
+			return 0;
+		};
+		const version = await runCli(["test", "place.rbxl", "--original", "original.rbxl"], {
+			files,
+			spawnCode: hangs("--version"),
+		});
+		expect(version.code).toBe(1);
+		expect(version.err).toContain("error: `lune --version` did not answer within 1 min, and was stopped");
+		expect(version.err).toContain("nothing was run or uploaded");
+		expect(version.launched).toHaveLength(0);
+		expect(version.machine.lock.owner).toBeUndefined();
+
+		const patching = await runCli(["test", "place.rbxl", "--original", "original.rbxl"], {
+			files,
+			spawnCode: hangs("run"),
+		});
+		expect(patching.code).toBe(1);
+		expect(patching.err).toContain("error: the patch did not finish within 5 min, and lune was stopped");
+		expect(patching.launched).toHaveLength(0);
+		// Its folder is removed all the same.
+		expect(patching.removedDirs).toEqual(patching.madeDirs);
+	});
+
+	test("a child process that runs past its timeout is ended, for real", async () => {
+		const started = Date.now();
+		const hung = runInheriting(["bun", "-e", "setTimeout(() => {}, 60000)"], import.meta.dir, {
+			timeoutMs: 500,
+		});
+		await expect(hung).rejects.toBeInstanceOf(ChildTimedOut);
+		expect(Date.now() - started).toBeLessThan(15_000);
+		expect(await runInheriting(["bun", "-e", "process.exit(3)"], import.meta.dir, { timeoutMs: 30_000 })).toBe(3);
+	}, 30_000);
 
 	test("a missing original place says how to get one", async () => {
 		const run = await runCli(["patch", "place.rbxl", "--original", "nowhere.rbxl"], {

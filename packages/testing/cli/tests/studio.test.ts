@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -7,6 +7,7 @@ import { parseArgs } from "../src/cli.ts";
 import {
 	claimWindowName,
 	closeWindowScript,
+	connectStudio,
 	findStudio,
 	findStudioForPlace,
 	isLocalFileWindow,
@@ -15,10 +16,12 @@ import {
 	parseClosedWindows,
 	luauErrorMessage,
 	placeNameOf,
+	PROXY_CLOSE_GRACE_MS,
 	renderStudioRun,
 	runCloseScript,
 	SANDBOX_HINT,
 	studioOpenArguments,
+	toolErrorMessage,
 	unquoteLuauResult,
 } from "../src/studio.ts";
 import { OTHER_STUDIO, PLACE, TESTING_STUDIO, UNIVERSE, resultJson, runCli } from "./harness.ts";
@@ -79,7 +82,7 @@ describe("studio helpers", () => {
 
 	test("the run snippet marks the host Sandboxed before invoking it, and uses nothing a sandboxed thread lacks", () => {
 		const lines = renderStudioRun("nil", "{}").split("\n");
-		// Studio runs the snippet sandboxed; a host from 2.0.0-alpha.5 or earlier does not mark its
+		// Studio may run the snippet sandboxed; a host from 2.0.0-alpha.5 or earlier does not mark its
 		// bindable itself. In a pcall: once Studio refuses that too, the invoke says why.
 		const mark = lines.indexOf("pcall(function() host.Sandboxed = true end)");
 		const invoke = lines.findIndex((line) => line.includes("host:Invoke(nil, {})"));
@@ -132,6 +135,84 @@ describe("studio helpers", () => {
 			"list_roblox_studios timed out after 15000ms",
 		);
 	});
+
+	test("a tool's error loses the tool's name a JSON-RPC error carries first, then the Assistant's locations", () => {
+		expect(toolErrorMessage("screen_capture: AssistantCommand:1: no viewport", "screen_capture")).toBe(
+			"no viewport",
+		);
+		expect(toolErrorMessage("sabuiltin_X.Tool:66: AssistantCommand:2: boom", "execute_luau")).toBe("boom");
+		// Another tool's name is part of the message.
+		expect(toolErrorMessage("get_studio_state: busy", "execute_luau")).toBe("get_studio_state: busy");
+	});
+});
+
+/** A stand-in for StudioMCP.exe: answers the MCP handshake, then ends when its stdin does, or never (`stubborn`). */
+const STAND_IN = `
+const stubborn = process.argv[2] === "stubborn";
+const marker = process.argv[3];
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+	buffer += chunk.toString();
+	let index;
+	while ((index = buffer.indexOf("\\n")) >= 0) {
+		const line = buffer.slice(0, index);
+		buffer = buffer.slice(index + 1);
+		const message = JSON.parse(line);
+		if (message.id !== undefined) process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }) + "\\n");
+	}
+});
+process.stdin.on("end", () => {
+	require("node:fs").writeFileSync(marker, "stdin ended");
+	if (stubborn) setInterval(() => {}, 1000);
+	else process.exit(0);
+});
+`;
+
+describe("closing the MCP proxy", () => {
+	const running = (pid: number) => {
+		try {
+			process.kill(pid, 0);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+
+	test("its stdin is ended first, and a proxy that exits then is let go of without being ended", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "fwproxy-"));
+		try {
+			const script = join(dir, "proxy.cjs");
+			writeFileSync(script, STAND_IN);
+			const marker = join(dir, "ended");
+			const client = await connectStudio(process.execPath, [script, "polite", marker]);
+			const started = Date.now();
+			await client.close();
+			expect(Date.now() - started).toBeLessThan(PROXY_CLOSE_GRACE_MS);
+			expect(existsSync(marker)).toBe(true);
+			expect(running(client.pid!)).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 20_000);
+
+	test("one that does not exit once its stdin has ended is ended after the grace", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "fwproxy-"));
+		try {
+			const script = join(dir, "proxy.cjs");
+			writeFileSync(script, STAND_IN);
+			const marker = join(dir, "ended");
+			const client = await connectStudio(process.execPath, [script, "stubborn", marker]);
+			const started = Date.now();
+			await Promise.all([client.close(), client.close()]);
+			expect(Date.now() - started).toBeGreaterThanOrEqual(PROXY_CLOSE_GRACE_MS - 50);
+			expect(existsSync(marker)).toBe(true);
+			// Ended: give Windows a moment to take it down.
+			for (let attempt = 0; attempt < 50 && running(client.pid!); attempt += 1) await Bun.sleep(100);
+			expect(running(client.pid!)).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 20_000);
 });
 
 describe("closing a window", () => {
@@ -364,22 +445,58 @@ describe("studio commands", () => {
 			"-universeId",
 			UNIVERSE,
 		]);
+		expect(unlisted.err).toContain("Studio started (PID 4001) but the testing place");
 		expect(unlisted.err).toContain("never showed up");
-		expect(unlisted.err).toContain("MCP server");
+		// Written for an agent: what is off, and who turns it on.
+		expect(unlisted.err).toContain(
+			'Studio\'s "MCP server" setting is probably off, and a window with it off is never listed: ask the user to enable "MCP server" in Studio\'s Assistant settings, then run this again',
+		);
+		// A window nothing can drive would hold the Studio lock for nobody: it is closed again, by its
+		// process and the place id on its command line, and the lock is free.
+		expect(unlisted.err).toContain("the window this run opened is closed again");
+		expect(unlisted.closeTargets).toEqual([`pid 4001 ${PLACE}`]);
+		expect(unlisted.windows).toHaveLength(0);
+		expect(unlisted.machine.lock.owner).toBeUndefined();
 
-		const connected = await runCli(["studio", "open"], { studio: { studios: [OTHER_STUDIO, TESTING_STUDIO] } });
+		const listed: StudioEntry[] = [OTHER_STUDIO];
+		const connected = await runCli(["studio", "open"], {
+			studio: { studios: listed },
+			onLaunch: () => listed.push(TESTING_STUDIO),
+		});
 		expect(connected.code).toBe(0);
 		expect(connected.out).toContain("connected: TestingExperience");
+		expect(connected.out).toContain("studio_id=studio-1 pid=4001");
+	});
+
+	test("open never takes a window listed before it launched Studio for its own, whatever its name", async () => {
+		// The user has the testing place open already: a second window of it is this command's.
+		const listed: StudioEntry[] = [TESTING_STUDIO];
+		const fresh = { id: "studio-fresh", name: TESTING_STUDIO.name };
+		const run = await runCli(["studio", "open"], {
+			studio: { studios: listed },
+			onLaunch: () => listed.push(fresh),
+		});
+		expect(run.code).toBe(0);
+		expect(run.out).toContain("studio_id=studio-fresh pid=4001");
+		expect(run.machine.lock.owner?.mcpId).toBe("studio-fresh");
+
+		// Only the old one: never this command's.
+		const old = await runCli(["studio", "open"], { studio: { studios: [TESTING_STUDIO] } });
+		expect(old.code).toBe(1);
+		expect(old.err).toContain("never showed up");
 	});
 
 	test("open with a file opens that file and waits for a window named after it", async () => {
+		const listed: StudioEntry[] = [OTHER_STUDIO];
 		const run = await runCli(["studio", "open", "place.patched.rbxl"], {
 			files: { "place.patched.rbxl": "x" },
-			studio: { studios: [OTHER_STUDIO, LOCAL_STUDIO] },
+			studio: { studios: listed },
+			onLaunch: () => listed.push(LOCAL_STUDIO),
 		});
 		expect(run.code).toBe(0);
 		expect(run.launched[0]![1]!.replaceAll("\\", "/")).toEndWith("place.patched.rbxl");
 		expect(run.out).toContain("connected: place.patched.rbxl");
+		expect(run.out).toContain("studio_id=studio-3 pid=4001");
 
 		const unlisted = await runCli(["studio", "open", "place.patched.rbxl"], {
 			files: { "place.patched.rbxl": "x" },
@@ -387,6 +504,7 @@ describe("studio commands", () => {
 		});
 		expect(unlisted.code).toBe(1);
 		expect(unlisted.err).toContain("place.patched.rbxl never showed up");
+		expect(unlisted.closedWindows).toEqual(["place.patched.rbxl"]);
 	});
 
 	test("with no testing-place window, the only local-file window is used, and --studio names any window", async () => {
@@ -431,7 +549,7 @@ describe("studio commands", () => {
 	});
 
 	test("play and stop drive the session, and close shuts the window by its place name", async () => {
-		const play = await runCli(["studio", "play"], {
+		const play = await runCli(["studio", "play", "--any-window"], {
 			studio: { studios: [TESTING_STUDIO], answers: { start_stop_play: "Game Started" } },
 		});
 		expect(play.code).toBe(0);
@@ -440,13 +558,13 @@ describe("studio commands", () => {
 			args: { studio_id: "studio-1", is_start: true },
 		});
 
-		const stop = await runCli(["studio", "stop"], {
+		const stop = await runCli(["studio", "stop", "--any-window"], {
 			studio: { studios: [TESTING_STUDIO], answers: { start_stop_play: "Game Stopped" } },
 		});
 		expect(stop.studioCalls[0]!.args.is_start).toBe(false);
 
 		const place1 = { pid: 3001, title: "Place1 - Roblox Studio" };
-		const close = await runCli(["studio", "close"], {
+		const close = await runCli(["studio", "close", "--any-window"], {
 			studio: { studios: [TESTING_STUDIO] },
 			windows: [{ pid: 3000, title: "TestingExperience - Roblox Studio" }, place1],
 		});
@@ -456,13 +574,16 @@ describe("studio commands", () => {
 		expect(close.out).toContain("closed TestingExperience (PID 3000)");
 		expect(close.windows).toEqual([place1]);
 
-		const gone = await runCli(["studio", "close"], { studio: { studios: [TESTING_STUDIO] }, windows: [place1] });
+		const gone = await runCli(["studio", "close", "--any-window"], {
+			studio: { studios: [TESTING_STUDIO] },
+			windows: [place1],
+		});
 		expect(gone.code).toBe(1);
 		expect(gone.err).toContain('no window titled "TestingExperience - Roblox Studio" was found to close');
 	});
 
 	test("close checks the window is gone, and says so when it is not or when the title is ambiguous", async () => {
-		const forced = await runCli(["studio", "close"], {
+		const forced = await runCli(["studio", "close", "--any-window"], {
 			studio: { studios: [TESTING_STUDIO] },
 			windows: [{ pid: 3000, title: "TestingExperience - Roblox Studio" }],
 			closeOutcome: "forced",
@@ -472,7 +593,7 @@ describe("studio commands", () => {
 			"closed TestingExperience (PID 3000) by ending its process: it did not close when asked",
 		);
 
-		const open = await runCli(["studio", "close"], {
+		const open = await runCli(["studio", "close", "--any-window"], {
 			studio: { studios: [TESTING_STUDIO] },
 			windows: [{ pid: 3000, title: "TestingExperience - Roblox Studio" }],
 			closeOutcome: "open",
@@ -488,7 +609,7 @@ describe("studio commands", () => {
 			{ pid: 3000, title: "C:\\a\\place.patched.rbxl - Roblox Studio", startedWith: "C:\\a\\place.patched.rbxl" },
 			{ pid: 3001, title: "D:\\b\\place.patched.rbxl - Roblox Studio", startedWith: "D:\\b\\place.patched.rbxl" },
 		];
-		const ambiguous = await runCli(["studio", "close"], {
+		const ambiguous = await runCli(["studio", "close", "--any-window"], {
 			studio: { studios: [OTHER_STUDIO, LOCAL_STUDIO] },
 			windows: [...twins],
 		});
@@ -502,7 +623,7 @@ describe("studio commands", () => {
 	});
 
 	test("exec runs Luau in the chosen data model", async () => {
-		const run = await runCli(["studio", "exec", "--code", "return 1 + 1", "--realm", "server"], {
+		const run = await runCli(["studio", "exec", "--code", "return 1 + 1", "--realm", "server", "--any-window"], {
 			studio: { studios: [TESTING_STUDIO], answers: { execute_luau: "2" } },
 		});
 		expect(run.code).toBe(0);
@@ -517,14 +638,14 @@ describe("studio commands", () => {
 	});
 
 	test("a window named with --studio, or the only local file, needs no testing place configured", async () => {
-		const exec = await runCli(["studio", "exec", "--code", "return 1", "--studio", "Other Place"], {
+		const exec = await runCli(["studio", "exec", "--code", "return 1", "--studio", "Other Place", "--any-window"], {
 			env: {},
 			studio: { studios: [OTHER_STUDIO, LOCAL_STUDIO], answers: { execute_luau: "1" } },
 		});
 		expect(exec.code).toBe(0);
 		expect(exec.studioCalls[0]!.args.studio_id).toBe("studio-2");
 
-		const close = await runCli(["studio", "close", "--studio", "place.patched.rbxl"], {
+		const close = await runCli(["studio", "close", "--studio", "place.patched.rbxl", "--any-window"], {
 			env: {},
 			studio: { studios: [OTHER_STUDIO, LOCAL_STUDIO] },
 			windows: [{ pid: 3000, title: "C:\\a\\place.patched.rbxl - Roblox Studio" }],
@@ -548,7 +669,7 @@ describe("studio commands", () => {
 	});
 
 	test("exec reports the snippet's error without the Assistant's wrapping", async () => {
-		const run = await runCli(["studio", "exec", "--code", "error('nope')"], {
+		const run = await runCli(["studio", "exec", "--code", "error('nope')", "--any-window"], {
 			studio: {
 				studios: [TESTING_STUDIO],
 				answers: {
@@ -566,7 +687,7 @@ describe("studio commands", () => {
 
 	test("run starts a play session when there is none, runs the tests, prints the summary and stops it", async () => {
 		let mode = "Edit";
-		const run = await runCli(["studio", "run", "--sections", "economy"], {
+		const run = await runCli(["studio", "run", "--sections", "economy", "--any-window"], {
 			studio: {
 				studios: [TESTING_STUDIO],
 				answers: {
@@ -598,7 +719,7 @@ describe("studio commands", () => {
 	});
 
 	test("run leaves a session it found running, and --keep leaves one it started", async () => {
-		const found = await runCli(["studio", "run", "--realm", "client"], {
+		const found = await runCli(["studio", "run", "--realm", "client", "--any-window"], {
 			studio: {
 				studios: [TESTING_STUDIO],
 				answers: { get_studio_state: PLAYING, execute_luau: JSON.stringify(resultJson({ realm: "client" })) },
@@ -609,7 +730,7 @@ describe("studio commands", () => {
 		expect(found.studioCalls[1]!.args.datamodel_type).toBe("Client");
 
 		let mode = "Edit";
-		const kept = await runCli(["studio", "run", "--keep"], {
+		const kept = await runCli(["studio", "run", "--keep", "--any-window"], {
 			studio: {
 				studios: [TESTING_STUDIO],
 				answers: {
@@ -627,7 +748,7 @@ describe("studio commands", () => {
 	});
 
 	test("run reports a failing suite with exit 1, and --realm edit is refused", async () => {
-		const run = await runCli(["studio", "run"], {
+		const run = await runCli(["studio", "run", "--any-window"], {
 			studio: {
 				studios: [TESTING_STUDIO],
 				answers: {

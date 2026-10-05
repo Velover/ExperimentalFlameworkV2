@@ -100,5 +100,27 @@ export class ShopTests implements OnStart {
 - `the server's run failed: Workspace.FlameworkTests did not appear within 30 seconds`: the place
   was built without the `testing` scope. `cannot invoke 'FlameworkTests' since 'FlameworkTests'
   has additional values for the Capabilities property`: the place was built with testing
-  2.0.0-alpha.5 or earlier, from before Studio ran MCP code sandboxed; rebuild it with a newer
-  testing.
+  2.0.0-alpha.5 or earlier, from before Studio first ran MCP code sandboxed; rebuild it with a
+  newer testing.
+
+## Driving Studio
+
+- `flamework-test` keeps one Studio window open at a time on the machine, across projects: `test`
+  and `studio open` wait for the Studio lock while another project's window holds it, saying whose
+  (300 seconds, `--lock-timeout`). Never close a window you did not open; `studio lock` shows the
+  holder.
+- `flamework-test studio open [file]` opens a window of your own and prints
+  `studio_id=<id> pid=<pid>`. Then `studio list` (the windows, and which is yours), `studio tools
+  [name]` (Studio's MCP tools, read live), `studio call <tool> --studio <id> --args-file args.json`
+  (any tool; images are written to files whose paths it prints), and `studio close`, which frees the
+  lock. A window left unused for 15 minutes (`--hold <minutes>`) may be closed for another project.
+- `refusing to ... the Studio window ...`: it is not the window flamework-test opened for this
+  project. `--any-window` acts on it anyway: on a window the user has open, only after asking.
+  `` ... this project's Studio window ...: `test` is running in it `` (or `test --keep`, `studio
+  open`): another process's run uses it; wait for it to end. `no Studio window flamework-test opened
+  for this project is open`: open one with `studio open`; a note says when another project closed
+  yours, or found it closed.
+- `"MCP server" setting is probably off`: ask the user to turn it on in Studio's Assistant settings,
+  then retry.
+- Studio may run `execute_luau` sandboxed (it did from 2026-10-01): then no `require` of the
+  place's modules, no `_G`, `shared` or DataStore; the CLI says so under such a refusal.

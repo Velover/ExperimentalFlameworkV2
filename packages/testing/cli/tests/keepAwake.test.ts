@@ -231,7 +231,7 @@ describe("--keep-awake", () => {
 		// Still held when the process exits, which is what lets go of it.
 		expect(run.executionStates).toEqual([HELD]);
 		expect(run.err).toContain(
-			"Ctrl+C again: exiting without finishing the cleanup; may be left: the Studio window it opened (PID 4001, place.rbxl); the play session it started",
+			"Ctrl+C again: exiting without finishing the cleanup; may be left: the Studio lock, which the next command takes over once this run and its window have gone; the Studio window it opened (PID 4001, place.rbxl); the play session it started",
 		);
 		expect(run.err).not.toContain("display");
 	});
@@ -280,7 +280,7 @@ describe("--keep-awake", () => {
 	test("studio run holds it while the realms run, and lets go", async () => {
 		const states: number[] = [];
 		let during: number[] = [];
-		const run = await runCli(["studio", "run", "--keep-awake"], {
+		const run = await runCli(["studio", "run", "--keep-awake", "--any-window"], {
 			studio: {
 				studios: [TESTING_STUDIO],
 				answers: {

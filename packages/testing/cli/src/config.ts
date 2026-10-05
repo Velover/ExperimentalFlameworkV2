@@ -26,12 +26,22 @@ export interface CloudSettings {
 	keepAwake?: boolean;
 	/** `testing.failOnSkip`: a skipped test fails the run. After `--fail-on-skip` and `FAIL_ON_SKIP`. */
 	failOnSkip?: boolean;
+	/**
+	 * `testing.lockTimeout`: seconds a command that opens a Studio window waits for the Studio lock.
+	 * After `--lock-timeout` and `FLAMEWORK_TEST_LOCK_TIMEOUT`.
+	 */
+	lockTimeout?: number;
+	/**
+	 * `testing.lockHold`: minutes a window flamework-test opened may sit unused before another
+	 * project may close it. After `--hold` and `FLAMEWORK_TEST_LOCK_HOLD`.
+	 */
+	lockHold?: number;
 	/** Where the settings were read from, when a file was found. */
 	configPath?: string;
 	/**
 	 * `.env`, then `.env.local`, then the process environment, later ones winning: the CLI reads
 	 * its own variables (ROBLOX_API_KEY, TESTING_UNIVERSE_ID, TESTING_PLACE_ID, ORIGINAL_PLACE,
-	 * ROJO_PROJECT, KEEP_AWAKE, FAIL_ON_SKIP)
+	 * ROJO_PROJECT, KEEP_AWAKE, FAIL_ON_SKIP, FLAMEWORK_TEST_LOCK_TIMEOUT, FLAMEWORK_TEST_LOCK_HOLD)
 	 * from here, so a `.env` works without the config file referencing it.
 	 */
 	env: Record<string, string>;
@@ -62,9 +72,30 @@ export function loadCloudSettings(cwd: string, env: Record<string, string | unde
 		testingEntry: entry !== undefined && entry !== "" ? entry : undefined,
 		...(typeof testing.keepAwake === "boolean" ? { keepAwake: testing.keepAwake } : {}),
 		...(typeof testing.failOnSkip === "boolean" ? { failOnSkip: testing.failOnSkip } : {}),
+		...(typeof testing.lockTimeout === "number" ? { lockTimeout: testing.lockTimeout } : {}),
+		...(typeof testing.lockHold === "number" ? { lockHold: testing.lockHold } : {}),
 		configPath: loaded.configPath,
 		env: loaded.env,
 	};
+}
+
+/**
+ * The project a command runs for, which the Studio lock records and compares: the nearest folder
+ * at or above `cwd` holding a flamework.config.json, else the nearest holding a package.json, else
+ * `cwd` itself. So a command run from any folder of a game, one with a package.json of its own
+ * included, speaks for the same project.
+ */
+export function findProjectRoot(cwd: string, isFile: (path: string) => boolean = existsSync): string {
+	const start = resolve(cwd);
+	let withPackage: string | undefined;
+	for (let directory = start; ;) {
+		if (isFile(join(directory, "flamework.config.json"))) return directory;
+		if (withPackage === undefined && isFile(join(directory, "package.json"))) withPackage = directory;
+		const parent = dirname(directory);
+		if (parent === directory) break;
+		directory = parent;
+	}
+	return withPackage ?? start;
 }
 
 /** The nearest directory at or above `cwd` holding a package.json, else the top of the tree: how far up the config file is looked for. */

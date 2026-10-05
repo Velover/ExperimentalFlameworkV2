@@ -154,10 +154,22 @@ export interface TestingRuntimeConfig {
 
 	/** `flamework-test` only: a Studio run keeps the display on. After `--keep-awake` and `KEEP_AWAKE`. */
 	keepAwake?: boolean;
+
+	/**
+	 * `flamework-test` only: seconds a command that opens a Studio window waits for the Studio lock.
+	 * After `--lock-timeout` and `FLAMEWORK_TEST_LOCK_TIMEOUT`.
+	 */
+	lockTimeout?: number;
+
+	/**
+	 * `flamework-test` only: minutes a window it opened may sit unused before another project may
+	 * close it. After `--hold` and `FLAMEWORK_TEST_LOCK_HOLD`.
+	 */
+	lockHold?: number;
 }
 
 /** Keys of the `testing` section only `flamework-test` reads, left out of the place's config. */
-const CLI_ONLY_TESTING_KEYS = ["failOnSkip", "keepAwake"] as const;
+const CLI_ONLY_TESTING_KEYS = ["failOnSkip", "keepAwake", "lockTimeout", "lockHold"] as const;
 
 /**
  * The sections the runtime packages read. Game projects get them written to

@@ -8,10 +8,13 @@
  * session and read Studio's state exactly as an assistant would.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import type { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+import type { ProcessInfo } from "./lock.ts";
 
 /** One entry of `list_roblox_studios`: the id every other call takes, and a name carrying the place id. */
 export interface StudioEntry {
@@ -21,13 +24,44 @@ export interface StudioEntry {
 
 export type DataModelType = "Edit" | "Client" | "Server";
 
-/** A connected proxy. Call `close()` when finished, it holds a child process. */
+/** One tool the proxy offers, as `tools/list` describes it. */
+export interface ToolInfo {
+	name: string;
+	description?: string;
+	inputSchema?: { type?: string; properties?: Record<string, unknown>; required?: string[] };
+}
+
+/** One piece of a tool's answer: text, or an image (base64 `data` and its `mimeType`), or other kinds. */
+export interface ToolContent {
+	type: string;
+	text?: string;
+	data?: string;
+	mimeType?: string;
+	[key: string]: unknown;
+}
+
+/** A tool's whole answer, as the proxy gives it. */
+export interface ToolResult {
+	content?: ToolContent[];
+	isError?: boolean;
+	[key: string]: unknown;
+}
+
+/** A connected proxy. Call `close()` when finished, and wait for it: it holds a child process. */
 export interface StudioClient {
 	/** Calls one MCP tool and returns its text content; throws on an error result. */
 	call: (name: string, args?: Record<string, unknown>, timeoutMs?: number) => Promise<string>;
+	/**
+	 * Calls one MCP tool and returns its whole answer, an error result included (`isError`); throws
+	 * only when the proxy answers with a JSON-RPC error, or not at all.
+	 */
+	callRaw: (name: string, args?: Record<string, unknown>, timeoutMs?: number) => Promise<ToolResult>;
+	/** The tools the proxy offers, read live (`tools/list`), so they are what this Studio has. */
+	tools: () => Promise<ToolInfo[]>;
 	/** Lists the connected Studio windows, retrying while the proxy is still joining the hub. */
 	studios: () => Promise<StudioEntry[]>;
-	close: () => void;
+	/** Ends the proxy: its stdin first, which lets it leave the hub in order, then its process. */
+	close: () => void | Promise<void>;
 	/** The proxy's process, when known. */
 	pid?: number;
 }
@@ -121,10 +155,11 @@ export function studioOpenArguments(target: { placeId: string; universeId: strin
  * The Luau that invokes the in-place test host and hands its result back as JSON, since
  * `execute_luau` returns text and a Lua table would arrive as `table: 0x...`.
  *
- * Studio runs it sandboxed, and a sandboxed thread may only invoke a bindable that is Sandboxed
- * itself (see the host's `openToSandboxedCallers`). A host from 2.0.0-alpha.5 or earlier does not
- * mark its bindable, so the snippet marks it before the invoke, for as long as Studio lets
- * sandboxed code set the property; a place built since needs nothing of it.
+ * Studio may run it sandboxed (it did from 2026-10-01; on 2026-10-05 it did not), and a sandboxed
+ * thread may only invoke a bindable that is Sandboxed itself (see the host's
+ * `openToSandboxedCallers`). A host from 2.0.0-alpha.5 or earlier does not mark its bindable, so the
+ * snippet marks it before the invoke, for as long as Studio lets sandboxed code set the property; a
+ * place built since needs nothing of it, sandboxed or not.
  */
 export function renderStudioRun(filter: string, options: string): string {
 	return [
@@ -141,11 +176,27 @@ export function isSandboxRefusal(message: string): boolean {
 }
 
 /**
+ * What Studio raises when sandboxed code does what its capabilities do not allow: the refusals of
+ * {@link isSandboxRefusal}, and a call "lacking capability". Not every error that names `require`:
+ * outside the sandbox, `require` of something that is not a ModuleScript fails too.
+ */
+export function isCapabilityRefusal(message: string): boolean {
+	return isSandboxRefusal(message) || /lacking capability/i.test(message);
+}
+
+/**
  * The line a run adds under a realm's failure that {@link isSandboxRefusal}: the place's test host
  * predates sandboxed MCP code, and Studio no longer lets the snippet mark it itself.
  */
 export const SANDBOX_HINT =
-	"Studio runs MCP code sandboxed, and sandboxed code may only invoke a Sandboxed bindable, which the test host in this place does not make: rebuild the place with this version of @flamework-experimental/testing (any release after 2.0.0-alpha.5)";
+	"Studio ran the run's Luau sandboxed (it may run MCP code so; it did from 2026-10-01), and sandboxed code may only invoke a Sandboxed bindable, which the test host in this place does not make: rebuild the place with this version of @flamework-experimental/testing (any release after 2.0.0-alpha.5)";
+
+/**
+ * The line `studio exec` and `studio call execute_luau` add under an error that
+ * {@link isCapabilityRefusal}: Studio ran the snippet sandboxed.
+ */
+export const SNIPPET_SANDBOX_HINT =
+	"Studio ran this Luau sandboxed (it may run MCP code so; it did from 2026-10-01): there, require of the place's modules, _G, shared and DataStore are refused; reach the game through a Sandboxed bindable, as the test host does";
 
 /**
  * The message of a failed call, without what Studio's Assistant wraps an `execute_luau` error in:
@@ -155,7 +206,24 @@ export const SANDBOX_HINT =
  */
 export function luauErrorMessage(error: unknown): string {
 	const text = error instanceof Error ? error.message : String(error);
-	return text.replace(/^execute_luau:\s*/, "").replace(/^(?:sabuiltin_\S*?:\d+:\s*|AssistantCommand:\d+:\s*)+/, "");
+	return toolErrorMessage(text.replace(/^execute_luau:\s*/, ""));
+}
+
+/**
+ * A tool's error text without the locations of the Studio Assistant's own code in front of it, and
+ * without the tool's name the client puts before a JSON-RPC error (`execute_luau: `), which comes
+ * first when `tool` is given.
+ */
+export function toolErrorMessage(text: string, tool?: string): string {
+	const named = tool !== undefined && text.startsWith(`${tool}:`) ? text.slice(tool.length + 1).trimStart() : text;
+	return named.replace(/^(?:sabuiltin_\S*?:\d+:\s*|AssistantCommand:\d+:\s*)+/, "");
+}
+
+/** A tool answer's text pieces, one per line; anything else (an image) as its JSON. */
+export function textOf(result: ToolResult): string {
+	return (result.content ?? [])
+		.map((entry) => (entry.type === "text" ? (entry.text ?? "") : JSON.stringify(entry)))
+		.join("\n");
 }
 
 /** Tidies what `execute_luau` returns: the proxy wraps a returned string in quotes. */
@@ -178,7 +246,9 @@ export function unquoteLuauResult(text: string): string {
  *
  * - `pid` and `file`: the process a run started on that file, and only while its title or the
  *   command line it was started with names that file, so a PID Windows has since reused is never
- *   touched. Other windows titled with the file are reported `untouched`.
+ *   touched. Other windows titled with the file are reported `untouched`. For a window opened on
+ *   the testing place from the cloud, `file` is the place id, which its command line names
+ *   (`-placeId <id>`) as a word of its own.
  * - `file` alone: every window whose title shows that very file (Studio titles a local file's window
  *   with its full path). By the title only: a window started on the file and since saved elsewhere
  *   or published shows its new name and is left alone, and so is one whose title has changed.
@@ -391,6 +461,56 @@ ${powershellString(CLOSE_MARKER)} + (ConvertTo-Json -InputObject @($out) -Compre
 }
 
 /**
+ * Looks processes up by PID: the name Windows gives each (`RobloxStudioBeta`, `bun`) and when it
+ * started, which together tell a process from another that has since been given its PID. A PID
+ * missing from the answer runs nothing. Read-only. Anywhere but Windows only whether it runs is known.
+ */
+export async function probeProcesses(pids: number[]): Promise<Map<number, ProcessInfo>> {
+	const wanted = [...new Set(pids.filter((pid) => Number.isInteger(pid) && pid > 0))];
+	const found = new Map<number, ProcessInfo>();
+	if (wanted.length === 0) return found;
+	if (process.platform !== "win32") {
+		for (const pid of wanted) if (isRunning(pid)) found.set(pid, {});
+		return found;
+	}
+
+	const script = `
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$out = @()
+foreach ($id in @(${wanted.join(", ")})) {
+	$p = Get-Process -Id $id -ErrorAction SilentlyContinue
+	if ($p) {
+		$started = $null
+		try { $started = ([DateTimeOffset]$p.StartTime).ToUnixTimeMilliseconds() } catch { }
+		$out += [pscustomobject]@{ pid = [int]$p.Id; name = [string]$p.ProcessName; started = $started }
+	}
+}
+${powershellString(CLOSE_MARKER)} + (ConvertTo-Json -InputObject @($out) -Compress)
+`;
+	const result = await runPowerShell(script, 60_000);
+	const line = result.stdout
+		.split(/\r?\n/)
+		.reverse()
+		.find((entry) => entry.startsWith(CLOSE_MARKER));
+	if (line === undefined) {
+		throw new Error(
+			`could not look up the processes ${wanted.join(", ")}${result.error ? `: ${result.error.message}` : result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
+		);
+	}
+	for (const entry of JSON.parse(line.slice(CLOSE_MARKER.length)) as Array<{
+		pid: number;
+		name: string;
+		started: number | null;
+	}>) {
+		found.set(entry.pid, {
+			name: entry.name,
+			...(typeof entry.started === "number" ? { startedAt: entry.started } : {}),
+		});
+	}
+	return found;
+}
+
+/**
  * Whether a Studio window's title shows a local file of this name: Studio titles such a window
  * `<full path> - Roblox Studio`, and the proxy lists it by the file name alone.
  */
@@ -478,26 +598,40 @@ export async function claimWindowName(
 
 // ----------------------------------------------------------------- the proxy
 
+/**
+ * How long a proxy is given to exit once its stdin has ended, before its process is ended. The MCP
+ * stdio transport ends a server by closing its stdin, then waiting, then ending the process; the
+ * proxy is a Rust rmcp server reading its stdin (`AsyncRwTransport<RoleServer, Stdin, Stdout>`), whose
+ * service stops when that stream ends. Ending it at once would give it no chance to leave the hub
+ * that other clients' proxies share (the first proxy is the hub; later ones join it). Not measured
+ * against a live proxy: if it does not exit in this time, it is ended as before.
+ */
+export const PROXY_CLOSE_GRACE_MS = 2000;
+
 interface Pending {
 	resolve: (message: JsonRpcResponse) => void;
 }
 
 interface JsonRpcResponse {
 	id?: number;
-	result?: {
-		content?: Array<{ type: string; text?: string }>;
-		isError?: boolean;
-		tools?: unknown[];
-	};
-	error?: unknown;
+	result?: ToolResult & { tools?: ToolInfo[] };
+	error?: { code?: number; message?: string } | unknown;
 }
 
-/** Spawns the proxy, does the MCP handshake and returns a client over it. */
-export async function connectStudio(exe: string): Promise<StudioClient> {
+/** The message of a JSON-RPC error, which is an object with a `message` when the proxy follows the spec. */
+function rpcErrorMessage(error: unknown): string {
+	if (typeof error === "object" && error !== null && typeof (error as { message?: unknown }).message === "string") {
+		return (error as { message: string }).message;
+	}
+	return JSON.stringify(error);
+}
+
+/** Spawns the proxy (`args`: for the tests, which stand a script in for it), does the MCP handshake and returns a client over it. */
+export async function connectStudio(exe: string, args: string[] = []): Promise<StudioClient> {
 	// Hidden, which with no stdio inherited gives it a console of its own: a Ctrl+C in the terminal
 	// does not reach it, so it is still there for an interrupted run to stop its play session with.
 	// It exits when this process does, its stdin closing.
-	const child: ChildProcess = spawn(exe, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+	const child: ChildProcess = spawn(exe, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
 	// A request written after the proxy has gone (a retry an interruption left running) is dropped.
 	child.stdin?.on("error", () => {});
 	let buffer = "";
@@ -547,14 +681,23 @@ export async function connectStudio(exe: string): Promise<StudioClient> {
 	});
 	child.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
 
-	const call: StudioClient["call"] = async (name, args = {}, timeoutMs) => {
+	const callRaw: StudioClient["callRaw"] = async (name, args = {}, timeoutMs) => {
 		const response = await request("tools/call", { name, arguments: args }, timeoutMs);
-		if (response.error !== undefined) throw new Error(`${name}: ${JSON.stringify(response.error)}`);
-		const text = (response.result?.content ?? [])
-			.map((entry) => (entry.type === "text" ? (entry.text ?? "") : JSON.stringify(entry)))
-			.join("\n");
-		if (response.result?.isError) throw new Error(`${name}: ${text}`);
+		if (response.error !== undefined) throw new Error(`${name}: ${rpcErrorMessage(response.error)}`);
+		return response.result ?? {};
+	};
+
+	const call: StudioClient["call"] = async (name, args = {}, timeoutMs) => {
+		const result = await callRaw(name, args, timeoutMs);
+		const text = textOf(result);
+		if (result.isError) throw new Error(`${name}: ${text}`);
 		return text;
+	};
+
+	const tools: StudioClient["tools"] = async () => {
+		const response = await request("tools/list", {}, 30_000);
+		if (response.error !== undefined) throw new Error(`tools/list: ${rpcErrorMessage(response.error)}`);
+		return response.result?.tools ?? [];
 	};
 
 	const studios: StudioClient["studios"] = async () => {
@@ -574,12 +717,36 @@ export async function connectStudio(exe: string): Promise<StudioClient> {
 		throw lastError instanceof Error ? lastError : new Error(String(lastError));
 	};
 
+	const exited = new Promise<void>((resolveExit) => {
+		if (child.exitCode !== null || child.signalCode !== null) resolveExit();
+		// Typed without its EventEmitter side here, which it has.
+		(child as unknown as EventEmitter).once("exit", () => resolveExit());
+	});
+	let closing: Promise<void> | undefined;
+	const close = (): Promise<void> =>
+		(closing ??= (async () => {
+			try {
+				child.stdin?.end();
+			} catch {
+				// Gone already.
+			}
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const graceful = await Promise.race([
+				exited.then(() => true),
+				new Promise<boolean>((resolveWait) => {
+					timer = setTimeout(() => resolveWait(false), PROXY_CLOSE_GRACE_MS);
+				}),
+			]);
+			if (timer !== undefined) clearTimeout(timer);
+			if (!graceful) child.kill();
+		})());
+
 	return {
 		call,
+		callRaw,
+		tools,
 		studios,
-		close: () => {
-			child.kill();
-		},
+		close,
 		...(child.pid !== undefined ? { pid: child.pid } : {}),
 	};
 }

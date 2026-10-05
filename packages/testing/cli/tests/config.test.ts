@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { loadCloudSettings } from "../src/config.ts";
+import { join, resolve } from "node:path";
+import { findProjectRoot, loadCloudSettings } from "../src/config.ts";
 
 function scratch(files: Record<string, string>): string {
 	const dir = mkdtempSync(join(tmpdir(), "flamework-test-"));
@@ -63,6 +63,20 @@ describe("loadCloudSettings", () => {
 		}
 	});
 
+	test("reads the Studio lock's keys, testing.lockTimeout and testing.lockHold, from the environment too", () => {
+		const dir = scratch({
+			"flamework.config.json": JSON.stringify({
+				testing: { lockTimeout: 90, lockHold: "${FLAMEWORK_TEST_HOLD_FOR_CONFIG:-30}" },
+			}),
+		});
+		try {
+			expect(loadCloudSettings(dir, {})).toMatchObject({ lockTimeout: 90, lockHold: 30 });
+			expect(loadCloudSettings(dir, { FLAMEWORK_TEST_HOLD_FOR_CONFIG: "45" }).lockHold).toBe(45);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("a directory with no config file gives empty settings", () => {
 		const dir = scratch({});
 		try {
@@ -100,5 +114,44 @@ describe("loadCloudSettings", () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("findProjectRoot", () => {
+	test("the nearest folder with a flamework.config.json, else the nearest with a package.json, else the folder itself", () => {
+		const root = mkdtempSync(join(tmpdir(), "fwroot-"));
+		try {
+			// A game with its config, a subfolder with a package.json of its own, and a package without a config.
+			const game = join(root, "game");
+			mkdirSync(join(game, "src", "deep"), { recursive: true });
+			mkdirSync(join(game, "pkg", "inner"), { recursive: true });
+			mkdirSync(join(root, "noconfig", "src"), { recursive: true });
+			mkdirSync(join(root, "bare", "deep"), { recursive: true });
+			writeFileSync(join(game, "package.json"), "{}");
+			writeFileSync(join(game, "flamework.config.json"), "{}");
+			writeFileSync(join(game, "pkg", "package.json"), "{}");
+			writeFileSync(join(root, "noconfig", "package.json"), "{}");
+
+			expect(findProjectRoot(game)).toBe(game);
+			expect(findProjectRoot(join(game, "src", "deep"))).toBe(game);
+			// Its own package.json does not make a subfolder another project.
+			expect(findProjectRoot(join(game, "pkg", "inner"))).toBe(game);
+			expect(findProjectRoot(join(game, "pkg"))).toBe(game);
+			// No config anywhere above: the nearest package.json.
+			expect(findProjectRoot(join(root, "noconfig", "src"))).toBe(join(root, "noconfig"));
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("with neither above it, the folder itself", () => {
+		const top = resolve("/");
+		const files = new Set<string>();
+		const isFile = (path: string) => files.has(path);
+		expect(findProjectRoot(join(top, "a", "b"), isFile)).toBe(join(top, "a", "b"));
+		files.add(join(top, "a", "package.json"));
+		expect(findProjectRoot(join(top, "a", "b"), isFile)).toBe(join(top, "a"));
+		files.add(join(top, "flamework.config.json"));
+		expect(findProjectRoot(join(top, "a", "b"), isFile)).toBe(top);
 	});
 });
