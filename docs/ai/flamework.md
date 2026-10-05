@@ -97,6 +97,16 @@ before you write Flamework code you are not sure of.
   `Project was compiled on different version of Flamework` and names the tsbuildinfo to delete:
   delete it and build again.
 
+## How much to test
+
+Match the testing to the change.
+- **The build (`rbxtsc`):** takes seconds. Run it after every change.
+- **Studio runs (`flamework-test`, or the project's test script):** take minutes. Run only the
+  sections the change touches, with `--sections` (and `--realm` when only one realm is involved).
+  A change to docs, comments or a name inside one file needs no Studio run.
+- **A whole run, several Rojo projects, cloud runs and benchmarks:** only when the user asks, or
+  after you suggest it, saying why and how long it takes, and the user agrees.
+
 ## Gotchas
 
 - Most of Flamework's API is macros that the transformer fills in. Without the transformer they
