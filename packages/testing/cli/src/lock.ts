@@ -5,23 +5,25 @@
  * would open one waits its turn.
  *
  * The lock is a folder (`mkdir` either makes it or finds it there, atomically) holding the owner
- * record, `owner.json`: who took it, the Studio process it launched, the window's MCP id, the
- * project, the place and the lease. Every change to it (taking, renewing, freeing) is made under a
+ * record, `owner.json`: who took it, the project, the lease, and every window the command has open
+ * or is opening, each with its place, the Studio process launched for it and its MCP id. One
+ * command holds it at a time; that command may hold several windows (`test --parallel`). Every change to it (taking, renewing, freeing) is made under a
  * short sub-lock of its own, so a renewal never lands on the record of a command that took the
  * lock over a moment before. The sub-lock names the process holding it, and is broken only once
  * that process has gone: a holder that is slow, not dead, is waited for.
  *
  * While the command that took it runs, the lock is live, window or not (a `test` closes one
- * project's window before it opens the next). Once that command has ended, a window it left open on
+ * project's window before it opens the next, or keeps up to `--parallel` of them open at once). Once that command has ended, a window it left open on
  * purpose (`kept`: `test --keep`, `studio open`) holds the lock under a lease, an idle timeout that
  * every command using the window renews; once the lease has run out another project may close that
  * window (it is flamework-test's own, known by the Studio PID the record names) and take the lock.
  * A window left open by a command that ended without meaning to (a second Ctrl+C) may be closed at
  * once.
  *
- * A lock whose holder has gone is stale and is taken over: its command has ended and the Studio
+ * A lock whose holder has gone is stale and is taken over: its command has ended and every Studio
  * process it names has exited (closed by hand, say) or is another process now, or no window was
- * open. A PID Windows has reused is told apart by the process's name and its start time, which the
+ * open. Every rule that reads the record holds per window: a window still open keeps the lock, and
+ * a taker closes every one of them. A PID Windows has reused is told apart by the process's name and its start time, which the
  * record keeps.
  *
  * It lives in a per-user folder every project and agent shares, never the temp folder, which an
@@ -33,33 +35,44 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, wri
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
-/** The owner record, `owner.json` in the lock's folder. Times are ISO strings. */
-export interface LockOwner {
-	version: 1;
-	/** Tells this holder from the next one: a record is changed or freed only under its own token. */
-	token: string;
-	/** The flamework-test process that took the lock, its name (`bun`) and when it started. */
-	cliPid: number;
-	cliName?: string;
-	cliStartedAt?: string;
-	/** The Studio process flamework-test launched, once launched, and when it started. */
-	studioPid?: number;
-	studioStartedAt?: string;
-	/** The window's id on the MCP proxy, once it has connected. */
-	mcpId?: string;
-	/**
-	 * The project directory: the nearest folder holding a flamework.config.json, else the nearest
-	 * holding a package.json, else where the command ran.
-	 */
-	project: string;
-	/** The command that took it: `test`, `test --keep`, `studio open`. */
-	command: string;
+/** One Studio window a lock's command has open, or is about to open. Times are ISO strings. */
+export interface LockWindow {
 	/** What the window has open, as people read it: a place file's path, or `the testing place <id>`. */
 	place: string;
 	/** The place file Studio was launched on, which closing the window by its process checks. */
 	placeFile?: string;
 	/** The cloud place's id Studio was launched on, for the same. */
 	placeId?: string;
+	/** The Studio process flamework-test launched for it, once launched, and when it started. */
+	studioPid?: number;
+	studioStartedAt?: string;
+	/** The window's id on the MCP proxy, once it has connected. */
+	mcpId?: string;
+}
+
+/** The owner record, `owner.json` in the lock's folder. Times are ISO strings. */
+export interface LockOwner {
+	version: 2;
+	/** Tells this holder from the next one: a record is changed or freed only under its own token. */
+	token: string;
+	/** The flamework-test process that took the lock, its name (`bun`) and when it started. */
+	cliPid: number;
+	cliName?: string;
+	cliStartedAt?: string;
+	/**
+	 * The project directory: the nearest folder holding a flamework.config.json, else the nearest
+	 * holding a package.json, else where the command ran.
+	 */
+	project: string;
+	/** The command that took it: `test`, `test --keep`, `test --parallel 2`, `studio open`. */
+	command: string;
+	/**
+	 * The windows the command has open or is opening, in the order it began them: one for `studio
+	 * open`, and one for each project of a `test` in turn, up to `--parallel` at once. A project's
+	 * window is listed from when its place is being made, before Studio is launched on it, and leaves
+	 * the list once it has closed; one that would not close stays, for the next taker to close.
+	 */
+	windows: LockWindow[];
 	since: string;
 	/** When the window was last used through flamework-test; the lease runs from here. */
 	lastActivity: string;
@@ -68,12 +81,27 @@ export interface LockOwner {
 	/** The idle timeout of this window, in minutes. */
 	holdMinutes: number;
 	/**
-	 * The window is left open on purpose when the command that took the lock ends (`test --keep`,
-	 * `studio open`, set when it launches Studio; or a window that would not close), and holds the
+	 * The windows are left open on purpose when the command that took the lock ends (`test --keep`,
+	 * `studio open`, set when it launches Studio; or a window that would not close), and hold the
 	 * lock under its lease then. Without it, a window still open once that command has ended was
 	 * left behind by a command cut short.
 	 */
 	kept?: boolean;
+}
+
+/**
+ * A record as read, in this version's shape: one written by the version before several windows
+ * (2026-10-04, never released) named its one window in fields of the record's own.
+ */
+export function normalizeOwner(parsed: Record<string, unknown>): LockOwner {
+	if (Array.isArray(parsed.windows)) return parsed as unknown as LockOwner;
+	const { place, placeFile, placeId, studioPid, studioStartedAt, mcpId, ...rest } = parsed;
+	const window: Record<string, unknown> = { place: typeof place === "string" ? place : "" };
+	for (const [key, value] of Object.entries({ placeFile, placeId, studioPid, studioStartedAt, mcpId })) {
+		if (value !== undefined) window[key] = value;
+	}
+	const named = typeof place === "string" || studioPid !== undefined;
+	return { ...rest, version: 2, windows: named ? [window] : [] } as unknown as LockOwner;
 }
 
 /** What the lock's folder holds. */
@@ -83,10 +111,12 @@ export type LockRecord =
 	/** A folder with no record that can be read: being taken right now, or left by a run that died taking it. */
 	| { kind: "unreadable"; ageMs: number };
 
-/** A window another project's command closed, so its owner's next command can say why it is gone. */
+/** Windows another project's command closed, so their owner's next command can say why they are gone. */
 export interface ClosedWindowRecord {
-	/** The owner record the window had when it was closed. */
+	/** The owner record the windows had when they were closed. */
 	owner: LockOwner;
+	/** The windows closed, or found closed: those of the record that had a Studio process. */
+	windows: LockWindow[];
 	closedAt: string;
 	/**
 	 * `expired`: idle past its hold; `abandoned`: the command that opened it had ended without
@@ -114,11 +144,12 @@ export interface LockStore {
 	update: (token: string, patch: Partial<LockOwner>) => Promise<boolean>;
 	/**
 	 * Frees the lock while `token` still holds it (`undefined`: while its record cannot be read);
-	 * false when something else holds it now.
+	 * false when something else holds it now. `note` remembers the windows closed for another
+	 * project's sake (see `closedWindows`), written in the same step as the free and only when it
+	 * frees: the project that takes the lock next forgets its notes after taking it, so it never
+	 * meets one written behind its back, and a free that lost to another taker writes none.
 	 */
-	free: (token: string | undefined) => Promise<boolean>;
-	/** Remembers a window closed for another project's sake, so its owner's next command can say so. */
-	recordClosed: (entry: ClosedWindowRecord) => Promise<void>;
+	free: (token: string | undefined, note?: ClosedWindowRecord) => Promise<boolean>;
 	/** The windows closed so within the last day, newest first. */
 	closedWindows: () => Promise<ClosedWindowRecord[]>;
 	/**
@@ -219,11 +250,26 @@ function writeAtomically(path: string, text: string): void {
 
 function readOwner(folder: string): LockOwner | undefined {
 	try {
-		const parsed = JSON.parse(readFileSync(join(folder, OWNER_FILE), "utf8")) as LockOwner;
-		return typeof parsed === "object" && parsed !== null && typeof parsed.token === "string" ? parsed : undefined;
+		const parsed = JSON.parse(readFileSync(join(folder, OWNER_FILE), "utf8")) as Record<string, unknown>;
+		return typeof parsed === "object" && parsed !== null && typeof parsed.token === "string"
+			? normalizeOwner(parsed)
+			: undefined;
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * When this process started, in milliseconds since the epoch, as the records name it: the wall clock
+ * Bun read as it started (`performance.timeOrigin`), which no later change of the clock, and no
+ * sleep, moves. Measured 18 to 23 ms after the start time Windows gives the process (2026-10-05,
+ * Bun 1.4.0). The clock less `process.uptime()` agreed: Bun's uptime is `performance.now()`, which
+ * on Windows is QueryPerformanceCounter and counts time asleep too; but it moves with a change of the
+ * wall clock after the start, and elsewhere a monotonic clock may stop while the machine sleeps.
+ */
+export function processStartedAt(): number {
+	const origin = performance.timeOrigin;
+	return Number.isFinite(origin) && origin > 0 ? origin : Date.now() - process.uptime() * 1000;
 }
 
 const pause = (ms: number) => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, ms));
@@ -283,7 +329,7 @@ async function withMutex<T>(mutex: string, body: () => T, judge: MutexJudge): Pr
 	const self: MutexHolder = {
 		pid: process.pid,
 		name: basename(process.execPath).replace(/\.exe$/i, ""),
-		startedAt: Date.now() - process.uptime() * 1000,
+		startedAt: processStartedAt(),
 		token: randomBytes(8).toString("hex"),
 	};
 	for (;;) {
@@ -369,15 +415,25 @@ async function breakDeadMutex(mutex: string, judge: MutexJudge): Promise<void> {
 		}
 		if (fate === "running") return;
 	}
-	// Still the one judged, and not one made since.
-	if (readMutexHolder(mutex)?.token !== holder?.token) return;
+	// Still the one judged, and not one made since. One that names no process is told from another
+	// such by its age, which moving it does not change: one made since the look is young.
+	const stillOld = (folder: string) => {
+		try {
+			return Date.now() - statSync(folder).mtimeMs >= MUTEX_STALE_MS;
+		} catch {
+			return false;
+		}
+	};
+	const same = (folder: string) =>
+		readMutexHolder(folder)?.token === holder?.token && (holder !== undefined || stillOld(folder));
+	if (!same(mutex)) return;
 	const aside = `${mutex}.stale-${process.pid}-${randomBytes(4).toString("hex")}`;
 	try {
 		renameSync(mutex, aside);
 	} catch {
 		return;
 	}
-	if (readMutexHolder(aside)?.token !== holder?.token) {
+	if (!same(aside)) {
 		try {
 			renameSync(aside, mutex);
 		} catch {
@@ -532,16 +588,25 @@ export function fileLockStore(dir: string, options: FileLockOptions = {}): LockS
 				}
 				return true;
 			}),
-		free: (token) =>
+		free: (token, note) =>
 			locked(() => {
 				const owner = readOwner(folder);
 				if (owner !== undefined && owner.token !== token) return false;
-				return breakFolder(token);
+				if (!breakFolder(token)) return false;
+				// Under the sub-lock still, so no take comes between the free and its note.
+				if (note !== undefined) {
+					try {
+						mkdirSync(closed, { recursive: true });
+						writeAtomically(
+							join(closed, `${note.owner.token}.json`),
+							`${JSON.stringify(note, null, "\t")}\n`,
+						);
+					} catch {
+						// A note is for the owner's next message only.
+					}
+				}
+				return true;
 			}),
-		recordClosed: async (entry) => {
-			mkdirSync(closed, { recursive: true });
-			writeAtomically(join(closed, `${entry.owner.token}.json`), `${JSON.stringify(entry, null, "\t")}\n`);
-		},
 		closedWindows: async () => {
 			let names: string[];
 			try {
@@ -569,7 +634,8 @@ export function fileLockStore(dir: string, options: FileLockOptions = {}): LockS
 						rmSync(path, { force: true });
 						continue;
 					}
-					entries.push(entry);
+					const owner = normalizeOwner(entry.owner as unknown as Record<string, unknown>);
+					entries.push({ ...entry, owner, windows: entry.windows ?? owner.windows });
 				} catch {
 					// Being written, or not a record: skipped.
 				}
@@ -603,9 +669,10 @@ export type ProbeProcesses = (pids: number[]) => Promise<Map<number, ProcessInfo
  */
 export const START_TOLERANCE_MS = 60_000;
 /**
- * How far a flamework-test process's start time may be from the one it recorded for itself (its
- * clock less its uptime: measured 25 ms off what Windows says). Tighter than Studio's, since another
- * bun process is given a PID that has come free far more often than another Studio is.
+ * How far a flamework-test process's start time may be from the one it recorded for itself (the
+ * clock as Bun started, {@link processStartedAt}: measured 18 to 25 ms off what Windows says).
+ * Tighter than Studio's, since another bun process is given a PID that has come free far more often
+ * than another Studio is.
  */
 export const CLI_START_TOLERANCE_MS = 5_000;
 
@@ -640,26 +707,33 @@ export function fateOf(
 /** Roblox Studio's process, as Windows names it. */
 export const STUDIO_PROCESS = /^RobloxStudio/i;
 
+/** One window of a record, judged: whether the Studio process it names is still the one launched. */
+export interface WindowView {
+	window: LockWindow;
+	/** The Studio process the window names; undefined while it names none (not launched yet). */
+	fate?: ProcessFate;
+	/** What the running process under the window's PID is called, when it is another one. */
+	reusedBy?: string;
+}
+
 /**
  * Where the lock stands:
  * - `free`: nothing holds it;
- * - `live`: the command that took it is still running (window or not), or, once it has ended, the
+ * - `live`: the command that took it is still running (windows or not), or, once it has ended, a
  *   window it left open on purpose is open and has been used within its hold;
- * - `expired`: another project may close the window and take the lock: a window left open on
- *   purpose, idle past its hold; or (`abandoned`) a window still open after the command that
- *   opened it ended without meaning to leave it (a second Ctrl+C, a killed process);
- * - `stale`: its holder has gone: the command has ended, and its window has closed, or its PID is
- *   another process now, or it had none open. The next taker takes it over.
+ * - `expired`: another project may close its windows and take the lock: windows left open on
+ *   purpose, idle past their hold; or (`abandoned`) windows still open after the command that
+ *   opened them ended without meaning to leave them (a second Ctrl+C, a killed process);
+ * - `stale`: its holder has gone: the command has ended, and every window it names has closed or
+ *   its PID is another process now, or it had none open. The next taker takes it over.
  */
 export interface LockView {
 	state: "free" | "live" | "expired" | "stale";
 	owner?: LockOwner;
-	/** The Studio process the record names; undefined while it names none. */
-	window?: ProcessFate;
+	/** Every window of the record, judged; empty while it names none. */
+	windows: WindowView[];
 	/** The flamework-test process that took it. */
 	cli?: ProcessFate;
-	/** What the running process under the window's PID is called, when it is another one. */
-	reusedBy?: string;
 	/** What the running process under the command's PID is called, when it is another one. */
 	cliReusedBy?: string;
 	/** Expired because its command ended leaving a window it did not mean to leave open. */
@@ -672,38 +746,41 @@ export interface LockView {
 
 /** Judges a record at `now`, looking up the processes it names. */
 export async function judgeLock(record: LockRecord, now: number, probe: ProbeProcesses): Promise<LockView> {
-	if (record.kind === "free") return { state: "free" };
+	if (record.kind === "free") return { state: "free", windows: [] };
 	if (record.kind === "unreadable") {
-		return { state: record.ageMs > UNREADABLE_GRACE_MS ? "stale" : "live", unreadableMs: record.ageMs };
+		return {
+			state: record.ageMs > UNREADABLE_GRACE_MS ? "stale" : "live",
+			windows: [],
+			unreadableMs: record.ageMs,
+		};
 	}
 
 	const owner = record.owner;
-	const pids = [owner.cliPid, ...(owner.studioPid !== undefined ? [owner.studioPid] : [])];
-	const found = await probe(pids);
+	const launched = owner.windows.flatMap((window) => (window.studioPid !== undefined ? [window.studioPid] : []));
+	const found = await probe([owner.cliPid, ...launched]);
 	const cliInfo = found.get(owner.cliPid);
 	const cli = fateOf(cliInfo, owner.cliName, owner.cliStartedAt, CLI_START_TOLERANCE_MS);
 	const idleMs = Math.max(0, now - Date.parse(owner.lastActivity));
-	let window: ProcessFate | undefined;
-	let reusedBy: string | undefined;
-	if (owner.studioPid !== undefined) {
-		const info = found.get(owner.studioPid);
-		window = fateOf(info, STUDIO_PROCESS, owner.studioStartedAt);
-		if (window === "reused") reusedBy = info?.name;
-	}
+	const windows = owner.windows.map((window): WindowView => {
+		if (window.studioPid === undefined) return { window };
+		const info = found.get(window.studioPid);
+		const fate = fateOf(info, STUDIO_PROCESS, window.studioStartedAt);
+		return { window, fate, ...(fate === "reused" && info?.name !== undefined ? { reusedBy: info.name } : {}) };
+	});
 	const view: LockView = {
 		state: "live",
 		owner,
+		windows,
 		cli,
 		idleMs,
-		...(window !== undefined ? { window } : {}),
-		...(reusedBy !== undefined ? { reusedBy } : {}),
 		...(cli === "reused" && cliInfo?.name !== undefined ? { cliReusedBy: cliInfo.name } : {}),
 	};
 
 	// The command that took it is still going, and using it: between one project's window and the
-	// next, a window it is closing, or one it has yet to launch.
+	// next, windows it is closing, or ones it has yet to launch.
 	if (cli === "running") return view;
-	if (window !== "running") return { ...view, state: "stale" };
+	// Every window it names has gone: one still open keeps the lock.
+	if (!windows.some((entry) => entry.fate === "running")) return { ...view, state: "stale" };
 	if (owner.kept !== true) return { ...view, state: "expired", abandoned: true };
 	return { ...view, state: now > Date.parse(owner.expires) ? "expired" : "live" };
 }

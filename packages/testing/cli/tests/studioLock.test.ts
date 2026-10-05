@@ -11,10 +11,13 @@ import {
 	TESTING_STUDIO,
 	fakeCtrlC,
 	fakeMachine,
+	flatOf,
+	fromFlat,
 	resultJson,
 	runCli,
 	type FakeMachine,
 	type FakeStudio,
+	type FlatOwner,
 } from "./harness.ts";
 
 const THIS_PROJECT = resolve(FIXTURE_CWD);
@@ -64,16 +67,15 @@ function proxyOn(machine: FakeMachine, answers: FakeStudio["answers"] = {}, alre
  */
 function otherProjectsWindow(
 	machine: FakeMachine,
-	options: { idleMs?: number; window?: boolean; overrides?: Partial<LockOwner> } = {},
-): LockOwner {
+	options: { idleMs?: number; window?: boolean; overrides?: Partial<FlatOwner> } = {},
+): ReturnType<typeof flatOf> {
 	const now = machine.time.now;
 	const last = now - (options.idleMs ?? MINUTE);
 	const startedAt = last - MINUTE;
 	if (options.window !== false) {
 		machine.windows.push({ pid: 5001, title: `${OTHER_FILE} - Roblox Studio`, startedWith: OTHER_FILE, startedAt });
 	}
-	const owner: LockOwner = {
-		version: 1,
+	const owner = fromFlat({
 		token: "other-token",
 		cliPid: 8001,
 		cliName: "bun",
@@ -91,9 +93,9 @@ function otherProjectsWindow(
 		holdMinutes: 15,
 		kept: true,
 		...options.overrides,
-	};
+	});
 	machine.lock.owner = owner;
-	return owner;
+	return flatOf(owner);
 }
 
 /** `studio open place.rbxl` in this project. */
@@ -118,7 +120,7 @@ describe("taking the Studio lock", () => {
 		expect(run.out).toContain(
 			"it holds the Studio lock until `flamework-test studio close`, or until it has sat unused for 15 min",
 		);
-		const owner = machine.lock.owner!;
+		const owner = flatOf(machine.lock.owner!);
 		expect(owner).toMatchObject({
 			project: THIS_PROJECT,
 			command: "studio open",
@@ -406,7 +408,7 @@ describe("the lease", () => {
 		expect(late.out).toContain(
 			`closed the Studio window flamework-test opened for ${THIS_PROJECT} (studio open on ${THIS_FILE}, Studio PID 4001): it had been idle for 16 min, past its 15-minute hold; the Studio lock is free`,
 		);
-		expect(machine.lock.owner).toMatchObject({ project: OTHER_PROJECT, studioPid: 4002, mcpId: "own-2" });
+		expect(flatOf(machine.lock.owner!)).toMatchObject({ project: OTHER_PROJECT, studioPid: 4002, mcpId: "own-2" });
 
 		// The owner's next command against that window says what became of it.
 		const gone = await runCli(["studio", "exec", "--code", "return 1", "--studio", "own-1"], {
@@ -483,7 +485,7 @@ describe("the lease", () => {
 		expect(run.code).toBe(0);
 		expect(run.out.split("\n")).toContain("studio_id=own-1 pid=4001");
 		expect(run.out).toContain("until it has sat unused for 60 min (--hold)");
-		expect(machine.lock.owner).toMatchObject({
+		expect(flatOf(machine.lock.owner!)).toMatchObject({
 			command: "test --keep",
 			holdMinutes: 60,
 			kept: true,
@@ -520,7 +522,11 @@ describe("letting go of the Studio lock", () => {
 			onLaunch: cloudProxy.onLaunch,
 		});
 		expect(opened.code).toBe(0);
-		expect(cloud.lock.owner).toMatchObject({ placeId: PLACE, place: `the testing place ${PLACE}`, mcpId: "own-1" });
+		expect(flatOf(cloud.lock.owner!)).toMatchObject({
+			placeId: PLACE,
+			place: `the testing place ${PLACE}`,
+			mcpId: "own-1",
+		});
 		const closed = await runCli(["studio", "close"], { machine: cloud, studio: cloudProxy.fake });
 		expect(closed.closeTargets).toEqual([`pid 4001 ${PLACE}`]);
 		expect(closed.removedFiles).toEqual([]);
@@ -544,7 +550,12 @@ describe("letting go of the Studio lock", () => {
 			onLaunch: proxy.onLaunch,
 		});
 		expect(run.code).toBe(0);
-		expect(during).toMatchObject({ command: "test", studioPid: 4001, mcpId: "own-1", project: THIS_PROJECT });
+		expect(flatOf(during!)).toMatchObject({
+			command: "test",
+			studioPid: 4001,
+			mcpId: "own-1",
+			project: THIS_PROJECT,
+		});
 		expect(during!.kept).toBeUndefined();
 		expect(machine.lock.owner).toBeUndefined();
 
@@ -582,7 +593,7 @@ describe("letting go of the Studio lock", () => {
 			closeOutcome: "open",
 		});
 		expect(run.code).toBe(1);
-		expect(machine.lock.owner).toMatchObject({ studioPid: 4001, kept: true });
+		expect(flatOf(machine.lock.owner!)).toMatchObject({ studioPid: 4001, kept: true });
 
 		// The user closes it by hand; the next command takes the lock over.
 		machine.windows.splice(0, machine.windows.length);
@@ -666,10 +677,9 @@ describe("studio lock and studio unlock", () => {
 		const json = await runCli(["studio", "lock", "--json", "--check-window"], { machine, studio: { studios: [] } });
 		expect(JSON.parse(json.out)).toMatchObject({
 			state: "live",
-			studioProcess: "running",
+			windows: [{ studioProcess: "running", proxy: "not listed", studio_id: "studio-other", studioPid: 5001 }],
 			idleMinutes: 3,
-			proxy: "not listed",
-			owner: { project: OTHER_PROJECT, mcpId: "studio-other" },
+			owner: { project: OTHER_PROJECT, windows: [{ mcpId: "studio-other" }] },
 		});
 
 		machine.advance(20 * MINUTE);
@@ -877,6 +887,8 @@ describe("when Studio's MCP server is off or missing", () => {
 			`the Studio window flamework-test opened for this project (${THIS_FILE}, Studio PID 4001) is open but not on the MCP proxy`,
 		);
 		expect(run.err).toContain('its "MCP server" setting is probably off: ask the user to turn it on');
+		// Its processes were looked up once, for the refusal check and the message alike (L6).
+		expect(run.probes).toBe(1);
 
 		// Closed by hand: the lock is freed at this look.
 		machine.windows.splice(0, machine.windows.length);
@@ -937,12 +949,11 @@ function probeOf(machine: FakeMachine) {
 }
 
 /** A test of this project, `place.rbxl`, run by another process (PID 8888) and still going, in Studio PID 5005. */
-function anotherRunningTest(machine: FakeMachine, overrides: Partial<LockOwner> = {}): LockOwner {
+function anotherRunningTest(machine: FakeMachine, overrides: Partial<FlatOwner> = {}): ReturnType<typeof flatOf> {
 	const now = machine.time.now;
 	machine.windows.push({ pid: 5005, title: `${THIS_FILE} - Roblox Studio`, startedWith: THIS_FILE, startedAt: now });
 	machine.clis.set(8888, now);
-	const owner: LockOwner = {
-		version: 1,
+	const owner = fromFlat({
 		token: "running-token",
 		cliPid: 8888,
 		cliName: "bun",
@@ -958,9 +969,9 @@ function anotherRunningTest(machine: FakeMachine, overrides: Partial<LockOwner> 
 		...leaseFrom(now, 15),
 		holdMinutes: 15,
 		...overrides,
-	};
+	});
 	machine.lock.owner = owner;
-	return owner;
+	return flatOf(owner);
 }
 
 describe("a running command holds the lock to its end", () => {
@@ -972,7 +983,7 @@ describe("a running command holds the lock to its end", () => {
 		machine.lock.update = async (token, patch) => {
 			// The window has just closed, and the record does not say so yet: another project's look
 			// lands in that gap, and so does its whole command.
-			if ("studioPid" in patch && patch.studioPid === undefined && others.length === 0) {
+			if (patch.windows?.length === 0 && others.length === 0) {
 				seen.push(await judgeLock(await machine.lock.read(), machine.time.now, probeOf(machine)));
 				others.push(
 					await runCli(["studio", "open", "test.rbxl", "--lock-timeout", "0"], {
@@ -1012,7 +1023,7 @@ describe("a running command holds the lock to its end", () => {
 		});
 
 		expect(seen).toHaveLength(1);
-		expect(seen[0]).toMatchObject({ state: "live", cli: "running", window: "gone" });
+		expect(seen[0]).toMatchObject({ state: "live", cli: "running", windows: [{ fate: "gone" }] });
 		const other = others[0]!;
 		expect(other.code).toBe(1);
 		expect(other.launched).toHaveLength(0);
@@ -1076,7 +1087,7 @@ describe("a running command holds the lock to its end", () => {
 			onLaunch: proxy.onLaunch,
 		});
 		expect(run.code).toBe(0);
-		expect(during).toMatchObject({ command: "test --keep", kept: true, studioPid: 4001 });
+		expect(flatOf(during!)).toMatchObject({ command: "test --keep", kept: true, studioPid: 4001 });
 	});
 });
 
@@ -1085,7 +1096,7 @@ describe("a window that is this project's by its id alone is not this project's 
 		const machine = fakeMachine();
 		const proxy = proxyOn(machine);
 		expect((await openHere(machine, proxy)).code).toBe(0);
-		const id = machine.lock.owner!.mcpId!;
+		const id = flatOf(machine.lock.owner!).mcpId!;
 		// The user closes it and opens their own place, which the proxy lists under the same id.
 		machine.windows.splice(0, machine.windows.length);
 		const users = { studios: [{ id, name: "UsersGame (placeId: 42)" }], answers: { execute_luau: "1" } };
@@ -1269,7 +1280,7 @@ describe("a window another process's command of this project is using, kept or n
 		});
 		expect(run.code).toBe(0);
 		// Kept from its launch on, and refused all the same while its command runs.
-		expect(owner).toMatchObject({ command: "test --keep", kept: true, studioPid: 4001 });
+		expect(flatOf(owner!)).toMatchObject({ command: "test --keep", kept: true, studioPid: 4001 });
 		expect(during.map((other) => other.code)).toEqual([1, 1, 1]);
 		for (const [other, verb] of [
 			[during[0]!, "run Luau in"],
@@ -1344,7 +1355,7 @@ describe("a window another process's command of this project is using, kept or n
 		machine.lock.update = async (token, patch) => {
 			const result = await update(token, patch);
 			// The first project's window has just closed.
-			if ("studioPid" in patch && patch.studioPid === undefined && gap.length === 0) {
+			if (patch.windows?.length === 0 && gap.length === 0) {
 				gap.push(await runCli(["studio", "exec", "--code", "return 1"], { machine, studio: { studios: [] } }));
 			}
 			return result;
@@ -1374,7 +1385,7 @@ describe("a window another process's command of this project is using, kept or n
 			spawnCode: (command) => {
 				// The patch of each project, with what the lock's record names then.
 				if (command.some((part) => part.endsWith(".luau")))
-					placesWhilePatching.push(machine.lock.owner?.place ?? "(free)");
+					placesWhilePatching.push(machine.lock.owner?.windows.at(-1)?.place ?? "(free)");
 				return 0;
 			},
 		});
@@ -1411,7 +1422,7 @@ describe("a window closed by hand, then taken over by another project (fix2 2, 6
 			`took over the Studio lock: the window flamework-test opened for ${THIS_PROJECT} (${THIS_FILE}, Studio PID 4001) has closed`,
 		);
 		expect(other.removedFiles).toEqual([`${THIS_FILE}.lock`.replaceAll("\\", "/")]);
-		expect(machine.lock.closed.map((entry) => [entry.reason, entry.owner.mcpId, entry.by.project])).toEqual([
+		expect(machine.lock.closed.map((entry) => [entry.reason, entry.windows[0]?.mcpId, entry.by.project])).toEqual([
 			["gone", "own-1", OTHER_PROJECT],
 		]);
 
@@ -1497,14 +1508,23 @@ describe("notes of closed windows (fix2 3)", () => {
 	test("an old note is not shown once this project has taken the lock again; another project's is kept", async () => {
 		const machine = fakeMachine();
 		const note = (project: string, token: string, minutesAgo: number) => ({
-			owner: {
+			owner: fromFlat({
 				...otherProjectsWindow(fakeMachine(), { window: false }),
+				windows: undefined,
 				project,
 				token,
 				place: join(project, "place.rbxl"),
 				placeFile: join(project, "place.rbxl"),
 				mcpId: `id-${token}`,
-			},
+			}),
+			windows: [
+				{
+					place: join(project, "place.rbxl"),
+					placeFile: join(project, "place.rbxl"),
+					mcpId: `id-${token}`,
+					studioPid: 5001,
+				},
+			],
 			closedAt: iso(machine.time.now - minutesAgo * MINUTE),
 			reason: "expired" as const,
 			idleMinutes: 16,

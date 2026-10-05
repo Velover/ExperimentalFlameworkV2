@@ -21,10 +21,15 @@ import {
 	judgeLock,
 	leaseFrom,
 	MUTEX_STALE_MS,
+	normalizeOwner,
+	processStartedAt,
 	START_TOLERANCE_MS,
 	stateDirOf,
 	UNREADABLE_GRACE_MS,
+	type ClosedWindowRecord,
 	type LockOwner,
+	type LockStore,
+	type LockWindow,
 	type ProcessInfo,
 } from "../src/lock.ts";
 import { probeProcesses } from "../src/studio.ts";
@@ -32,22 +37,28 @@ import { probeProcesses } from "../src/studio.ts";
 const T0 = Date.parse("2026-10-04T12:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
 
-function owner(overrides: Partial<LockOwner> = {}): LockOwner {
+/** A record with one window, `E:\game\test.rbxl`, changed by `window` (or several, by `overrides.windows`). */
+function owner(overrides: Partial<LockOwner> = {}, window: Partial<LockWindow> = {}): LockOwner {
 	return {
-		version: 1,
+		version: 2,
 		token: "token-a",
 		cliPid: 9001,
 		cliName: "bun",
 		cliStartedAt: iso(T0 - 60_000),
 		project: "E:\\game",
 		command: "studio open",
-		place: "E:\\game\\test.rbxl",
-		placeFile: "E:\\game\\test.rbxl",
+		windows: [{ place: "E:\\game\\test.rbxl", placeFile: "E:\\game\\test.rbxl", ...window }],
 		since: iso(T0 - 60_000),
 		...leaseFrom(T0 - 60_000, 15),
 		holdMinutes: 15,
 		...overrides,
 	};
+}
+
+/** Leaves a note the way a taker does: in the free of a lock it took over. */
+async function noteVia(store: LockStore, note: ClosedWindowRecord): Promise<void> {
+	expect(await store.take(note.owner)).toBe(true);
+	expect(await store.free(note.owner.token, note)).toBe(true);
 }
 
 const probeOf =
@@ -70,18 +81,19 @@ describe("the lock's folder", () => {
 			expect(await store.take(owner({ token: "token-b" }))).toBe(false);
 			expect(await store.read()).toEqual({ kind: "held", owner: first });
 
-			expect(await store.update("token-a", { studioPid: 4001, mcpId: "abc", kept: true })).toBe(true);
-			expect(await store.update("token-b", { studioPid: 1 })).toBe(false);
+			const windows = [{ place: "a.rbxl", studioPid: 4001, mcpId: "abc" }, { place: "b.rbxl" }];
+			expect(await store.update("token-a", { windows, kept: true })).toBe(true);
+			expect(await store.update("token-b", { windows: [] })).toBe(false);
 			// A field given as undefined is removed.
 			expect(await store.update("token-a", { kept: undefined })).toBe(true);
 			const read = await store.read();
-			expect(read.kind === "held" && read.owner.studioPid).toBe(4001);
+			expect(read.kind === "held" && read.owner.windows).toEqual(windows);
 			expect(read.kind === "held" && "kept" in read.owner).toBe(false);
 
 			expect(await store.free("token-b")).toBe(false);
 			expect(await store.free("token-a")).toBe(true);
 			expect(await store.read()).toEqual({ kind: "free" });
-			expect(await store.update("token-a", { studioPid: 1 })).toBe(false);
+			expect(await store.update("token-a", { windows: [] })).toBe(false);
 			expect(await store.free("token-a")).toBe(false);
 			// Nothing is left behind: no folder set aside, no half-written record.
 			expect(readdirSync(dir)).toEqual([]);
@@ -137,15 +149,16 @@ describe("the lock's folder", () => {
 		const dir = dirOf();
 		try {
 			const store = fileLockStore(dir);
-			const entry = (token: string) => ({
+			const entry = (token: string): ClosedWindowRecord => ({
 				owner: owner({ token }),
+				windows: owner().windows,
 				closedAt: iso(Date.now()),
 				reason: "gone" as const,
 				idleMinutes: 0,
 				by: { project: "D:\\other", command: "test" },
 			});
-			await store.recordClosed(entry("one"));
-			await store.recordClosed(entry("two"));
+			await noteVia(store, entry("one"));
+			await noteVia(store, entry("two"));
 			const half = join(dir, "closed", "three.json.123.abcd.tmp");
 			writeFileSync(half, "{ half");
 			const old = (Date.now() - LEFTOVER_STALE_MS - 5_000) / 1000;
@@ -165,19 +178,104 @@ describe("the lock's folder", () => {
 		try {
 			const store = fileLockStore(dir);
 			expect(await store.closedWindows()).toEqual([]);
-			const entry = (token: string, closedAt: number) => ({
+			const entry = (token: string, closedAt: number): ClosedWindowRecord => ({
 				owner: owner({ token }),
+				windows: owner().windows,
 				closedAt: iso(closedAt),
 				reason: "expired" as const,
 				idleMinutes: 20,
 				by: { project: "D:\\other", command: "test" },
 			});
-			await store.recordClosed(entry("older", Date.now() - 60_000));
-			await store.recordClosed(entry("newer", Date.now()));
-			await store.recordClosed(entry("gone", Date.now() - CLOSED_MEMORY_MS - 60_000));
+			await noteVia(store, entry("older", Date.now() - 60_000));
+			await noteVia(store, entry("newer", Date.now()));
+			await noteVia(store, entry("gone", Date.now() - CLOSED_MEMORY_MS - 60_000));
 			expect((await store.closedWindows()).map((closed) => closed.owner.token)).toEqual(["newer", "older"]);
 			// The one past a day is forgotten.
 			expect(readdirSync(join(dir, "closed")).sort()).toEqual(["newer.json", "older.json"]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a note is written by the free that frees the lock, and by no free that does not (L1)", async () => {
+		const dir = dirOf();
+		try {
+			const store = fileLockStore(dir);
+			const note = (token: string): ClosedWindowRecord => ({
+				owner: owner({ token }),
+				windows: owner().windows,
+				closedAt: iso(Date.now()),
+				reason: "gone",
+				idleMinutes: 0,
+				by: { project: "D:\\other", command: "test" },
+			});
+			// Judged stale by two takers: the one whose free comes second finds the lock taken anew,
+			// and leaves no note for the owner to read as news after it took the lock again.
+			await store.take(owner({ token: "judged" }));
+			expect(await store.free("judged", note("judged"))).toBe(true);
+			await store.take(owner({ token: "fresh" }));
+			expect(await store.free("judged", note("judged-again"))).toBe(false);
+			expect((await store.closedWindows()).map((entry) => entry.owner.token)).toEqual(["judged"]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a record of the version before several windows reads as one window, and so does its note", async () => {
+		const dir = dirOf();
+		try {
+			const store = fileLockStore(dir);
+			const flat = {
+				version: 1,
+				token: "old",
+				cliPid: 9001,
+				project: "E:\\game",
+				command: "studio open",
+				place: "E:\\game\\test.rbxl",
+				placeFile: "E:\\game\\test.rbxl",
+				studioPid: 4001,
+				studioStartedAt: iso(T0),
+				mcpId: "abc",
+				since: iso(T0),
+				...leaseFrom(T0, 15),
+				holdMinutes: 15,
+				kept: true,
+			};
+			mkdirSync(join(dir, "studio-lock"));
+			writeFileSync(join(dir, "studio-lock", "owner.json"), JSON.stringify(flat));
+			const read = await store.read();
+			expect(read.kind === "held" && read.owner).toMatchObject({
+				version: 2,
+				token: "old",
+				kept: true,
+				windows: [
+					{
+						place: "E:\\game\\test.rbxl",
+						placeFile: "E:\\game\\test.rbxl",
+						studioPid: 4001,
+						studioStartedAt: iso(T0),
+						mcpId: "abc",
+					},
+				],
+			});
+			expect(read.kind === "held" && "studioPid" in read.owner).toBe(false);
+			// One with no window launched yet names its place alone; one with nothing names none.
+			expect(normalizeOwner({ token: "x", place: "p.rbxl" }).windows).toEqual([{ place: "p.rbxl" }]);
+			expect(normalizeOwner({ token: "x" }).windows).toEqual([]);
+
+			mkdirSync(join(dir, "closed"));
+			writeFileSync(
+				join(dir, "closed", "old.json"),
+				JSON.stringify({
+					owner: flat,
+					closedAt: iso(Date.now()),
+					reason: "gone",
+					idleMinutes: 0,
+					by: { project: "D:\\other", command: "test" },
+				}),
+			);
+			const [note] = await store.closedWindows();
+			expect(note!.windows).toEqual([expect.objectContaining({ studioPid: 4001, mcpId: "abc" })]);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -187,10 +285,10 @@ describe("the lock's folder", () => {
 describe("judging the lock", () => {
 	const studio = { name: "RobloxStudioBeta", startedAt: T0 - 60_000 };
 	const cli = { name: "bun", startedAt: T0 - 60_000 };
-	const launched = owner({ studioPid: 4001, studioStartedAt: iso(T0 - 60_000), mcpId: "abc", kept: true });
+	const launched = owner({ kept: true }, { studioPid: 4001, studioStartedAt: iso(T0 - 60_000), mcpId: "abc" });
 
 	test("free, and a record being taken: live for a while, then stale", async () => {
-		expect(await judgeLock({ kind: "free" }, T0, probeOf({}))).toEqual({ state: "free" });
+		expect(await judgeLock({ kind: "free" }, T0, probeOf({}))).toEqual({ state: "free", windows: [] });
 		expect((await judgeLock({ kind: "unreadable", ageMs: 1000 }, T0, probeOf({}))).state).toBe("live");
 		expect((await judgeLock({ kind: "unreadable", ageMs: UNREADABLE_GRACE_MS + 1 }, T0, probeOf({}))).state).toBe(
 			"stale",
@@ -199,17 +297,17 @@ describe("judging the lock", () => {
 
 	test("a window that runs is live within its hold and expired past it, whether its command is still going or not", async () => {
 		const live = await judgeLock({ kind: "held", owner: launched }, T0, probeOf({ 4001: studio }));
-		expect(live).toMatchObject({ state: "live", window: "running", cli: "gone", idleMs: 60_000 });
+		expect(live).toMatchObject({ state: "live", windows: [{ fate: "running" }], cli: "gone", idleMs: 60_000 });
 		const going = await judgeLock({ kind: "held", owner: launched }, T0, probeOf({ 4001: studio, 9001: cli }));
 		expect(going).toMatchObject({ state: "live", cli: "running" });
 		const expired = await judgeLock({ kind: "held", owner: launched }, T0 + 15 * 60_000, probeOf({ 4001: studio }));
-		expect(expired).toMatchObject({ state: "expired", window: "running", idleMs: 16 * 60_000 });
+		expect(expired).toMatchObject({ state: "expired", windows: [{ fate: "running" }], idleMs: 16 * 60_000 });
 	});
 
 	test("a window that has closed, or whose PID is another process now, is stale", async () => {
 		expect(await judgeLock({ kind: "held", owner: launched }, T0, probeOf({}))).toMatchObject({
 			state: "stale",
-			window: "gone",
+			windows: [{ fate: "gone" }],
 		});
 		expect(
 			await judgeLock(
@@ -217,7 +315,7 @@ describe("judging the lock", () => {
 				T0,
 				probeOf({ 4001: { name: "notepad", startedAt: T0 } }),
 			),
-		).toMatchObject({ state: "stale", window: "reused", reusedBy: "notepad" });
+		).toMatchObject({ state: "stale", windows: [{ fate: "reused", reusedBy: "notepad" }] });
 		// Another Studio under the same PID, started well after the one launched: the user's own.
 		expect(
 			await judgeLock(
@@ -225,7 +323,7 @@ describe("judging the lock", () => {
 				T0,
 				probeOf({ 4001: { name: "RobloxStudioBeta", startedAt: T0 - 60_000 + START_TOLERANCE_MS + 1 } }),
 			),
-		).toMatchObject({ state: "stale", window: "reused" });
+		).toMatchObject({ state: "stale", windows: [{ fate: "reused" }] });
 		// Even past its hold: what has gone is stale, not expired.
 		expect((await judgeLock({ kind: "held", owner: launched }, T0 + 60 * 60_000, probeOf({}))).state).toBe("stale");
 	});
@@ -238,7 +336,12 @@ describe("judging the lock", () => {
 			T0,
 			probeOf({ 4001: window, 9001: { name: "bun", startedAt: T0 - 60_000 + 10_000 } }),
 		);
-		expect(view).toMatchObject({ window: "running", cli: "reused", cliReusedBy: "bun", state: "live" });
+		expect(view).toMatchObject({
+			windows: [{ fate: "running" }],
+			cli: "reused",
+			cliReusedBy: "bun",
+			state: "live",
+		});
 		const same = await judgeLock(
 			{ kind: "held", owner: launched },
 			T0,
@@ -263,21 +366,21 @@ describe("judging the lock", () => {
 		);
 		// A test whose window has just closed, before its record says so, and before the next
 		// project's window opens: still its own (another project's poll in that gap took it before).
-		const running = owner({ command: "test", studioPid: 4001, studioStartedAt: iso(T0 - 60_000) });
+		const running = owner({ command: "test" }, { studioPid: 4001, studioStartedAt: iso(T0 - 60_000) });
 		expect(await judgeLock({ kind: "held", owner: running }, T0, probeOf({ 9001: cli }))).toMatchObject({
 			state: "live",
 			cli: "running",
-			window: "gone",
+			windows: [{ fate: "gone" }],
 		});
 	});
 
 	test("a window its command did not mean to leave open, once that command has ended, may be closed at once", async () => {
 		// A plain test cut off by a second Ctrl+C, or killed: its window is still open, its run is not.
-		const left = owner({ command: "test", studioPid: 4001, studioStartedAt: iso(T0 - 60_000) });
+		const left = owner({ command: "test" }, { studioPid: 4001, studioStartedAt: iso(T0 - 60_000) });
 		expect(await judgeLock({ kind: "held", owner: left }, T0, probeOf({ 4001: studio }))).toMatchObject({
 			state: "expired",
 			abandoned: true,
-			window: "running",
+			windows: [{ fate: "running" }],
 			cli: "gone",
 		});
 		// Its window gone too: nothing holds it.
@@ -290,6 +393,35 @@ describe("judging the lock", () => {
 			(await judgeLock({ kind: "held", owner: { ...left, kept: true } }, T0, probeOf({ 4001: studio })))
 				.abandoned,
 		).toBeUndefined();
+	});
+
+	test("several windows: each judged by its own process; the lock is stale only once every one has gone", async () => {
+		const several = owner({ command: "test --parallel 2" }, {});
+		several.windows = [
+			{ place: "a.rbxl", placeFile: "a.rbxl", studioPid: 4001, studioStartedAt: iso(T0 - 60_000), mcpId: "a" },
+			{ place: "b.rbxl", placeFile: "b.rbxl", studioPid: 4002, studioStartedAt: iso(T0 - 60_000) },
+			{ place: "c.rbxl", placeFile: "c.rbxl" },
+		];
+		const record = { kind: "held" as const, owner: several };
+		// Its run going: live, each window as it is.
+		expect(await judgeLock(record, T0, probeOf({ 9001: cli, 4002: studio }))).toMatchObject({
+			state: "live",
+			windows: [{ fate: "gone" }, { fate: "running" }, {}],
+		});
+		// Its run cut short with one window still open: that one is left behind, and may be closed at once.
+		expect(await judgeLock(record, T0, probeOf({ 4002: studio }))).toMatchObject({
+			state: "expired",
+			abandoned: true,
+			windows: [{ fate: "gone" }, { fate: "running" }, {}],
+		});
+		// One whose PID is another process now holds nothing; with the other gone, nothing holds it.
+		expect(await judgeLock(record, T0, probeOf({ 4002: { name: "notepad", startedAt: T0 } }))).toMatchObject({
+			state: "stale",
+			windows: [{ fate: "gone" }, { fate: "reused", reusedBy: "notepad" }, {}],
+		});
+		// The window never launched is judged as none.
+		const view = await judgeLock(record, T0, probeOf({}));
+		expect(view.windows[2]).toEqual({ window: { place: "c.rbxl", placeFile: "c.rbxl" } });
 	});
 
 	test("a process is the one recorded by its name and its start time, within the tolerance; unknowns pass", () => {
@@ -314,8 +446,9 @@ describe.skipIf(process.platform !== "win32")("looking processes up, for real", 
 		const info = found.get(self)!;
 		expect(info.name?.toLowerCase()).toBe("bun");
 		// What the CLI records for itself is within the (CLI's, tighter) tolerance of what Windows says.
-		const recorded = Date.now() - process.uptime() * 1000;
-		expect(Math.abs(info.startedAt! - recorded)).toBeLessThan(CLI_START_TOLERANCE_MS);
+		expect(Math.abs(info.startedAt! - processStartedAt())).toBeLessThan(CLI_START_TOLERANCE_MS);
+		// It is the clock as Bun started, which no later change of the clock moves (L7).
+		expect(processStartedAt()).toBe(performance.timeOrigin);
 		expect(await probeProcesses([])).toEqual(new Map());
 	}, 60_000);
 });
@@ -368,7 +501,7 @@ describe("the sub-lock every change takes", () => {
 			const old = (Date.now() - MUTEX_STALE_MS - 5_000) / 1000;
 			utimesSync(join(dir, "studio-lock.mutex"), old, old);
 			expect(await store.take(owner())).toBe(true);
-			expect(await store.update("token-a", { mcpId: "x" })).toBe(true);
+			expect(await store.update("token-a", { kept: true })).toBe(true);
 			expect(await store.free("token-a")).toBe(true);
 			// Nothing is left: no sub-lock, no folder set aside.
 			expect(readdirSync(dir)).toEqual([]);
@@ -450,7 +583,7 @@ describe("the sub-lock every change takes", () => {
 					return "x";
 				},
 			};
-			expect(await store.update("token-a", { mcpId: swap as unknown as string })).toBe(true);
+			expect(await store.update("token-a", { command: swap as unknown as string })).toBe(true);
 			expect(existsSync(mutexOf(dir))).toBe(true);
 			expect(JSON.parse(readFileSync(join(mutexOf(dir), "holder.json"), "utf8")).token).toBe("another");
 		} finally {
@@ -505,11 +638,11 @@ describe("the sub-lock every change takes", () => {
 			const store = fileLockStore(dir);
 			await store.take(owner());
 			const results = await Promise.all(
-				Array.from({ length: 20 }, (_, index) => store.update("token-a", { mcpId: String(index) })),
+				Array.from({ length: 20 }, (_, index) => store.update("token-a", { command: String(index) })),
 			);
 			expect(results.every(Boolean)).toBe(true);
 			const read = await store.read();
-			expect(read.kind === "held" && read.owner.mcpId).toBe("19");
+			expect(read.kind === "held" && read.owner.command).toBe("19");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

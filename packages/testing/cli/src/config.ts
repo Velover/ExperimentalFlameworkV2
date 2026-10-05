@@ -36,12 +36,18 @@ export interface CloudSettings {
 	 * project may close it. After `--hold` and `FLAMEWORK_TEST_LOCK_HOLD`.
 	 */
 	lockHold?: number;
+	/**
+	 * `testing.parallel`: how many projects' Studio windows a `test` of several runs side by side.
+	 * After `--parallel` and `FLAMEWORK_TEST_PARALLEL`; never read by a cloud run.
+	 */
+	parallel?: number;
 	/** Where the settings were read from, when a file was found. */
 	configPath?: string;
 	/**
 	 * `.env`, then `.env.local`, then the process environment, later ones winning: the CLI reads
 	 * its own variables (ROBLOX_API_KEY, TESTING_UNIVERSE_ID, TESTING_PLACE_ID, ORIGINAL_PLACE,
-	 * ROJO_PROJECT, KEEP_AWAKE, FAIL_ON_SKIP, FLAMEWORK_TEST_LOCK_TIMEOUT, FLAMEWORK_TEST_LOCK_HOLD)
+	 * ROJO_PROJECT, KEEP_AWAKE, FAIL_ON_SKIP, FLAMEWORK_TEST_LOCK_TIMEOUT, FLAMEWORK_TEST_LOCK_HOLD,
+	 * FLAMEWORK_TEST_PARALLEL)
 	 * from here, so a `.env` works without the config file referencing it.
 	 */
 	env: Record<string, string>;
@@ -74,6 +80,7 @@ export function loadCloudSettings(cwd: string, env: Record<string, string | unde
 		...(typeof testing.failOnSkip === "boolean" ? { failOnSkip: testing.failOnSkip } : {}),
 		...(typeof testing.lockTimeout === "number" ? { lockTimeout: testing.lockTimeout } : {}),
 		...(typeof testing.lockHold === "number" ? { lockHold: testing.lockHold } : {}),
+		...(typeof testing.parallel === "number" ? { parallel: testing.parallel } : {}),
 		configPath: loaded.configPath,
 		env: loaded.env,
 	};

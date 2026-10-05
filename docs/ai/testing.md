@@ -92,6 +92,9 @@ export class ShopTests implements OnStart {
   `--fail-on-skip` (a skip fails the run), `--keep-awake` (Windows: keeps the display on, since
   while it sleeps RenderStepped stops and `onRender` tests fail), `--list`, `--keep`, `--timeout`,
   `--concurrency 1` (concurrent tests one at a time).
+- `--parallel [n]` runs a run of several Rojo projects with that many windows side by side (each
+  about 3 GB). Add it only when the user wants a multi-project run anyway: it is no reason to run
+  more.
 - `--sections` is judged across both realms: an entry only one realm has is listed for the other
   as `not among the client's sections: ...` without failing, and an entry no realm has fails the
   run with `MISS matched nothing in any realm: ...`. With `--realm`, the one realm judges alone.

@@ -48,7 +48,8 @@ appears.
 
 Studio may run the Luau its MCP server executes in a sandboxed thread (it did from 2026-10-01; on
 2026-10-05 it did not), and the host and the CLI work either way. A sandboxed thread may only
-invoke a bindable that is Sandboxed itself and has no capability the thread lacks. So the host makes `Workspace.FlameworkTests` Sandboxed, with no capabilities. That
+invoke a bindable that is Sandboxed itself and has no capability the thread lacks. So the host
+makes `Workspace.FlameworkTests` Sandboxed, with no capabilities. That
 decides only who may call it: the callback runs with the capabilities of the script that set it,
 so the tests keep `require`, `_G` and everything else. A place built with 2.0.0-alpha.5 or earlier
 has a bindable that is not Sandboxed. The CLI marks it before the invoke for as long as Studio
@@ -74,13 +75,14 @@ on the proxy before the run looks; one that is still opening (a double-click, `s
 own the entry the run is waiting for, so the run waits for it, and refuses, closing its own window,
 when it cannot tell the two apart.
 
-One Studio window opened through flamework-test is open at a time on the machine, across projects
-and agents: `test` takes the Studio lock before it launches Studio, holds it across all its
-projects, and waits (300 seconds, `--lock-timeout`) while another project's run or window holds it,
-saying whose. A window left open (`--keep`, `studio open`) holds the lock until it closes, or until
-it has sat unused past its hold (15 minutes, `--hold`), when the next command closes it. The lock
-lives in `%LOCALAPPDATA%\flamework-test` on Windows, shared by every project and agent. See the
-package's [README](../../packages/testing/README.md#the-studio-lock).
+One flamework-test run at a time opens Studio windows on the machine, across projects and agents
+(with `--parallel`, several of its projects' windows at once): `test` takes the Studio lock before
+it launches Studio, holds it across all its projects, and waits (300 seconds, `--lock-timeout`)
+while another project's run or window holds it, saying whose. A window left open (`--keep`, `studio
+open`) holds the lock until it closes, or until it has sat unused past its hold (15 minutes,
+`--hold`), when the next command closes it. The lock lives in `%LOCALAPPDATA%\flamework-test` on
+Windows, shared by every project and agent. See the package's
+[README](../../packages/testing/README.md#the-studio-lock).
 
 Both realms share the one play session, so the client's sections run against a server whose own
 tests have already run. A RemoteEvent message fired at a client before it connected
@@ -440,6 +442,16 @@ projects: default passed (1 skipped), deferred passed, streaming FAILED
 ```
 
 The exit code is the worst of them; `--timeout` and the hang report apply to each project's run.
+
+`--parallel` runs two projects' windows side by side (`--parallel 3`: three, at most 4), the next
+project starting as one's window closes. Each project's lines are still printed together, in
+project order, and short lines on stderr say how the ones waiting to print are getting on. Each
+window takes about 3 GB; `FLAMEWORK_TEST_PARALLEL` or `"testing": { "parallel": 2 }` set it too.
+See the package's [README](../../packages/testing/README.md#side-by-side).
+
+```console
+bunx flamework-test test place.rbxl --project default.project.json,tests/deferred.project.json --parallel
+```
 Without a project named, the run is the plain one, and `ROJO_PROJECT=` turns a listed set off
 again. A chosen project needs `lune` even without an original: the build came from `rojo build`
 with `default.project.json`, so its properties are set on a copy first. The tree still comes from

@@ -237,6 +237,12 @@
 					"minimum": 1,
 					"default": 15,
 					"description": "flamework-test only: minutes a Studio window flamework-test opened may sit unused before another project's command may close it and take the Studio lock; one at least. Every flamework-test command that uses the window renews it. --hold (studio open, test --keep) and FLAMEWORK_TEST_LOCK_HOLD come first. Never compiled into the place. Default: 15."
+				},
+				"parallel": {
+					"type": "integer",
+					"minimum": 1,
+					"default": 1,
+					"description": "flamework-test only: how many projects' Studio windows a test of several Rojo projects (--project, ROJO_PROJECT) runs side by side, each project's lines still printed together in project order; 1 runs them one after another. At most 4 at once, and no more than there are projects: each window takes about 3 GB with its play session. Not for cloud runs. --parallel and FLAMEWORK_TEST_PARALLEL come first. Never compiled into the place. Default: 1."
 				}
 			}
 		},

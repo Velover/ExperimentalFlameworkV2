@@ -95,13 +95,37 @@ and closes it again (`studio open` + `studio run [--realm client]` do the same b
 ```console
 bun run test:place                                          # build the packages, then the place's `bun run test`
 bun run test:place --project tests/deferred.project.json    # arguments go to flamework-test test, paths relative to tests/place
+bun run test:place --parallel 2                             # two projects' windows side by side: about 5 min rather than 7 min 20 s
 ```
 
 which builds the packages and runs the whole suite in Studio under each of the four Rojo projects in
 the place's `ROJO_PROJECT` (default, immediate, deferred, streaming; see the place's
 [README](../../tests/place/README.md#one-suite-four-rojo-projects)). The root `bun run test` leaves
-it out, since it needs Studio. What follows is the older battletest of `[FWTEST]` lines the place's
-providers print on start, which the same proxy drives.
+it out, since it needs Studio.
+
+With `--parallel 2` the run holds the Studio lock for both of its windows at once, and
+`flamework-test studio lock` (from any folder) lists each:
+
+```
+Studio lock (...\flamework-test\studio-lock): live: its `test --parallel 2` is running (flamework-test PID 37972); ...
+  command:  test --parallel 2
+  window 1 of 2:
+  place:    ...\tests\place\place.default.rbxl
+  studio:   PID 38416, running
+  mcp:      ab311083-..., on the MCP proxy        (with --check-window)
+  window 2 of 2:
+  place:    ...\tests\place\place.deferred.rbxl
+  studio:   PID 39412, running
+  mcp:      0d72f123-..., on the MCP proxy
+```
+
+A run cut short with both windows up (a second Ctrl+C, a killed process) leaves them to the next
+command that opens a window, which closes both, each by its own Studio process, and says so in one
+line; `studio close` from `tests/place` closes them too. One that would not close stays in the
+lock's record with its own place file, for the next taker.
+
+What follows is the older battletest of `[FWTEST]` lines the place's providers print on start,
+which the same proxy drives.
 
 `scripts/studio/run-studio-tests.mjs` drives Studio through the MCP proxy: it starts a play session,
 waits for the providers, prints every `[FWTEST]` line, stops the session and exits non-zero on a
@@ -181,12 +205,13 @@ overlapping.
 
 Studio may run every snippet sandboxed (it did from 2026-10-01; on 2026-10-05 it did not), without
 the LoadUnownedAsset, ScriptGlobals, DataStore and Network capabilities. Then, in a snippet, `_G`
-and `shared` are nil, `require` of one of the place's ModuleScripts fails, and `DataStoreService`
-is not there; the place's own scripts are not affected. A snippet may only invoke or fire a bindable that is Sandboxed itself and has no
-capability the snippet lacks, which is why the test host's `Workspace.FlameworkTests` is (see
-[Running the tests](place.md#in-studio-on-this-machine)). `RunService:Run()` and a client snippet's
-`RemoteFunction:InvokeServer` still work. The runner's prelude and the cases here use none of what
-is gone (all of them ran sandboxed on 2026-10-02), so they run either way.
+and `shared` are nil, `require` of one of the place's ModuleScripts fails, and `DataStoreService` is
+not there; the place's own scripts are not affected. A snippet may only invoke or fire a bindable
+that is Sandboxed itself and has no capability the snippet lacks, which is why the test host's
+`Workspace.FlameworkTests` is (see [Running the tests](place.md#in-studio-on-this-machine)).
+`RunService:Run()` and a client snippet's `RemoteFunction:InvokeServer` still work. The runner's
+prelude and the cases here use none of what is gone (all of them ran sandboxed on 2026-10-02), so
+they run either way.
 
 ```lua
 -- @mode server

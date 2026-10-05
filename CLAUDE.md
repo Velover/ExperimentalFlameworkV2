@@ -12,7 +12,7 @@ small change never needs it.
 | runtime code in `packages/core`, `components`, `networking`, `testing/src` | `bun run build`, then `bun run test:runtime` | 3 min |
 | `packages/transformer` | the test files of that area: `bun test --timeout 120000 packages/transformer/tests/<file>` | 1–3 min |
 | packaging: a package's `files`, `scripts/copy-*.mjs`, `scripts/links.mjs` | `bun run test:packaging` | 1 min |
-| behaviour only the engine shows (signals, replication, streaming) | `bun run test:place --sections <section>`, one project | several min, Studio |
+| behaviour only the engine shows (signals, replication, streaming) | `bun run test:place --sections <section>`, one project | several min, Studio; all four projects 7 min 20 s, about 5 min with `--parallel 2` |
 
 - **Ask first, saying why and how long:**
   - `bun run test` (every suite);

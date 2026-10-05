@@ -478,7 +478,7 @@ describe("studio commands", () => {
 		});
 		expect(run.code).toBe(0);
 		expect(run.out).toContain("studio_id=studio-fresh pid=4001");
-		expect(run.machine.lock.owner?.mcpId).toBe("studio-fresh");
+		expect(run.machine.lock.owner?.windows[0]?.mcpId).toBe("studio-fresh");
 
 		// Only the old one: never this command's.
 		const old = await runCli(["studio", "open"], { studio: { studios: [TESTING_STUDIO] } });

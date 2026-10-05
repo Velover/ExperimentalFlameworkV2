@@ -16,6 +16,7 @@ From the repository root:
 
 ```console
 bun run test:place                                                    # build the packages, then everything below
+bun run test:place --parallel 2                                       # two projects' windows at once, each about 3 GB
 bun run test:place --project tests/deferred.project.json              # one project (paths are relative to tests/place)
 bun run test:place --project tests/deferred.project.json --realm client --sections components
 bun run test:place --cloud                                            # a real server through Open Cloud, server realm

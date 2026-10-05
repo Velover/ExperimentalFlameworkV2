@@ -3,7 +3,15 @@ import { basename, join } from "node:path";
 
 import { main, type CliDeps } from "../src/cli.ts";
 import type { CloudSettings } from "../src/config.ts";
-import type { ClosedWindowRecord, LockOwner, LockRecord, LockStore, ProcessInfo } from "../src/lock.ts";
+import {
+	normalizeOwner,
+	type ClosedWindowRecord,
+	type LockOwner,
+	type LockRecord,
+	type LockStore,
+	type LockWindow,
+	type ProcessInfo,
+} from "../src/lock.ts";
 import type { FetchLike } from "../src/openCloud.ts";
 import {
 	textOf,
@@ -45,6 +53,30 @@ export interface FakeWindow {
 }
 
 /**
+ * A lock record with one window, written flat as the tests name it: the record's fields and its
+ * window's (`place`, `placeFile`, `studioPid`, `mcpId`) side by side. `windows` gives several.
+ */
+export type FlatOwner = Omit<LockOwner, "version" | "windows"> &
+	Partial<LockWindow> & { version?: number; windows?: LockWindow[] };
+
+/** The record a flat one stands for: its window fields make its one window. */
+export function fromFlat(flat: FlatOwner): LockOwner {
+	if (flat.windows !== undefined) {
+		const rest: Record<string, unknown> = { ...flat };
+		for (const key of ["place", "placeFile", "placeId", "studioPid", "studioStartedAt", "mcpId"]) delete rest[key];
+		return { ...rest, version: 2, windows: flat.windows } as unknown as LockOwner;
+	}
+	return normalizeOwner({ ...flat, version: 1 } as unknown as Record<string, unknown>);
+}
+
+/** A record read back flat: its fields, and its first window's beside them. */
+export function flatOf(owner: LockOwner): FlatOwner & { windows: LockWindow[] } {
+	return { ...owner, ...(owner.windows[0] ?? {}), place: owner.windows[0]?.place ?? "" } as FlatOwner & {
+		windows: LockWindow[];
+	};
+}
+
+/**
  * The Studio lock in memory, as the real one keeps it in a folder: `owner` is the record, and
  * `unreadable` a folder whose record cannot be read (being written, or left half-made).
  */
@@ -79,18 +111,19 @@ export function fakeLockStore(now: () => number = () => Date.now()): FakeLockSto
 			}
 			return true;
 		},
-		free: async (token) => {
+		free: async (token, note) => {
 			if (store.owner === undefined) {
 				if (store.unreadable === undefined || token !== undefined) return false;
 				store.unreadable = undefined;
-				return true;
+			} else {
+				if (store.owner.token !== token) return false;
+				store.owner = undefined;
 			}
-			if (store.owner.token !== token) return false;
-			store.owner = undefined;
+			if (note !== undefined) {
+				store.closed = store.closed.filter((entry) => entry.owner.token !== note.owner.token);
+				store.closed.unshift(structuredClone(note));
+			}
 			return true;
-		},
-		recordClosed: async (entry) => {
-			store.closed.unshift(structuredClone(entry));
 		},
 		closedWindows: async () => structuredClone(store.closed),
 		forgetClosed: async (tokens) => {
@@ -214,6 +247,8 @@ export interface Harness {
 	executionStates: number[];
 	/** The thread's execution state when the run returned: 0x80000000 when nothing is held. */
 	executionState: number;
+	/** How many times the run looked processes up (each a PowerShell call, 0.5 to 1 s, on a real machine). */
+	probes: number;
 }
 
 /** A canned Studio: what the proxy lists, and what each tool answers. */
@@ -301,6 +336,11 @@ export async function runCli(
 		 * later, or throw as the real spawn does (`ChildTimedOut` past the timeout).
 		 */
 		spawnCode?: number | ((command: string[], timeoutMs?: number) => number | Promise<number>);
+		/**
+		 * What a spawned process prints, line by line: to the terminal's stdout (`out`), as an
+		 * inherited child's output lands, unless the run asked for its lines, which it then gets.
+		 */
+		spawnLines?: (command: string[]) => string[];
 		studio?: FakeStudio;
 		/** Where Roblox Studio is; undefined means not installed. */
 		studioExe?: string | undefined;
@@ -362,6 +402,7 @@ export async function runCli(
 	const executionStates: number[] = [];
 	// The thread's state as Windows keeps it: ES_CONTINUOUS alone is nothing held.
 	let executionState = 0x80000000;
+	let probes = 0;
 	let exitedAtOnce = false;
 	let exitAtOnce: (code: number) => void = () => {};
 	const exited = new Promise<number>((resolve) => (exitAtOnce = resolve));
@@ -413,9 +454,13 @@ export async function runCli(
 			written[path.replaceAll("\\", "/")] = text;
 		},
 		exists: async (path) => find(path) !== undefined,
-		spawn: async (command, _cwd, timeoutMs) => {
+		spawn: async (command, _cwd, timeoutMs, output) => {
 			spawned.push(command);
 			spawnTimeouts.push(timeoutMs);
+			for (const line of options.spawnLines?.(command) ?? []) {
+				if (output !== undefined) output(line, false);
+				else out.push(line);
+			}
 			const code = options.spawnCode ?? 0;
 			return typeof code === "function" ? await code(command, timeoutMs) : code;
 		},
@@ -527,6 +572,7 @@ export async function runCli(
 		projectRoot: options.projectRoot ?? ((cwd) => cwd),
 		// What runs on the fake machine: its Studio windows, and the flamework-test runs going on.
 		probeProcesses: async (pids) => {
+			probes += 1;
 			const found = new Map<number, ProcessInfo>();
 			for (const pid of pids) {
 				const window = windows.find((entry) => entry.pid === pid);
@@ -632,6 +678,7 @@ export async function runCli(
 		proxies,
 		executionStates,
 		executionState,
+		probes,
 	};
 }
 

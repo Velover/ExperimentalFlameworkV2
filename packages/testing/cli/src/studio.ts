@@ -540,6 +540,12 @@ function isRunning(pid: number): boolean {
  * claim, a second run looks at the proxy only once the first run's window is listed, and so finds
  * its own. A claim is a file in `dir` holding the claimant's PID; one whose process has ended is
  * taken over, and a wait longer than `timeoutMs` is refused, naming the holder.
+ *
+ * The holder is judged by its PID alone, not by its name and start time as the Studio lock's are. No
+ * older CLI reads these claims (2.0.0-alpha.6 kept its own in the temp folder), so the format is
+ * free to change; it is left because a claim lives only while a window registers, seconds, and is
+ * removed with it, so one is left only by a process killed in that moment, and a PID Windows gives
+ * another process before the next claimant looks costs a wait that ends naming the file to delete.
  */
 export async function claimWindowName(
 	name: string,

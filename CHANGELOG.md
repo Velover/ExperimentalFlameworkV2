@@ -46,6 +46,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `list_roblox_studios`, which acts on no window: which window such a tool acts on cannot be told.
 - **`testing.concurrency` needs the next transformer.** Its schema has it; 2.0.0-alpha.7 refuses a
   `flamework.config.json` with it. `--concurrency` and a run's `concurrency` option need nothing.
+- **`testing.parallel` needs the next transformer.** Its schema has it; 2.0.0-alpha.7 refuses a
+  `flamework.config.json` with it. `--parallel` and `FLAMEWORK_TEST_PARALLEL` need nothing.
 
 ### core
 
@@ -72,8 +74,9 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   (`~/Library/Application Support/flamework-test` on macOS, `$XDG_STATE_HOME/flamework-test`
   elsewhere), or `FLAMEWORK_TEST_STATE_DIR`, which every project must agree on: set it in the shell,
   never in a project's `.env` (Bun loads the `.env` of the folder a command runs in, which would
-  move the lock for the commands run from there). It holds who took it: the
-  CLI and Studio PIDs, the window's MCP id, the project, the place, the command, since when. A
+  move the lock for the commands run from there). It holds who took it: the CLI's PID, the
+  project, the command, since when, and every window the command has open or is opening (its
+  place, its Studio PID, its MCP id), each judged on its own. A
   command that finds it held says whose once and then every minute, and waits up to
   `--lock-timeout` seconds (`FLAMEWORK_TEST_LOCK_TIMEOUT`, `testing.lockTimeout`; 300 by default),
   then fails naming the holder and how it is freed; Ctrl+C during the wait exits 130 holding
@@ -116,8 +119,9 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - **lune is given a timeout:** `lune --version` one minute, the patch five. A lune that hangs is
   stopped, and the run fails saying so, rather than holding the run (and, between two projects, the
   Studio lock) for as long as the CLI lives.
-- **`studio lock` and `studio unlock`.** `studio lock` names the holder (project, place, command,
-  since, last use, when its hold runs out), whether its command and its Studio process still run,
+- **`studio lock` and `studio unlock`.** `studio lock` names the holder (project, command, since,
+  last use, when its hold runs out, and each of its windows: place, Studio PID, MCP id), whether its
+  command and each window's Studio process still run,
   and whether the lock is live, expired or stale; `--check-window` also asks the MCP proxy whether
   its window is on it, which is not done unasked, since starting a proxy joins the hub other clients
   share. `studio unlock` frees a stale or
@@ -126,7 +130,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - **Concurrent tests, opt-in.** `test.concurrent(name, body)` registers a test that may run
   alongside others, and `defineTests(name, { concurrent: true }, body)` makes every test that body
   registers concurrent (`defineTests(name, body)` is unchanged). Tests start in the order they were
-  declared; consecutive concurrent tests in a section run together, up to `testing.concurrency` at
+  declared (a `--sections` list naming a section's tests in another order runs them in its own);
+  consecutive concurrent tests in a section run together, up to `testing.concurrency` at
   once (4 by default; `RunOptions.concurrency` and `flamework-test --concurrency` override it for a
   run, and 1 runs every test alone). A plain test is a barrier: it waits for the tests before it,
   runs alone, and the ones after it wait for it, as does the end of a section. A test marked with
@@ -147,8 +152,24 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `--json` keep the order the tests started in. Against a place built before concurrent tests,
   which ignores the option, the summary says so (on stderr with `--json`); an older CLI against a
   newer place reads its results as before. A run that does not answer in time names the last test
-  that reported and, unless `--concurrency 1` or a place before concurrent tests rules them out,
-  adds that among concurrent tests the hanging one may be any that has not reported.
+  that reported, and adds that among concurrent tests the hanging one may be any that has not
+  reported. It leaves that out only where the CLI knows none were in flight: under
+  `--concurrency 1`, or for a realm after one that answered from a place before concurrent tests,
+  or with a concurrency of 1 (the place's own `testing.concurrency`). Before any realm of the run
+  has answered, it cannot know the place, and adds it.
+
+- **`flamework-test test --parallel [n]`**: a run of several Rojo projects (`--project`,
+  `ROJO_PROJECT`) runs up to n of their Studio windows side by side (`--parallel` alone: 2), in
+  project order, a project starting as another's window closes; this repository's four projects took
+  about 5 min rather than 7 min 20 s. At most 4 at once, and no more than there are projects (each
+  window takes about 3 GB with its play session); also `FLAMEWORK_TEST_PARALLEL` and
+  `testing.parallel`, after the flag, checked before anything opens; 1 by default. Each project's
+  lines, lune's included, are printed together, in project order, as one after another prints them,
+  with short progress lines on stderr for the projects waiting to print; `--json` prints the same
+  stdout. A project that fails fails alone; the `projects:` line and the exit code are as ever. One
+  run holds the Studio lock for all its windows, and Ctrl+C closes every one. `--keep` under several
+  projects is still refused, and so is `--parallel` with `--cloud` (one testing place); the variable
+  and the key are not a cloud run's.
 
 #### Changed
 
@@ -182,6 +203,9 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - `testing.concurrency` in `flamework.config.json`'s schema: the most concurrent tests that run at
   once, a whole number, 1 or more (4 by default). A key of the place's, compiled into
   `include/flamework/config.json` as `timeout` is.
+- `testing.parallel` in `flamework.config.json`'s schema: how many Rojo projects' Studio windows
+  `flamework-test test` runs side by side, a whole number, 1 or more (1 by default), read by
+  `flamework-test` alone and left out of the place's config, as `lockTimeout` is.
 
 ## 2026-10-02: core, networking and testing 2.0.0-alpha.6; transformer 2.0.0-alpha.7
 

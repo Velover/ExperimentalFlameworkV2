@@ -43,13 +43,16 @@ import {
 	judgeLock,
 	leaseFrom,
 	newToken,
+	processStartedAt,
 	stateDirOf,
 	type ClosedWindowRecord,
 	type LockOwner,
 	type LockStore,
 	type LockView,
+	type LockWindow,
 	type ProbeProcesses,
 	type ProcessInfo,
+	type WindowView,
 } from "./lock.ts";
 import { parseSections, renderFilter, renderOptions, renderShim, type Filter } from "./luau.ts";
 import {
@@ -173,6 +176,16 @@ export const LOCK_REMIND_MS = 60_000;
 /** How often a command that uses its window renews the lease while it runs: half the shortest hold. */
 export const LEASE_HEARTBEAT_MS = 30_000;
 /**
+ * The most Studio windows one `test --parallel` opens at once, whatever is asked: a window with its
+ * play session (a server and a client) took 2.8 to 3.1 GB on this repository's place (measured
+ * 2026-10-05), so four take about 12 GB. Past four, a machine that also runs the user's own windows
+ * swaps, and the timing-sensitive tests of every window slow down together; four is also as many
+ * Rojo projects as a framework is usually tested under. More is cut down to it, saying so.
+ */
+export const PARALLEL_MOST = 4;
+/** `--parallel` with no number. */
+export const PARALLEL_DEFAULT = 2;
+/**
  * The tools of Studio's MCP proxy known to act on no window: `studio call` sends them without one.
  * Every other tool the proxy offers takes a `studio_id` (checked against the live tool list on
  * 2026-10-04); one that does not is sent only with `--any-window`, since the CLI cannot tell which
@@ -184,8 +197,15 @@ export const WINDOWLESS_ATTEMPTS = 20;
 
 // ---------------------------------------------------------------- arguments
 
-/** `list`: a string flag that may be repeated, or given comma-separated, and collects every value. */
-type FlagKind = "string" | "boolean" | "list";
+/**
+ * `list`: a string flag that may be repeated, or given comma-separated, and collects every value.
+ * `count`: a number that may be left out (`--parallel`, `--parallel 3`): the next argument is
+ * its value when it looks like a number, and `--parallel=<n>` always gives one.
+ */
+type FlagKind = "string" | "boolean" | "list" | "count";
+
+/** What `count` flags stand for when given without a number. */
+const COUNT_DEFAULTS: Record<string, string> = { parallel: String(PARALLEL_DEFAULT) };
 
 const FLAGS: Record<string, FlagKind> = {
 	file: "string",
@@ -198,6 +218,7 @@ const FLAGS: Record<string, FlagKind> = {
 	list: "boolean",
 	timeout: "string",
 	concurrency: "string",
+	parallel: "count",
 	code: "string",
 	script: "string",
 	realm: "string",
@@ -246,7 +267,18 @@ const RUN_FLAGS = [
 const REPORT_FLAGS = ["sections", "list", "json", "timeout", "concurrency", "fail-on-skip"];
 
 const COMMANDS: Record<string, string[]> = {
-	test: ["file", "realm", "keep", "keep-awake", "cloud", ...PATCH_FLAGS, ...REPORT_FLAGS, "published", ...LOCK_FLAGS],
+	test: [
+		"file",
+		"realm",
+		"keep",
+		"keep-awake",
+		"cloud",
+		"parallel",
+		...PATCH_FLAGS,
+		...REPORT_FLAGS,
+		"published",
+		...LOCK_FLAGS,
+	],
 	patch: ["file", "out", ...PATCH_FLAGS],
 	"studio open": ["file", "timeout", "json", ...LOCK_FLAGS],
 	"studio close": CHANGING_FLAGS,
@@ -285,6 +317,11 @@ export interface Flags {
 	timeout?: string;
 	/** The most concurrent tests that run at once, over the place's `testing.concurrency`. */
 	concurrency?: string;
+	/**
+	 * How many projects' Studio windows a `test` of several runs side by side: the value given, or
+	 * "2" for a bare `--parallel`; after it, FLAMEWORK_TEST_PARALLEL and testing.parallel.
+	 */
+	parallel?: string;
 	code?: string;
 	script?: string;
 	realm?: string;
@@ -377,6 +414,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
 					throw new UsageError(`--${name} does not take a value`);
 				}
 				(flags as Record<string, unknown>)[name] = value !== "false";
+			} else if (kind === "count") {
+				// A number-looking next argument is the value (and refused when it is not a whole number,
+				// 1 or more); anything else is left for what comes next: a file, another flag.
+				if (value === undefined && /^-?\d+(?:\.\d+)?$/.test(argv[i + 1] ?? "")) {
+					value = argv[i + 1];
+					i += 1;
+				}
+				(flags as Record<string, unknown>)[name] = value ?? COUNT_DEFAULTS[name];
 			} else {
 				if (value === undefined) {
 					const next = argv[i + 1];
@@ -523,6 +568,12 @@ Flags:
                                      while it sleeps, which fails onRender tests in a run nobody
                                      watches; Windows only, not with --cloud (default: $KEEP_AWAKE,
                                      else testing.keepAwake; off)
+             --parallel [n]          run up to n projects' Studio windows side by side (no number: 2;
+                                     at most ${PARALLEL_MOST}, and no more than there are projects), each
+                                     project's lines printed together, in project order; each window
+                                     takes about 3 GB. Not with --cloud (default:
+                                     $FLAMEWORK_TEST_PARALLEL, else testing.parallel, else 1: one
+                                     after another)
              --lock-timeout <seconds>  how long to wait for the Studio lock; 0 does not wait
                                      (default: $FLAMEWORK_TEST_LOCK_TIMEOUT, else
                                      testing.lockTimeout, else ${LOCK_TIMEOUT_SECONDS})
@@ -574,7 +625,8 @@ A cloud run also needs "testing": { "entry": "src/server/main" }, the ModuleScri
 the game: a cloud task runs none of the place's Scripts, so the runner has to. Studio needs nothing.
 "testing": { "failOnSkip": true, "keepAwake": true } turns those two on; --fail-on-skip=false and
 --keep-awake=false turn them off for one run. "testing": { "lockTimeout": 300, "lockHold": 15 } sets
-the Studio lock's wait (seconds) and hold (minutes).
+the Studio lock's wait (seconds) and hold (minutes); "testing": { "parallel": 2 } runs two projects'
+windows at once.
 
 Environment (the shell, .env or .env.local):
   ROBLOX_API_KEY                          Open Cloud key: universe-places:write and
@@ -585,6 +637,7 @@ Environment (the shell, .env or .env.local):
   FAIL_ON_SKIP, KEEP_AWAKE                true or false (1 or 0), for --fail-on-skip and --keep-awake
   FLAMEWORK_TEST_LOCK_TIMEOUT             seconds, for --lock-timeout
   FLAMEWORK_TEST_LOCK_HOLD                minutes, for --hold
+  FLAMEWORK_TEST_PARALLEL                 windows at once, for --parallel
   FLAMEWORK_TEST_STATE_DIR                where the Studio lock lives; every project must agree on it,
                                           so set it in the shell, never in a project's .env (Bun loads
                                           the .env of the folder a command runs in, which moves it)
@@ -594,6 +647,7 @@ Examples:
   rojo build -o place.rbxl && flamework-test test place.rbxl
   rojo build -o place.rbxl && flamework-test test place.rbxl --sections economy --keep
   rojo build -o place.rbxl && flamework-test test place.rbxl --project tests/deferred.project.json
+  flamework-test test place.rbxl --project default.project.json,tests/deferred.project.json --parallel
   rojo build -o place.rbxl && flamework-test test place.rbxl --cloud
   flamework-test cloud run --sections economy       again, against the version last published
   flamework-test studio open && flamework-test studio run --realm client
@@ -622,8 +676,10 @@ export interface CliDeps {
 	/**
 	 * Runs a child process with inherited output; resolves with its exit code, or throws when it
 	 * cannot start. Past `timeoutMs` the child is ended, and it rejects with {@link ChildTimedOut}.
+	 * With `output`, its output is not inherited: each line it prints is handed over instead (a
+	 * project's run beside others, whose lines are kept together).
 	 */
-	spawn?: (command: string[], cwd: string, timeoutMs?: number) => Promise<number>;
+	spawn?: (command: string[], cwd: string, timeoutMs?: number, output?: ChildOutput) => Promise<number>;
 	/** Starts a program and returns at once, leaving it running; resolves with its process id when known. */
 	launch?: (command: string[]) => Promise<number | undefined>;
 	/**
@@ -696,6 +752,15 @@ interface Io extends Required<Omit<CliDeps, "fetch">> {
 	fetch: FetchLike;
 	/** Ctrl+C: what the run holds, and whether it has been interrupted (see interrupt.ts). */
 	interruption: Interruption;
+	/**
+	 * A short line saying how a project's run is getting on, for a project whose lines wait for
+	 * another's (`test --parallel`); nothing otherwise, its own lines saying it.
+	 */
+	progress: (line: string) => void;
+	/** What one invocation reads once, shared by every project's view of it. */
+	memo: { settings?: CloudSettings; project?: string };
+	/** How many tests the results printed through this view skipped: one project's, for its line at the end. */
+	tally: { skipped: number };
 }
 
 /**
@@ -708,6 +773,25 @@ const INTERRUPT_SIGNALS = (): NodeJS.Signals[] =>
 
 /** A real sleep, which the run's own sleeps and a window-name claim's wait are made of. */
 const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Where a child process's lines go when they are not inherited: each line, and whether it came on stderr. */
+export type ChildOutput = (line: string, error: boolean) => void;
+
+/** Hands a stream's lines over as they come, the last one too when it has no line break. */
+async function forwardLines(stream: ReadableStream<Uint8Array>, error: boolean, output: ChildOutput): Promise<void> {
+	const decoder = new TextDecoder();
+	let rest = "";
+	for await (const chunk of stream) {
+		rest += decoder.decode(chunk, { stream: true });
+		let index: number;
+		while ((index = rest.indexOf("\n")) >= 0) {
+			output(rest.slice(0, index).replace(/\r$/, ""), error);
+			rest = rest.slice(index + 1);
+		}
+	}
+	rest += decoder.decode();
+	if (rest.length > 0) output(rest.replace(/\r$/, ""), error);
+}
 
 /** A child process that ran past its timeout, and was ended. */
 export class ChildTimedOut extends Error {
@@ -727,9 +811,23 @@ export class ChildTimedOut extends Error {
 export async function runInheriting(
 	command: string[],
 	cwd: string,
-	options: { signal?: AbortSignal; interrupted?: () => boolean; timeoutMs?: number } = {},
+	options: { signal?: AbortSignal; interrupted?: () => boolean; timeoutMs?: number; output?: ChildOutput } = {},
 ): Promise<number> {
-	const child = Bun.spawn({ cmd: command, cwd, stdout: "inherit", stderr: "inherit" });
+	const output = options.output;
+	const piped = output !== undefined;
+	const child = Bun.spawn({
+		cmd: command,
+		cwd,
+		stdout: piped ? "pipe" : "inherit",
+		stderr: piped ? "pipe" : "inherit",
+	});
+	// Read as it comes, so a chatty child never blocks on a full pipe.
+	const forwarded = piped
+		? Promise.all([
+				forwardLines(child.stdout as ReadableStream<Uint8Array>, false, output),
+				forwardLines(child.stderr as ReadableStream<Uint8Array>, true, output),
+			]).catch(() => {})
+		: Promise.resolve();
 	// On this console the child hears a Ctrl+C itself, and is ended here in case it outlives it.
 	const end = () => child.kill();
 	options.signal?.addEventListener("abort", end, { once: true });
@@ -743,6 +841,7 @@ export async function runInheriting(
 			: undefined;
 	try {
 		const code = await child.exited;
+		await forwarded;
 		if (timedOut) throw new ChildTimedOut(command, options.timeoutMs!);
 		// The Ctrl+C that ended the child can reach it before it reaches this process: a moment's
 		// wait lets it arrive, so the run reports the interruption rather than the child's failure.
@@ -770,11 +869,12 @@ function resolveDeps(deps: CliDeps, interruption: Interruption): Io {
 		deps.fetch ?? ((input, init) => globalThis.fetch(input, { ...init, signal: interruption.abortSignal }));
 	const spawnChild =
 		deps.spawn ??
-		((command: string[], cwd: string, timeoutMs?: number) =>
+		((command: string[], cwd: string, timeoutMs?: number, output?: ChildOutput) =>
 			runInheriting(command, cwd, {
 				signal: interruption.abortSignal,
 				interrupted: () => interruption.interrupted,
 				...(timeoutMs !== undefined ? { timeoutMs } : {}),
+				...(output !== undefined ? { output } : {}),
 			}));
 	const launch =
 		deps.launch ??
@@ -823,7 +923,7 @@ function resolveDeps(deps: CliDeps, interruption: Interruption): Io {
 				await Bun.write(path, text);
 			}),
 		exists: deps.exists ?? ((path) => Bun.file(path).exists()),
-		spawn: async (command, cwd, timeoutMs) => {
+		spawn: async (command, cwd, timeoutMs, output) => {
 			interruption.check();
 			const name = basename(command[0] ?? "").replace(/\.exe$/i, "");
 			// Bun ends the children it started when this process exits (measured: lune, PowerShell and
@@ -832,7 +932,7 @@ function resolveDeps(deps: CliDeps, interruption: Interruption): Io {
 				endsWithProcess: true,
 			});
 			try {
-				return await interruption.run(() => spawnChild(command, cwd, timeoutMs));
+				return await interruption.run(() => spawnChild(command, cwd, timeoutMs, output));
 			} finally {
 				release();
 			}
@@ -917,7 +1017,7 @@ function resolveDeps(deps: CliDeps, interruption: Interruption): Io {
 			(() => ({
 				pid: process.pid,
 				name: basename(process.execPath).replace(/\.exe$/i, ""),
-				startedAt: Date.now() - process.uptime() * 1000,
+				startedAt: processStartedAt(),
 			})),
 		writeBinaryFile:
 			deps.writeBinaryFile ??
@@ -926,18 +1026,16 @@ function resolveDeps(deps: CliDeps, interruption: Interruption): Io {
 				await Bun.write(path, data);
 			}),
 		interruption,
+		progress: () => {},
+		memo: {},
+		tally: { skipped: 0 },
 	};
 }
 
 /** The config file's settings, read once per invocation. */
-const settingsCache = new WeakMap<Io, CloudSettings>();
 function settingsOf(io: Io): CloudSettings {
-	let settings = settingsCache.get(io);
-	if (settings === undefined) {
-		settings = io.loadSettings(io.cwd, io.env);
-		settingsCache.set(io, settings);
-	}
-	return settings;
+	io.memo.settings ??= io.loadSettings(io.cwd, io.env);
+	return io.memo.settings;
 }
 
 /** A variable from the shell, else from `.env` / `.env.local` next to the config file. */
@@ -1056,6 +1154,42 @@ function concurrencyOf(flags: Flags): number | undefined {
 		throw new UsageError(`--concurrency must be a whole number, 1 or more, got "${flags.concurrency}"`);
 	}
 	return value;
+}
+
+/**
+ * How many projects' Studio windows a `test` runs side by side: `--parallel [n]`, else
+ * FLAMEWORK_TEST_PARALLEL (shell, `.env`, `.env.local`), else `testing.parallel`, else 1. A whole
+ * number, 1 or more, refused otherwise before anything opens; cut down to the projects there are,
+ * and to {@link PARALLEL_MOST}, saying so. A cloud run never reads the variable or the key.
+ */
+function parallelOf(flags: Flags, io: Io, projects: number): number {
+	const wanted = (text: string, from: string): number => {
+		const trimmed = text.trim();
+		if (!/^\d+$/.test(trimmed) || Number(trimmed) < 1) {
+			throw new UsageError(`${from} must be a whole number, 1 or more, got "${text}"`);
+		}
+		return Number(trimmed);
+	};
+	let asked = 1;
+	let from = "";
+	const variable = envOf(io, "FLAMEWORK_TEST_PARALLEL");
+	const configured = settingsOf(io).parallel;
+	if (flags.parallel !== undefined) {
+		asked = wanted(flags.parallel, "--parallel");
+		from = "--parallel";
+	} else if (variable !== undefined && variable.trim() !== "") {
+		asked = wanted(variable, "FLAMEWORK_TEST_PARALLEL");
+		from = "FLAMEWORK_TEST_PARALLEL";
+	} else if (configured !== undefined) {
+		asked = wanted(String(configured), "testing.parallel");
+		from = "testing.parallel";
+	}
+	if (asked > PARALLEL_MOST && projects > PARALLEL_MOST) {
+		io.error(
+			`note: ${from} ${asked} is more than the ${PARALLEL_MOST} Studio windows flamework-test opens at once (each takes about 3 GB with its play session); running ${PARALLEL_MOST} at a time`,
+		);
+	}
+	return Math.max(1, Math.min(asked, projects, PARALLEL_MOST));
 }
 
 /**
@@ -1590,17 +1724,11 @@ function readRunResult(results: string[], io: Io): RunResult | undefined {
 }
 
 /**
- * How many tests the results a run has printed skipped, for the line a run under several projects
- * ends on.
- */
-const skipTally = new WeakMap<Io, number>();
-
-/**
  * Prints a result as `--json`, `--list` or the summary ask, judged as `options` says. Under
  * `--json`, a run its skips fail says so on stderr, outside the JSON, which is the place's own.
  */
 function printResult(result: RunResult, results: string[], flags: Flags, io: Io, options?: Judgement): void {
-	if (!flags.list) skipTally.set(io, (skipTally.get(io) ?? 0) + result.skipped);
+	if (!flags.list) io.tally.skipped += result.skipped;
 	const ignored = concurrencyNote(result, concurrencyOf(flags), flags.list === true);
 	if (flags.json) {
 		io.log(JSON.stringify(JSON.parse(results[0]!), null, 2));
@@ -1686,20 +1814,14 @@ async function cloudTestProject(flags: Flags, io: Io, project: ProjectChoice): P
 
 // ------------------------------------------------------------- the Studio lock
 
-/** The project a command runs for, looked up once per invocation. */
-const projectCache = new WeakMap<Io, string>();
-
 /**
- * The project a command runs for: the nearest folder holding a flamework.config.json, else the
- * nearest holding a package.json, else where it ran (see `findProjectRoot`).
+ * The project a command runs for, looked up once per invocation: the nearest folder holding a
+ * flamework.config.json, else the nearest holding a package.json, else where it ran (see
+ * `findProjectRoot`).
  */
 function projectOf(io: Io): string {
-	let project = projectCache.get(io);
-	if (project === undefined) {
-		project = resolve(io.projectRoot(io.cwd));
-		projectCache.set(io, project);
-	}
-	return project;
+	io.memo.project ??= resolve(io.projectRoot(io.cwd));
+	return io.memo.project;
 }
 
 /** Whether two paths name the same place; Windows compares them ignoring case. */
@@ -1719,13 +1841,32 @@ function span(ms: number): string {
 	return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
 }
 
+/** A window of a lock's record as messages name it: `place.rbxl, Studio PID 4001, MCP id studio-4`. */
+function describeLockWindow(window: LockWindow): string {
+	return window.studioPid !== undefined
+		? `${window.place}, Studio PID ${window.studioPid}${window.mcpId !== undefined ? `, MCP id ${window.mcpId}` : ""}`
+		: `${window.place}, no Studio window open`;
+}
+
+/** Several windows of a record, as one clause: `a.rbxl, Studio PID 4001; b.rbxl, Studio PID 4002`. */
+function describeLockWindows(windows: readonly LockWindow[]): string {
+	return windows.map(describeLockWindow).join("; ");
+}
+
+/** Windows by their place and Studio process, as a close names them: `a.rbxl, Studio PID 4001; b.rbxl, Studio PID 4002`. */
+function describeProcesses(windows: readonly LockWindow[]): string {
+	return windows.map((window) => `${window.place}, Studio PID ${window.studioPid}`).join("; ");
+}
+
+/** `window` or `windows`, `has` or `have`: what a message says of one window or of several. */
+function windowWord(count: number): { window: string; has: string; it: string } {
+	return count === 1 ? { window: "window", has: "has", it: "it" } : { window: "windows", has: "have", it: "them" };
+}
+
 /** The holder of the Studio lock as every message names it. */
 function describeOwner(owner: LockOwner): string {
-	const window =
-		owner.studioPid !== undefined
-			? `Studio PID ${owner.studioPid}${owner.mcpId !== undefined ? `, MCP id ${owner.mcpId}` : ""}`
-			: "no Studio window open";
-	return `flamework-test for ${owner.project} (${owner.command} on ${owner.place}, ${window}), since ${owner.since}`;
+	const windows = owner.windows.length > 0 ? describeLockWindows(owner.windows) : "no Studio window open";
+	return `flamework-test for ${owner.project} (${owner.command} on ${windows}), since ${owner.since}`;
 }
 
 /** Where the holder's lease stands: when it was last used, and when its hold runs out. */
@@ -1738,7 +1879,7 @@ function describeLease(owner: LockOwner, now: number): string {
 
 /**
  * The holder and how long it holds on: while its command runs, to that command's end (the hold
- * does not count then); once it has ended, its window's lease.
+ * does not count then); once it has ended, its windows' lease.
  */
 function describeHolder(view: LockView, now: number): string {
 	const owner = view.owner!;
@@ -1756,69 +1897,134 @@ function describeEndedCli(view: LockView): string {
 		: `PID ${owner.cliPid}`;
 }
 
+/** The windows of a judged record that Studio was launched for. */
+function launchedOf(view: LockView): WindowView[] {
+	return view.windows.filter((entry) => entry.window.studioPid !== undefined);
+}
+
 /** Why a lock is stale, in a clause: `its window ... has closed`. */
 function whyStale(view: LockView): string {
 	const owner = view.owner;
 	if (owner === undefined) {
 		return `its record had been unreadable for ${span(view.unreadableMs ?? 0)}: a command stopped while taking it`;
 	}
-	if (owner.studioPid !== undefined) {
-		return view.window === "reused"
-			? `the window flamework-test opened for ${owner.project} has closed: its Studio PID ${owner.studioPid} is now another process${view.reusedBy !== undefined ? ` (${view.reusedBy})` : ""}`
-			: `the window flamework-test opened for ${owner.project} (${owner.place}, Studio PID ${owner.studioPid}) has closed`;
+	const launched = launchedOf(view);
+	if (launched.length === 1) {
+		const { window, fate, reusedBy } = launched[0]!;
+		return fate === "reused"
+			? `the window flamework-test opened for ${owner.project} has closed: its Studio PID ${window.studioPid} is now another process${reusedBy !== undefined ? ` (${reusedBy})` : ""}`
+			: `the window flamework-test opened for ${owner.project} (${window.place}, Studio PID ${window.studioPid}) has closed`;
+	}
+	if (launched.length > 1) {
+		return `the windows flamework-test opened for ${owner.project} have closed: ${launched
+			.map(({ window, fate, reusedBy }) =>
+				fate === "reused"
+					? `${window.place}, whose Studio PID ${window.studioPid} is now another process${reusedBy !== undefined ? ` (${reusedBy})` : ""}`
+					: `${window.place}, Studio PID ${window.studioPid}`,
+			)
+			.join("; ")}`;
 	}
 	return `the flamework-test run that took it for ${owner.project} (${describeEndedCli(view)}) has ended, with no window of its open`;
 }
 
-/** Why a window left behind may be closed at once, in a clause. */
+/** Why windows left behind may be closed at once, in a clause. */
 function whyAbandoned(view: LockView): string {
 	const owner = view.owner!;
-	return `the \`${owner.command}\` that opened it (flamework-test ${describeEndedCli(view)}) has ended without closing it`;
+	const words = windowWord(view.windows.filter((entry) => entry.fate === "running").length || 1);
+	return `the \`${owner.command}\` that opened ${words.it} (flamework-test ${describeEndedCli(view)}) has ended without closing ${words.it}`;
 }
+
+/** Where a window is: what it has open, and the file or the cloud place Studio was launched on. */
+type LockPlace = Pick<LockWindow, "place" | "placeFile" | "placeId">;
 
 /** What `studio open` and `test` ask of the lock. */
 interface LockRequest {
-	/** How the record names the command: `test`, `test --keep`, `studio open`. */
+	/** How the record names the command: `test`, `test --keep`, `test --parallel 2`, `studio open`. */
 	command: string;
-	place: string;
-	placeFile?: string;
-	placeId?: string;
+	/** The window the command is about to open first. */
+	window: LockPlace;
 	holdMinutes: number;
 	/** The window is left open when the command ends (`--keep`, `studio open`), and holds the lock then. */
 	keep: boolean;
 }
 
 /**
- * The Studio lock as a command holds it: it records the window the command launches, renews the
- * lease while the command uses it, and at the end frees the lock, or leaves it to the window
- * when the window stays open.
+ * One window of the Studio lock's record, as the command that opens it holds it: listed while its
+ * place is being made and Studio launched on it, named by its process and its MCP id once known,
+ * and gone from the record once it has closed. A window that would not close stays listed, so the
+ * next taker can close it.
+ */
+class LockSlot {
+	/** Whether Studio was launched for it, and it is not known to have closed since. */
+	open = false;
+
+	constructor(
+		/** The lock the window is listed in. */
+		readonly lock: HeldLock,
+		readonly window: LockWindow,
+	) {}
+
+	/** Studio was launched on its place, as `pid`. */
+	async launched(pid: number | undefined): Promise<void> {
+		await this.lock.launched(this, pid);
+	}
+
+	async connected(mcpId: string): Promise<void> {
+		this.window.mcpId = mcpId;
+		await this.lock.flush();
+	}
+
+	/** The window has closed: it leaves the record. */
+	async closed(): Promise<void> {
+		this.open = false;
+		await this.lock.drop(this);
+	}
+
+	/** Its project is done with it: a window never launched leaves the record, one still open stays. */
+	async settle(): Promise<void> {
+		if (!this.open) await this.lock.drop(this);
+	}
+}
+
+/**
+ * The Studio lock as a command holds it: it lists the windows the command opens, renews the lease
+ * while the command uses them, and at the end frees the lock, or leaves it to the windows still
+ * open. The record is written whole, one write at a time and in order, each with the windows as
+ * they stand when it runs: two projects' windows changing at once never undo each other's change.
  */
 class HeldLock {
 	private heartbeat: ReturnType<typeof setInterval> | undefined;
-	/** Whether the window this command launched is open as far as it knows. */
-	private windowOpen = false;
+	private writes: Promise<unknown> = Promise.resolve();
+	private readonly slots: LockSlot[];
 
 	constructor(
 		private readonly io: Io,
 		readonly owner: LockOwner,
 		private ledger: Release | undefined,
 		private readonly keep: boolean,
-	) {}
-
-	private async patch(patch: Partial<LockOwner>): Promise<boolean> {
-		const held = await this.io.studioLock.update(this.owner.token, patch);
-		if (held) {
-			const record = this.owner as unknown as Record<string, unknown>;
-			for (const [key, value] of Object.entries(patch)) {
-				if (value === undefined) delete record[key];
-				else record[key] = value;
-			}
-		}
-		return held;
+	) {
+		this.slots = owner.windows.map((window) => new LockSlot(this, window));
 	}
 
-	private lease(): { lastActivity: string; expires: string } {
-		return leaseFrom(this.io.now().getTime(), this.owner.holdMinutes);
+	/** The window the command asked for when it took the lock. */
+	first(): LockSlot {
+		return this.slots[0]!;
+	}
+
+	/** Writes the record's windows and lease as they stand when the write runs; false when another command holds the lock now. */
+	flush(): Promise<boolean> {
+		const write = async (): Promise<boolean> => {
+			Object.assign(this.owner, leaseFrom(this.io.now().getTime(), this.owner.holdMinutes));
+			return await this.io.studioLock.update(this.owner.token, {
+				windows: this.owner.windows.map((window) => ({ ...window })),
+				lastActivity: this.owner.lastActivity,
+				expires: this.owner.expires,
+				kept: this.owner.kept,
+			});
+		};
+		const next = this.writes.then(write, write);
+		this.writes = next.catch(() => false);
+		return next;
 	}
 
 	/** Refuses to go on when another command has taken the lock from this one. */
@@ -1832,65 +2038,68 @@ class HeldLock {
 		}
 	}
 
+	/** Another window of this command, listed from here: its place is about to be made, then opened. */
+	async open(place: LockPlace): Promise<LockSlot> {
+		const window: LockWindow = { ...place };
+		this.owner.windows.push(window);
+		const slot = new LockSlot(this, window);
+		this.slots.push(slot);
+		await this.flush();
+		return slot;
+	}
+
 	/**
-	 * Records the window launched for a place, and keeps the lease fresh while the command runs. A
-	 * window left open on purpose (`--keep`, `studio open`) is marked kept from here: once the
-	 * command has ended it holds the lock under its lease, where a window any other command leaves
-	 * open was left by a run cut short, and may be closed at once.
+	 * Records a window's Studio process, and keeps the lease fresh while the command runs. A window
+	 * left open on purpose (`--keep`, `studio open`) is marked kept from here: once the command has
+	 * ended it holds the lock under its lease, where a window any other command leaves open was left
+	 * by a run cut short, and may be closed at once.
 	 */
-	async launched(pid: number | undefined, place: Pick<LockOwner, "place" | "placeFile" | "placeId">): Promise<void> {
-		this.windowOpen = true;
-		await this.patch({
-			studioPid: pid,
-			studioStartedAt: pid !== undefined ? iso(this.io.now().getTime()) : undefined,
-			mcpId: undefined,
-			place: place.place,
-			placeFile: place.placeFile,
-			placeId: place.placeId,
-			...(this.keep ? { kept: true } : {}),
-			...this.lease(),
-		});
-		// The window holds the lock from here: a window left open on purpose is not this run's to free.
+	async launched(slot: LockSlot, pid: number | undefined): Promise<void> {
+		slot.open = true;
+		delete slot.window.mcpId;
+		if (pid !== undefined) {
+			slot.window.studioPid = pid;
+			slot.window.studioStartedAt = iso(this.io.now().getTime());
+		} else {
+			delete slot.window.studioPid;
+			delete slot.window.studioStartedAt;
+		}
 		if (this.keep) {
+			this.owner.kept = true;
+			// The window holds the lock from here: a window left open on purpose is not this run's to free.
 			this.ledger?.();
 			this.ledger = undefined;
 		}
-		this.heartbeat ??= setInterval(() => void this.renew().catch(() => {}), LEASE_HEARTBEAT_MS);
+		await this.flush();
+		this.heartbeat ??= setInterval(() => void this.flush().catch(() => {}), LEASE_HEARTBEAT_MS);
 		this.heartbeat.unref?.();
 	}
 
-	async connected(mcpId: string): Promise<void> {
-		await this.patch({ mcpId, ...this.lease() });
+	/** Takes a window off the record. */
+	async drop(slot: LockSlot): Promise<void> {
+		const index = this.owner.windows.indexOf(slot.window);
+		if (index === -1) return;
+		this.owner.windows.splice(index, 1);
+		this.slots.splice(this.slots.indexOf(slot), 1);
+		await this.flush();
 	}
 
 	async renew(): Promise<void> {
-		await this.patch(this.lease());
-	}
-
-	/** The window closed, and the command goes on (the next project's window). */
-	async windowClosed(): Promise<void> {
-		this.windowOpen = false;
-		await this.patch({ studioPid: undefined, studioStartedAt: undefined, mcpId: undefined, ...this.lease() });
+		await this.flush();
 	}
 
 	/**
-	 * The command goes on to another place, with no window open (the next project's, being made): the
-	 * record names that place from here, so that a look at the lock meanwhile does not name the last.
-	 */
-	async moveTo(place: Pick<LockOwner, "place" | "placeFile" | "placeId">): Promise<void> {
-		await this.patch({ place: place.place, placeFile: place.placeFile, placeId: place.placeId, ...this.lease() });
-	}
-
-	/**
-	 * The end of the command. With its window still open (`--keep`, `studio open`, or a window that
-	 * would not close), the lock is left to the window, which holds it until it closes or its hold
-	 * runs out; otherwise it is freed.
+	 * The end of the command. With a window still open (`--keep`, `studio open`, or a window that
+	 * would not close), the lock is left to the windows, which hold it until they close or their
+	 * hold runs out; otherwise it is freed.
 	 */
 	async finish(): Promise<void> {
 		if (this.heartbeat !== undefined) clearInterval(this.heartbeat);
 		this.heartbeat = undefined;
-		if (this.windowOpen) {
-			await this.patch({ kept: true, ...this.lease() });
+		await this.writes;
+		if (this.slots.some((slot) => slot.open)) {
+			this.owner.kept = true;
+			await this.flush();
 			return;
 		}
 		await this.io.studioLock.free(this.owner.token);
@@ -1902,9 +2111,10 @@ class HeldLock {
 /**
  * Takes the Studio lock for a command that is about to launch Studio, waiting while another
  * holds it, and saying who, once and then about every minute. What it meets:
- * - a stale lock (its command has ended, and its window has closed or it had none) is taken over;
- * - an expired one (its window idle past its hold, or left open by a command cut short) has its
- *   window closed, the way flamework-test closes its own, and is taken over; a window the record's
+ * - a stale lock (its command has ended, and every window it names has closed, or it had none) is
+ *   taken over;
+ * - an expired one (its windows idle past their hold, or left open by a command cut short) has its
+ *   windows closed, the way flamework-test closes its own, and is taken over; a window the record's
  *   PID no longer is, is never closed;
  * - this project's own window, left open on purpose (`--keep`, `studio open`) by a command that has
  *   ended: `test` of that very file closes it, as a window left from an earlier build, and takes
@@ -1936,21 +2146,20 @@ async function takeStudioLock(
 		looked = { at, pids: key, found: await io.probeProcesses(pids) };
 		return looked.found;
 	};
+	const by = { project, command: request.command };
 
 	for (;;) {
 		io.interruption.check();
 		const now = io.now().getTime();
 		const owner: LockOwner = {
-			version: 1,
+			version: 2,
 			token: newToken(),
 			cliPid: self.pid,
 			cliName: self.name,
 			cliStartedAt: iso(self.startedAt),
 			project,
 			command: request.command,
-			place: request.place,
-			...(request.placeFile !== undefined ? { placeFile: request.placeFile } : {}),
-			...(request.placeId !== undefined ? { placeId: request.placeId } : {}),
+			windows: [{ ...request.window }],
 			since: iso(now),
 			...leaseFrom(now, request.holdMinutes),
 			holdMinutes: request.holdMinutes,
@@ -1970,9 +2179,10 @@ async function takeStudioLock(
 		const view = await judgeLock(record, now, probe);
 
 		if (view.state === "stale") {
-			if (await store.free(token)) {
+			// The note goes with the free, under the lock's sub-lock: see `LockStore.free`.
+			if (await store.free(token, goneNote(io, view, by))) {
 				say(`took over the Studio lock: ${whyStale(view)}`);
-				await afterWindowGone(io, view, { project, command: request.command });
+				await removeGoneLockFiles(io, view);
 			}
 			continue;
 		}
@@ -1980,19 +2190,22 @@ async function takeStudioLock(
 		// This project's own window, left open on purpose by a command that has ended: waiting would be
 		// waiting for itself, expired or not. One a command cut short left is closed below, as anyone's.
 		const holder = view.owner;
+		const launched = holder?.windows.filter((window) => window.studioPid !== undefined) ?? [];
 		if (
 			holder !== undefined &&
-			holder.studioPid !== undefined &&
+			launched.length > 0 &&
 			holder.kept === true &&
 			view.cli !== "running" &&
 			samePath(holder.project, project, io)
 		) {
+			const file = request.window.placeFile;
 			const sameFile =
-				request.placeFile !== undefined &&
-				holder.placeFile !== undefined &&
-				samePath(holder.placeFile, request.placeFile, io);
+				launched.length === 1 &&
+				file !== undefined &&
+				launched[0]!.placeFile !== undefined &&
+				samePath(launched[0]!.placeFile, file, io);
 			if (request.command.startsWith("test") && sameFile) {
-				await closeOwnLeftWindow(io, holder);
+				await closeOwnLeftWindow(io, holder, launched[0]!);
 				continue;
 			}
 			throw ownWindowStillOpen(holder, request);
@@ -2000,9 +2213,9 @@ async function takeStudioLock(
 
 		if (view.state === "expired") {
 			// The close judges the lock again from a fresh look at its processes; when that finds it
-			// otherwise (its window gone since, say), the next try judges from a fresh look too, rather
+			// otherwise (its windows gone since, say), the next try judges from a fresh look too, rather
 			// than trying the close again on this one's cached look until it ages.
-			if (!(await closeExpiredWindow(io, view, { project, command: request.command }, "expired", say))) {
+			if (!(await closeExpiredWindows(io, view, by, "expired", say))) {
 				looked = undefined;
 			}
 			continue;
@@ -2027,15 +2240,19 @@ async function takeStudioLock(
 	}
 }
 
+const CLOSED_OUTCOMES = ["closed", "forced", "ended"];
+
 /**
- * Closes the window of a lock that has expired (idle past its hold, or left open by a command cut
- * short), or that `studio unlock --force` frees, and frees the lock. Only the Studio process the
- * record names, and only while it is still the one flamework-test launched on that place (its
- * command line names the file or the place id): a PID Windows has given another process is left
- * alone, as is anything a close cannot tie to the record. Its owner's next command finds a note of
- * it, and says why the window is gone.
+ * Closes the windows of a lock that has expired (idle past its hold, or left open by a command cut
+ * short), or that `studio unlock --force` frees, and frees the lock. Every window the record names,
+ * by its Studio process, and only while that process is still the one flamework-test launched on
+ * its place (its command line names the file or the place id): a PID Windows has given another
+ * process is left alone, as is anything a close cannot tie to the record. A window that will not
+ * close fails the take, and stays in the record, without the windows closed meanwhile, for the next
+ * taker to try again. Its owner's next command finds a note of the windows closed, and says why
+ * they are gone.
  */
-async function closeExpiredWindow(
+async function closeExpiredWindows(
 	io: Io,
 	view: LockView,
 	by: { project: string; command: string },
@@ -2046,46 +2263,79 @@ async function closeExpiredWindow(
 	// moment ago is not idle, and a command that took the lock just now is not cut short.
 	const fresh = await io.studioLock.read();
 	if (fresh.kind !== "held" || fresh.owner.token !== view.owner!.token) return false;
-	if (reason === "expired") {
-		view = await judgeLock(fresh, io.now().getTime(), io.probeProcesses);
-		if (view.state !== "expired") return false;
-	}
+	view = await judgeLock(fresh, io.now().getTime(), io.probeProcesses);
+	if (reason === "expired" && view.state !== "expired") return false;
 	const owner = fresh.owner;
 	const idleMs = view.idleMs ?? 0;
-	const startedWith = owner.placeFile ?? owner.placeId;
-	let closed = false;
-	if (owner.studioPid !== undefined && view.window === "running" && startedWith !== undefined) {
-		const windows = await closeWindows({ pid: owner.studioPid, file: startedWith }, owner.place, io, {
-			quiet: true,
-			lockFile: owner.placeFile !== undefined,
-		});
-		closed = windows.some((window) => ["closed", "forced", "ended"].includes(window.outcome));
+	const closed: LockWindow[] = [];
+	// Running under the PID the record names, but not the window flamework-test launched (or not tied to it).
+	const leftAlone: LockWindow[] = [];
+	let failure: unknown;
+	for (const { window, fate } of view.windows) {
+		const startedWith = window.placeFile ?? window.placeId;
+		if (window.studioPid === undefined || fate !== "running") continue;
+		if (startedWith === undefined) {
+			leftAlone.push(window);
+			continue;
+		}
+		try {
+			const windows = await closeWindows({ pid: window.studioPid, file: startedWith }, window.place, io, {
+				quiet: true,
+				lockFile: window.placeFile !== undefined,
+			});
+			(windows.some((entry) => CLOSED_OUTCOMES.includes(entry.outcome)) ? closed : leftAlone).push(window);
+		} catch (error) {
+			rethrowInterrupted(error);
+			failure ??= error;
+		}
 	}
-	if (!(await io.studioLock.free(owner.token))) return false;
+	await removeGoneLockFiles(io, view);
+	if (failure !== undefined) {
+		if (closed.length > 0) {
+			const gone = new Set(closed.map((window) => window.studioPid));
+			await io.studioLock.update(owner.token, {
+				windows: owner.windows.filter(
+					(window) => window.studioPid === undefined || !gone.has(window.studioPid),
+				),
+			});
+		}
+		throw failure;
+	}
 	const noted = reason === "forced" ? "forced" : view.abandoned === true ? "abandoned" : "expired";
+	const note: ClosedWindowRecord | undefined =
+		closed.length > 0 && !samePath(owner.project, by.project, io)
+			? {
+					owner,
+					windows: closed,
+					closedAt: iso(io.now().getTime()),
+					reason: noted,
+					idleMinutes: Math.round(idleMs / 60_000),
+					by,
+				}
+			: undefined;
+	if (!(await io.studioLock.free(owner.token, note))) return false;
 	const why =
 		noted === "expired"
-			? `it had been idle for ${span(idleMs)}, past its ${owner.holdMinutes}-minute hold`
+			? `${closed.length > 1 ? "they" : "it"} had been idle for ${span(idleMs)}, past ${closed.length > 1 ? "their" : "its"} ${owner.holdMinutes}-minute hold`
 			: noted === "abandoned"
 				? whyAbandoned(view)
 				: "`studio unlock --force` freed its lock while it was live";
-	if (closed && !samePath(owner.project, by.project, io)) {
-		await io.studioLock.recordClosed({
-			owner,
-			closedAt: iso(io.now().getTime()),
-			reason: noted,
-			idleMinutes: Math.round(idleMs / 60_000),
-			by,
-		});
-	}
-	if (closed) {
+	const notTied =
+		leftAlone.length > 0
+			? leftAlone
+					.map(
+						(window) =>
+							`Studio PID ${window.studioPid} is no longer the window flamework-test launched on ${window.place}`,
+					)
+					.join("; ")
+			: undefined;
+	if (closed.length > 0) {
+		const words = windowWord(closed.length);
 		say(
-			`closed the Studio window flamework-test opened for ${owner.project} (${owner.command} on ${owner.place}, Studio PID ${owner.studioPid}): ${why}; the Studio lock is free`,
+			`closed the Studio ${words.window} flamework-test opened for ${owner.project} (${owner.command} on ${describeProcesses(closed)}): ${why}; ${notTied !== undefined ? `left alone: ${notTied}; ` : ""}the Studio lock is free`,
 		);
-	} else if (owner.studioPid !== undefined) {
-		say(
-			`freed the Studio lock of ${owner.project} (${why}) without closing anything: Studio PID ${owner.studioPid} is no longer the window flamework-test launched on ${owner.place}`,
-		);
+	} else if (notTied !== undefined) {
+		say(`freed the Studio lock of ${owner.project} (${why}) without closing anything: ${notTied}`);
 	} else {
 		say(`freed the Studio lock of ${owner.project} (${why}); it had no Studio window open`);
 	}
@@ -2093,10 +2343,10 @@ async function closeExpiredWindow(
 }
 
 /** `test` of the very file this project's window has open: that window is from an earlier build. */
-async function closeOwnLeftWindow(io: Io, holder: LockOwner): Promise<void> {
-	const name = basename(holder.placeFile!);
+async function closeOwnLeftWindow(io: Io, holder: LockOwner, window: LockWindow): Promise<void> {
+	const name = basename(window.placeFile!);
 	await closeWindows(
-		{ pid: holder.studioPid!, file: holder.placeFile! },
+		{ pid: window.studioPid!, file: window.placeFile! },
 		`the window left from an earlier build of ${name}`,
 		io,
 	);
@@ -2105,12 +2355,20 @@ async function closeOwnLeftWindow(io: Io, holder: LockOwner): Promise<void> {
 
 /** This project's own window holds the lock: the command would wait for itself. */
 function ownWindowStillOpen(holder: LockOwner, request: LockRequest): CliError {
-	const id = holder.mcpId !== undefined ? `, MCP id ${holder.mcpId}` : ", never seen on the MCP proxy";
+	const open = holder.windows.filter((window) => window.studioPid !== undefined);
+	const named = open
+		.map(
+			(window) =>
+				`${window.place} (Studio PID ${window.studioPid}${window.mcpId !== undefined ? `, MCP id ${window.mcpId}` : ", never seen on the MCP proxy"})`,
+		)
+		.join("; ");
+	const words = windowWord(open.length);
+	const only = open.length === 1 ? open[0] : undefined;
 	return new CliError(
-		`this project's Studio window is still open: ${holder.place} (Studio PID ${holder.studioPid}${id}), opened by \`${holder.command}\` at ${holder.since}; flamework-test keeps one window open at a time`,
-		request.command === "studio open" && holder.mcpId !== undefined
-			? `use it (studio_id=${holder.mcpId}: --studio ${holder.mcpId}), or close it with \`flamework-test studio close\` and open again`
-			: "close it with `flamework-test studio close`, then run this again",
+		`this project's Studio ${words.window} ${open.length === 1 ? "is" : "are"} still open: ${named}, opened by \`${holder.command}\` at ${holder.since}; flamework-test lets one command hold Studio at a time`,
+		request.command === "studio open" && only?.mcpId !== undefined
+			? `use it (studio_id=${only.mcpId}: --studio ${only.mcpId}), or close it with \`flamework-test studio close\` and open again`
+			: `close ${words.it} with \`flamework-test studio close\`, then run this again`,
 	);
 }
 
@@ -2124,47 +2382,60 @@ function lockTimedOut(view: LockView, timeoutMs: number, io: Io): CliError {
 	}
 	const freedWhen =
 		view.cli === "running"
-			? `it is freed when that command ends${holder.kept === true ? " and then its window closes, or its hold runs out" : " (it closes its own window)"}`
-			: `it is freed when that window closes: \`flamework-test studio close\` run in ${holder.project}, the user closing it, or its hold running out, after which the next command closes it`;
+			? `it is freed when that command ends${holder.kept === true ? " and then its window closes, or its hold runs out" : ` (it closes its own ${holder.windows.length > 1 ? "windows" : "window"})`}`
+			: holder.windows.length > 1
+				? `it is freed when its windows close: \`flamework-test studio close\` run in ${holder.project}, the user closing them, or their hold running out, after which the next command closes them`
+				: `it is freed when that window closes: \`flamework-test studio close\` run in ${holder.project}, the user closing it, or its hold running out, after which the next command closes it`;
 	return new CliError(
 		`the Studio lock is still held after waiting ${span(timeoutMs)}: ${describeHolder(view, io.now().getTime())}`,
 		`${freedWhen}. Wait longer with --lock-timeout <seconds>; \`flamework-test studio lock\` shows the holder. Never close a window you did not open: ask the user, or the agent working in ${holder.project}.`,
 	);
 }
 
-/** A window closed for another project's sake, or found closed by it, as its owner's next command explains it. */
+/** Windows closed for another project's sake, or found closed by it, as their owner's next command explains it. */
 function closedWindowError(entry: ClosedWindowRecord): CliError {
 	const owner = entry.owner;
+	const words = windowWord(entry.windows.length);
+	const named = entry.windows
+		.map(
+			(window) =>
+				`${window.place}, Studio PID ${window.studioPid}${window.mcpId !== undefined ? `, MCP id ${window.mcpId}` : ""}`,
+		)
+		.join("; ");
+	const file = entry.windows.find((window) => window.placeFile !== undefined)?.placeFile;
+	const again = `open it again: flamework-test studio open${file !== undefined ? ` ${file}` : ""}`;
 	if (entry.reason === "gone") {
 		return new CliError(
-			`the Studio window flamework-test opened for this project (${owner.place}, Studio PID ${owner.studioPid}${owner.mcpId !== undefined ? `, MCP id ${owner.mcpId}` : ""}) has closed: closed by hand, or Studio exited; flamework-test for ${entry.by.project} (${entry.by.command}) found it so at ${entry.closedAt}, and ${entry.by.command.startsWith("studio unlock") ? "freed" : "took over"} its Studio lock`,
-			`open it again: flamework-test studio open${owner.placeFile !== undefined ? ` ${owner.placeFile}` : ""}`,
+			`the Studio ${words.window} flamework-test opened for this project (${named}) ${words.has} closed: closed by hand, or Studio exited; flamework-test for ${entry.by.project} (${entry.by.command}) found ${words.it} so at ${entry.closedAt}, and ${entry.by.command.startsWith("studio unlock") ? "freed" : "took over"} its Studio lock`,
+			again,
 		);
 	}
 	const why =
 		entry.reason === "expired"
-			? `after ${entry.idleMinutes} min idle, past its ${owner.holdMinutes}-minute hold, so that another project could use Studio`
+			? `after ${entry.idleMinutes} min idle, past ${entry.windows.length > 1 ? "their" : "its"} ${owner.holdMinutes}-minute hold, so that another project could use Studio`
 			: entry.reason === "abandoned"
-				? `because the \`${owner.command}\` that opened it (flamework-test PID ${owner.cliPid}) had ended without closing it`
+				? `because the \`${owner.command}\` that opened ${words.it} (flamework-test PID ${owner.cliPid}) had ended without closing ${words.it}`
 				: "by `flamework-test studio unlock --force`";
 	return new CliError(
-		`the Studio window flamework-test opened for this project (${owner.place}, Studio PID ${owner.studioPid}${owner.mcpId !== undefined ? `, MCP id ${owner.mcpId}` : ""}) was closed at ${entry.closedAt} by flamework-test for ${entry.by.project} (${entry.by.command}), ${why}`,
-		`open it again: flamework-test studio open${owner.placeFile !== undefined ? ` ${owner.placeFile}` : ""}${entry.reason === "expired" ? " (--hold <minutes> keeps a window longer)" : ""}`,
+		`the Studio ${words.window} flamework-test opened for this project (${named}) ${entry.windows.length > 1 ? "were" : "was"} closed at ${entry.closedAt} by flamework-test for ${entry.by.project} (${entry.by.command}), ${why}`,
+		`${again}${entry.reason === "expired" ? " (--hold <minutes> keeps a window longer)" : ""}`,
 	);
 }
 
 /**
- * The newest note of a window of this project closed for another's sake, matching an id when one is
+ * The newest note of windows of this project closed for another's sake, matching an id when one is
  * given. Only notes from after this project last took the lock: those before are forgotten then.
  */
 async function closedForThisProject(io: Io, id: string | undefined): Promise<ClosedWindowRecord | undefined> {
 	const project = projectOf(io);
 	return (await io.studioLock.closedWindows()).find(
-		(entry) => samePath(entry.owner.project, project, io) && (id === undefined || entry.owner.mcpId === id),
+		(entry) =>
+			samePath(entry.owner.project, project, io) &&
+			(id === undefined || entry.windows.some((window) => window.mcpId === id)),
 	);
 }
 
-/** Says, on stderr, what became of this project's last window, when another project closed it or found it closed. */
+/** Says, on stderr, what became of this project's last windows, when another project closed them or found them closed. */
 async function noteClosedWindow(io: Io): Promise<void> {
 	const closed = await closedForThisProject(io, undefined);
 	if (closed !== undefined) io.error(`note: ${closedWindowError(closed).message}`);
@@ -2184,57 +2455,72 @@ async function forgetNotesOf(io: Io, project: string): Promise<void> {
 }
 
 /**
- * After a lock was freed because its window had gone (closed by hand, or Studio exited) or its PID is
- * another process now: Studio's own lock beside the place file, which a Studio that was ended leaves
- * behind, is removed when it names that process, as a close removes its own; and when `by` is
- * another project, the owner gets a note, so that its next command says its window has closed,
- * rather than not finding it or picking another. The owner's own command says so itself.
+ * The note a lock freed because its windows had gone (closed by hand, or Studio exited; or their
+ * PIDs are other processes now) leaves its owner, when `by` is another project: so that the owner's
+ * next command says its windows have closed, rather than not finding them or picking another. The
+ * owner's own command says so itself, and gets none. It is written by the free (`LockStore.free`).
  */
-async function afterWindowGone(io: Io, view: LockView, by?: { project: string; command: string }): Promise<void> {
+function goneNote(io: Io, view: LockView, by: { project: string; command: string }): ClosedWindowRecord | undefined {
 	const owner = view.owner;
-	if (owner?.studioPid === undefined) return;
-	if (view.window === "gone" && owner.placeFile !== undefined) {
-		await removeStudioLock(owner.placeFile, owner.studioPid, io);
-	}
-	if (by !== undefined && !samePath(owner.project, by.project, io)) {
-		try {
-			await io.studioLock.recordClosed({
-				owner,
-				closedAt: iso(io.now().getTime()),
-				reason: "gone",
-				idleMinutes: Math.round((view.idleMs ?? 0) / 60_000),
-				by,
-			});
-		} catch {
-			// A note is for the owner's next message only.
+	const windows = launchedOf(view).map((entry) => entry.window);
+	if (owner === undefined || windows.length === 0 || samePath(owner.project, by.project, io)) return undefined;
+	return {
+		owner,
+		windows,
+		closedAt: iso(io.now().getTime()),
+		reason: "gone",
+		idleMinutes: Math.round((view.idleMs ?? 0) / 60_000),
+		by,
+	};
+}
+
+/**
+ * Once a lock's windows have gone: Studio's own lock beside each place file, which a Studio that was
+ * ended leaves behind, is removed when it names that window's process, as a close removes its own.
+ */
+async function removeGoneLockFiles(io: Io, view: LockView): Promise<void> {
+	for (const { window, fate } of view.windows) {
+		if (fate === "gone" && window.placeFile !== undefined && window.studioPid !== undefined) {
+			await removeStudioLock(window.placeFile, window.studioPid, io);
 		}
 	}
 }
 
 /**
- * This project's window has gone (closed by hand, or Studio exited; or its PID is another process
- * now), or its command ended with none open: the lock is freed at this look, and the command says so.
+ * This project's windows have gone (closed by hand, or Studio exited; or their PIDs are other
+ * processes now), or its command ended with none open: the lock is freed at this look, and the
+ * command says so.
  */
 async function ownWindowClosed(io: Io, ours: LockOwner, view: LockView): Promise<CliError> {
-	if (await io.studioLock.free(ours.token)) await afterWindowGone(io, view);
-	if (ours.studioPid === undefined) {
+	if (await io.studioLock.free(ours.token)) await removeGoneLockFiles(io, view);
+	const launched = launchedOf(view);
+	if (launched.length === 0) {
 		return new CliError(
 			`no Studio window flamework-test opened for this project is open: the \`${ours.command}\` that took the Studio lock for it (flamework-test ${describeEndedCli(view)}) has ended without one`,
 			"open one first: flamework-test studio open [file]",
 		);
 	}
+	const file = launched.find((entry) => entry.window.placeFile !== undefined)?.window.placeFile;
+	const again = `open it again: flamework-test studio open${file !== undefined ? ` ${file}` : ""}`;
+	if (launched.length === 1) {
+		const { window, fate, reusedBy } = launched[0]!;
+		return new CliError(
+			`the Studio window flamework-test opened for this project (${window.place}, Studio PID ${window.studioPid}) has closed${
+				fate === "reused"
+					? `: its PID is another process now${reusedBy !== undefined ? ` (${reusedBy})` : ""}`
+					: ""
+			}`,
+			again,
+		);
+	}
 	return new CliError(
-		`the Studio window flamework-test opened for this project (${ours.place}, Studio PID ${ours.studioPid}) has closed${
-			view.window === "reused"
-				? `: its PID is another process now${view.reusedBy !== undefined ? ` (${view.reusedBy})` : ""}`
-				: ""
-		}`,
-		`open it again: flamework-test studio open${ours.placeFile !== undefined ? ` ${ours.placeFile}` : ""}`,
+		`the Studio windows flamework-test opened for this project (${describeLockWindows(launched.map((entry) => entry.window))}) have closed`,
+		again,
 	);
 }
 
 /**
- * Keeps the lease of this project's window fresh while a command uses it: renewed at the start,
+ * Keeps the lease of this project's windows fresh while a command uses one: renewed at the start,
  * every {@link LEASE_HEARTBEAT_MS} (30 seconds) meanwhile, and at the end. Nothing for any other window.
  */
 async function withLease<T>(io: Io, mine: LockOwner | undefined, body: () => Promise<T>): Promise<T> {
@@ -2258,22 +2544,30 @@ async function withLease<T>(io: Io, mine: LockOwner | undefined, body: () => Pro
  * Whether an entry of the proxy's list shows the place a lock record's window was launched on: a
  * local file's window is listed by the file's name, a cloud place's with its place id.
  */
-function listsPlaceOf(owner: LockOwner, entry: StudioEntry): boolean {
-	if (owner.placeFile !== undefined) {
-		const file = (owner.placeFile.split(/[\\/]/).pop() ?? owner.placeFile).toLowerCase();
+function listsPlaceOf(window: LockWindow, entry: StudioEntry): boolean {
+	if (window.placeFile !== undefined) {
+		const file = (window.placeFile.split(/[\\/]/).pop() ?? window.placeFile).toLowerCase();
 		return entry.name.toLowerCase() === file || placeNameOf(entry.name).toLowerCase() === file;
 	}
-	if (owner.placeId !== undefined) return findStudioForPlace([entry], owner.placeId) !== undefined;
+	if (window.placeId !== undefined) return findStudioForPlace([entry], window.placeId) !== undefined;
 	return false;
 }
 
 /**
- * Whether an entry of the proxy's list is the window a lock record names: its MCP id, and the
- * place that window was launched on. The id alone could be one the proxy has given another window
- * since, the user's own, once the one flamework-test opened has closed.
+ * The window of a lock record an entry of the proxy's list is: its MCP id, and the place that
+ * window was launched on. The id alone could be one the proxy has given another window since, the
+ * user's own, once the one flamework-test opened has closed.
  */
-function isLockWindow(owner: LockOwner | undefined, entry: StudioEntry): boolean {
-	return owner?.mcpId !== undefined && owner.mcpId === entry.id && listsPlaceOf(owner, entry);
+function lockWindowOf(owner: LockOwner | undefined, entry: StudioEntry): LockWindow | undefined {
+	return owner?.windows.find(
+		(window) => window.mcpId !== undefined && window.mcpId === entry.id && listsPlaceOf(window, entry),
+	);
+}
+
+/** This project's window a command found, with the lock record that names it. */
+interface MineWindow {
+	owner: LockOwner;
+	window: LockWindow;
 }
 
 /**
@@ -2290,16 +2584,22 @@ async function runningIn(io: Io, owner: LockOwner, view?: LockView): Promise<Loc
 	return judged.cli === "running" ? judged : undefined;
 }
 
-/** The refusal of a command that would change this project's window while another process's command uses it. */
-function inUseError(owner: LockOwner, verb: string): CliError {
+/**
+ * The refusal of a command that would change this project's window while another process's command
+ * uses it: `window`, when the command named one of its windows, else every window it has open.
+ */
+function inUseError(owner: LockOwner, verb: string, window?: LockWindow): CliError {
 	// `test --keep` and `studio open` leave their window open (kept from its launch on); a `test` closes its own.
-	const leaves = owner.kept === true || owner.command !== "test";
+	const leaves = owner.kept === true || owner.command === "test --keep" || owner.command === "studio open";
 	const running = `\`${owner.command}\` is running`;
 	const who = `(flamework-test PID ${owner.cliPid}, since ${owner.since})`;
+	const open = window !== undefined ? [window] : owner.windows.filter((entry) => entry.studioPid !== undefined);
+	const words = windowWord(open.length);
+	const opening = owner.windows.map((entry) => entry.place).join("; ");
 	return new CliError(
-		owner.studioPid !== undefined
-			? `refusing to ${verb} this project's Studio window (${owner.place}, Studio PID ${owner.studioPid}): ${running} in it ${who}, and ${leaves ? "leaves it open" : "closes it"} when it ends`
-			: `refusing to ${verb} this project's Studio window: ${running} for this project ${who} with no window open right now, between two of its windows or before its first (${owner.place}), and ${leaves ? "leaves its window open" : "closes its windows"} when it ends`,
+		open.length > 0
+			? `refusing to ${verb} this project's Studio ${words.window} (${open.map((entry) => `${entry.place}, Studio PID ${entry.studioPid}`).join("; ")}): ${running} in ${words.it} ${who}, and ${leaves ? `leaves ${words.it} open` : `closes ${words.it}`} when it ends`
+			: `refusing to ${verb} this project's Studio window: ${running} for this project ${who} with no window open right now, between two of its windows or before its first${opening !== "" ? ` (${opening})` : ""}, and ${leaves ? "leaves its window open" : "closes its windows"} when it ends`,
 		`wait for that run to end${leaves ? ", then use the window it leaves open" : ""} (\`flamework-test studio lock\` shows it), or stop it with Ctrl+C where it runs; --any-window acts on a window anyway`,
 	);
 }
@@ -2310,7 +2610,7 @@ function inUseError(owner: LockOwner, verb: string): CliError {
  * whose run or agent may be using it. Comes before any call to that window.
  */
 function refuseWindow(studio: StudioEntry, holder: LockOwner | undefined, verb: string, io: Io): CliError | undefined {
-	if (holder !== undefined && isLockWindow(holder, studio)) {
+	if (holder !== undefined && lockWindowOf(holder, studio) !== undefined) {
 		if (samePath(holder.project, projectOf(io), io)) return undefined;
 		return new CliError(
 			`refusing to ${verb} the Studio window "${studio.name}" (${studio.id}): flamework-test opened it for another project, ${holder.project} (${holder.command}, since ${holder.since}), whose run or agent may still be using it`,
@@ -2325,7 +2625,8 @@ function refuseWindow(studio: StudioEntry, holder: LockOwner | undefined, verb: 
 
 /**
  * Says why no window was found, for a person or an agent to act on. `guarded`: the command would
- * change the window, and acts only on this project's.
+ * change the window, and acts only on this project's. `judged`: this project's lock, when the
+ * command judged it already (its processes looked up), so that it is not looked up twice.
  */
 async function noWindow(
 	flags: Flags,
@@ -2334,31 +2635,36 @@ async function noWindow(
 	placeId: string | undefined,
 	ours: LockOwner | undefined,
 	guarded: boolean,
+	judged?: LockView,
 ): Promise<CliError> {
 	const closed = await closedForThisProject(io, flags.studio);
 	if (closed !== undefined && (flags.studio !== undefined || ours === undefined)) return closedWindowError(closed);
 
 	if (flags.studio === undefined && ours !== undefined) {
-		const view = await judgeLock({ kind: "held", owner: ours }, io.now().getTime(), io.probeProcesses);
+		const view = judged ?? (await judgeLock({ kind: "held", owner: ours }, io.now().getTime(), io.probeProcesses));
 		// A window closed by hand frees the lock at the next look.
 		if (view.state === "stale") return await ownWindowClosed(io, ours, view);
+		const launched = ours.windows.filter((window) => window.studioPid !== undefined);
 		if (view.cli === "running" && ours.cliPid !== io.self().pid) {
 			return new CliError(
-				`this project's \`${ours.command}\` (flamework-test PID ${ours.cliPid}) is running, and its window is not on the MCP proxy${ours.studioPid === undefined ? "; it has none open right now" : " yet"}`,
+				`this project's \`${ours.command}\` (flamework-test PID ${ours.cliPid}) is running, and its window is not on the MCP proxy${launched.length === 0 ? "; it has none open right now" : " yet"}`,
 				"wait for it to connect, or for that run to end; `flamework-test studio lock` shows it",
 			);
 		}
-		const reused = ours.mcpId !== undefined ? studios.find((entry) => entry.id === ours.mcpId) : undefined;
-		if (reused !== undefined) {
-			return new CliError(
-				`the Studio window flamework-test opened for this project (${ours.place}, Studio PID ${ours.studioPid ?? "none"}) is not on the MCP proxy as ${ours.mcpId}: the proxy lists "${reused.name}" under that id now, which is not that place, so nothing was sent to it`,
-				"`flamework-test studio list` shows the windows; `flamework-test studio close` closes this project's window, and `flamework-test studio open` opens it again",
-			);
+		for (const window of launched) {
+			const reused = window.mcpId !== undefined ? studios.find((entry) => entry.id === window.mcpId) : undefined;
+			if (reused !== undefined) {
+				return new CliError(
+					`the Studio window flamework-test opened for this project (${window.place}, Studio PID ${window.studioPid}) is not on the MCP proxy as ${window.mcpId}: the proxy lists "${reused.name}" under that id now, which is not that place, so nothing was sent to it`,
+					"`flamework-test studio list` shows the windows; `flamework-test studio close` closes this project's window, and `flamework-test studio open` opens it again",
+				);
+			}
 		}
-		if (ours.studioPid !== undefined) {
+		if (launched.length > 0) {
+			const words = windowWord(launched.length);
 			return new CliError(
-				`the Studio window flamework-test opened for this project (${ours.place}, Studio PID ${ours.studioPid}) is open but not on the MCP proxy`,
-				'its "MCP server" setting is probably off: ask the user to turn it on in Studio\'s Assistant settings, then run this again; `flamework-test studio close` closes the window',
+				`the Studio ${words.window} flamework-test opened for this project (${describeProcesses(launched)}) ${launched.length === 1 ? "is" : "are"} open but not on the MCP proxy`,
+				`${launched.length === 1 ? "its" : "their"} "MCP server" setting is probably off: ask the user to turn it on in Studio's Assistant settings, then run this again; \`flamework-test studio close\` closes ${words.it}`,
 			);
 		}
 	}
@@ -2411,7 +2717,7 @@ async function withStudio<T>(
 	flags: Flags,
 	io: Io,
 	changes: string | undefined,
-	body: (client: StudioClient, studio: StudioEntry, mine: LockOwner | undefined) => Promise<T>,
+	body: (client: StudioClient, studio: StudioEntry, mine: MineWindow | undefined) => Promise<T>,
 	shared?: StudioClient,
 ): Promise<T> {
 	const record = await io.studioLock.read();
@@ -2423,29 +2729,42 @@ async function withStudio<T>(
 	// window: another process's command of this project running, in the window or between two of
 	// them, refuses before the proxy is asked anything.
 	let judged: LockView | undefined;
-	if (guarded && ours !== undefined && (flags.studio === undefined || flags.studio === ours.mcpId)) {
+	if (
+		guarded &&
+		ours !== undefined &&
+		(flags.studio === undefined || ours.windows.some((window) => window.mcpId === flags.studio))
+	) {
 		judged = await judgeLock({ kind: "held", owner: ours }, io.now().getTime(), io.probeProcesses);
-		if ((await runningIn(io, ours, judged)) !== undefined) throw inUseError(ours, changes!);
+		const named = ours.windows.find((window) => window.mcpId !== undefined && window.mcpId === flags.studio);
+		if ((await runningIn(io, ours, judged)) !== undefined) throw inUseError(ours, changes!, named);
 	}
 	const placeId = flags.studio === undefined ? testingPlaceIdIfAny(flags, io) : undefined;
 	const client = shared ?? (await io.connectStudio());
 	try {
 		const studios = await client.studios();
 		let studio: StudioEntry | undefined;
+		const connected = ours?.windows.filter((window) => window.mcpId !== undefined) ?? [];
 		if (flags.studio !== undefined) {
 			studio = findStudio(studios, undefined, flags.studio);
-		} else if (ours?.mcpId !== undefined) {
+		} else if (connected.length > 1) {
+			// Several windows of this project's (a `test --parallel`): which one is meant cannot be told.
+			throw new CliError(
+				`this project's \`${ours!.command}\` has ${connected.length} Studio windows (${describeLockWindows(connected)}), so which one to act on cannot be told`,
+				"name one with --studio <id>; `flamework-test studio lock` lists them",
+			);
+		} else if (connected.length === 1) {
 			// This project's window, or none: never some other window in its place, nor another
 			// window the proxy lists under its id since.
-			studio = studios.find((entry) => isLockWindow(ours, entry));
-		} else if (!guarded && ours?.studioPid === undefined) {
+			studio = studios.find((entry) => lockWindowOf(ours, entry) !== undefined);
+		} else if (!guarded && !(ours?.windows.some((window) => window.studioPid !== undefined) ?? false)) {
 			studio = findStudio(studios, placeId);
 			// Another window than this project's last one: said so, when another project closed that.
 			if (studio !== undefined && ours === undefined) await noteClosedWindow(io);
 		}
-		if (studio === undefined) throw await noWindow(flags, io, studios, placeId, ours, guarded);
+		if (studio === undefined) throw await noWindow(flags, io, studios, placeId, ours, guarded, judged);
 
-		const mine = ours !== undefined && isLockWindow(ours, studio) ? ours : undefined;
+		const window = ours !== undefined ? lockWindowOf(ours, studio) : undefined;
+		const mine: MineWindow | undefined = window !== undefined ? { owner: ours!, window } : undefined;
 		if (guarded) {
 			const refusal = refuseWindow(studio, holder, changes!, io);
 			if (refusal !== undefined) {
@@ -2454,15 +2773,24 @@ async function withStudio<T>(
 			}
 			if (mine !== undefined) {
 				const view =
-					judged ?? (await judgeLock({ kind: "held", owner: mine }, io.now().getTime(), io.probeProcesses));
-				if ((await runningIn(io, mine, view)) !== undefined) throw inUseError(mine, changes!);
+					judged ??
+					(await judgeLock({ kind: "held", owner: mine.owner }, io.now().getTime(), io.probeProcesses));
+				if ((await runningIn(io, mine.owner, view)) !== undefined)
+					throw inUseError(mine.owner, changes!, mine.window);
 				// Listed under its id, with its place, but the Studio process it was launched as has gone:
 				// not the window flamework-test opened, and nothing is sent to it.
-				if (view.state === "stale") throw await ownWindowClosed(io, mine, view);
+				if (view.state === "stale") throw await ownWindowClosed(io, mine.owner, view);
+				const fate = view.windows.find((entry) => entry.window.mcpId === mine.window.mcpId)?.fate;
+				if (fate !== "running") {
+					throw new CliError(
+						`the Studio window flamework-test opened for this project (${mine.window.place}, Studio PID ${mine.window.studioPid ?? "none"}) has closed: the proxy lists its id, but not the process it was launched as, so nothing was sent to it`,
+						"`flamework-test studio lock` shows this project's other windows",
+					);
+				}
 			}
 		}
 		const found = studio;
-		return await withLease(io, mine, () => body(client, found, mine));
+		return await withLease(io, mine?.owner, () => body(client, found, mine));
 	} finally {
 		if (shared === undefined) await client.close();
 	}
@@ -2631,7 +2959,7 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 	const holdMinutes = holdOf(flags, io);
 
 	let launch: { file: string } | { placeId: string; universeId: string };
-	let place: Pick<LockOwner, "place" | "placeFile" | "placeId">;
+	let place: LockPlace;
 	let what: string;
 	if (flags.file !== undefined) {
 		const file = resolve(io.cwd, flags.file);
@@ -2648,7 +2976,13 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 		what = `the testing place ${placeId}`;
 	}
 
-	const lock = await takeStudioLock(io, flags, { command: "studio open", ...place, holdMinutes, keep: true }, say);
+	const lock = await takeStudioLock(
+		io,
+		flags,
+		{ command: "studio open", window: place, holdMinutes, keep: true },
+		say,
+	);
+	const slot = lock.first();
 	try {
 		const client = await io.connectStudio();
 		try {
@@ -2668,7 +3002,7 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 				const before = new Set((await client.studios()).map((entry) => entry.id));
 				await lock.check();
 				pid = await io.launch([exe, ...studioOpenArguments(launch)]);
-				await lock.launched(pid, place);
+				await slot.launched(pid);
 				// The window is what was asked for: Ctrl+C stops the wait for it, and leaves it.
 				const window = io.interruption.hold(
 					`${ownWindow(pid, "file" in launch ? basename(launch.file) : what)}, which studio open leaves open`,
@@ -2680,7 +3014,7 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 				const giveUp = async (): Promise<boolean> => {
 					try {
 						const closed = await closeLaunchedWindow(pid, launch, what, io, window);
-						if (closed) await lock.windowClosed();
+						if (closed) await slot.closed();
 						return closed;
 					} catch (error) {
 						printError(error, io);
@@ -2717,7 +3051,7 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 				release?.();
 			}
 
-			await lock.connected(studio.id);
+			await slot.connected(studio.id);
 			if (json) {
 				io.log(
 					JSON.stringify(
@@ -2923,15 +3257,20 @@ function printError(error: unknown, io: Io): void {
 async function cmdStudioClose(flags: Flags, io: Io): Promise<number> {
 	const record = await io.studioLock.read();
 	const holder = record.kind === "held" ? record.owner : undefined;
-	if (flags.studio === undefined && holder?.studioPid !== undefined && samePath(holder.project, projectOf(io), io)) {
+	if (
+		flags.studio === undefined &&
+		holder !== undefined &&
+		holder.windows.some((window) => window.studioPid !== undefined) &&
+		samePath(holder.project, projectOf(io), io)
+	) {
 		if (flags["any-window"] !== true && (await runningIn(io, holder)) !== undefined) {
 			throw inUseError(holder, "close");
 		}
-		return await closeThisProjectsWindow(holder, io);
+		return await closeThisProjectsWindows(holder, io, holder.windows);
 	}
 
 	return await withStudio(flags, io, "close", async (_client, studio, mine) => {
-		if (mine?.studioPid !== undefined) return await closeThisProjectsWindow(mine, io);
+		if (mine?.window.studioPid !== undefined) return await closeThisProjectsWindows(mine.owner, io, [mine.window]);
 
 		const name = placeNameOf(studio.name);
 		const title = `${name} - Roblox Studio`;
@@ -2957,25 +3296,49 @@ async function cmdStudioClose(flags: Flags, io: Io): Promise<number> {
 }
 
 /**
- * Closes the window the Studio lock's record names for this project, by its process and only
- * while that process still has the place it was launched on, and frees the lock.
+ * Closes windows the Studio lock's record names for this project (`which`), each by its process and
+ * only while that process still has the place it was launched on, and frees the lock once none of
+ * its windows is left; otherwise the record keeps the others. A window that will not close fails
+ * the command, naming it, and stays in the record.
  */
-async function closeThisProjectsWindow(owner: LockOwner, io: Io): Promise<number> {
-	const label = owner.placeFile !== undefined ? basename(owner.placeFile) : owner.place;
-	const startedWith = owner.placeFile ?? owner.placeId;
-	let closed = false;
-	if (owner.studioPid !== undefined && startedWith !== undefined) {
-		const windows = await closeWindows({ pid: owner.studioPid, file: startedWith }, label, io, {
-			lockFile: owner.placeFile !== undefined,
-		});
-		closed = windows.some((window) => ["closed", "forced", "ended"].includes(window.outcome));
+async function closeThisProjectsWindows(owner: LockOwner, io: Io, which: readonly LockWindow[]): Promise<number> {
+	const handled = new Set<LockWindow>();
+	let failure: unknown;
+	for (const window of which) {
+		const label = window.placeFile !== undefined ? basename(window.placeFile) : window.place;
+		const startedWith = window.placeFile ?? window.placeId;
+		let closed = false;
+		try {
+			if (window.studioPid !== undefined && startedWith !== undefined) {
+				const windows = await closeWindows({ pid: window.studioPid, file: startedWith }, label, io, {
+					lockFile: window.placeFile !== undefined,
+				});
+				closed = windows.some((entry) => CLOSED_OUTCOMES.includes(entry.outcome));
+			}
+		} catch (error) {
+			rethrowInterrupted(error);
+			failure ??= error;
+			continue;
+		}
+		handled.add(window);
+		if (!closed && window.studioPid !== undefined) {
+			io.log(
+				`${label} had already closed: the Studio flamework-test opened for this project (PID ${window.studioPid}) no longer has it open`,
+			);
+		}
+	}
+	const remaining = owner.windows.filter(
+		(window) => window.studioPid !== undefined && ![...handled].some((done) => done.studioPid === window.studioPid),
+	);
+	if (failure !== undefined || remaining.length > 0) {
+		await io.studioLock.update(owner.token, { windows: remaining });
+		if (failure !== undefined) throw failure;
+		io.log(
+			`the Studio lock stays with this project's other ${windowWord(remaining.length).window}: ${describeLockWindows(remaining)}`,
+		);
+		return 0;
 	}
 	const freed = await io.studioLock.free(owner.token);
-	if (!closed) {
-		io.log(
-			`${label} had already closed: the Studio flamework-test opened for this project (PID ${owner.studioPid ?? "unknown"}) no longer has it open`,
-		);
-	}
 	// Taken over meanwhile (its window found closed, by a command that was waiting): not this one's to free.
 	io.log(
 		freed
@@ -3115,7 +3478,8 @@ async function runRealms(
 		const several = realms.length > 1;
 		const answered: Array<{ result: RunResult; results: string[] }> = [];
 		// Whether a realm that does not answer may have had concurrent tests in flight: not under
-		// `--concurrency 1`, nor once a realm of this place answered as a runner before them.
+		// `--concurrency 1`, nor once a realm of this place answered as a runner before them, or with
+		// a concurrency of 1.
 		let mayOverlap = concurrencyOf(flags) !== 1;
 		for (const dataModel of realms) {
 			const realm = dataModel.toLowerCase();
@@ -3137,10 +3501,12 @@ async function runRealms(
 					// Every test has `testing.timeout` of its own, so a realm that does not answer is
 					// stuck somewhere the runner cannot see: the last test that reported places it.
 					io.error(`the ${realm}'s run did not finish within ${timeout} (--timeout)`);
+					io.progress(`the ${realm}'s run did not finish within ${timeout}`);
 					io.error(await describeHangingTest(client, studio, dataModel, mayOverlap));
 				} else {
 					const message = luauErrorMessage(error);
 					io.error(`the ${realm}'s run failed: ${message}`);
+					io.progress(`the ${realm}'s run failed`);
 					// Once a run: both realms are refused alike.
 					if (isSandboxRefusal(message) && !hinted) {
 						hinted = true;
@@ -3157,7 +3523,14 @@ async function runRealms(
 				continue;
 			}
 
-			if (result.concurrency === undefined) mayOverlap = false;
+			io.progress(
+				flags.list === true
+					? `${realm}: listed`
+					: `${realm}: ${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped`,
+			);
+			// A runner before concurrent tests, or a place that runs every test alone (its own
+			// `testing.concurrency` of 1): no realm of this place had concurrent tests in flight.
+			if (result.concurrency === undefined || result.concurrency === 1) mayOverlap = false;
 			if (!several) {
 				const judged: Judgement = { failOnSkip };
 				printResult(result, results, flags, io, judged);
@@ -3301,7 +3674,7 @@ async function cmdStudioList(flags: Flags, io: Io): Promise<number> {
 	const running = await io.studioWindows();
 
 	const rows = studios.map((studio) => {
-		const opened = isLockWindow(holder, studio);
+		const opened = lockWindowOf(holder, studio) !== undefined;
 		return {
 			studio_id: studio.id,
 			name: studio.name,
@@ -3333,9 +3706,11 @@ async function cmdStudioList(flags: Flags, io: Io): Promise<number> {
 									state: view.state,
 									project: holder.project,
 									command: holder.command,
-									place: holder.place,
-									studioPid: holder.studioPid ?? null,
-									studio_id: holder.mcpId ?? null,
+									windows: holder.windows.map((window) => ({
+										place: window.place,
+										studioPid: window.studioPid ?? null,
+										studio_id: window.mcpId ?? null,
+									})),
 									since: holder.since,
 									lastActivity: holder.lastActivity,
 									expires: holder.expires,
@@ -3618,11 +3993,11 @@ async function cmdStudioCall(flags: Flags, io: Io): Promise<number> {
 
 /**
  * `studio lock`: who holds the Studio lock, and whether it is live, expired or stale: the holder's
- * project, place, command, since when, its last activity and when its hold runs out, whether its
- * command and its Studio process are still running, and with `--check-window`, whether its window
- * is on the MCP proxy (asked only while the process runs: starting a proxy joins the hub other
- * clients share, so it is not done unasked). Read-only: a stale lock is freed by the next command
- * that takes it, or by `studio unlock`.
+ * project, command, since when, its last activity and when its hold runs out, whether its command is
+ * still running, and each window it has open or is opening: its place, whether its Studio process
+ * still runs, and with `--check-window`, whether it is on the MCP proxy (asked only while that
+ * process runs: starting a proxy joins the hub other clients share, so it is not done unasked).
+ * Read-only: a stale lock is freed by the next command that takes it, or by `studio unlock`.
  */
 async function cmdStudioLock(flags: Flags, io: Io): Promise<number> {
 	const record = await io.studioLock.read();
@@ -3630,19 +4005,26 @@ async function cmdStudioLock(flags: Flags, io: Io): Promise<number> {
 	const view = await judgeLock(record, now, io.probeProcesses);
 	const owner = view.owner;
 
-	let proxy: "listed" | "listed as another place" | "not listed" | "not checked" = "not checked";
+	type Proxy = "listed" | "listed as another place" | "not listed" | "not checked";
+	const proxy = new Map<LockWindow, Proxy>();
 	let proxyWhy: string | undefined;
-	if (flags["check-window"] === true && owner?.mcpId !== undefined && view.window === "running") {
+	const asked = view.windows.filter((entry) => entry.window.mcpId !== undefined && entry.fate === "running");
+	if (flags["check-window"] === true && asked.length > 0) {
 		try {
 			const client = await io.connectStudio();
 			try {
-				const entry = (await client.studios()).find((listed) => listed.id === owner.mcpId);
-				proxy =
-					entry === undefined
-						? "not listed"
-						: isLockWindow(owner, entry)
-							? "listed"
-							: "listed as another place";
+				const listed = await client.studios();
+				for (const { window } of asked) {
+					const entry = listed.find((studio) => studio.id === window.mcpId);
+					proxy.set(
+						window,
+						entry === undefined
+							? "not listed"
+							: listsPlaceOf(window, entry)
+								? "listed"
+								: "listed as another place",
+					);
+				}
 			} finally {
 				await client.close();
 			}
@@ -3653,18 +4035,44 @@ async function cmdStudioLock(flags: Flags, io: Io): Promise<number> {
 	}
 
 	const state = view.state;
+	const words = windowWord(view.windows.length);
 	const verdict =
 		state === "free"
 			? "free: no window flamework-test opened holds it"
 			: state === "stale"
 				? `stale: ${whyStale(view)}; the next command that opens a window takes it over (or \`flamework-test studio unlock\`)`
 				: state === "expired"
-					? `expired: ${view.abandoned === true ? whyAbandoned(view) : `its window has sat unused past its ${owner!.holdMinutes}-minute hold`}; the next command that opens a window closes it and takes the lock (or \`flamework-test studio unlock\`)`
+					? `expired: ${view.abandoned === true ? whyAbandoned(view) : `its ${words.window} ${view.windows.length === 1 ? "has" : "have"} sat unused past its ${owner!.holdMinutes}-minute hold`}; the next command that opens a window closes ${words.it} and takes the lock (or \`flamework-test studio unlock\`)`
 					: owner === undefined
 						? "live: a command is taking it right now"
 						: view.cli === "running"
 							? `live: its \`${owner.command}\` is running (flamework-test PID ${owner.cliPid}); commands that open a window wait until it ends${owner.kept === true ? ", and then for the window it leaves open" : ", which frees it"}`
-							: `live: commands that open a window wait for it, until \`flamework-test studio close\` in ${owner.project}, the window closing, or its hold running out at ${owner.expires}`;
+							: `live: commands that open a window wait for it, until \`flamework-test studio close\` in ${owner.project}, the ${words.window} closing, or ${view.windows.length === 1 ? "its" : "their"} hold running out at ${owner.expires}`;
+
+	const studioOf = (entry: WindowView): string =>
+		entry.window.studioPid === undefined
+			? "no window open yet"
+			: `PID ${entry.window.studioPid}, ${
+					entry.fate === "running"
+						? "running"
+						: entry.fate === "reused"
+							? `no longer that Studio (PID reused${entry.reusedBy !== undefined ? ` by ${entry.reusedBy}` : ""})`
+							: "no longer running"
+				}`;
+	const proxyOf = (entry: WindowView): string => {
+		const found = proxy.get(entry.window) ?? "not checked";
+		return found === "listed"
+			? "on the MCP proxy"
+			: found === "listed as another place"
+				? "listed by the MCP proxy as another place: the id is another window's now"
+				: found === "not listed"
+					? "not on the MCP proxy"
+					: proxyWhy !== undefined && entry.fate === "running"
+						? `not checked (${proxyWhy})`
+						: flags["check-window"] === true
+							? "not checked: its Studio process is not running"
+							: "not checked (--check-window asks the MCP proxy)";
+	};
 
 	if (flags.json === true) {
 		io.log(
@@ -3672,10 +4080,16 @@ async function cmdStudioLock(flags: Flags, io: Io): Promise<number> {
 				{
 					state,
 					owner: owner ?? null,
-					studioProcess: owner?.studioPid !== undefined ? view.window : null,
+					windows: view.windows.map((entry) => ({
+						place: entry.window.place,
+						placeFile: entry.window.placeFile ?? null,
+						studioPid: entry.window.studioPid ?? null,
+						studioProcess: entry.window.studioPid !== undefined ? (entry.fate ?? null) : null,
+						studio_id: entry.window.mcpId ?? null,
+						proxy: proxy.get(entry.window) ?? "not checked",
+					})),
 					cliProcess: view.cli ?? null,
 					idleMinutes: view.idleMs !== undefined ? Math.round(view.idleMs / 60_000) : null,
-					proxy,
 					where: io.studioLock.where,
 				},
 				null,
@@ -3689,7 +4103,6 @@ async function cmdStudioLock(flags: Flags, io: Io): Promise<number> {
 	if (owner === undefined) return 0;
 	io.log(`  project:  ${owner.project}`);
 	io.log(`  command:  ${owner.command}`);
-	io.log(`  place:    ${owner.place}`);
 	io.log(`  since:    ${owner.since}`);
 	io.log(`  used:     ${owner.lastActivity} (${span(now - Date.parse(owner.lastActivity))} ago)`);
 	io.log(
@@ -3702,37 +4115,22 @@ async function cmdStudioLock(flags: Flags, io: Io): Promise<number> {
 				: view.cli === "reused"
 					? `ended: its PID is another process now${view.cliReusedBy !== undefined ? ` (${view.cliReusedBy})` : ""}`
 					: "ended"
-		}${owner.kept === true ? "; it leaves its window open" : ""}`,
+		}${owner.kept === true ? `; it leaves its ${words.window} open` : ""}`,
 	);
-	io.log(
-		owner.studioPid !== undefined
-			? `  studio:   PID ${owner.studioPid}, ${view.window === "running" ? "running" : view.window === "reused" ? `no longer that Studio (PID reused${view.reusedBy !== undefined ? ` by ${view.reusedBy}` : ""})` : "no longer running"}`
-			: "  studio:   no window open",
-	);
-	if (owner.mcpId !== undefined) {
-		io.log(
-			`  mcp:      ${owner.mcpId}, ${
-				proxy === "listed"
-					? "on the MCP proxy"
-					: proxy === "listed as another place"
-						? "listed by the MCP proxy as another place: the id is another window's now"
-						: proxy === "not listed"
-							? "not on the MCP proxy"
-							: proxyWhy !== undefined
-								? `not checked (${proxyWhy})`
-								: flags["check-window"] === true
-									? "not checked: its Studio process is not running"
-									: "not checked (--check-window asks the MCP proxy)"
-			}`,
-		);
-	}
+	if (view.windows.length === 0) io.log("  studio:   no window open");
+	view.windows.forEach((entry, index) => {
+		if (view.windows.length > 1) io.log(`  window ${index + 1} of ${view.windows.length}:`);
+		io.log(`  place:    ${entry.window.place}`);
+		io.log(`  studio:   ${studioOf(entry)}`);
+		if (entry.window.mcpId !== undefined) io.log(`  mcp:      ${entry.window.mcpId}, ${proxyOf(entry)}`);
+	});
 	return 0;
 }
 
 /**
- * `studio unlock`: frees a stale lock, and an expired one, closing its window as a command that
- * takes the lock would (flamework-test's window only). A live lock with time left on its hold is
- * refused, naming the holder and when its hold runs out; `--force` frees it too, closing its window.
+ * `studio unlock`: frees a stale lock, and an expired one, closing its windows as a command that
+ * takes the lock would (flamework-test's windows only). A live lock with time left on its hold is
+ * refused, naming the holder and when its hold runs out; `--force` frees it too, closing its windows.
  */
 async function cmdStudioUnlock(flags: Flags, io: Io): Promise<number> {
 	const record = await io.studioLock.read();
@@ -3746,22 +4144,23 @@ async function cmdStudioUnlock(flags: Flags, io: Io): Promise<number> {
 	}
 	if (view.state === "stale") {
 		const token = record.kind === "held" ? record.owner.token : undefined;
-		if (await io.studioLock.free(token)) {
+		if (await io.studioLock.free(token, goneNote(io, view, by))) {
 			io.log(`freed the Studio lock: ${whyStale(view)}`);
-			await afterWindowGone(io, view, by);
+			await removeGoneLockFiles(io, view);
 		} else {
 			io.log("the Studio lock changed hands meanwhile; `flamework-test studio lock` shows it");
 		}
 		return 0;
 	}
 	if (view.state === "expired") {
-		if (!(await closeExpiredWindow(io, view, by, "expired", say))) {
+		if (!(await closeExpiredWindows(io, view, by, "expired", say))) {
 			io.log("the Studio lock was used or changed hands meanwhile; `flamework-test studio lock` shows it");
 		}
 		return 0;
 	}
 	if (flags.force !== true || view.owner === undefined) {
 		const owner = view.owner;
+		const words = windowWord(owner?.windows.length ?? 1);
 		throw new CliError(
 			owner !== undefined
 				? `the Studio lock is live: ${describeHolder(view, io.now().getTime())}`
@@ -3769,11 +4168,11 @@ async function cmdStudioUnlock(flags: Flags, io: Io): Promise<number> {
 			owner === undefined
 				? "try again in a moment"
 				: view.cli === "running"
-					? `it is freed when that command ends${owner.kept === true ? " and its window closes" : ""}. --force closes its window now: only with the go-ahead of whoever is using it`
-					: `it is freed by \`flamework-test studio close\` in ${owner.project}, by the window closing, or once its hold runs out (${owner.expires}). --force closes its window now: only with the go-ahead of whoever is using it`,
+					? `it is freed when that command ends${owner.kept === true ? " and its window closes" : ""}. --force closes its ${words.window} now: only with the go-ahead of whoever is using ${words.it}`
+					: `it is freed by \`flamework-test studio close\` in ${owner.project}, by its ${words.window} closing, or once its hold runs out (${owner.expires}). --force closes its ${words.window} now: only with the go-ahead of whoever is using ${words.it}`,
 		);
 	}
-	if (!(await closeExpiredWindow(io, view, by, "forced", say))) {
+	if (!(await closeExpiredWindows(io, view, by, "forced", say))) {
 		io.log("the Studio lock changed hands meanwhile; `flamework-test studio lock` shows it");
 	}
 	return 0;
@@ -3789,8 +4188,10 @@ async function cmdStudioUnlock(flags: Flags, io: Io): Promise<number> {
  * up front (a missing project file, no lune, no Studio) is checked before the first run starts.
  *
  * A Studio run takes the Studio lock before it launches its first window, and holds it until its
- * last window has closed: its projects' windows open one after another, never beside another
- * project's. `--keep` leaves the window open, holding the lock, so it keeps one project's only.
+ * last window has closed. `--parallel <n>` runs up to n projects' windows side by side, in project
+ * order, a project starting as another's window closes; each project's lines are printed together,
+ * in project order, as one after another prints them. `--keep` leaves the window open, holding the
+ * lock, so it keeps one project's only.
  */
 async function cmdTest(flags: Flags, io: Io): Promise<number> {
 	if (flags.published && !flags.cloud) {
@@ -3802,6 +4203,11 @@ async function cmdTest(flags: Flags, io: Io): Promise<number> {
 	if (flags.cloud && (flags["lock-timeout"] !== undefined || flags.hold !== undefined)) {
 		throw new UsageError(
 			`--${flags.hold !== undefined ? "hold" : "lock-timeout"} is for Studio runs: a cloud run opens no Studio window and takes no lock`,
+		);
+	}
+	if (flags.cloud && flags.parallel !== undefined) {
+		throw new UsageError(
+			"--parallel is for Studio runs: the cloud runs of several projects publish to the one testing place, so they run one after another",
 		);
 	}
 	if (!flags.cloud && flags.hold !== undefined && flags.keep !== true) {
@@ -3827,21 +4233,29 @@ async function cmdTest(flags: Flags, io: Io): Promise<number> {
 	}
 	// Misspelt settings are refused before anything is patched or opened.
 	lockTimeoutOf(flags, io);
+	const parallel = parallelOf(flags, io, projects.length);
 	const lock = new LazyStudioLock(io, flags, {
-		command: flags.keep === true ? "test --keep" : "test",
+		command: flags.keep === true ? "test --keep" : parallel > 1 ? `test --parallel ${parallel}` : "test",
 		holdMinutes: holdOf(flags, io),
 		keep: flags.keep === true,
 	});
 	try {
-		return await withKeepAwake(keepAwake, io, () => testProjects(flags, io, projects, lock));
+		return await withKeepAwake(keepAwake, io, () => testProjects(flags, io, projects, lock, parallel));
 	} finally {
 		await lock.finish();
 	}
 }
 
-/** The Studio lock of a `test`, taken when its first window is about to open and kept to its end. */
+/**
+ * The Studio lock of a `test`, taken when its first window is about to open and kept to its end.
+ * Every project's window is listed in it: from when its place is being made, once the lock is held,
+ * else from when the lock is taken for it. Projects side by side share one take.
+ */
 class LazyStudioLock {
+	private taking: Promise<HeldLock> | undefined;
 	private held: HeldLock | undefined;
+	/** Why the lock was not taken: every project that waited for it failed so, and the run fails so. */
+	private failure: unknown;
 
 	constructor(
 		private readonly io: Io,
@@ -3849,16 +4263,35 @@ class LazyStudioLock {
 		private readonly request: Pick<LockRequest, "command" | "holdMinutes" | "keep">,
 	) {}
 
-	async take(place: Pick<LockOwner, "place" | "placeFile" | "placeId">): Promise<HeldLock> {
-		this.held ??= await takeStudioLock(this.io, this.flags, { ...this.request, ...place }, (line) =>
-			this.io.log(line),
-		);
-		return this.held;
+	/** A project's window, listed from here when the lock is held already: its place is about to be made. */
+	async begin(place: LockPlace): Promise<LockSlot | undefined> {
+		return this.held !== undefined ? await this.held.open(place) : undefined;
 	}
 
-	/** A project after the first: the lock, held already, names the place it is about to make and open. */
-	async next(file: string): Promise<void> {
-		await this.held?.moveTo({ place: file, placeFile: file });
+	/** The project's window in the lock, taking the lock for it when no project has yet. */
+	async take(slot: LockSlot | undefined, place: LockPlace): Promise<LockSlot> {
+		if (slot !== undefined) return slot;
+		if (this.taking === undefined) {
+			this.taking = takeStudioLock(this.io, this.flags, { ...this.request, window: place }, (line) =>
+				this.io.log(line),
+			).then(
+				(held) => {
+					this.held = held;
+					return held;
+				},
+				(error: unknown) => {
+					this.failure = error;
+					throw error;
+				},
+			);
+			return (await this.taking).first();
+		}
+		return await (await this.taking).open(place);
+	}
+
+	/** Whether an error is the lock's own: it could not be taken, which no project gets past. */
+	failedWith(error: unknown): boolean {
+		return this.failure !== undefined && error === this.failure;
 	}
 
 	async finish(): Promise<void> {
@@ -3866,8 +4299,21 @@ class LazyStudioLock {
 	}
 }
 
+/** How one project of several fared, for the line a run ends on. */
+interface ProjectOutcome {
+	project: ProjectChoice;
+	code: number;
+	skipped: number;
+}
+
 /** Runs the tests under every project, and says how each fared when there are several. */
-async function testProjects(flags: Flags, io: Io, projects: ProjectChoice[], lock?: LazyStudioLock): Promise<number> {
+async function testProjects(
+	flags: Flags,
+	io: Io,
+	projects: ProjectChoice[],
+	lock?: LazyStudioLock,
+	parallel = 1,
+): Promise<number> {
 	if (projects.length === 1) {
 		return await testProject(flags, io, projects[0]!, lock);
 	}
@@ -3875,16 +4321,10 @@ async function testProjects(flags: Flags, io: Io, projects: ProjectChoice[], loc
 	// Every project file is read before the first run, so a typo in the last does not cost the runs before it.
 	for (const project of projects) await readProject(project, io);
 
-	const outcomes: Array<{ project: ProjectChoice; code: number; skipped: number }> = [];
-	for (const project of projects) {
-		// A Ctrl+C during the last project's cleanup lets that finish; the next project does not start.
-		io.interruption.check();
-		io.log("");
-		io.log(`=== ${project.name}: ${relative(io.cwd, project.path)} ===`);
-		const before = skipTally.get(io) ?? 0;
-		const code = await testProject(flags, io, project, lock);
-		outcomes.push({ project, code, skipped: (skipTally.get(io) ?? 0) - before });
-	}
+	const outcomes =
+		parallel > 1 && lock !== undefined
+			? await testSideBySide(flags, io, projects, lock, parallel)
+			: await testInTurn(flags, io, projects, lock);
 
 	io.log("");
 	io.log(
@@ -3898,6 +4338,161 @@ async function testProjects(flags: Flags, io: Io, projects: ProjectChoice[], loc
 	return Math.max(...outcomes.map(({ code }) => code));
 }
 
+/** The heading a project's lines start with, under several projects. */
+function projectHeading(project: ProjectChoice, io: Io): string {
+	return `=== ${project.name}: ${relative(io.cwd, project.path)} ===`;
+}
+
+/** Several projects one after another: a project's error ends the run, as it always has. */
+async function testInTurn(
+	flags: Flags,
+	io: Io,
+	projects: ProjectChoice[],
+	lock?: LazyStudioLock,
+): Promise<ProjectOutcome[]> {
+	const outcomes: ProjectOutcome[] = [];
+	for (const project of projects) {
+		// A Ctrl+C during the last project's cleanup lets that finish; the next project does not start.
+		io.interruption.check();
+		io.log("");
+		io.log(projectHeading(project, io));
+		// Its own tally of skips, for its part of the line the run ends on.
+		const view: Io = { ...io, tally: { skipped: 0 } };
+		const code = await testProject(flags, view, project, lock);
+		outcomes.push({ project, code, skipped: view.tally.skipped });
+	}
+	return outcomes;
+}
+
+/**
+ * Where each project's lines go when projects run side by side: the first project in order that has
+ * not printed all of its lines prints them as they come; every later one keeps its own until each
+ * project before it has printed everything, then prints them together and goes on as they come. So
+ * the lines read as a run one after another prints them, project by project, stdout and stderr each
+ * in their order; what waits says how it is getting on meanwhile, in short lines on stderr.
+ */
+class ProjectOutput {
+	private readonly kept: Array<Array<{ error: boolean; text: string }>>;
+	private readonly done: boolean[];
+	private front = 0;
+
+	constructor(
+		private readonly io: Io,
+		count: number,
+	) {
+		this.kept = Array.from({ length: count }, () => []);
+		this.done = Array.from({ length: count }, () => false);
+	}
+
+	/** Whether project `index` prints its lines as they come. */
+	live(index: number): boolean {
+		return index === this.front;
+	}
+
+	write(index: number, error: boolean, text: string): void {
+		if (this.live(index)) this.print(error, text);
+		else this.kept[index]!.push({ error, text });
+	}
+
+	/** Project `index` has ended: the ones after it print what they kept, up to the next still running. */
+	finish(index: number): void {
+		this.done[index] = true;
+		while (this.front < this.done.length && this.done[this.front] === true) {
+			this.front += 1;
+			for (const line of this.kept[this.front] ?? []) this.print(line.error, line.text);
+			if (this.front < this.kept.length) this.kept[this.front] = [];
+		}
+	}
+
+	private print(error: boolean, text: string): void {
+		if (error) this.io.error(text);
+		else this.io.log(text);
+	}
+}
+
+/**
+ * Several projects side by side: up to `parallel` at once, started in project order, the next
+ * starting as soon as a project has ended (its window closed). A project that fails (its window
+ * never connects, a realm errs or hangs) fails alone, saying why among its own lines, and the
+ * others run on. What no project gets past ends the run once the projects running have ended: the
+ * Studio lock not taken, a Ctrl+C (no project starts after it, and each one running cleans up).
+ */
+async function testSideBySide(
+	flags: Flags,
+	io: Io,
+	projects: ProjectChoice[],
+	lock: LazyStudioLock,
+	parallel: number,
+): Promise<ProjectOutcome[]> {
+	const output = new ProjectOutput(io, projects.length);
+	const outcomes: ProjectOutcome[] = [];
+	let next = 0;
+	let stop: unknown;
+	let hasStopped = false;
+	const halt = (error: unknown) => {
+		if (!hasStopped) {
+			hasStopped = true;
+			stop = error;
+		}
+	};
+
+	const worker = async (): Promise<void> => {
+		for (;;) {
+			if (hasStopped) return;
+			try {
+				io.interruption.check();
+			} catch (error) {
+				halt(error);
+				return;
+			}
+			const index = next;
+			next += 1;
+			if (index >= projects.length) return;
+			const project = projects[index]!;
+			const view: Io = {
+				...io,
+				log: (message) => output.write(index, false, message),
+				error: (message) => output.write(index, true, message),
+				// What its child processes print (lune's patch) is its own too, kept with its lines.
+				spawn: (command, cwd, timeoutMs) =>
+					io.spawn(command, cwd, timeoutMs, (line, error) => output.write(index, error, line)),
+				progress: (line) => {
+					if (!output.live(index)) io.error(`[${project.name}] ${line}`);
+				},
+				tally: { skipped: 0 },
+			};
+			const startedAt = io.now().getTime();
+			view.log("");
+			view.log(projectHeading(project, io));
+			view.progress("started");
+			let code: number;
+			try {
+				code = await testProject(flags, view, project, lock);
+			} catch (error) {
+				if (error instanceof Interrupted || lock.failedWith(error)) {
+					halt(error);
+					output.finish(index);
+					return;
+				}
+				printError(error, view);
+				code = 1;
+			}
+			outcomes[index] = { project, code, skipped: view.tally.skipped };
+			const waiting = projects.slice(0, index).filter((_, before) => outcomes[before] === undefined);
+			view.progress(
+				`${code === 0 ? "passed" : "FAILED"} in ${span(io.now().getTime() - startedAt)}${
+					waiting.length > 0 ? `; its lines follow ${waiting.map((other) => other.name).join(", ")}'s` : ""
+				}`,
+			);
+			output.finish(index);
+		}
+	};
+
+	await Promise.all(Array.from({ length: parallel }, () => worker()));
+	if (hasStopped) throw stop;
+	return outcomes;
+}
+
 async function testProject(flags: Flags, io: Io, project: ProjectChoice, lock?: LazyStudioLock): Promise<number> {
 	if (flags.cloud) return await cloudTestProject(flags, io, project);
 	return await studioTestProject(flags, io, project, lock!);
@@ -3909,18 +4504,35 @@ async function testProject(flags: Flags, io: Io, project: ProjectChoice, lock?: 
  * open is from an earlier build and would test stale code, so it is closed first and the file
  * opened afresh; windows of other files are never touched, whatever their names. The window this
  * run opens is known by the process it started, which is what closes it, whether the run finished
- * or gave up on it (unless `--keep`); a window that will not close fails the run, naming it.
+ * or gave up on it (unless `--keep`); a window that will not close fails the run, naming it, and
+ * stays in the Studio lock's record for the next taker to close.
  */
 async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice, lock: LazyStudioLock): Promise<number> {
 	const realms = realmsOf(flags.realm, "both");
-	await lock.next(plannedPlaceOf(flags, io, "test", project));
-	const { absolute: file, label } = await placeToRun(flags, io, "test", project);
-	const name = basename(file);
-	const exe = requireStudioExe(io);
-	const keep = flags.keep === true;
-	const place = { place: file, placeFile: file };
-	const held = await lock.take(place);
+	const planned = plannedPlaceOf(flags, io, "test", project);
+	// Listed in the lock from here when another project holds it already: its place is being made.
+	let slot = await lock.begin({ place: planned, placeFile: planned });
+	try {
+		const { absolute: file, label } = await placeToRun(flags, io, "test", project);
+		const name = basename(file);
+		const exe = requireStudioExe(io);
+		const keep = flags.keep === true;
+		slot = await lock.take(slot, { place: file, placeFile: file });
+		const held = slot;
+		return await studioTestWindow(flags, io, { file, label, name, exe, keep, realms }, held);
+	} finally {
+		await slot?.settle();
+	}
+}
 
+/** One project's window: opened, run on both realms, and closed again (unless `--keep`). */
+async function studioTestWindow(
+	flags: Flags,
+	io: Io,
+	run: { file: string; label: string; name: string; exe: string; keep: boolean; realms: Array<"Server" | "Client"> },
+	slot: LockSlot,
+): Promise<number> {
+	const { file, label, name, exe, keep, realms } = run;
 	const client = await io.connectStudio();
 	try {
 		const staleLabel = `the window left from an earlier build of ${name}`;
@@ -3940,7 +4552,7 @@ async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice, l
 			if (keep) return false;
 			try {
 				await closeOwnWindow(pid, file, io, releaseWindow);
-				await held.windowClosed();
+				await slot.closed();
 				return true;
 			} catch (closeError) {
 				printError(closeError, io);
@@ -3960,16 +4572,19 @@ async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice, l
 				),
 			);
 			// Whatever the proxy lists now is not this run's window, even when it has the same name.
+			// Two projects' launches a moment apart are not staggered: Studio opened and connected
+			// both every time (2026-10-05), and each run takes only an entry of its own file's name.
 			const before = new Set((await client.studios()).map((entry) => entry.id));
-			await held.check();
+			await slot.lock.check();
 			pid = await io.launch([exe, ...studioOpenArguments({ file })]);
 			launched = true;
-			await held.launched(pid, place);
+			await slot.launched(pid);
 			const window = ownWindow(pid, name);
 			releaseWindow = keep
 				? io.interruption.hold(`${window}, which --keep leaves open`)
 				: io.interruption.hold(window, `closed ${window}`);
 			io.log(`opening ${label} in Studio; waiting for it to connect...`);
+			io.progress(`opening ${name} in Studio (PID ${pid ?? "unknown"})`);
 
 			const found = await findLaunchedWindow(client, { file }, pid, before, flags, io);
 			studio = found.studio;
@@ -3986,9 +4601,10 @@ async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice, l
 			release();
 			release = undefined;
 			io.log(`connected: ${studio.name} (${studio.id})`);
-			await held.connected(studio.id);
+			io.progress(`connected: ${studio.name} (${studio.id})`);
+			await slot.connected(studio.id);
 
-			code = await runRealms(client, studio, realms, flags, io, releaseWindow, () => held.renew());
+			code = await runRealms(client, studio, realms, flags, io, releaseWindow, () => slot.lock.renew());
 		} catch (error) {
 			if (launched && !gaveUp) await giveUp();
 			throw error;
@@ -4000,15 +4616,16 @@ async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice, l
 			io.log("Studio left open (--keep)");
 			io.log(windowLine(studio.id, pid));
 			io.log(
-				`it holds the Studio lock until \`flamework-test studio close\`, or until it has sat unused for ${held.owner.holdMinutes} min (--hold)`,
+				`it holds the Studio lock until \`flamework-test studio close\`, or until it has sat unused for ${slot.lock.owner.holdMinutes} min (--hold)`,
 			);
 			return code;
 		}
 		try {
 			await closeOwnWindow(pid, file, io, releaseWindow);
-			await held.windowClosed();
+			await slot.closed();
 		} catch (error) {
-			// The results stand, but the run did not clean up after itself, and fails saying so.
+			// The results stand, but the run did not clean up after itself, and fails saying so. The
+			// window stays in the lock's record, by its own process and file, for the next taker.
 			printError(error, io);
 			return 1;
 		}

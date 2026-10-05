@@ -83,8 +83,9 @@ export class ConcurrentSpecs implements OnStart {
 					late.Name = "Late";
 					late.Parent = folder;
 				});
-				// A generous timeout: one frame Studio holds for seconds as the session starts can cover
-				// both the delay and a short timeout, and the timeout may then resume first.
+				// A generous timeout, as hardening: the case is about the child arriving, not about the
+				// timeout. A 3 s one survived a 3.5 s frame as the session started (2026-10-05), so this
+				// guards against no failure seen, only leaves the timeout far from the delay.
 				expectDefined(folder.WaitForChild("Late", WAIT * 20), "the late child");
 			});
 

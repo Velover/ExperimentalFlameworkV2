@@ -192,7 +192,8 @@ injected.
 A test may yield (`task.wait`, `WaitForChild`, a signal), and a Promise it returns is awaited.
 Each test runs on its own thread, with a timeout of `testing.timeout` seconds (30 by default). A
 test that runs over is cancelled and counted as failed, and the run moves on. Tests run one after
-another, in the order they were declared, unless they are [concurrent](#concurrent-tests).
+another, in the order they were declared (a `--sections` list naming a section's tests in another
+order runs them in its own), unless they are [concurrent](#concurrent-tests).
 
 ## Cleanup
 
@@ -361,11 +362,12 @@ the ones after it.
 | A client, for the server's tests | `Testing.runOnServer(filter?)`, over `Workspace.FlameworkTestsServer` |
 | Start-up | `"autoRun": true` in the config runs everything right after ignition |
 
-`flamework-test` opens one Studio window at a time on the machine, across projects: a Studio run
-takes the Studio lock first, and waits while another project's run or window holds it. A command
-that changes a window (`studio exec`, `close`, ...) acts only on the one it opened for this
-project, and not while another process's run of this project uses it; see
-[the Studio lock](../../packages/testing/README.md#the-studio-lock).
+`flamework-test` lets one run at a time open Studio windows on the machine, across projects: a
+Studio run takes the Studio lock first, and waits while another project's run or window holds it.
+`--parallel` lets a run of several Rojo projects keep up to that many of its windows open at once. A
+command that changes a window (`studio exec`, `close`, ...) acts only on the one it opened for this
+project, and not while another process's run of this project uses it; see [the Studio
+lock](../../packages/testing/README.md#the-studio-lock).
 
 A filter is nothing (every section), one section name, one `section/test` name, or a list of
 those; `--sections a,b` on the command line. Passing `{ list = true }` as the options reports the
@@ -466,15 +468,16 @@ are written this way.
   "failOnSkip": false,         // flamework-test: a skipped test fails the run (--fail-on-skip)
   "keepAwake": false,          // flamework-test: keep the display on during a Studio run (--keep-awake)
   "lockTimeout": 300,          // flamework-test: seconds to wait for the Studio lock (--lock-timeout)
-  "lockHold": 15               // flamework-test: minutes a window it left open may sit unused (--hold)
+  "lockHold": 15,              // flamework-test: minutes a window it left open may sit unused (--hold)
+  "parallel": 1                // flamework-test: Rojo projects whose windows run at once (--parallel)
 }
 ```
 
-`failOnSkip`, `keepAwake`, `lockTimeout` and `lockHold` are read by `flamework-test` alone, never by
-the place. Its flags come first, then the `FAIL_ON_SKIP` and `KEEP_AWAKE` variables (`true` or
-`false`, `1` or `0`), and `FLAMEWORK_TEST_LOCK_TIMEOUT` and `FLAMEWORK_TEST_LOCK_HOLD`, from the
-shell, `.env` or `.env.local`. `--fail-on-skip=false` and `--keep-awake=false` turn them off for one
-run.
+`failOnSkip`, `keepAwake`, `lockTimeout`, `lockHold` and `parallel` are read by `flamework-test`
+alone, never by the place. Its flags come first, then the `FAIL_ON_SKIP` and `KEEP_AWAKE` variables
+(`true` or `false`, `1` or `0`), and `FLAMEWORK_TEST_LOCK_TIMEOUT`, `FLAMEWORK_TEST_LOCK_HOLD` and
+`FLAMEWORK_TEST_PARALLEL`, from the shell, `.env` or `.env.local`. A cloud run reads no `parallel`.
+`--fail-on-skip=false` and `--keep-awake=false` turn them off for one run.
 
 `entry` exists for one reason. An Open Cloud task loads the place but runs none of its Scripts, so
 nothing ignites the game there. The runner has to require a ModuleScript and call its `ignite()`

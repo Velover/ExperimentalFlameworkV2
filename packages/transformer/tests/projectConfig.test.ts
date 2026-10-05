@@ -234,6 +234,22 @@ describe("reading flamework.config.json", () => {
 		remove("flamework.config.json");
 	});
 
+	test("accepts testing.parallel, flamework-test's, as a whole number, 1 or more, from the environment too", () => {
+		const file = write("flamework.config.json", `{ "testing": { "parallel": 2 } }`);
+		expect(readProjectConfig(file)).toEqual({ testing: { parallel: 2 } });
+
+		write("flamework.config.json", `{ "testing": { "parallel": "${"${PARALLEL:-1}"}" } }`);
+		expect(readProjectConfig(file, {})).toEqual({ testing: { parallel: 1 } });
+		expect(readProjectConfig(file, { PARALLEL: "4" })).toEqual({ testing: { parallel: 4 } });
+		expect(() => readProjectConfig(file, { PARALLEL: "lots" })).toThrow(/\/testing\/parallel.*not a number/);
+
+		for (const bad of ["0", "1.5", "-2"]) {
+			write("flamework.config.json", `{ "testing": { "parallel": ${bad} } }`);
+			expect(() => readProjectConfig(file)).toThrow(/\/testing\/parallel must be (>= 1|integer)/);
+		}
+		remove("flamework.config.json");
+	});
+
 	test("reports a parse error with the file name", () => {
 		const file = write("flamework.config.json", `{ "transformer": `);
 		expect(() => readProjectConfig(file)).toThrow(/Failed to parse .*flamework\.config\.json/);
@@ -1010,6 +1026,7 @@ describe("runtime sections", () => {
 					failOnSkip: true,
 					lockTimeout: 60,
 					lockHold: 30,
+					parallel: 2,
 				},
 			}),
 		).toEqual({

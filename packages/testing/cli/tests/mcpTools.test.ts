@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { parseArgs } from "../src/cli.ts";
-import type { LockOwner } from "../src/lock.ts";
 import { SNIPPET_SANDBOX_HINT } from "../src/studio.ts";
 import {
 	FAKE_TOOLS,
@@ -11,6 +10,7 @@ import {
 	OTHER_STUDIO,
 	TESTING_STUDIO,
 	fakeMachine,
+	fromFlat,
 	runCli,
 	type FakeMachine,
 	type FakeStudio,
@@ -32,8 +32,7 @@ function withOwnWindow(): FakeMachine {
 	const now = machine.time.now;
 	const file = join(THIS_PROJECT, "place.rbxl");
 	machine.windows.push({ pid: 4001, title: `${file} - Roblox Studio`, startedWith: file, startedAt: now });
-	const owner: LockOwner = {
-		version: 1,
+	const owner = fromFlat({
 		token: "own-token",
 		cliPid: 8001,
 		cliName: "bun",
@@ -50,7 +49,7 @@ function withOwnWindow(): FakeMachine {
 		expires: new Date(now + 15 * 60_000).toISOString(),
 		holdMinutes: 15,
 		kept: true,
-	};
+	});
 	machine.lock.owner = owner;
 	return machine;
 }
@@ -340,7 +339,10 @@ describe("studio list", () => {
 		// Another project's window, as that project sees it, and as JSON.
 		const json = await runCli(["studio", "list", "--json"], { machine, cwd: "D:\\other", studio: studio() });
 		const parsed = JSON.parse(json.out);
-		expect(parsed.lock).toMatchObject({ project: THIS_PROJECT, studio_id: "own-1", studioPid: 4001 });
+		expect(parsed.lock).toMatchObject({
+			project: THIS_PROJECT,
+			windows: [{ studio_id: "own-1", studioPid: 4001 }],
+		});
 		expect(parsed.studios).toContainEqual({
 			studio_id: "own-1",
 			name: "place.rbxl",

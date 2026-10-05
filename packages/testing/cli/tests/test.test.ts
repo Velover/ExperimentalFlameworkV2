@@ -1097,6 +1097,12 @@ describe("test", () => {
 		expect(serial.code).toBe(1);
 		expect(serial.err).toContain("last test that reported: economy/buys (PASS)");
 		expect(serial.err).not.toContain(NOTE);
+
+		// The same when the place's own testing.concurrency is 1, which the realm that answered says (C1).
+		const configured = await hanging(JSON.stringify(resultJson({ concurrency: 1 })));
+		expect(configured.code).toBe(1);
+		expect(configured.err).toContain("last test that reported: economy/buys (PASS)");
+		expect(configured.err).not.toContain(NOTE);
 	});
 
 	test("a --sections entry only one realm has passes, and one that no realm has fails the run", async () => {

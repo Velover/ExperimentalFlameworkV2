@@ -8,7 +8,12 @@
  * run ends on can say what was cleaned up and what was left (a task already created on Open Cloud
  * runs on, say), and a second Ctrl+C during the cleanup, which exits at once, can say what may be
  * left.
+ *
+ * A run may do several things at once (`test --parallel`: a window per project), each unwinding
+ * through its own cleanup: being inside a cleanup belongs to the work that entered it, carried
+ * along its awaits, so one project's cleanup never makes another project's waits deaf to Ctrl+C.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 
 /** What every wait of an interrupted run rejects with. */
 export class Interrupted extends Error {
@@ -58,7 +63,8 @@ export class Interruption {
 	/** The signal the run was interrupted by; undefined while it goes on. */
 	private signal: string | undefined;
 	private readonly controller = new AbortController();
-	private cleaning = 0;
+	/** Set inside {@link cleanup}, for the work that entered it and what it awaits. */
+	private readonly cleaning = new AsyncLocalStorage<true>();
 	private readonly held = new Map<number, Held>();
 	private readonly ids = new WeakMap<Release, number>();
 	private nextHold = 0;
@@ -91,7 +97,7 @@ export class Interruption {
 
 	/** Throws when the run has been interrupted and this is not its cleanup: nothing new starts then. */
 	check(): void {
-		if (this.signal !== undefined && this.cleaning === 0) throw new Interrupted(this.signal);
+		if (this.signal !== undefined && this.cleaning.getStore() === undefined) throw new Interrupted(this.signal);
 	}
 
 	/**
@@ -101,7 +107,7 @@ export class Interruption {
 	 * {@link cleanup} it is a plain call: the cleanup is what an interrupted run waits for.
 	 */
 	run<T>(start: () => Promise<T>, dispose?: (value: T) => void): Promise<T> {
-		if (this.cleaning > 0) return start();
+		if (this.cleaning.getStore() !== undefined) return start();
 		if (this.signal !== undefined) return Promise.reject(new Interrupted(this.signal));
 
 		const work = start();
@@ -139,15 +145,11 @@ export class Interruption {
 	/**
 	 * Runs part of a run's cleanup (stopping the play session, closing its window): what it waits
 	 * for is never refused, so a Ctrl+C that comes during the cleanup does not cut it short. Only
-	 * a second one does, and that exits.
+	 * a second one does, and that exits. Only `body` and what it awaits are the cleanup: work of
+	 * the same run going on beside it (another project's window) is interrupted as ever.
 	 */
 	async cleanup<T>(body: () => Promise<T>): Promise<T> {
-		this.cleaning += 1;
-		try {
-			return await body();
-		} finally {
-			this.cleaning -= 1;
-		}
+		return await this.cleaning.run(true, body);
 	}
 
 	/**

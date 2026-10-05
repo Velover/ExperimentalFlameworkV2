@@ -172,10 +172,16 @@ export interface TestingRuntimeConfig {
 	 * close it. After `--hold` and `FLAMEWORK_TEST_LOCK_HOLD`.
 	 */
 	lockHold?: number;
+
+	/**
+	 * `flamework-test` only: how many projects' Studio windows a `test` of several runs side by side.
+	 * After `--parallel` and `FLAMEWORK_TEST_PARALLEL`.
+	 */
+	parallel?: number;
 }
 
 /** Keys of the `testing` section only `flamework-test` reads, left out of the place's config. */
-const CLI_ONLY_TESTING_KEYS = ["failOnSkip", "keepAwake", "lockTimeout", "lockHold"] as const;
+const CLI_ONLY_TESTING_KEYS = ["failOnSkip", "keepAwake", "lockTimeout", "lockHold", "parallel"] as const;
 
 /**
  * The sections the runtime packages read. Game projects get them written to

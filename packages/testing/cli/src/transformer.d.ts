@@ -18,6 +18,7 @@ declare module "@flamework-experimental/transformer/out/util/projectConfig.js" {
 				failOnSkip?: boolean;
 				lockTimeout?: number;
 				lockHold?: number;
+				parallel?: number;
 			};
 		};
 		configPath?: string;
