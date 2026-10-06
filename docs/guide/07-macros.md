@@ -328,7 +328,7 @@ any of it, and nothing in the output describes the type.
   key or an enum member (which can renumber the others), or changing a width changes the format: a
   buffer written before is then read wrong, or not at all. A Flamework upgrade can change a layout
   too, and the changelog's upgrade notes say which. Keep that in mind before you store buffers, in a
-  DataStore say, and store a version with them.
+  DataStore say, and give their serializer a version (below).
 - `deserialize` checks lengths, counts, union tags and literal indices, and trusts no count or
   length it reads
   ([Payloads that cannot be decoded](06-networking.md#payloads-that-cannot-be-decoded)). It does not
@@ -337,6 +337,70 @@ any of it, and nothing in the output describes the type.
   (`Flamework.createGuard<T>()`), as networking checks what it decodes.
 - Create serializers at the top level of a file (module scope). One created inside a function makes
   its two functions again on every call.
+
+#### Versions
+
+A buffer you store, in a DataStore say, outlives the build that wrote it. Give its serializer a
+version:
+
+```ts
+const saves = Flamework.createSerializer<SaveV3>({ version: 3 });
+```
+
+Every buffer it writes then starts with a header of 5 bytes: the version, one byte, then a 4-byte
+hash of `SaveV3`'s layout, worked out when you build. `deserialize` checks the header before it
+reads anything else, and refuses:
+
+- a buffer of another version: `this buffer is version 2, and this serializer of SaveV3 reads
+  version 3: ...`;
+- a buffer of its version whose layout hash differs: `SaveV3's layout changed since this buffer was
+  written as version 3; bump the version and keep a reader for the old one`.
+
+`Serialization.versionOf(buffer)` reads the version back, so a game keeps a serializer for each
+version it still has data of, and sends each buffer to the one of its version:
+
+```ts
+const v3 = Flamework.createSerializer<DataV3>({ version: 3 });
+const v2 = Flamework.createSerializer<DataV2>({ version: 2 });
+
+const data = Serialization.versionOf(buf) === 2 ? migrate(v2.deserialize(buf)) : v3.deserialize(buf);
+```
+
+A DataStore library that migrates data by a version number of its own can pass the same number
+here: `deserialize` then refuses a buffer whose type changed without the number being bumped.
+
+The hash is what catches a change to the type made without a new version: a field added, removed,
+renamed, reordered or retyped, a width changed, a union member added or moved, a literal value
+added, an enum's members reordered, and a Flamework upgrade that changes how the type is written.
+It leaves out what changes no byte: the names of types, a width against its
+`Serialization.Implicit` twin (only checked, written the same), what a blob holds. A changed layout
+keeps its hash about once in four billion times.
+
+- The version is read when you build: a whole number from 0 to 255, written as a number literal, or
+  as a `const` or an enum member whose type is one. Anything else is a build error.
+- Without options nothing changes: no header, and the same bytes as before.
+- `versionOf` returns `undefined` for a buffer shorter than a header (5 bytes). The serializer has
+  the version too, as `saves.version` (`undefined` for one without).
+- A versioned serializer needs a transformer that knows versions; with an older one,
+  `createSerializer` raises when the module loads instead of handing back a serializer without the
+  header.
+
+**Adding a version to data stored without one.** A buffer written without a version has no header,
+and nothing in its bytes tells it from one with a header: `versionOf` reads its first byte as a
+version. Keep a serializer without a version to read the old data, and tell old from new by where
+it is kept (a new key, or a field next to the buffer), or try the versioned serializer first: it
+refuses an old buffer by its version byte or, when that byte happens to match, by its layout hash.
+
+```ts
+const legacy = Flamework.createSerializer<DataV1>();
+const v2 = Flamework.createSerializer<DataV2>({ version: 2 });
+
+function load(buf: buffer): DataV2 {
+    const [ok, data] = pcall(() => v2.deserialize(buf));
+    if (ok) return data as DataV2;
+    return migrate(legacy.deserialize(buf)); // written before the version
+}
+```
 
 ## When a macro does not fire
 

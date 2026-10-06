@@ -1094,9 +1094,51 @@ tally is capped at 65535, so nesting cannot multiply what one count may announce
 Members declared `Networking.Raw*` alone get handler types without the send and decode markers
 (they carry only `_flamework_packing`; `IsRawMember` gives a member also marked serialized the
 marked handler, so the transformer meets it and reports the conflict); the decoder intrinsics return `undefined` for them, and for plain
-members with the switch off. `core/src/serialization/types.ts` holds only types: the
-brands and the `Serializer`/`Decoder` shapes. `Flamework.createSerializer<T>()` exposes the same
-generator through the `serializer` intrinsic.
+members with the switch off. `core/src/serialization/types.ts` holds the brands, the
+`Serializer`/`Decoder` shapes and `SerializerOptions`, and one function, `versionOf`.
+`Flamework.createSerializer<T>()` exposes the same generator through the `serializer` intrinsic.
+
+**Versioned serializers.** `createSerializer` has two overloads. The first is the declaration it
+always had, so a call without options resolves to it and emits `Flamework.createSerializer({
+serialize, deserialize })` byte for byte as before; the second takes `options`
+(`Serialization.SerializerOptions`) ahead of the intrinsic and names it with
+`{@link options intrinsic-serializer-options}`. `getSerializerVersion`
+(`transformations/macros/intrinsics/serializer.ts`) finds that argument through the call's resolved
+signature, as `intrinsic-const` finds its own, wants an object literal without spreads, and reads
+`version` off its expression's type, which has to be one number literal, a whole one from 0 to 255:
+a literal, a `const`, an enum member (a shorthand `{ version }` reads the variable's own type, since
+the property's is widened to `number`). The options stay in the emitted call; the runtime function
+returns its last argument, and refuses a serializer whose `version` field (which the transformer
+adds to a versioned one) is not the options' version, which is what a transformer from before
+versions builds: a serializer without a header, whose buffers would only look versioned.
+
+The header is 5 bytes ahead of the payload: the version as a u8 at 0, the layout hash as a u32 at 1
+(`HEADER_SIZE`). `encodeInto` creates the buffer 5 bytes longer and writes both, and the payload
+starts at 5: the constant offsets of a fixed layout, the start a hoisted `w_`/`r_` is called with,
+or an inline layout's position variable. `decodeBody` checks the header before anything else, each
+failure with a message of its own: shorter than a header, another version (named, with a pointer to
+`Serialization.versionOf`), or this version with another layout hash ("`T`'s layout changed since
+this buffer was written as version n; bump the version and keep a reader for the old one"); then
+the payload's own checks run as before, the end compared with the whole buffer. `versionOf` reads
+the first byte of a buffer of 5 bytes or more, and gives `undefined` below that. The header has no
+mark of its own: a magic byte would cost a byte and still let about one unversioned buffer in 256
+through (all of them for a type that starts with that byte), so an unversioned buffer's first byte
+reads as a version, and the serializer it reaches refuses it by that byte or by the hash, which it
+passes once in 2^32.
+
+The layout hash is the first four bytes of the SHA-256 of `flamework layout <LAYOUT_REVISION>\n`
+followed by `layoutText` of the spelled type, read as a little-endian u32 so that `buffer.writeu32`
+puts the digest's bytes in order (`layoutHash`). `layoutText` is `wireKey` with `bytesOnly`: the
+text `packingKey` compares members by, without what changes no byte (the ` checked` mark of an
+implicit width, a blob's `typeof`), cached apart from it. So it is a function of the types alone,
+like every order on the wire, and never of type ids, paths or generated names, and it changes when
+what a buffer's bytes are read as does: widths and lengths, literal tables in order, field keys in
+order, union members in tag order, `^n` for a type met again inside itself. A field's key is a
+number as JavaScript writes it, `Infinity` and `-Infinity` included, and a string quoted
+(`fieldKey`); `JSON.stringify` alone wrote both infinities as `null`, which let `packingKey` take
+members keyed `{ 1e999: V }` and `{ [-1e999]: V }` for alike. A change to how some layout is written
+that its text would not show has to change that kind's text, or raise `LAYOUT_REVISION`, which
+changes every hash; the golden layouts suite refuses to rewrite goldens otherwise (below).
 
 An object's fields go in TypeScript's order where that follows from the types, and sorted where it
 followed the ids (`fieldOrder`, `propertyOrder`). `getPropertiesOfType` lists an interface's or an
@@ -1434,6 +1476,13 @@ because a flag reads the same on every shell, and the runner clears the variable
 not given: one left set in a PowerShell session would otherwise rewrite the goldens on every later
 run, and every such run would pass. Maps and sets in the fixture hold one entry at most, since a
 table's iteration order is the runtime's, not the layout's, and a NaN sample has fixed bits.
+Every case has a versioned twin next to it, the same type argument with `{ version: 1 }`: the suite
+wants it to write the header and then the case's own bytes for every sample, one hash per type, and
+to read them back, and pins each type's hash in `packages/specs/golden/hashes.txt`, so a refactor
+of `layoutText` that moves a hash fails. A few cases at the end are versioned themselves, which pins
+a header's bytes in full. Before `--update-golden` rewrites `serializer.txt` and `hashes.txt`, it
+refuses a type whose bytes would change under the same hash (`guardHashes`): a buffer stored by a
+versioned serializer would pass its header check and be read wrong.
 
 **`@rbxts/signal` is deferred in the engine, and on request here.** The library wraps a
 BindableEvent, so every dispatch through it -- `onComponentAdded`, `onComponentRemoved`,

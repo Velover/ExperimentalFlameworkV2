@@ -1,8 +1,12 @@
 /**
- * Types for Flamework's static serialization. There is no runtime here: the transformer generates
- * the encode and decode code for each type at the call site, straight `buffer` reads and writes with
- * nothing describing the type left in the output.
+ * Types for Flamework's static serialization. The transformer generates the encode and decode code
+ * for each type at the call site, straight `buffer` reads and writes with nothing describing the type
+ * left in the output; the only runtime here is {@link Serialization.versionOf}.
  */
+
+/** The header of a versioned serializer's buffer: the version, one byte, then the layout hash, four. */
+const HEADER_SIZE = 5;
+
 export namespace Serialization {
 	/** What `Flamework.createSerializer<T>()` returns. */
 	export interface Serializer<T> {
@@ -15,9 +19,46 @@ export namespace Serialization {
 
 		/**
 		 * Decodes a payload produced by {@link serialize}. Raises on malformed input, so wrap it in
-		 * `pcall` for data from an untrusted peer; the networking package does.
+		 * `pcall` for data from an untrusted peer; the networking package does. A versioned serializer
+		 * also raises on a buffer of another version, or of its version with another layout hash,
+		 * before it reads anything else.
 		 */
 		deserialize: (payload: buffer, blobs?: Array<defined>) => T;
+
+		/**
+		 * The version a versioned serializer (`Flamework.createSerializer<T>({ version })`) writes into
+		 * every buffer's header; `undefined` for one without a version.
+		 */
+		readonly version?: number;
+	}
+
+	/** What `Flamework.createSerializer<T>(options)` takes, read when the project builds. */
+	export interface SerializerOptions {
+		/**
+		 * Starts every buffer with a header of 5 bytes: this version, one byte, then a 4-byte hash of
+		 * `T`'s layout, worked out when the project builds. `deserialize` refuses a buffer of another
+		 * version, and one of this version whose layout hash differs, which is what a change to `T`
+		 * made without a new version (or a Flamework upgrade that changes how `T` is written) leaves.
+		 * {@link Serialization.versionOf} reads the version back, to pick the serializer of that version.
+		 *
+		 * A whole number from 0 to 255, known when the project builds: a number literal, or a `const`
+		 * or an enum member whose type is one.
+		 */
+		readonly version: number;
+	}
+
+	/**
+	 * The version a versioned serializer (`Flamework.createSerializer<T>({ version })`) wrote at the
+	 * start of `payload`, to read it with the serializer of that version. `undefined` when the buffer
+	 * is shorter than the header (5 bytes), which no versioned serializer writes.
+	 *
+	 * The header has no mark of its own: a buffer written without a version gets its first byte read
+	 * as one. The serializer it is routed to then refuses it, unless it also holds that serializer's
+	 * layout hash (a 1 in 2^32 chance). Data written before a version was added has to be told apart
+	 * by where it is kept, or by the newest serializer refusing it.
+	 */
+	export function versionOf(payload: buffer): number | undefined {
+		return buffer.len(payload) >= HEADER_SIZE ? buffer.readu8(payload, 0) : undefined;
 	}
 
 	/**

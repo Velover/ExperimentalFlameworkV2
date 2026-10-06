@@ -15,6 +15,7 @@ import {
 	transformShuffleArrayIntrinsic,
 } from "./macros/intrinsics/networking";
 import { buildTupleGuardsIntrinsic } from "./macros/intrinsics/guards";
+import { getSerializerVersion } from "./macros/intrinsics/serializer";
 import {
 	buildDecoderFromType,
 	buildResultDecoderFromType,
@@ -411,7 +412,8 @@ function buildIntrinsicMacro(state: TransformState, node: ts.Node, macro: UserMa
 			throw new Error(`Invalid intrinsic usage`);
 		}
 
-		return buildSerializerFromType(state, node, type);
+		// `{ version }`, when the macro takes options (`createSerializer<T>({ version: 3 })`).
+		return buildSerializerFromType(state, node, type, getSerializerVersion(state, node));
 	}
 
 	// Networking metadata: the decoder for an argument list (or, given a function type, for its

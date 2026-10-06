@@ -9,6 +9,12 @@ import { fail, suite } from "../testkit";
  * fails here, naming the type and the value, with both hex strings. Every golden is also read back
  * and must give its sample again, which is what a buffer stored by an earlier build needs.
  *
+ * Every type's versioned twin (`createSerializer<T>({ version: 1 })`) has to write the header and
+ * then the very bytes of the type's goldens, and read them back; the 4-byte layout hash in its header
+ * is pinned per type in packages/specs/golden/hashes.txt. A versioned buffer a game stored is refused
+ * once its type's hash changes, so the hashes may change only with a layout, and a rewrite of the
+ * goldens that changes a type's bytes under the same hash is refused.
+ *
  * `bun run test:runtime --update-golden` rewrites the files (the runner hands its runs
  * UPDATE_GOLDEN=1, which `__harness.golden.updating` reads): the Server run writes them and the
  * Client run checks what it wrote. That is for a deliberate change only, which the CHANGELOG's
@@ -25,6 +31,12 @@ declare const __harness: {
 
 const SERIALIZER_FILE = "serializer.txt";
 const NETWORKING_FILE = "networking.txt";
+const HASHES_FILE = "hashes.txt";
+
+/** A versioned serializer's header: the version, one byte, then the layout hash, four. */
+const HEADER_SIZE = 5;
+/** The version every case's versioned twin is created with. */
+const TWIN_VERSION = 1;
 
 const HEADERS: Record<string, string[]> = {
 	[SERIALIZER_FILE]: [
@@ -44,6 +56,17 @@ const HEADERS: Record<string, string[]> = {
 		"# bun run test:runtime --update-golden and is named in the CHANGELOG's upgrade notes.",
 		"#",
 		"# <member> :: <sample> => <bytes>[ + blobs [<typeof>, ...]] | nothing | raw <values>",
+	],
+	[HASHES_FILE]: [
+		"# Golden layout hashes: the four bytes after the version that Flamework.createSerializer<T>({ version })",
+		"# writes for each type of packages/specs/src/golden/layouts.ts (the case's versioned twin), as hex",
+		"# in buffer order: the first four bytes of the SHA-256 of the type's layout description. A buffer a",
+		"# versioned serializer stored is refused once its type's hash changes, so a hash may change only",
+		"# with its layout. Checked by the golden layouts spec of the runtime suite. Never edit by hand: a",
+		"# deliberate change rewrites this file with bun run test:runtime --update-golden and is named in",
+		"# the CHANGELOG's upgrade notes.",
+		"#",
+		"# <type> => <hash>",
 	],
 };
 
@@ -139,7 +162,7 @@ function writeGolden(file: string, lines: Line[]) {
 /**
  * Compares what was written now with the goldens, every line, and fails naming each difference. A
  * key in `skipped` is a line this build cannot produce, which is left alone. With UPDATE_GOLDEN=1 the
- * Server run writes the file instead, and refuses, before either file is written, in a build that
+ * Server run writes the file instead, and refuses, before any file is written, in a build that
  * does not pack the plain members: it would write serializer.txt and then fail on networking.txt.
  */
 function check(file: string, lines: Line[], skipped: ReadonlySet<string>, failures: string[]) {
@@ -147,7 +170,7 @@ function check(file: string, lines: Line[], skipped: ReadonlySet<string>, failur
 	if (writing && !plainPacked) {
 		fail(
 			"--update-golden needs a build with networking.serialization on: this one does not pack the plain " +
-				"members, so neither golden file is written",
+				"members, so no golden file is written",
 		);
 	}
 
@@ -298,6 +321,8 @@ function same(a: unknown, b: unknown): boolean {
 interface SerializedSample extends Line {
 	case: SerializerCase;
 	sample: unknown;
+	/** The buffer, as hex. */
+	bytes: string;
 	blobs?: Array<defined>;
 }
 
@@ -322,12 +347,117 @@ function serializeAll() {
 			}
 			const { payload, blobs } = written as { payload: buffer; blobs?: Array<defined> };
 			const value = blobs !== undefined ? `${hex(payload)} + blobs ${blobKinds(blobs)}` : hex(payload);
-			samples.push({ key, value, case: golden, sample, blobs });
+			samples.push({ key, value, case: golden, sample, bytes: hex(payload), blobs });
 		}
 	}
 
 	serialized = { samples, failures };
 	return serialized;
+}
+
+// --- versioned twins and layout hashes -------------------------------------------------------------
+
+let versioned: { hashes: Line[]; problems: string[]; failures: string[] } | undefined;
+
+/**
+ * Every sample written by its case's versioned twin: the header has to hold the twin's version and
+ * one hash for every sample of the type, the bytes after it have to be the case's own, and the twin
+ * has to read them back as the sample. Gives each type's hash as a golden line.
+ */
+function versionAll() {
+	if (versioned !== undefined) return versioned;
+
+	const hashes = new Array<Line>();
+	const problems = new Array<string>();
+	const failures = new Array<string>();
+	const hashOf = new Map<SerializerCase, string>();
+	for (const entry of serializeAll().samples) {
+		const twin = entry.case.versioned;
+		if (twin === undefined) continue;
+
+		const [ok, written] = pcall(() => {
+			const [payload, blobs] = twin.serialize(entry.sample);
+			return { payload, blobs };
+		});
+		if (!ok) {
+			failures.push(`  ${entry.key}: ${tostring(written)}`);
+			continue;
+		}
+
+		const { payload, blobs } = written as { payload: buffer; blobs?: Array<defined> };
+		if (buffer.len(payload) < HEADER_SIZE) {
+			problems.push(`  ${entry.key}: the versioned buffer has no header: ${hex(payload)}`);
+			continue;
+		}
+
+		const text = hex(payload);
+		const version = buffer.readu8(payload, 0);
+		const hash = text.sub(3, 2 * HEADER_SIZE);
+		const rest = buffer.len(payload) === HEADER_SIZE ? "empty" : text.sub(2 * HEADER_SIZE + 1);
+		if (version !== TWIN_VERSION) problems.push(`  ${entry.key}: the header holds version ${version}`);
+		if (rest !== entry.bytes) {
+			problems.push(`  ${entry.key}: after the header\n    plain:     ${entry.bytes}\n    versioned: ${rest}`);
+		}
+		const plainBlobs = entry.blobs !== undefined ? blobKinds(entry.blobs) : "none";
+		const twinBlobs = blobs !== undefined ? blobKinds(blobs) : "none";
+		if (twinBlobs !== plainBlobs)
+			problems.push(`  ${entry.key}: blobs ${twinBlobs}, the plain one's ${plainBlobs}`);
+
+		const known = hashOf.get(entry.case);
+		if (known === undefined) {
+			hashOf.set(entry.case, hash);
+			hashes.push({ key: entry.case.type, value: hash });
+		} else if (known !== hash) {
+			problems.push(`  ${entry.key}: hash ${hash}, another sample of the type's ${known}`);
+		}
+
+		const [read, decoded] = pcall(() => twin.deserialize(payload, blobs));
+		if (!read) {
+			problems.push(`  ${entry.key}: the versioned one raised ${tostring(decoded)}`);
+		} else if (!same(decoded, entry.sample)) {
+			const [got, wanted] = showPair(decoded, entry.sample);
+			problems.push(`  ${entry.key}: the versioned one read ${got}, sample ${wanted}`);
+		}
+	}
+
+	versioned = { hashes, problems, failures };
+	return versioned;
+}
+
+let guarded: string | undefined;
+
+/**
+ * Before serializer.txt and hashes.txt are rewritten: a type whose bytes change has to change its
+ * layout hash too, or a buffer a versioned serializer stored before would pass its header check and
+ * be read wrong. The description the hash is taken over (`layoutText` in buildSerializerFromType.ts)
+ * has to show the change, or its `LAYOUT_REVISION` go up. Neither file is written when this fails.
+ */
+function guardHashes() {
+	guarded ??= findKeptHashes();
+	if (guarded !== "") fail(guarded);
+}
+
+/** The refusal of {@link guardHashes}, or "" when every type that changes its bytes changes its hash. */
+function findKeptHashes(): string {
+	const samples = serializeAll().samples;
+	const hashes = versionAll().hashes;
+	const oldBytes = readGolden(SERIALIZER_FILE);
+	const oldHashes = readGolden(HASHES_FILE);
+	if (oldBytes === undefined || oldHashes === undefined) return "";
+
+	const changed = new Set<string>();
+	for (const { key, case: golden, bytes } of samples) {
+		const before = oldBytes.values.get(key);
+		if (before !== undefined && bytesOf(before) !== bytes) changed.add(golden.type);
+	}
+
+	const kept = new Array<string>();
+	for (const { key, value } of hashes) {
+		if (changed.has(key) && oldHashes.values.get(key) === value) kept.push(`  ${key} (hash ${value})`);
+	}
+
+	if (kept.size() === 0) return "";
+	return `${kept.size()} type(s) would change their bytes and keep their layout hash, so a versioned buffer stored before would be read wrong:\n${kept.join("\n")}\nMake the layout description (layoutText in buildSerializerFromType.ts) show the change, or raise LAYOUT_REVISION; serializer.txt and hashes.txt were not written.`;
 }
 
 // --- networking ----------------------------------------------------------------------------------
@@ -387,6 +517,7 @@ export = suite("golden layouts", [
 		"createSerializer writes every sample as the golden bytes",
 		() => {
 			const { samples, failures } = serializeAll();
+			if (__harness.golden.updating && isServer) guardHashes();
 			check(SERIALIZER_FILE, samples, new Set(), failures);
 		},
 	],
@@ -412,6 +543,28 @@ export = suite("golden layouts", [
 				}
 			}
 			report(SERIALIZER_FILE, problems);
+		},
+	],
+	[
+		"a versioned createSerializer writes its header, then the bytes of every sample, and reads them back",
+		() => {
+			const { problems, failures } = versionAll();
+			if (failures.size() > 0) {
+				fail(`${failures.size()} sample(s) could not be written with a version:\n${failures.join("\n")}`);
+			}
+			if (problems.size() > 0) {
+				fail(
+					`${problems.size()} versioned sample(s) are not the header and the plain bytes:\n${problems.join("\n")}`,
+				);
+			}
+		},
+	],
+	[
+		"createSerializer gives every type its golden layout hash",
+		() => {
+			const { hashes, failures } = versionAll();
+			if (__harness.golden.updating && isServer) guardHashes();
+			check(HASHES_FILE, hashes, new Set(), failures);
 		},
 	],
 	[

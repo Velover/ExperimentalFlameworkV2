@@ -142,7 +142,9 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   server and its client build together, so a game only has to rebuild. A buffer stored with
   `createSerializer` under 2.0.0-alpha.7 or earlier, in a DataStore say, that holds one of these
   types may read wrong or not at all. Read such data with the old build and save it again with the
-  new one, or store a version next to each buffer and keep the old reader for the old version.
+  new one. From this release, give a stored buffer's serializer a version
+  (`Flamework.createSerializer<T>({ version: 1 })`, see core, Added): a later layout change is then
+  refused instead of read wrong.
 - **A place typed as one networking member's sender no longer takes another member's,** even of
   the same type, as each member's handler type now carries its name: `let send = Events.a`
   followed by `send = Events.b`; a field or property set from one member and later another; a
@@ -171,6 +173,21 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 #### Added
 
+- **Versioned serializers: `Flamework.createSerializer<T>({ version })` and
+  `Serialization.versionOf`.** With a version, a whole number from 0 to 255 known when the project
+  builds, every buffer starts with a 5-byte header: the version, one byte, then a 4-byte hash of
+  `T`'s layout. `deserialize` checks it before it reads anything else, and refuses a buffer of
+  another version (`this buffer is version 2, and this serializer of SaveV3 reads version 3: ...`)
+  and one of its version with another layout hash (`SaveV3's layout changed since this buffer was
+  written as version 3; bump the version and keep a reader for the old one`), which is what a change
+  to `T` made without a new version, or a Flamework upgrade that writes `T` differently, leaves.
+  `Serialization.versionOf(buf)` returns the version (`undefined` for a buffer shorter than the
+  header), to send a buffer to the serializer of its version; a versioned serializer also has it as
+  `version`. `Serialization.SerializerOptions` is the options' type. Without options nothing
+  changes: no header, and the same bytes. The header has no mark of its own, so a buffer written
+  without a version reads its first byte as one; guide 07 ("Versions") has the recipe for data
+  stored before a version was added. Needs the next transformer: `createSerializer` raises when
+  given options and a serializer built without its header, which is what 2.0.0-alpha.7 builds.
 - **Instructions for a coding assistant ship in core,** in `docs/ai/`, next to the guide, so they
   match the installed version. `flamework.md` holds the rules every project follows. A project's
   `CLAUDE.md` loads it, in every session, with the line
@@ -334,6 +351,14 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 #### Added
 
+- **Versioned serializers** (see core): `Flamework.createSerializer<T>({ version })` reads the
+  version when the project builds, from an object literal whose `version` has one number for its
+  type (a literal, a `const`, an enum member), a whole one from 0 to 255; anything else is a build
+  error that says why. The generated `serialize` writes the version and the layout hash ahead of
+  the value, and `deserialize` checks them first. The hash is the first four bytes of the SHA-256 of
+  a description of the layout's bytes: the text networking compares members by, without the checks
+  and blob types that change no byte. It follows from the types alone, as every order on the wire
+  does. A call without options emits exactly what it did before.
 - `testing.lockTimeout` and `testing.lockHold` in `flamework.config.json`'s schema: the Studio
   lock's wait (seconds) and hold (minutes), read by `flamework-test` alone and left out of the
   place's config, as `failOnSkip` and `keepAwake` are.
@@ -371,7 +396,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   keep their string names, as the engine stores them. The bytes on the wire are unchanged, since
   keys are never written: a buffer stored earlier still decodes, into number keys now. A check's
   message names such a field `value[10]`, and a networking call through a union of a member typed
-  `{ 10: V }` and one typed `{ "10": V }` is refused, as the two key the field differently.
+  `{ 10: V }` and one typed `{ "10": V }` is refused, as the two key the field differently, and so
+  is one through members typed `{ 1e999: V }` and `{ [-1e999]: V }`.
 - **A function declared under one name in both directions packs each side's results as that side
   declares them.** Since 2.0.0-alpha.5, with `networking.serialization` on or for a `Serialized`
   member, `serverFunctions.both.setCallback(...)` packed its result as the client's `both` (the

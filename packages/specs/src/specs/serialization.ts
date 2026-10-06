@@ -1,5 +1,5 @@
 import { Flamework, Serialization } from "@flamework-experimental/core";
-import { expectEqual, expectFalse, expectTrue, suite } from "../testkit";
+import { expectEqual, expectFalse, expectThrows, expectTrue, suite } from "../testkit";
 
 /*
  * `Flamework.createSerializer<T>()` builds encode and decode code from the type at compile time:
@@ -294,6 +294,50 @@ const numberKeyedSerializer = Flamework.createSerializer<NumberKeyed>();
 const numberKeyedGuard = Flamework.createGuard<NumberKeyed>();
 const gearSerializer = Flamework.createSerializer<Partial<Record<Gear, string>>>();
 const gearGuard = Flamework.createGuard<Partial<Record<Gear, string>>>();
+
+/**
+ * Versioned serializers (`{ version }`): a save's two versions, and a third that keeps version 2 with
+ * another layout, which is what a change made without a new version leaves.
+ */
+interface SaveV1 {
+	coins: number;
+	name: string;
+}
+
+interface SaveV2 {
+	coins: number;
+	name: string;
+	level: Serialization.u8;
+}
+
+interface SaveV2Changed {
+	coins: Serialization.u32;
+	name: string;
+	level: Serialization.u8;
+}
+
+const saveV1Serializer = Flamework.createSerializer<SaveV1>({ version: 1 });
+const saveV2Serializer = Flamework.createSerializer<SaveV2>({ version: 2 });
+const saveV2ChangedSerializer = Flamework.createSerializer<SaveV2Changed>({ version: 2 });
+const unversionedSaveSerializer = Flamework.createSerializer<SaveV1>();
+/** Unversioned data whose first byte the spec picks. */
+const taggedSerializer = Flamework.createSerializer<{ tag: Serialization.u8; text: string }>();
+const versionedByteSerializer = Flamework.createSerializer<Serialization.u8>({ version: 4 });
+const shortSerializer = Flamework.createSerializer<Serialization.u16>();
+
+/** Reads a save of either version, as a game routes stored data by its version. */
+function readSave(payload: buffer): SaveV2 {
+	if (Serialization.versionOf(payload) === 1) {
+		const old = saveV1Serializer.deserialize(payload);
+		return { ...old, level: 1 as Serialization.u8 };
+	}
+	return saveV2Serializer.deserialize(payload);
+}
+
+/** Fails unless `message` holds `text`. */
+function expectMessage(message: string, text: string, what: string) {
+	expectTrue(message.find(text, 1, true)[0] !== undefined, `${what}: '${message}' should say '${text}'`);
+}
 
 /** Whether decoding raises, which is how a malformed payload is reported. */
 function rejects(run: () => unknown): boolean {
@@ -1108,6 +1152,144 @@ export = suite("serialization", [
 			expectEqual((gear as unknown as Map<unknown, unknown>).get("2"), undefined, "no string key 2");
 			expectTrue(gearGuard({ [Gear.Hat]: "felt" }), "the guard takes a member's value");
 			expectFalse(gearGuard({ [Gear.Hat]: 1 }), "and checks it");
+		},
+	],
+	[
+		"writes a versioned serializer's header ahead of the value, and reads the value back after it",
+		() => {
+			const save: SaveV2 = { coins: 12.5, name: "ada", level: 3 as Serialization.u8 };
+			const [payload, blobs] = saveV2Serializer.serialize(save);
+			expectEqual(blobs, undefined, "no blob list");
+			const [plain] = unversionedSaveSerializer.serialize({ coins: 12.5, name: "ada" });
+			// The version byte and the 4-byte hash, then the value as a serializer without a version writes it.
+			expectEqual(buffer.len(payload), buffer.len(plain) + 1 + 5, "the header and one more byte, for level");
+			expectEqual(buffer.readu8(payload, 0), 2, "the version first");
+			expectEqual(
+				buffer.readstring(payload, 5, buffer.len(plain)),
+				buffer.tostring(plain),
+				"the value after the header",
+			);
+			expectTrue(deepEquals(saveV2Serializer.deserialize(payload), save), "read back");
+
+			const [byte] = versionedByteSerializer.serialize(200 as Serialization.u8);
+			expectEqual(buffer.len(byte), 6, "a fixed-size value after its header");
+			expectEqual(versionedByteSerializer.deserialize(byte), 200, "and read back");
+		},
+	],
+	[
+		"reads the version back with Serialization.versionOf, to route a buffer to the serializer of its version",
+		() => {
+			const [v1] = saveV1Serializer.serialize({ coins: 5, name: "old" });
+			const [v2] = saveV2Serializer.serialize({ coins: 7, name: "new", level: 9 as Serialization.u8 });
+			expectEqual(Serialization.versionOf(v1), 1, "version 1");
+			expectEqual(Serialization.versionOf(v2), 2, "version 2");
+			expectTrue(deepEquals(readSave(v1), { coins: 5, name: "old", level: 1 }), "version 1 read and migrated");
+			expectTrue(deepEquals(readSave(v2), { coins: 7, name: "new", level: 9 }), "version 2 read as it is");
+
+			// Shorter than a header: no versioned serializer wrote it.
+			expectEqual(Serialization.versionOf(buffer.create(0)), undefined, "an empty buffer");
+			expectEqual(Serialization.versionOf(buffer.create(4)), undefined, "four bytes");
+			expectEqual(Serialization.versionOf(buffer.create(5)), 0, "five bytes hold a header");
+		},
+	],
+	[
+		"refuses a buffer of another version, naming both versions",
+		() => {
+			const [v1] = saveV1Serializer.serialize({ coins: 5, name: "old" });
+			const message = expectThrows(() => saveV2Serializer.deserialize(v1), "reading version 1 as version 2");
+			expectMessage(
+				message,
+				"this buffer is version 1, and this serializer of SaveV2 reads version 2",
+				"the message",
+			);
+			expectMessage(message, "Serialization.versionOf", "the message");
+		},
+	],
+	[
+		"refuses a buffer of its version with another layout, asking for a new version",
+		() => {
+			const [v2] = saveV2Serializer.serialize({ coins: 7, name: "new", level: 9 as Serialization.u8 });
+			const message = expectThrows(() => saveV2ChangedSerializer.deserialize(v2), "reading a changed layout");
+			expectMessage(
+				message,
+				"SaveV2Changed's layout changed since this buffer was written as version 2; bump the version and keep a reader for the old one",
+				"the message",
+			);
+		},
+	],
+	[
+		"keeps the payload's own checks after the header: too short and too long still raise",
+		() => {
+			const [v2] = saveV2Serializer.serialize({ coins: 7, name: "new", level: 9 as Serialization.u8 });
+			const longer = buffer.create(buffer.len(v2) + 1);
+			buffer.copy(longer, 0, v2);
+			expectTrue(
+				rejects(() => saveV2Serializer.deserialize(longer)),
+				"a byte too many",
+			);
+			const shorter = buffer.create(buffer.len(v2) - 1);
+			buffer.copy(shorter, 0, v2, 0, buffer.len(shorter));
+			expectTrue(
+				rejects(() => saveV2Serializer.deserialize(shorter)),
+				"a byte too few",
+			);
+			const [byte] = versionedByteSerializer.serialize(1 as Serialization.u8);
+			const header = buffer.create(5);
+			buffer.copy(header, 0, byte, 0, 5);
+			expectTrue(
+				rejects(() => versionedByteSerializer.deserialize(header)),
+				"the header without its value",
+			);
+		},
+	],
+	[
+		// The header has no mark of its own: an unversioned buffer's first byte reads as a version, and
+		// the serializer it is routed to refuses it, by its version or by its layout hash.
+		"refuses a buffer written without a version, whatever its first byte says",
+		() => {
+			const [short] = shortSerializer.serialize(7 as Serialization.u16);
+			expectEqual(Serialization.versionOf(short), undefined, "a buffer shorter than a header");
+			expectMessage(
+				expectThrows(() => saveV2Serializer.deserialize(short), "a short unversioned buffer"),
+				"this buffer is too short for the header of SaveV2, version 2: no versioned serializer wrote it",
+				"the message",
+			);
+
+			// The unversioned save starts with its f64: 1 is 00 00 00 00 00 00 f0 3f, read as version 0.
+			const [plain] = unversionedSaveSerializer.serialize({ coins: 1, name: "ada" });
+			expectEqual(Serialization.versionOf(plain), 0, "the first byte, read as a version");
+			expectMessage(
+				expectThrows(() => saveV2Serializer.deserialize(plain), "an unversioned save"),
+				"this buffer is version 0, and this serializer of SaveV2 reads version 2",
+				"the message",
+			);
+
+			// A first byte that happens to be the version: the layout hash refuses it.
+			const [tagged] = taggedSerializer.serialize({ tag: 2 as Serialization.u8, text: "a longer text" });
+			expectEqual(Serialization.versionOf(tagged), 2, "the tag, read as version 2");
+			expectMessage(
+				expectThrows(() => saveV2Serializer.deserialize(tagged), "an unversioned buffer starting with 2"),
+				"SaveV2's layout changed since this buffer was written as version 2",
+				"the message",
+			);
+		},
+	],
+	[
+		// A transformer from before versioned serializers builds `createSerializer<T>({ version })`'s
+		// serializer without its header, and core refuses it rather than let a game store buffers that
+		// only look versioned. Called through a cast, the runtime function is no macro.
+		"refuses a serializer built without the header its options ask for",
+		() => {
+			const runtime = Flamework as unknown as { createSerializer: (...args: unknown[]) => unknown };
+			const plain = { serialize: () => buffer.create(0), deserialize: () => undefined };
+			expectMessage(
+				expectThrows(() => runtime.createSerializer({ version: 3 }, plain), "a serializer without a version"),
+				"createSerializer was given version 3, but the transformer built this serializer without a header",
+				"the message",
+			);
+			const versioned = { version: 3, serialize: () => buffer.create(5), deserialize: () => undefined };
+			expectEqual(runtime.createSerializer({ version: 3 }, versioned), versioned, "one of that version");
+			expectEqual(runtime.createSerializer(plain), plain, "one without options");
 		},
 	],
 ]);

@@ -556,6 +556,37 @@ export function run(flag: boolean) {
 		expect(plainOutput(result.output)).toContain("so the callers of the other would read them wrong");
 	});
 
+	test("tells a field keyed by Infinity from one keyed by -Infinity", () => {
+		// roblox-ts keys `{ 1e999: v }` by `1e999`, which Luau reads as `math.huge`, and `{ [-1e999]: v }` by
+		// its negative, but the layout text wrote both keys as `JSON.stringify` does, `null`, so the call
+		// was packed as if the two were laid out alike.
+		const result = compileProbes({
+			infinityKeys: `import { Networking } from "@flamework-experimental/networking";
+
+interface InfinityFunctions {
+	positive: Networking.Serialized<() => { 1e999: number }>;
+	negative: Networking.Serialized<() => { [-1e999]: number }>;
+}
+
+const functions = Networking.createFunction<InfinityFunctions, {}>();
+export const serverFunctions = functions.createServer({});
+
+export function run(flag: boolean) {
+	return (flag ? serverFunctions.positive : serverFunctions.negative).setCallback(() => 5 as never);
+}
+`,
+		});
+
+		expect(result.status).not.toBe(0);
+		expect(
+			refusals(result.output).get(
+				"(flag ? serverFunctions.positive : serverFunctions.negative).setCallback(...)",
+			),
+		).toBe(
+			"their results are not laid out and checked alike ('InfinityFunctions.negative(): { [-1e999]: number }' and 'InfinityFunctions.positive(): { 1e999: number }')",
+		);
+	});
+
 	test("packs members laid out and checked alike as one of them would, whatever their types", () => {
 		const result = compileProbes({
 			alikeEvent: either(["client.textFirst", "client.textFirstToo"], 'fire("x")'),

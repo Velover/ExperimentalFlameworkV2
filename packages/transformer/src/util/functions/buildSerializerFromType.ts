@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import ts from "typescript";
 import { Diagnostics } from "../../classes/diagnostics";
 import { Logger } from "../../classes/logger";
@@ -223,6 +224,42 @@ const DATATYPES: Record<string, Array<[Width, string[]]>> = {
 const CFRAME_COMPONENTS = 12;
 
 const MALFORMED = "malformed payload";
+
+/**
+ * A versioned serializer's header (`createSerializer<T>({ version })`), ahead of the payload: the
+ * version, one byte, then the layout hash, four (see {@link layoutHash}).
+ */
+const HEADER_SIZE = 5;
+
+/**
+ * The revision of how Flamework writes the layouts that the layout hash describes, hashed with every
+ * description. A change to how some layout is written that its description does not show changes
+ * that kind's description, or raises this to change every hash, so that a buffer written before is
+ * refused as a changed layout rather than read wrong; the golden layouts spec refuses to rewrite a
+ * type's goldens whose bytes changed under the same hash.
+ */
+const LAYOUT_REVISION = 1;
+
+/**
+ * A versioned serializer's layout hash: the first four bytes of the SHA-256 of the layout's
+ * description (`layoutText`) after the revision, as a little-endian u32, so that `buffer.writeu32`
+ * puts those four bytes in order. It only has to tell layouts apart, never to resist forgery: a
+ * changed layout keeps its hash once in 2^32 times.
+ */
+export function layoutHash(description: string): number {
+	return crypto
+		.createHash("sha256")
+		.update(`flamework layout ${LAYOUT_REVISION}\n${description}`, "utf8")
+		.digest()
+		.readUInt32LE(0);
+}
+
+/** A versioned serializer's header: its version, the hash of its layout, and the type for the messages. */
+interface Header {
+	version: number;
+	hash: number;
+	name: string;
+}
 
 /**
  * What the generator knows about a type. Children are kept as types so that named ones can be
@@ -706,22 +743,39 @@ function emitHoisted(state: TransformState, generator: ReturnType<typeof createS
 	state.nextRootStatements.push(...generator.takeHoisted());
 }
 
-/** `Flamework.createSerializer<T>()`: a `{ serialize, deserialize }` pair for one value. */
+/**
+ * `Flamework.createSerializer<T>()`: a `{ serialize, deserialize }` pair for one value. With a
+ * `version` (`createSerializer<T>({ version })`), every buffer starts with the version and `T`'s
+ * layout hash, which `deserialize` checks before anything else.
+ */
 export function buildSerializerFromType(
 	state: TransformState,
 	node: ts.Node,
 	type: ts.Type,
+	version?: number,
 	file = state.getSourceFile(node),
 ): ts.Expression {
 	const generator = generatorFor(state, node, file);
 	// The type argument as written is where the unions in it get their member order from.
 	const written = ts.isCallExpression(node) ? node.typeArguments?.[0] : undefined;
-	const serializer = generator.buildSerializer(generator.spell(written, unwrapPromise(state, type)));
+	const value = unwrapPromise(state, type);
+	const versioned = version !== undefined ? { version, name: serializerName(state, written, value) } : undefined;
+	const serializer = generator.buildSerializer(generator.spell(written, value), versioned);
 	emitHoisted(state, generator);
 
 	// roblox-ts type-checks the transformed file. The generated functions are typed loosely inside
 	// (`unknown` values with casts); the macro's own return type is what users see.
 	return f.asNever(serializer);
+}
+
+/**
+ * The type a versioned serializer's messages name: its type argument as written, with its spaces
+ * collapsed, or as TypeScript prints it; a long one is cut short.
+ */
+function serializerName(state: TransformState, written: ts.TypeNode | undefined, type: ts.Type): string {
+	const original = written && ts.getParseTreeNode(written);
+	const text = (original ? original.getText() : state.typeChecker.typeToString(type)).replace(/\s+/g, " ");
+	return text.length > 60 ? `${text.slice(0, 57)}...` : text;
 }
 
 /**
@@ -927,6 +981,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	const unionAlternatives = new Map<ts.UnionType, { isOptional: boolean; alternatives: Alternative[] }>();
 	/** {@link wireKey}'s results for the shapes whose key reads nothing outside them. */
 	const wireKeys = new Map<Shape, string>();
+	/** The same, of the bytes alone (`layoutText`). */
+	const layoutKeys = new Map<Shape, string>();
 	let varint: Varint | undefined;
 	/** The per-file tally of zero-size elements the payload being decoded has announced; see `readCount`. */
 	let zeros: ts.Identifier | undefined;
@@ -1305,18 +1361,23 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	// --- top level -----------------------------------------------------------------------------------
 
-	function buildSerializer(type: Shape): ts.Expression {
+	/**
+	 * `{ serialize, deserialize }` for a value of `type`. A versioned one (`versioned`) starts every
+	 * buffer with its header: the version, then the hash of the type's layout (`layoutText`).
+	 */
+	function buildSerializer(type: Shape, versioned?: { version: number; name: string }): ts.Expression {
 		const layout = layoutOf(type);
 		countUses(type);
+		const header = versioned && { ...versioned, hash: layoutHash(layoutText(type)) };
 		const value = parameter("v");
-		const serialize = f.arrowFunction(f.block(encodeBody(type, layout, value, rootPath(type))), [
+		const serialize = f.arrowFunction(f.block(encodeBody(type, layout, value, rootPath(type), header)), [
 			f.parameterDeclaration(value, T.unknown()),
 		]);
 
 		const buf = uid("buf");
 		const blobs = layout.blobs ? uid("blobs") : undefined;
 		const body = new Array<ts.Statement>();
-		const result = decodeBody(type, layout, buf, blobs, body);
+		const result = decodeBody(type, layout, buf, blobs, body, header);
 		body.push(f.returnStatement(result));
 		const deserialize = f.arrowFunction(
 			f.block(body),
@@ -1325,7 +1386,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				: [f.parameterDeclaration(buf, T.buffer())],
 		);
 
+		// A versioned one carries its version too, which core's `createSerializer` compares with the
+		// options it is given: a transformer from before versions builds one without its header.
 		return f.object([
+			...(header ? [f.propertyAssignmentDeclaration("version", num(header.version))] : []),
 			f.propertyAssignmentDeclaration("serialize", serialize),
 			f.propertyAssignmentDeclaration("deserialize", deserialize),
 		]);
@@ -1369,29 +1433,41 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	}
 
 	/**
+	 * The layout of a serializer's value as text, which a versioned serializer's hash is taken over
+	 * ({@link layoutHash}): {@link wireKey} of the bytes alone, so it changes exactly when what a
+	 * buffer's bytes are read as does. Which widths are checked, and the `typeof` a blob is tested
+	 * for, change nothing a buffer holds, and are left out.
+	 */
+	function layoutText(shape: Shape): string {
+		return wireKey(shape, [], true).text;
+	}
+
+	/**
 	 * The wire format of a shape as text, which builds no code: what each byte is and what a decoder
 	 * makes of it -- widths and lengths, which of them are checked, literal tables in order, field
-	 * keys in order (`10` and `"10"` differ), union members in tag order -- so that two shapes with one
-	 * key are written and read alike, whatever their types are called and however their code is hoisted.
-	 * A type met again inside itself is `^n`, n levels up. `reaches` is the outermost place on `stack`
-	 * the key refers to; a key that refers to nothing outside itself is the same wherever it is met, and
-	 * is kept.
+	 * keys in order (`10` and `"10"` differ, and so do `1e999` and `-1e999`), union members in tag
+	 * order -- so that two shapes with one key are written and read alike, whatever their types are
+	 * called and however their code is hoisted. With `bytesOnly` (see {@link layoutText}) it leaves out
+	 * what changes no byte: which widths are checked, and a blob's `typeof`. A type met again inside
+	 * itself is `^n`, n levels up. `reaches` is the outermost place on `stack` the key refers to; a key
+	 * that refers to nothing outside itself is the same wherever it is met, and is kept.
 	 */
-	function wireKey(shape: Shape, stack: Shape[]): { text: string; reaches: number } {
+	function wireKey(shape: Shape, stack: Shape[], bytesOnly = false): { text: string; reaches: number } {
 		const at = stack.indexOf(shape);
 		if (at >= 0) return { text: `^${stack.length - at}`, reaches: at };
-		const known = wireKeys.get(shape);
+		const cache = bytesOnly ? layoutKeys : wireKeys;
+		const known = cache.get(shape);
 		if (known !== undefined) return { text: known, reaches: Infinity };
 
 		const depth = stack.length;
 		let reaches = Infinity;
 		const key = (inner: Shape) => {
-			const result = wireKey(inner, stack);
+			const result = wireKey(inner, stack, bytesOnly);
 			reaches = Math.min(reaches, result.reaches);
 			return result.text;
 		};
 		const keys = (inner: Shape[]) => inner.map(key).join(", ");
-		const checked = (implicit: boolean | undefined) => (implicit ? " checked" : "");
+		const checked = (implicit: boolean | undefined) => (implicit && !bytesOnly ? " checked" : "");
 
 		const kind = describe(shape);
 		stack.push(shape);
@@ -1415,7 +1491,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 					text = `literals(${kind.values.map(literalKey).join(", ")})`;
 					break;
 				case "blob":
-					text = kind.typeofName !== undefined ? `blob(${kind.typeofName})` : "blob";
+					text = kind.typeofName !== undefined && !bytesOnly ? `blob(${kind.typeofName})` : "blob";
 					break;
 				case "datatype":
 				case "enum":
@@ -1438,7 +1514,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 					break;
 				}
 				case "object":
-					text = `object(${kind.fields.map((field) => `${JSON.stringify(field.key)}: ${key(field.shape)}`).join(", ")})`;
+					text = `object(${kind.fields.map((field) => `${fieldKey(field.key)}: ${key(field.shape)}`).join(", ")})`;
 					break;
 				case "union": {
 					const whole = kind.whole !== undefined ? `; whole ${kind.whole}` : "";
@@ -1452,8 +1528,16 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			stack.pop();
 		}
 
-		if (reaches >= depth) wireKeys.set(shape, text);
+		if (reaches >= depth) cache.set(shape, text);
 		return { text, reaches };
+	}
+
+	/**
+	 * A field's key in a {@link wireKey}: a number as JavaScript writes it (`10`, `1.5`, `Infinity`,
+	 * `-Infinity`), a string quoted (`"10"`). `JSON.stringify` alone writes both infinities as `null`.
+	 */
+	function fieldKey(key: TableKey): string {
+		return typeof key === "number" ? `${key}` : JSON.stringify(key);
 	}
 
 	/**
@@ -1599,18 +1683,26 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	/**
 	 * `const buf = buffer.create(<size>)`, the blob list when the type has blob slots, the writes,
-	 * and `return buf, blobs`.
+	 * and `return buf, blobs`. A versioned serializer's `header` goes ahead of the value.
 	 */
-	function encodeBody(shape: Shape, layout: Layout, value: ts.Identifier, path: string): ts.Statement[] {
+	function encodeBody(
+		shape: Shape,
+		layout: Layout,
+		value: ts.Identifier,
+		path: string,
+		header?: Header,
+	): ts.Statement[] {
 		const body = new Array<ts.Statement>();
-		const { buf, blobs } = encodeInto(shape, layout, value, body, { path });
+		const { buf, blobs } = encodeInto(shape, layout, value, body, { path }, header);
 		body.push(f.returnStatement(blobs ? tuple([buf, blobs]) : buf));
 		return body;
 	}
 
 	/**
 	 * The size pass, the buffer, the blob list when the type has blob slots, and the writes. `where`
-	 * is where the value is, for the messages of the checks (see {@link Place}).
+	 * is where the value is, for the messages of the checks (see {@link Place}). With a `header` (a
+	 * versioned serializer), the buffer starts with the version and the layout hash, and the value
+	 * goes after them.
 	 */
 	function encodeInto(
 		shape: Shape,
@@ -1618,27 +1710,33 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		value: ts.Expression,
 		body: ts.Statement[],
 		where: { path: string; site?: string; args?: boolean },
+		header?: Header,
 	) {
 		const size = emitSize(shape, value, body, where);
 
 		const buf = uid("buf");
-		body.push(constDecl(buf, bufferCall("create", [size])));
+		body.push(constDecl(buf, bufferCall("create", [header ? add(size, HEADER_SIZE) : size])));
+		if (header) {
+			body.push(f.statement(bufferCall("writeu8", [buf, num(0), num(header.version)])));
+			body.push(f.statement(bufferCall("writeu32", [buf, num(1), num(header.hash)])));
+		}
+		const start = header ? HEADER_SIZE : 0;
 
 		const blobs = layout.blobs ? uid("blobs") : undefined;
 		if (blobs) body.push(constDecl(blobs, construct("Array", []), T.blobs()));
 
 		const top = isKind(shape) ? undefined : hoist(shape);
 		if (top) {
-			const args = blobs ? [buf, num(0), value, blobs] : [buf, num(0), value];
+			const args = blobs ? [buf, num(start), value, blobs] : [buf, num(start), value];
 			if (top.checks) args.push(whereOf({ path: where.path, site: where.site }));
 			body.push(f.statement(callHoisted(top, "w", args)));
 		} else {
 			const variable = layout.size === undefined ? uid("o") : undefined;
-			if (variable) body.push(letDecl(variable, num(0)));
+			if (variable) body.push(letDecl(variable, num(start)));
 			emitWrite(shape, value, {
 				buf,
 				blobs,
-				cursor: { variable, base: variable, offset: 0 },
+				cursor: { variable, base: variable, offset: variable ? 0 : start },
 				out: body,
 				path: where.path,
 				site: where.site,
@@ -1649,14 +1747,21 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return { buf, blobs };
 	}
 
-	/** The reads, ending with a check that the whole buffer was consumed; returns the value. */
+	/**
+	 * The reads, ending with a check that the whole buffer was consumed; returns the value. A versioned
+	 * serializer's `header` is checked first, and the value read after it.
+	 */
 	function decodeBody(
 		shape: Shape,
 		layout: Layout,
 		buf: ts.Identifier,
 		blobs: ts.Identifier | undefined,
 		body: ts.Statement[],
+		header?: Header,
 	): ts.Expression {
+		if (header) checkHeader(buf, header, body);
+		const start = header ? HEADER_SIZE : 0;
+
 		const length = bufferCall("len", [buf]);
 		// The payload's own tally of zero-size elements starts here; decoding never yields, so one
 		// per file is never shared between two payloads.
@@ -1669,7 +1774,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			body.push(
 				constDecl(
 					f.arrayBindingDeclaration([value, end]),
-					callHoisted(top, "r", blobs ? [buf, num(0), blobs] : [buf, num(0)]),
+					callHoisted(top, "r", blobs ? [buf, num(start), blobs] : [buf, num(start)]),
 				),
 			);
 			body.push(
@@ -1679,9 +1784,9 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		}
 
 		const variable = layout.size === undefined ? uid("o") : undefined;
-		if (variable) body.push(letDecl(variable, num(0)));
+		if (variable) body.push(letDecl(variable, num(start)));
 
-		const ctx: Ctx = { buf, blobs, cursor: { variable, base: variable, offset: 0 }, out: body };
+		const ctx: Ctx = { buf, blobs, cursor: { variable, base: variable, offset: variable ? 0 : start }, out: body };
 		let result = emitRead(shape, ctx);
 		if (!f.is.identifier(result) && !isLiteral(result)) {
 			result = bind(body, result, "value");
@@ -1694,13 +1799,53 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			);
 		} else {
 			body.push(
-				ifStatement(f.binary(length, ts.SyntaxKind.ExclamationEqualsEqualsToken, num(layout.size!)), [
+				ifStatement(f.binary(length, ts.SyntaxKind.ExclamationEqualsEqualsToken, num(layout.size! + start)), [
 					raise(MALFORMED),
 				]),
 			);
 		}
 
 		return result;
+	}
+
+	/**
+	 * A versioned serializer's checks of its header, ahead of every read of the value: the buffer holds
+	 * a header, of this version, and of this layout. Each refusal says which, so that a buffer of
+	 * another version is told from one written before the type changed.
+	 */
+	function checkHeader(buf: ts.Identifier, header: Header, body: ts.Statement[]) {
+		const { version, hash, name } = header;
+		body.push(
+			ifStatement(f.binary(bufferCall("len", [buf]), ts.SyntaxKind.LessThanToken, num(HEADER_SIZE)), [
+				raise(
+					`[Flamework] this buffer is too short for the header of ${name}, version ${version}: no versioned serializer wrote it`,
+				),
+			]),
+		);
+
+		const written = () => bufferCall("readu8", [buf, num(0)]);
+		body.push(
+			ifStatement(f.binary(written(), ts.SyntaxKind.ExclamationEqualsEqualsToken, num(version)), [
+				raiseWith(
+					interpolate([
+						"[Flamework] this buffer is version ",
+						written(),
+						`, and this serializer of ${name} reads version ${version}: read each version with its own serializer (Serialization.versionOf tells which), and a buffer written without a version with one without`,
+					]),
+				),
+			]),
+		);
+
+		body.push(
+			ifStatement(
+				f.binary(bufferCall("readu32", [buf, num(1)]), ts.SyntaxKind.ExclamationEqualsEqualsToken, num(hash)),
+				[
+					raise(
+						`[Flamework] ${name}'s layout changed since this buffer was written as version ${version}; bump the version and keep a reader for the old one`,
+					),
+				],
+			),
+		);
 	}
 
 	// --- classification ------------------------------------------------------------------------------

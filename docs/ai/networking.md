@@ -63,6 +63,11 @@ since v1.
 - `networking.serialization` in `flamework.config.json` packs every payload into a buffer, with
   code generated from the parameter types. It is off by default. Both realms build from one config,
   so they always agree on the format.
+- `Flamework.createSerializer<T>()` writes the same format into a buffer of its own. For anything
+  stored (a DataStore), give it a version, `Flamework.createSerializer<T>({ version: 1 })`: its
+  `deserialize` refuses a buffer of another version or of a changed layout, and
+  `Serialization.versionOf(buf)` picks the serializer of an old buffer's version (guide 07,
+  "Versions").
 - To pack one heavy member with the switch off, mark it: `Networking.SerializedReliable<...>` or
   `SerializedUnreliable<...>` for an event, `Networking.Serialized<...>` for a function (`Raw*`
   does the opposite). The build refuses a call that may reach members packed differently, such as

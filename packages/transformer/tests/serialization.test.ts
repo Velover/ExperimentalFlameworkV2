@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import ts from "typescript";
@@ -325,6 +326,373 @@ export const checked = Flamework.createSerializer<{ 90: Serialization.Implicit.u
 
 	test("is named by its number in a width check's message", () => {
 		expect(luau()).toMatch(/codec\.checkWidth\("u8", \w+, "value\[90\]"\)/);
+	});
+});
+
+describe("a versioned serializer", () => {
+	// `Flamework.createSerializer<T>({ version })` starts every buffer with the version, one byte, and a
+	// 4-byte hash of T's layout, which `deserialize` checks before anything else. Without options
+	// nothing changes: the same bytes, and the same emit to the byte.
+	const UNVERSIONED = `import { Flamework, Serialization } from "@flamework-experimental/core";
+
+interface Pin {
+	id: Serialization.u16;
+	name: string;
+	owner?: Instance;
+}
+
+export const fixed = Flamework.createSerializer<{ a: Serialization.u8; b: Serialization.i16 }>();
+export const pin = Flamework.createSerializer<Pin>();
+export const counts = Flamework.createSerializer<Map<string, Serialization.u8>>();
+`;
+
+	const VERSIONED = `import { Flamework, Serialization } from "@flamework-experimental/core";
+
+interface Pin {
+	id: Serialization.u16;
+	name: string;
+	owner?: Instance;
+}
+
+const V = 7;
+enum Versions { First = 1, Second = 2 }
+const version = 9;
+
+export const fixed = Flamework.createSerializer<{ a: Serialization.u8; b: Serialization.i16 }>({ version: 3 });
+export const pin = Flamework.createSerializer<Pin>({ version: 0 });
+export const counts = Flamework.createSerializer<Map<string, Serialization.u8>>({ version: 255 });
+export const byConst = Flamework.createSerializer<{ a: Serialization.u8 }>({ version: V });
+export const byEnum = Flamework.createSerializer<{ a: Serialization.u8 }>({ version: Versions.Second });
+export const shorthand = Flamework.createSerializer<{ a: Serialization.u8 }>({ version });
+export const implicitA = Flamework.createSerializer<{ a: Serialization.Implicit.u8 }>({ version: 1 });
+export const instanceA = Flamework.createSerializer<{ a: Instance }>({ version: 1 });
+export const unknownA = Flamework.createSerializer<{ a: unknown }>({ version: 1 });
+export const keyTen = Flamework.createSerializer<{ 10: number }>({ version: 1 });
+export const keyTenText = Flamework.createSerializer<{ "10": number }>({ version: 1 });
+export const keyInfinity = Flamework.createSerializer<{ 1e999: number }>({ version: 1 });
+export const keyNegativeInfinity = Flamework.createSerializer<{ [-1e999]: number }>({ version: 1 });
+export const inlinePin = Flamework.createSerializer<{ id: Serialization.u16; name: string; owner?: Instance }>({ version: 1 });
+export const namedPin = Flamework.createSerializer<Pin>({ version: 1 });
+export const swapped = Flamework.createSerializer<{ name: string; id: Serialization.u16; owner?: Instance }>({ version: 1 });
+export const wider = Flamework.createSerializer<{ id: Serialization.u32; name: string; owner?: Instance }>({ version: 1 });
+`;
+
+	let compiled: ReturnType<typeof compileProbes> | undefined;
+	const compile = () => {
+		compiled ??= compileProbes({ unversionedEmit: UNVERSIONED, versionedEmit: VERSIONED });
+		expect(compiled.status).toBe(0);
+		return compiled;
+	};
+	const luau = () => compile().files.get("versionedEmit")!;
+
+	/** One serializer's emit: from its `local` to the end of the call. */
+	const serializer = (name: string) => {
+		const text = luau();
+		const start = text.indexOf(`local ${name} = Flamework.createSerializer(`);
+		expect(start).toBeGreaterThanOrEqual(0);
+		return text.slice(start, text.indexOf("\n})\n", start));
+	};
+
+	/** The version and the hash a serializer writes into its header. */
+	const header = (name: string) => {
+		const match = serializer(name).match(
+			/buffer\.writeu8\(buf\w*, 0, (\d+)\)\s*buffer\.writeu32\(buf\w*, 1, (\d+)\)/,
+		);
+		expect(match).not.toBeNull();
+		return { version: Number(match![1]), hash: Number(match![2]) };
+	};
+
+	/** The hash of a layout's description: the first four bytes of its SHA-256, after the revision. */
+	const layoutHash = (description: string) =>
+		crypto.createHash("sha256").update(`flamework layout 1\n${description}`, "utf8").digest().readUInt32LE(0);
+
+	test("writes the version and the layout hash ahead of the value, which goes after them", () => {
+		// A fixed-size value: five more bytes, every offset five further on. The options stay in the call,
+		// and the serializer carries its version, which core compares with them.
+		expect(serializer("fixed")).toMatch(
+			/local fixed = Flamework\.createSerializer\(\{\s*version = 3,\s*\}, \{\s*version = 3,\s*serialize = function\(v\w*\)\s*local buf\w* = buffer\.create\(8\)\s*buffer\.writeu8\(buf\w*, 0, 3\)\s*buffer\.writeu32\(buf\w*, 1, \d+\)\s*buffer\.writeu8\(buf\w*, 5, v\w*\.a\)\s*buffer\.writei16\(buf\w*, 6, v\w*\.b\)/,
+		);
+		expect(serializer("fixed")).toMatch(/a = buffer\.readu8\(buf\w*, 5\),\s*b = buffer\.readi16\(buf\w*, 6\),/);
+		expect(serializer("fixed")).toMatch(/if buffer\.len\(buf\w*\) ~= 8 then\s*error\("malformed payload"\)/);
+		// A hoisted type: its functions start at 5.
+		expect(serializer("pin")).toMatch(/local buf\w* = buffer\.create\(codec\.s_Pin\(v\w*\) \+ 5\)/);
+		expect(serializer("pin")).toMatch(/codec\.w_Pin\(buf\w*, 5, v\w*, blobs\w*\)/);
+		expect(serializer("pin")).toMatch(/local value\w*, o\w* = codec\.r_Pin\(buf\w*, 5, blobs\w*\)/);
+		// A variable-size value written inline: the position starts at 5.
+		expect(serializer("counts")).toMatch(/local buf\w* = buffer\.create\(size\w* \+ 5\)/);
+		expect(serializer("counts").match(/local o\w* = 5\n/g)).toHaveLength(2);
+	});
+
+	test("checks the header before it reads the value, telling another version from another layout", () => {
+		const deserialize = serializer("pin").slice(serializer("pin").indexOf("deserialize = function"));
+		const short = deserialize.indexOf("if buffer.len(buf");
+		const version = deserialize.indexOf("if buffer.readu8(buf");
+		const layout = deserialize.indexOf("if buffer.readu32(buf");
+		const read = deserialize.indexOf("codec.r_Pin(");
+		expect(short).toBeGreaterThan(0);
+		expect([short < version, version < layout, layout < read]).toEqual([true, true, true]);
+		expect(deserialize).toMatch(
+			/if buffer\.len\(buf\w*\) < 5 then\s*error\("\[Flamework\] this buffer is too short for the header of Pin, version 0: no versioned serializer wrote it"\)/,
+		);
+		expect(deserialize).toMatch(
+			/if buffer\.readu8\(buf\w*, 0\) ~= 0 then\s*error\(`\[Flamework\] this buffer is version \{buffer\.readu8\(buf\w*, 0\)\}, and this serializer of Pin reads version 0: read each version with its own serializer \(Serialization\.versionOf tells which\)/,
+		);
+		expect(deserialize).toMatch(
+			new RegExp(
+				`if buffer\\.readu32\\(buf\\w*, 1\\) ~= ${header("pin").hash} then\\s*error\\("\\[Flamework\\] Pin's layout changed since this buffer was written as version 0; bump the version and keep a reader for the old one"\\)`,
+			),
+		);
+	});
+
+	test("takes the version from a literal, a const, an enum member or a shorthand property", () => {
+		expect(header("fixed").version).toBe(3);
+		expect(header("pin").version).toBe(0);
+		expect(header("counts").version).toBe(255);
+		expect(header("byConst").version).toBe(7);
+		expect(header("byEnum").version).toBe(2);
+		expect(header("shorthand").version).toBe(9);
+	});
+
+	test("hashes the layout's bytes: names, checks and blob types change nothing, keys, orders and widths do", () => {
+		expect(header("fixed").hash).toBe(layoutHash('object("a": u8, "b": i16)'));
+		// The version is the header's own byte; the hash is the layout's alone.
+		expect(header("byConst").hash).toBe(layoutHash('object("a": u8)'));
+		expect(header("byEnum").hash).toBe(header("byConst").hash);
+		// An implicit width is written as the strict one; its check changes no byte.
+		expect(header("implicitA").hash).toBe(header("byConst").hash);
+		// A blob is an index whatever the value's `typeof`.
+		expect(header("instanceA").hash).toBe(layoutHash('object("a": blob)'));
+		expect(header("unknownA").hash).toBe(header("instanceA").hash);
+		// A type's name and how its code is hoisted are not part of it.
+		expect(header("namedPin").hash).toBe(header("inlinePin").hash);
+		expect(header("namedPin").hash).toBe(header("pin").hash);
+		// The keys the decoded table holds are: `10` and `"10"`, `1e999` and `-1e999`.
+		expect(header("keyTen").hash).toBe(layoutHash("object(10: f64)"));
+		expect(header("keyTenText").hash).toBe(layoutHash('object("10": f64)'));
+		expect(header("keyInfinity").hash).toBe(layoutHash("object(Infinity: f64)"));
+		expect(header("keyNegativeInfinity").hash).toBe(layoutHash("object(-Infinity: f64)"));
+		// The fields' order and widths are.
+		const hashes = [
+			"namedPin",
+			"swapped",
+			"wider",
+			"keyTen",
+			"keyTenText",
+			"keyInfinity",
+			"keyNegativeInfinity",
+		].map((name) => header(name).hash);
+		expect(new Set(hashes).size).toBe(hashes.length);
+	});
+
+	test("without options, emits exactly what it did before versions existed", () => {
+		// Compiled by the transformer at 4141588, the commit before versioned serializers.
+		expect(compile().files.get("unversionedEmit")).toBe(`-- Compiled with roblox-ts v3.0.0
+local TS = require(script.Parent.Parent.include.RuntimeLib)
+local Flamework = TS.import(script, script.Parent.Parent, "node_modules", "@flamework-experimental", "core", "out").Flamework
+local fixed = Flamework.createSerializer({
+	serialize = function(v)
+		local buf = buffer.create(3)
+		buffer.writeu8(buf, 0, v.a)
+		buffer.writei16(buf, 1, v.b)
+		return buf
+	end,
+	deserialize = function(buf_1)
+		local value = {
+			a = buffer.readu8(buf_1, 0),
+			b = buffer.readi16(buf_1, 1),
+		}
+		if buffer.len(buf_1) ~= 3 then
+			error("malformed payload")
+		end
+		return value
+	end,
+})
+local codec = {}
+local vsize = function(n)
+	return if n < 128 then 1 elseif n < 16384 then 2 elseif n < 2097152 then 3 elseif n < 268435456 then 4 else 5
+end
+local vwrite = function(buf_2, o, n_1)
+	while n_1 >= 128 do
+		buffer.writeu8(buf_2, o, n_1 % 128 + 128)
+		o += 1
+		n_1 = math.floor(n_1 / 128)
+	end
+	buffer.writeu8(buf_2, o, n_1)
+	return o + 1
+end
+local vread = function(buf_3, o_1)
+	local n_2 = 0
+	local scale = 1
+	while true do
+		local b_1 = buffer.readu8(buf_3, o_1)
+		o_1 += 1
+		n_2 += b_1 % 128 * scale
+		if b_1 < 128 then
+			return n_2, o_1
+		end
+		scale *= 128
+		if scale > 268435456 then
+			error("malformed payload")
+		end
+	end
+end
+codec.s_Pin = function(v_1)
+	local length = #(v_1.name)
+	local v_2 = v_1.owner
+	return vsize(length) + length + (if v_2 ~= nil then 5 else 1) + 2
+end
+codec.w_Pin = function(buf_4, o_2, v_1, blobs)
+	buffer.writeu16(buf_4, o_2, v_1.id)
+	local text = v_1.name
+	local length_1 = #text
+	o_2 = vwrite(buf_4, o_2 + 2, length_1)
+	buffer.writestring(buf_4, o_2, text)
+	o_2 += length_1
+	local v_3 = v_1.owner
+	buffer.writeu8(buf_4, o_2, if v_3 ~= nil then 1 else 0)
+	o_2 += 1
+	if v_3 ~= nil then
+		if v_3 ~= nil then
+			table.insert(blobs, v_3)
+			buffer.writeu32(buf_4, o_2, #blobs)
+		else
+			buffer.writeu32(buf_4, o_2, 0)
+		end
+		o_2 += 4
+	end
+	return o_2
+end
+codec.r_Pin = function(buf_4, o_2, blobs)
+	local id_1 = buffer.readu16(buf_4, o_2)
+	local length_2, o_3 = vread(buf_4, o_2 + 2)
+	local text_1 = buffer.readstring(buf_4, o_3, length_2)
+	o_2 = o_3 + length_2
+	local present = buffer.readu8(buf_4, o_2) ~= 0
+	local value_1
+	o_2 += 1
+	if present then
+		value_1 = blobs[buffer.readu32(buf_4, o_2)]
+		o_2 += 4
+	end
+	local value_2 = {
+		id = id_1,
+		name = text_1,
+		owner = value_1,
+	}
+	return value_2, o_2
+end
+local pin = Flamework.createSerializer({
+	serialize = function(v_4)
+		local buf_5 = buffer.create(codec.s_Pin(v_4))
+		local blobs_1 = {}
+		codec.w_Pin(buf_5, 0, v_4, blobs_1)
+		return buf_5, blobs_1
+	end,
+	deserialize = function(buf_6, blobs_2)
+		local value_3, o_4 = codec.r_Pin(buf_6, 0, blobs_2)
+		if o_4 ~= buffer.len(buf_6) then
+			error("malformed payload")
+		end
+		return value_3
+	end,
+})
+local counts = Flamework.createSerializer({
+	serialize = function(v_5)
+		local size = 0
+		local n_3 = 0
+		for key, entry in v_5 do
+			n_3 += 1
+			local length_3 = #key
+			size += vsize(length_3) + length_3 + 1
+		end
+		size += vsize(n_3)
+		local buf_7 = buffer.create(size)
+		local o_5 = 0
+		-- ▼ ReadonlyMap.size ▼
+		local _size = 0
+		for _ in v_5 do
+			_size += 1
+		end
+		-- ▲ ReadonlyMap.size ▲
+		local n_4 = _size
+		o_5 = vwrite(buf_7, o_5, n_4)
+		for key_1, entry_1 in v_5 do
+			local length_4 = #key_1
+			o_5 = vwrite(buf_7, o_5, length_4)
+			buffer.writestring(buf_7, o_5, key_1)
+			o_5 += length_4
+			buffer.writeu8(buf_7, o_5, entry_1)
+			o_5 += 1
+		end
+		return buf_7
+	end,
+	deserialize = function(buf_8)
+		local o_6 = 0
+		local count, o_7 = vread(buf_8, o_6)
+		o_6 = o_7
+		if count * 2 > buffer.len(buf_8) - o_6 then
+			error("malformed payload")
+		end
+		local map = {}
+		for _ = 1, count do
+			local length_5, o_8 = vread(buf_8, o_6)
+			local text_2 = buffer.readstring(buf_8, o_8, length_5)
+			o_6 = o_8 + length_5
+			local entry_2 = buffer.readu8(buf_8, o_6)
+			map[text_2] = entry_2
+			o_6 += 1
+		end
+		if o_6 ~= buffer.len(buf_8) then
+			error("malformed payload")
+		end
+		return map
+	end,
+})
+return {
+	fixed = fixed,
+	pin = pin,
+	counts = counts,
+}
+`);
+	});
+
+	test("refuses a version it cannot read when the project builds, and options it cannot read", () => {
+		const head = 'import { Flamework, Serialization } from "@flamework-experimental/core";\n';
+		const result = compileProbes({
+			versionVariable: `${head}let current = 3;\nexport const s = Flamework.createSerializer<Serialization.u8>({ version: current });\n`,
+			versionTooLarge: `${head}export const s = Flamework.createSerializer<Serialization.u8>({ version: 256 });\n`,
+			versionFraction: `${head}export const s = Flamework.createSerializer<Serialization.u8>({ version: 1.5 });\n`,
+			versionNegative: `${head}export const s = Flamework.createSerializer<Serialization.u8>({ version: -1 });\n`,
+			optionsVariable: `${head}const options = { version: 1 };\nexport const s = Flamework.createSerializer<Serialization.u8>(options);\n`,
+		});
+		expect(result.status).not.toBe(0);
+		const output = result.output.replace(/\x1b\[[0-9;]*m/g, "");
+		const errors = new Map(
+			[
+				...output.matchAll(
+					/src\/(\w+)\.ts:\d+:\d+ - error TS @flamework-experimental\/transformer: ([^\r\n]+)/g,
+				),
+			].map((match) => [match[1], match[2]]),
+		);
+		expect(errors.get("versionVariable")).toBe(
+			"Flamework writes a serializer's version into the code it generates, so it has to be known when the project builds, and the type of this one is 'number'.",
+		);
+		expect(output).toContain(
+			"Write the version as a number literal (`{ version: 3 }`), or as a `const` or an enum member whose type is that number.",
+		);
+		expect(errors.get("versionTooLarge")).toBe(
+			"A serializer's version is written as one byte: a whole number from 0 to 255, not 256.",
+		);
+		expect(errors.get("versionFraction")).toBe(
+			"A serializer's version is written as one byte: a whole number from 0 to 255, not 1.5.",
+		);
+		expect(errors.get("versionNegative")).toBe(
+			"A serializer's version is written as one byte: a whole number from 0 to 255, not -1.",
+		);
+		expect(errors.get("optionsVariable")).toBe(
+			"Flamework reads a serializer's options when the project builds, so they have to be written here as an object literal, such as `{ version: 1 }`.",
+		);
+		expect(errors.size).toBe(5);
 	});
 });
 

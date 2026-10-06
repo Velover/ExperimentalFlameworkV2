@@ -114,7 +114,41 @@ export namespace Flamework {
 	 */
 	export function createSerializer<T>(
 		meta?: Modding.Intrinsic<"serializer", [T], Serialization.Serializer<T>>,
+	): Serialization.Serializer<T>;
+
+	/**
+	 * Creates a versioned serializer for `T`: as `createSerializer<T>()`, with every buffer starting
+	 * with a 5-byte header, the version (one byte) and a 4-byte hash of `T`'s layout. `deserialize`
+	 * refuses a buffer of another version, and one of this version with another layout hash, which is
+	 * what a change to `T` made without a new version leaves; `Serialization.versionOf` reads the
+	 * version, to pick the serializer of that version. Use one for anything you store.
+	 *
+	 * `version` is read when the project builds: a whole number from 0 to 255, written as a literal
+	 * (or a `const` or an enum member whose type is one).
+	 *
+	 * @metadata macro {@link options intrinsic-serializer-options}
+	 */
+	export function createSerializer<T>(
+		options: Serialization.SerializerOptions,
+		meta?: Modding.Intrinsic<"serializer", [T], Serialization.Serializer<T>>,
+	): Serialization.Serializer<T>;
+
+	export function createSerializer<T>(
+		first?: Serialization.SerializerOptions | Serialization.Serializer<T>,
+		second?: Serialization.Serializer<T>,
 	): Serialization.Serializer<T> {
-		return meta!;
+		// The generated serializer is the last argument: after the options, if there are any.
+		if (second === undefined) return first as Serialization.Serializer<T>;
+
+		// A transformer from before versions builds the serializer without its header: refuse it here,
+		// rather than let a game store buffers that only look versioned.
+		const version = (first as Serialization.SerializerOptions).version;
+		if (second.version !== version) {
+			error(
+				`[Flamework] createSerializer was given version ${version}, but the transformer built this serializer without a header: update @flamework-experimental/transformer`,
+				2,
+			);
+		}
+		return second;
 	}
 }
