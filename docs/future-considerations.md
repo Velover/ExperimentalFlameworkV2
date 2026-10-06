@@ -627,6 +627,10 @@ Edge cases found and deliberately left alone, because the fix would cost more th
   - A class-instance blob next to an all-optional object is sent as `{}`.
   - A recursive interface as a guard-checked union member overflows the stack in
     `buildGuardFromType`.
+  - So does a recursive interface as an event or function argument of its own
+    (`tree(v: Tree): void` with `kids: Tree[]`): the handler that receives it (`createServer`, for a
+    server event) builds its incoming guard, and the build stops with "Maximum call stack size
+    exceeded", as it did in 2.0.0-alpha.7.
   - A payload nested about 20,000 levels deep raises "stack overflow" (caught) instead of
     "malformed payload".
   - Two Luau limits, neither reported by rbxtsc:

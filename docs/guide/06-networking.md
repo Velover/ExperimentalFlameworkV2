@@ -278,9 +278,12 @@ own type: `Events.X.fire(...)`, a typed reference to `Events.X`, or a helper gen
 name. Such a helper must not return members that are packed differently, such as a `Serialized`
 member and a plain one while `networking.serialization` is off, or a `Raw` member and a packed one:
 a call through it is packed one way, so the build refuses it. It refuses packed members whose
-argument lists (for `setCallback`, results) are laid out differently for the same reason, even one
-TypeScript type spelled two ways, `a(x: string | number)` and `b(x: number | string)` (see
-[What each type costs](#what-each-type-costs)); members laid out alike are packed together.
+argument lists (for `setCallback`, results) are not laid out and checked alike, for the same
+reason: even one TypeScript type spelled two ways, `a(x: string | number)` and
+`b(x: number | string)` (see [What each type costs](#what-each-type-costs)), or a
+`Serialization.u8` against a `Serialization.Implicit.u8`, one byte either way but by default
+checked only as the second. Members laid out and checked alike are packed together, whatever
+their types.
 Don't go through a hand-written interface that widens
 `fire` to `(...args: unknown[])`. Such a call is left alone and sends unpacked values, which the peer drops as malformed. A handler reached
 through `?.` (`this.events?.X.fire(...)`) is packed like any other, behind the same short-circuit.
@@ -294,12 +297,18 @@ The same generator is available on its own as `Flamework.createSerializer<T>()`;
 Sizes follow the types:
 
 - A `number` is eight bytes. A `boolean` is one byte, and so is an `"idle" | "walk" | "run"`: the
-  value's place among the union's values sorted, numbers by value first, then strings by their
-  character codes, then `false` and `true`, then Roblox enum items by name. A TypeScript `enum`'s
-  members, all of them or some, keep the order the enum declares them in, after any plain values in
-  the same union; the members of several enums go by the enum's name.
-- An object is its fields in declaration order, with nothing spent on names. An object a mapped type
-  makes (`Record`, `Pick`, `Omit`, `Partial`, `Readonly`) sends its fields in name order.
+  value's place among the union's values sorted. `false`, `true`, `""` and `0` come first, then the
+  names `typeof` returns (`"string"`, `"number"`, `"bigint"`, `"boolean"`, `"symbol"`,
+  `"undefined"`, `"object"`, `"function"`, in that order), then the other numbers by size, each
+  before its negative (`1`, `-1`, `2`), then strings by their character codes: in
+  `"number" | "string"`, `"string"` is 0. A TypeScript `enum`'s members, all of them or some, keep
+  the order the enum declares them in, after any plain values in the same union; the members of
+  several enums go by the enum's name. Roblox enum items go last, by name.
+- An object is its fields in declaration order, with nothing spent on names. A mapped type over
+  another type's fields, such as `Partial<T>`, `Readonly<T>` or `{ readonly [P in keyof T]?: ... }`,
+  keeps `T`'s order, and a `Record` over a TypeScript enum the order the enum declares its members
+  in. A mapped type over other keys (`Record<"speed" | "power", number>`, `Pick`, `Omit`) sends its
+  fields in the order of its keys, sorted as a literal union's values are: `power`, then `speed`.
 - A `Vector3` is three floats.
 - Counts and lengths (of arrays, sets, maps, strings and buffers) are varints: one byte below 128,
   two below 16384, up to five.
@@ -325,14 +334,35 @@ small that way. A `number` that is not in a union is always eight bytes.
 type or tuple element, including inside arrays, sets, maps and Promises. So `a(x: string | number)`
 and `b(x: number | string)` number their members differently, even though they are one TypeScript
 type. Both sides agree, because both read the same declaration. A union written as a member of
-another (`type Choice = Pair | Gamma`) keeps its own written order there.
+another (`type Choice = Pair | Gamma`, or in parentheses) keeps its own written order there, but
+its built-in types, `boolean`, and its literal values `false`, `true`, `""`, `0` and the names
+`typeof` returns go first, in TypeScript's fixed order given below, whatever order it writes them
+in: with `type Id = number | string`, `Id | Alpha` numbers the string 0 and the number 1, and with
+`type ItemOrNumber = Item | "number"`, `ItemOrNumber | Alpha` numbers `"number"` 0. A TypeScript
+enum written as one keeps the order it declares its members in.
 
-A union that is not spelled out where it is reached numbers its members by their types instead: a
-named type by its name (`Alpha` before `Beta`), anything else by its structure, after any members
-that are written out. One example is a union that only arrives as a generic's type argument, as in
-`Box<A | B>`, whose `value: T` names only `T`. Two members that only TypeScript's internal ids
-could tell apart, such as two interfaces of one name from two files, stop the build. Declare an alias
-for the union and use it where the value is declared, and its written order numbers them.
+A union that is not spelled out where it is reached numbers its members by their types instead,
+after any members that are written out: `boolean` first, then the built-in types in a fixed order
+(`string`, then `number`, then `object`), then the other types, then whole Roblox enums by name,
+then the literal values. Among the other types, the one that nests type arguments less deeply
+goes first, so a type goes ahead of the types made from it (`Item` before `Item[]` and
+`Box<Item>`), and `Zed` ahead of `Alpha[]` too; then a named type goes by its name (`Alpha` before
+`Beta`) and anything else by its structure. A TypeScript enum with computed members
+(`C = "abc".size()`) numbers those first, as declared, then its values. One example is a union
+that only arrives as a generic's type argument, as in `Box<A | B>`, whose `value: T` names only
+`T`; another is a property typed as an enum; a third is an optional property, parameter or tuple
+element typed as an alias of a union without `undefined`, as in `reward?: Reward`: TypeScript makes
+it a new union with `undefined`, which no longer carries the alias, so it goes by these rules and
+not by the alias's written order, as `reward: Reward` does. An alias whose union holds `undefined`
+itself (`type MaybeReward = ItemReward | CurrencyReward | undefined`) stays the alias, and its
+written order numbers it. A member written as a union that is not spelled out
+itself, such as `Prims[keyof Prims]` in `Prims[keyof Prims] | Alpha`, numbers its parts the same
+way, except that `boolean` and the literal values `false`, `true`, `""`, `0` and the names `typeof`
+returns go among the built-in types, in TypeScript's fixed order: `string`, `number`, `boolean` (or
+`false`, then `true`), `object`, `""`, `0`, then `"string"`, `"number"` and the other names in the
+order above. Two members that only TypeScript's internal ids could tell apart, such as two
+interfaces of one name from two files, stop the build. Declare an alias for the union and use it
+where the value is declared, and its written order numbers them.
 
 None of these orders depends on what TypeScript happened to check first in a build. So a watcher's
 rebuild, which compiles a sender without its receiver, and a buffer stored with
@@ -867,6 +897,13 @@ logging. Game rules belong in the handler, where you can test them.
   build cannot see it. Spell such members' unions alike, or make the call where the member is known.
   Members packed differently (a `Serialized` one with a plain one) stay apart, and their call is
   checked.
+- **An ambient enum declared in several declaration files is numbered in the order TypeScript reads
+  them.** `declare enum Spread { Q = 9, R = 3 }` in one `.d.ts` file and
+  `declare enum Spread { P = 5 }` in another are one enum, and TypeScript lists its members file by
+  file, in the order the program loads the files: a `/// <reference>` that loads the second one
+  first numbers `P` first (5, 9, 3 rather than 9, 3, 5). Both realms of one build agree, as
+  2.0.0-alpha.7's did, but an unrelated edit can renumber it, so a buffer stored with it is not
+  safe. Declare such an enum in one file.
 - **Unreliable events can be dropped.** Never make later messages depend on an earlier one.
 - **An event uses one remote for both directions; a function uses two.** In ReplicatedStorage, a
   function's two remotes share a name and differ only by their `id` attribute (`$name` for one

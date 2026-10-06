@@ -316,11 +316,19 @@ any of it, and nothing in the output describes the type.
 - The format follows the types as written: fields in declaration order, and a union's members
   numbered in the order written in the type argument and the declarations it reaches
   ([What each type costs](06-networking.md#what-each-type-costs)). A literal union's values are
-  numbered in sorted order, a TypeScript enum's members in the order the enum declares them, and a
-  mapped type's fields (`Record`, `Partial`) go by name. Reordering fields, members or an enum's
-  members, adding a literal value or an enum member (which can renumber the others), or changing a
-  width changes the format: a buffer written before is then read wrong, or not at all. Keep that in
-  mind before you store buffers, in a DataStore say, and store a version with them.
+  numbered in sorted order, `false`, `true`, `""`, `0` and the names `typeof` returns (`"string"`,
+  `"number"`, ...) first and a number before its negative, a TypeScript enum's members in the order
+  the enum declares them, and Roblox enum items last. The members of a union nothing spells out
+  (`Box<A | B>`) go by their types: `boolean`, then the built-in types (`string`, then `number`),
+  then the other types by how deeply they nest type arguments (`Item` before `Item[]`), then by
+  name, then Roblox enums and literal values.
+  `Partial<T>`, `Readonly<T>` and the other mapped types over `T`'s fields keep `T`'s order, and
+  a mapped type over a union of keys (`Record<"speed" | "power", V>`, `Pick`, `Omit`) sends its
+  fields by key, sorted. Reordering fields, members or an enum's members, adding a literal value, a
+  key or an enum member (which can renumber the others), or changing a width changes the format: a
+  buffer written before is then read wrong, or not at all. A Flamework upgrade can change a layout
+  too, and the changelog's upgrade notes say which. Keep that in mind before you store buffers, in a
+  DataStore say, and store a version with them.
 - `deserialize` checks lengths, counts, union tags and literal indices, and trusts no count or
   length it reads
   ([Payloads that cannot be decoded](06-networking.md#payloads-that-cannot-be-decoded)). It does not

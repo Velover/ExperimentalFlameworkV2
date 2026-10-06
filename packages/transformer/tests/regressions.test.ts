@@ -1159,3 +1159,119 @@ describe("the serializer's self-check", () => {
 		});
 	}, 120_000);
 });
+
+describe("a value whose serializer fails to build", () => {
+	// A failure while one of a file's values is built is reported, and the file's next value is built
+	// after it in the same pass. Nothing the failed build left behind may count as finished: the next
+	// value would call table fields or helpers that were never defined. Forced here by a failure
+	// injected into the first build; the build stops with that error either way, so only
+	// `--writeTransformedFiles` ever showed such output, but a later value must still come out whole.
+
+	/**
+	 * The `codec` fields and varint helpers the code from `from` on calls, followed through the
+	 * definitions `printed` makes, that `printed` never defines or declares.
+	 */
+	function undefinedCalls(printed: string, from: string): string[] {
+		const definitions = new Map<string, string>();
+		for (const match of printed.matchAll(/^codec\w*\.(\w+) = ([\s\S]*?)(?=^\S)/gm)) {
+			definitions.set(match[1], match[2]);
+		}
+		const declared = new Set([...printed.matchAll(/\b(?:const|let) ([A-Za-z_]\w*)/g)].map((match) => match[1]));
+
+		const missing = new Array<string>();
+		const seen = new Set<string>();
+		const visit = (code: string) => {
+			for (const [, field] of code.matchAll(/\bcodec\w*\.(\w+)\b(?! =)/g)) {
+				if (seen.has(field)) continue;
+				seen.add(field);
+				const definition = definitions.get(field);
+				if (definition === undefined) missing.push(`codec.${field}`);
+				else visit(definition);
+			}
+			for (const [, helper] of code.matchAll(/(?<![.\w])((?:vsize|vwrite|vread)\w*)\(/g)) {
+				if (!declared.has(helper) && !missing.includes(helper)) missing.push(helper);
+			}
+		};
+		const start = printed.indexOf(from);
+		expect(start).toBeGreaterThan(-1);
+		visit(printed.slice(start));
+		return missing;
+	}
+
+	test("takes a type that failed out again, with every type hoisted while it was built", async () => {
+		// `Inner` is hoisted while `Outer` is built, and calls Outer's functions; the guard `P1 | P2`
+		// needs fails after it. Kept, `Outer` would be called by `second` and never defined; kept,
+		// `Inner` would call the Outer that failed.
+		const source = `import { Flamework } from "@flamework-experimental/core";
+interface Inner { x: string; up?: Outer[] }
+interface P1 { a: string; n: number }
+interface P2 { a: number; n: string }
+export interface Outer { first: Inner; second: P1 | P2 }
+export const first = Flamework.createSerializer<Outer>();
+export const second = Flamework.createSerializer<Outer>();
+`;
+		await transformInProcess({ failedHoist: source }, (fixture) => {
+			// eslint-disable-next-line @typescript-eslint/no-require-imports
+			const guards = require("../out/util/functions/buildGuardFromType");
+			// eslint-disable-next-line @typescript-eslint/no-require-imports
+			const { Diagnostics } = require("../out/classes/diagnostics");
+			const original = guards.buildGuardFromType;
+			let calls = 0;
+			guards.buildGuardFromType = function (this: unknown, state: unknown, node: ts.Node, ...rest: unknown[]) {
+				if (calls++ === 0) Diagnostics.error(node, "injected failure");
+				return original.call(this, state, node, ...rest);
+			};
+
+			try {
+				const program = fixture.program();
+				const { printed, diagnostics } = fixture.pass(program, [fixture.file(program, "failedHoist")]);
+				expect(diagnostics).toEqual(["injected failure"]);
+				expect(calls).toBe(2);
+				// Both built again, under new names: what the failed build made of them is still handed out.
+				expect(printed[0]).toMatch(/^codec\.s_Outer_1 = /m);
+				expect(printed[0]).toMatch(/^codec\.s_Inner_1 = /m);
+				expect(undefinedCalls(printed[0], "export const second")).toEqual([]);
+			} finally {
+				guards.buildGuardFromType = original;
+			}
+		});
+	}, 120_000);
+
+	for (const [helpers, global, firstType, secondType] of [
+		["varint helpers", "math", "{ name: string }", "{ title: string }"],
+		["width check", "error", "{ a: Serialization.Implicit.u8 }", "{ b: Serialization.Implicit.u16 }"],
+	]) {
+		test(`builds the ${helpers} again for the file's next value when building them failed`, async () => {
+			// The first time the file's hoisted code looks up the global its helpers use, a declaration of
+			// the file hides it: building them fails, and the helpers must not count as built.
+			const source = `import { Flamework, Serialization } from "@flamework-experimental/core";
+export const first = Flamework.createSerializer<${firstType}>();
+export const second = Flamework.createSerializer<${secondType}>();
+`;
+			await transformInProcess({ failedHelper: source }, (fixture) => {
+				const program = fixture.program();
+				const file = fixture.file(program, "failedHelper");
+				const checker = program.getTypeChecker();
+				const statement = file.statements.find(ts.isVariableStatement)!;
+				const hiding = checker.getSymbolAtLocation(statement.declarationList.declarations[0].name)!;
+				const original = checker.resolveName;
+				let lookups = 0;
+				checker.resolveName = function (this: ts.TypeChecker, name, location, meaning, excludeGlobals) {
+					if (name === global && location && ts.isSourceFile(location) && lookups++ === 0) return hiding;
+					return original.call(this, name, location, meaning, excludeGlobals);
+				};
+
+				try {
+					const { printed, diagnostics } = fixture.pass(program, [file]);
+					expect(diagnostics).toEqual([
+						expect.stringContaining(`uses the global '${global}', which the declaration of '${global}'`),
+					]);
+					expect(lookups).toBe(2);
+					expect(undefinedCalls(printed[0], "export const second")).toEqual([]);
+				} finally {
+					checker.resolveName = original;
+				}
+			});
+		}, 120_000);
+	}
+});

@@ -464,10 +464,10 @@ describe("wire order does not depend on which literals TypeScript created first"
 });
 
 describe("wire order is a function of the types alone", () => {
-	// Each order below came from TypeScript's internal type ids, or from declarations a mapped type
-	// does not have, before. The ids follow whatever the checker happened to create first in a
-	// compilation, which a partial rebuild changes.
-	test("numbers a literal union's values by value, and sends a mapped type's fields by name", () => {
+	// The literal values and the union members below were put in order by TypeScript's internal type
+	// ids before. The ids follow whatever the checker happened to create first in a compilation, which
+	// a partial rebuild changes.
+	test("numbers a literal union's values by value, and keeps `Partial<T>`'s fields in `T`'s order", () => {
 		const result = compileProbes({
 			canonicalOrder: `import { Flamework } from "@flamework-experimental/core";
 export enum Mode { Single = "single", Double = "double" }
@@ -485,16 +485,16 @@ export const ordered = Flamework.createSerializer<Ordered>();
 		expect(result.status).toBe(0);
 		const luau = result.files.get("canonicalOrder")!;
 
-		// Numbers by value, then strings by code units, then Roblox enum items by name. A TypeScript enum
-		// keeps the order it declares its members in, as 2.0.0-alpha.7 did: see the next describe.
+		// Numbers by size, then strings by code units, Roblox enum items by name. A TypeScript enum keeps
+		// the order it declares its members in, as 2.0.0-alpha.7 did: see the next describe.
 		expect(luau).toMatch(/local literals\w* = \{ "aardvark", "zebra" \}/);
 		expect(luau).toMatch(/local literals\w* = \{ -5, 12\.5, 300 \}/);
 		expect(luau).toMatch(/local literals\w* = \{ Enum\.Material\.Plastic, Enum\.Material\.Wood \}/);
 		expect(luau).toMatch(/local literals\w* = \{ "single", "double" \}/);
-		// `Partial<Zoo>` is a mapped type: its fields go by name, not as `Zoo` declares them.
-		expect(luau.indexOf(".aardvark")).toBeGreaterThan(-1);
-		expect(luau.indexOf(".aardvark")).toBeLessThan(luau.indexOf(".zebra"));
-		expect(luau).toMatch(/aardvark = \w+,\s*zebra = \w+,/);
+		// `Partial<Zoo>` makes its fields as `Zoo` lists them, as declared: see "a mapped type's fields".
+		expect(luau.indexOf(".zebra")).toBeGreaterThan(-1);
+		expect(luau.indexOf(".zebra")).toBeLessThan(luau.indexOf(".aardvark"));
+		expect(luau).toMatch(/zebra = \w+,\s*aardvark = \w+,/);
 	});
 
 	/** Makes `program`'s checker create the declared type of the interface `name` before anything else in `file`. */
@@ -640,5 +640,449 @@ export const FIRST_BETA = Beta.X;
 			'{ 2, 1, "y", "x" }',
 			'{ 7, "alpha", "zeta", 2, "y" }',
 		]);
+	});
+});
+
+/** The keys of each table the decoders build, in order: `{ zebra = ..., ["30"] = ... }` is "zebra,30". */
+function tableKeys(luau: string): string[] {
+	return [...luau.matchAll(/= \{\n((?:\t+\S+ = [^\n{]+,\n)+)\t*\}/g)].map((table) =>
+		[...table[1].matchAll(/^\t+\[?"?(\w+)"?\]? = /gm)].map((key) => key[1]).join(","),
+	);
+}
+
+/**
+ * What each union decoder of `luau` reads under its tags, in tag order, one entry per decoder: a
+ * blob, a literal index, a boolean, an array, a string, a number, an object read in place by its
+ * first field, as that field's name (`alpha` for `Alpha`, though it reads a number too), the whole
+ * number a plain `number` member's own tag carries as a varint, or something else.
+ */
+function tagKinds(luau: string): string[] {
+	const decoders = new Map<string, string[]>();
+	const lines = luau.split("\n");
+	for (let i = 0; i < lines.length - 1; i++) {
+		const branch = /^\s*(?:if|elseif) (tag\w*) == \d+ then$/.exec(lines[i]);
+		if (!branch) continue;
+		const next = lines[i + 1];
+		const field = /^\s*local (\w+?)(?:_\d+)? = buffer\w*\.read\w+\(/.exec(next);
+		const kind = /blobs/.test(next)
+			? "blob"
+			: /literals/.test(next)
+				? "literals"
+				: /~= 0$/.test(next)
+					? "boolean"
+					: /^\s*local n\w*, o\w* = vread\(/.test(next)
+						? "varint"
+						: /^\s*local count\w*, o\w* = vread\(/.test(next)
+							? "array"
+							: /vread|readstring/.test(next)
+								? "string"
+								: field
+									? field[1]
+									: /readf64/.test(next)
+										? "number"
+										: "other";
+		const kinds = decoders.get(branch[1]) ?? [];
+		decoders.set(branch[1], [...kinds, kind]);
+	}
+
+	return [...decoders.values()].map((kinds) => kinds.join(","));
+}
+
+describe("a mapped type's fields keep TypeScript's order where it follows from the types", () => {
+	// A homomorphic mapped type, `{ [P in keyof T]: ... }` (`Partial`, `Readonly`, `Required`, the
+	// project's own), makes its properties in the order `T` lists its own, which follows from `T`'s
+	// declaration, and 2.0.0-alpha.7 sent them that way: a buffer stored with it, of a
+	// `Partial<PlayerData>` say, reads the same. So does a `Record` over a TypeScript enum, whose
+	// members TypeScript creates together, as declared. A mapped type over a union of other keys
+	// (`Record<"speed" | "power", V>`, `Pick`, `Omit`) made them in the order the checker happened to
+	// create the key literals in: those go by their keys, sorted.
+	const sources = {
+		mappedOrderTypes: `export interface Zoo { zebra: number; aardvark: string; mole: boolean }
+export interface Extra { extra: number }
+export enum Rarity { Common = "common", Rare = "rare", Epic = "epic" }
+export enum Level { High = 30, Low = 10, Mid = 20 }
+`,
+		mappedOrderKept: `import { Flamework } from "@flamework-experimental/core";
+import type { Zoo, Extra } from "./mappedOrderTypes";
+import { Rarity, Level } from "./mappedOrderTypes";
+type Patch<T> = { readonly [P in keyof T]?: T[P] };
+export interface Kept {
+	partial: Partial<Zoo>;
+	readonlyZoo: Readonly<Zoo>;
+	required: Required<Patch<Zoo>>;
+	byRarity: Record<Rarity, number>;
+	byLevel: Partial<Record<Level, string>>;
+	both: Partial<Zoo & Extra>;
+}
+export const kept = Flamework.createSerializer<Kept>();
+`,
+		mappedOrderSorted: `import { Flamework } from "@flamework-experimental/core";
+import type { Zoo, Extra } from "./mappedOrderTypes";
+export interface Inherits extends Record<"kk" | "dd", number> { own: string }
+export interface Sorted {
+	record: Record<"speed" | "power", number>;
+	picked: Pick<Zoo, "zebra" | "aardvark">;
+	omitted: Omit<Zoo, "aardvark">;
+	numbered: Record<10 | 2 | 1, string>;
+	withRecord: Extra & Record<"qq" | "cc", number>;
+	inherits: Inherits;
+}
+export const sorted = Flamework.createSerializer<Sorted>();
+`,
+	};
+	// Checked ahead of the others (it sorts first, after the file it imports), it creates the key
+	// literals in another order and asks for the enums' last members first. `Inherits` is declared
+	// with `Sorted`, which is checked after this file, so that "dd" can come before "kk"; the file this
+	// one imports is always checked first. Laid out in TypeScript's order, as 2.0.0-alpha.7 did, every
+	// mapped type of `Sorted` comes out in another order after this file.
+	const early = `import { Rarity, Level } from "./mappedOrderTypes";
+export const LAST_RARITY = Rarity.Epic;
+export const LAST_LEVEL = Level.Mid;
+export const NAMES = ["mole", "aardvark", "power", "cc", "dd", "kk", "extra", 1, 2] as const;
+`;
+
+	let alone: ReturnType<typeof compileProbes> | undefined;
+	const compiledAlone = () => (alone ??= compileProbes(sources));
+
+	test("keeps the order of the type a homomorphic mapped type maps, and of a Record over an enum, as 2.0.0-alpha.7 did", () => {
+		const result = compiledAlone();
+		expect(result.status).toBe(0);
+		const keys = tableKeys(result.files.get("mappedOrderKept")!);
+
+		// Every table with Zoo's fields lists them as Zoo declares them, `Extra`'s after them.
+		const zoo = keys.filter((list) => list.includes("zebra"));
+		expect(zoo.length).toBeGreaterThanOrEqual(4);
+		for (const list of zoo) expect(["zebra,aardvark,mole", "zebra,aardvark,mole,extra"]).toContain(list);
+		expect(zoo).toContain("zebra,aardvark,mole,extra");
+		// As the enums declare their members: not sorted.
+		expect(keys).toContain("common,rare,epic");
+		expect(keys).toContain("30,10,20");
+	});
+
+	test("sorts the keys of a mapped type over other keys, and keeps what an intersection or an interface adds around them", () => {
+		const result = compiledAlone();
+		expect(result.status).toBe(0);
+		const keys = tableKeys(result.files.get("mappedOrderSorted")!);
+
+		expect(keys).toContain("power,speed");
+		expect(keys).toContain("aardvark,zebra");
+		expect(keys).toContain("mole,zebra");
+		// Numbers by size, not as text.
+		expect(keys).toContain("1,2,10");
+		// `Extra`'s field, then the Record's, sorted; the interface's own field, then the inherited ones.
+		expect(keys).toContain("extra,cc,qq");
+		expect(keys).toContain("own,dd,kk");
+	});
+
+	test("lays each of them out the same whichever key literal or enum member TypeScript created first", () => {
+		const afterEarly = compileProbes({ aaaMappedOrderEarly: early, ...sources });
+		expect(afterEarly.status).toBe(0);
+		for (const name of ["mappedOrderKept", "mappedOrderSorted"]) {
+			expect(afterEarly.files.get(name)).toBe(compiledAlone().files.get(name)!);
+		}
+	});
+});
+
+describe("a union no spelling orders keeps 2.0.0-alpha.7's groups", () => {
+	// 2.0.0-alpha.7 numbered such a union's members as `alternativesOf` lists them: `boolean`, then the
+	// other types, then whole Roblox enums, then the literal values, which never depended on type ids.
+	// Among the types, the built-in ones (`string`, `number`, `object`) came first, in the order
+	// TypeScript creates them when its checker starts, before any other type; only the order of the
+	// rest among themselves followed what the checker happened to create first. Among the literal
+	// values, `true` and `false`, created with the checker too, came first. A TypeScript enum's
+	// computed member is a type of its own, created with the enum's other members, as declared: so a
+	// whole enum put its computed members ahead of its values, and one written in a union went by its
+	// declaration order.
+	const sources = {
+		groupOrderTypes: `export interface Alpha { alpha: number }
+export interface Box<T> { value: T }
+export interface Item { item: string }
+export interface None { __none: "__none" }
+export enum Computed { A = 4, B = A * 2, C = "abc".size(), D = 1 }
+export enum Late { Z = "z".size(), A = 1, Y = "yy".size(), B = 2 }
+`,
+		groupOrder: `import { Flamework } from "@flamework-experimental/core";
+import type { Alpha, Box } from "./groupOrderTypes";
+import { Computed, Late } from "./groupOrderTypes";
+export interface Grouped {
+	computed: Computed;
+	late: Late;
+	writtenComputed: Computed | string;
+	writtenLate: Late | string;
+	booleanFirst: Box<Alpha | boolean>;
+	typeFirst: Box<Alpha | "x" | "y">;
+}
+export const grouped = Flamework.createSerializer<Grouped>();
+`,
+		groupOrderBuiltIns: `import { Flamework } from "@flamework-experimental/core";
+import type { Box, Item, None } from "./groupOrderTypes";
+export interface BuiltIns {
+	stringNumber: Box<string | number>;
+	itemNumber: Box<Item | number>;
+	noneNumber: Box<None | number>;
+	noneString: Box<None | string>;
+	objectString: Box<object | string>;
+	trueFirst: "b" | true;
+	falseFirst: Box<"b" | false>;
+	mixed: "b" | true | 3;
+}
+export const builtIns = Flamework.createSerializer<BuiltIns>();
+`,
+	};
+	const early = `import { Computed, Late } from "./groupOrderTypes";
+import type { Item, None } from "./groupOrderTypes";
+export const LAST = Computed.D;
+export const LATE = Late.Y;
+export const VALUES = ["y", "x", "b", 1, 2, 3] as const;
+export const NONE: None = { __none: "__none" };
+export const ITEM: Item = { item: "x" };
+`;
+
+	let alone: ReturnType<typeof compileProbes> | undefined;
+	const compiledAlone = () => (alone ??= compileProbes(sources));
+
+	test("numbers an enum's computed members as 2.0.0-alpha.7 did, and `boolean` and other types ahead of literal values", () => {
+		const result = compiledAlone();
+		expect(result.status).toBe(0);
+		const kinds = tagKinds(result.files.get("groupOrder")!);
+
+		// `Computed` alone: its computed member C (a blob), then its values; `Late`: Z, Y, then its values.
+		expect(kinds).toContain("blob,literals");
+		expect(kinds).toContain("blob,blob,literals");
+		expect(kinds).not.toContain("literals,blob");
+		// Written in a union, as declared: `Computed`'s values (from A) before C; Late's Z, values (from A), Y.
+		expect(kinds).toContain("literals,blob,string");
+		expect(kinds).toContain("blob,literals,blob,string");
+		// `boolean` first, and `Alpha` (read by its field, `alpha`) before the literal values.
+		expect(kinds).toContain("boolean,alpha");
+		expect(kinds).toContain("alpha,literals");
+	});
+
+	test("numbers the built-in types ahead of the other types, in the order TypeScript creates them, as 2.0.0-alpha.7 did", () => {
+		const result = compiledAlone();
+		expect(result.status).toBe(0);
+
+		// `string` 0 and `number` 1, its whole numbers 2; `number` ahead of `Item` and `None`; `string`
+		// ahead of `None` and of `object`, a blob.
+		expect(tagKinds(result.files.get("groupOrderBuiltIns")!).sort()).toEqual(
+			[
+				"string,number,varint",
+				"number,other,varint",
+				"number,other,varint",
+				"string,other",
+				"string,blob",
+			].sort(),
+		);
+	});
+
+	test("numbers `true` and `false` ahead of the other literal values, as 2.0.0-alpha.7 did", () => {
+		const result = compiledAlone();
+		expect(result.status).toBe(0);
+		const luau = result.files.get("groupOrderBuiltIns")!;
+
+		// `true` or `false` first, then the numbers, then the strings.
+		expect(luau).toMatch(/local literals\w* = \{ true, "b" \}/);
+		expect(luau).toMatch(/local literals\w* = \{ false, "b" \}/);
+		expect(luau).toMatch(/local literals\w* = \{ true, 3, "b" \}/);
+	});
+
+	test("numbers them the same whichever member TypeScript created first", () => {
+		const afterEarly = compileProbes({ aaaGroupOrderEarly: early, ...sources });
+		expect(afterEarly.status).toBe(0);
+		for (const name of ["groupOrder", "groupOrderBuiltIns"]) {
+			expect(afterEarly.files.get(name)).toBe(compiledAlone().files.get(name)!);
+		}
+	});
+});
+
+describe("orders TypeScript's checker fixed for every build keep 2.0.0-alpha.7's layout", () => {
+	// 2.0.0-alpha.7 numbered these by type ids that came out the same in every build. The checker
+	// creates `false`, `true`, `""` and `0` when it starts, ahead of every literal a program writes,
+	// then the names `typeof` returns (`"string"`, `"number"`, ... `"function"`), and `1` before `-1`,
+	// which it gets by checking `1`; Roblox enum items were added after every other value. A type
+	// made from another (`Item[]`, `Box<Item>`) can only be created after it. And the
+	// parts of a written member that no spelling orders came at their types' places, where `boolean`
+	// is `false`'s, after `string` and `number`; so did the built-in parts of a member written as an
+	// alias of a union or in parentheses, ahead of the others, whatever order it wrote them in.
+	const sources = {
+		layoutKeptTypes: `export interface Box<T> { value: T }
+export interface Alpha { alpha: number }
+export interface Item { item: string }
+export interface Zed { zed: boolean }
+export interface Prims { n: number; s: string; b: boolean }
+export interface Settings { volume: number; muted: boolean; name: string }
+export interface Zoo { zebra: number; aardvark: string; mole: boolean }
+export interface Holder { empty: ""; count: number; alpha: Alpha }
+export interface KindHolder { kind: "number"; item: Item }
+export enum Rarity { Common = "common", Rare = "rare", Epic = "epic" }
+export type Id = number | string;
+export type Prim = boolean | number | string;
+export type ItemOrNumber = Item | "number";
+`,
+		layoutKeptLiterals: `import { Flamework } from "@flamework-experimental/core";
+import { Rarity } from "./layoutKeptTypes";
+export interface KeptLiterals {
+	emptyOrFive: "" | 5;
+	zeroOrMinusFive: -5 | 0;
+	trueEmptyOrFive: true | "" | 5;
+	signs: 1 | -1;
+	aroundZero: -1 | 0 | 1;
+	twos: -2 | 2 | 0;
+	rare: Rarity.Rare | Enum.KeyCode.W;
+	rarity: Rarity | Enum.KeyCode.W;
+	signKeys: Record<1 | -1, string>;
+	emptyKeys: Record<"" | 5, string>;
+}
+export const keptLiterals = Flamework.createSerializer<KeptLiterals>();
+`,
+		layoutKeptTypeofNames: `import { Flamework } from "@flamework-experimental/core";
+import type { Alpha, ItemOrNumber, KindHolder } from "./layoutKeptTypes";
+export interface KeptTypeofNames {
+	kind: "number" | "string";
+	three: "boolean" | "number" | "string";
+	target: "npc" | "object" | "player";
+	oneOrString: 1 | "string";
+	byKind: Record<"number" | "string", number>;
+	itemOrNumber: ItemOrNumber | Alpha;
+	held: KindHolder[keyof KindHolder] | Alpha;
+}
+export const keptTypeofNames = Flamework.createSerializer<KeptTypeofNames>();
+`,
+		layoutKeptMade: `import { Flamework } from "@flamework-experimental/core";
+import type { Box, Item, Zed } from "./layoutKeptTypes";
+export const itemOrList = Flamework.createSerializer<Box<Item | Item[]>>();
+export const zedOrList = Flamework.createSerializer<Box<Zed | Zed[]>>();
+export const itemOrBox = Flamework.createSerializer<Box<Item | Box<Item>>>();
+`,
+		layoutKeptMembers: `import { Flamework } from "@flamework-experimental/core";
+import type { Alpha, Holder, Item, Prims, Settings, Zoo } from "./layoutKeptTypes";
+export interface KeptMembers {
+	prim: Prims[keyof Prims] | undefined;
+	setting: Settings[keyof Settings] | undefined;
+	zoo: Zoo[keyof Zoo] | Alpha;
+	excluded: Exclude<string | boolean | number | undefined, undefined> | Alpha;
+	nonNullable: NonNullable<boolean | number | undefined> | Alpha;
+	held: Holder[keyof Holder] | Item;
+}
+export const keptMembers = Flamework.createSerializer<KeptMembers>();
+`,
+		layoutKeptAliases: `import { Flamework } from "@flamework-experimental/core";
+import type { Alpha, Id, Prim } from "./layoutKeptTypes";
+export interface KeptAliases {
+	id: Id | Alpha;
+	prim: Prim | Prim[];
+	parenthesized: (number | string) | Alpha;
+}
+export const keptAliases = Flamework.createSerializer<KeptAliases>();
+`,
+	};
+	// Checked ahead of the others (it sorts first, after the file it imports), it creates the values,
+	// the types made from others and `Alpha` before the files that use them do, in another order.
+	const early = `import { Rarity } from "./layoutKeptTypes";
+import type { Alpha, Box, Id, Item, Prim, Zed } from "./layoutKeptTypes";
+export const EPIC = Rarity.Epic;
+export const VALUES = [5, -2, 2, -1, 1, -5, "rare", "common", "player", "npc"] as const;
+export const KEYS = [Enum.KeyCode.A, Enum.KeyCode.W] as const;
+export const ITEMS: Item[] = [];
+export const ZEDS: Zed[] = [];
+export const BOXED: Box<Item> = { value: { item: "x" } };
+export const ALPHA: Alpha = { alpha: 1 };
+export const PRIMS: Prim[] = ["x", 1, true];
+export const IDS: Array<Id | Alpha> = [];
+`;
+	const tables = (luau: string) => [...luau.matchAll(/local literals\w* = (\{[^}]*\})/g)].map((match) => match[1]);
+	/** What each union decoder reads first under its tag 0. */
+	const firstReads = (luau: string) => [...luau.matchAll(/if tag\w* == 0 then\n\s*(.*)/g)].map((match) => match[1]);
+
+	let alone: ReturnType<typeof compileProbes> | undefined;
+	const compiledAlone = () => (alone ??= compileProbes(sources));
+	let afterEarly: ReturnType<typeof compileProbes> | undefined;
+	const compiledAfterEarly = () => (afterEarly ??= compileProbes({ aaaLayoutKeptEarly: early, ...sources }));
+	const compiled = (name: string) => {
+		const [first, second] = [compiledAlone(), compiledAfterEarly()];
+		expect(first.status).toBe(0);
+		expect(second.status).toBe(0);
+		// The same whichever value or type TypeScript created first.
+		expect(second.files.get(name)).toBe(first.files.get(name)!);
+		return first.files.get(name)!;
+	};
+
+	test('numbers `false`, `true`, `""` and `0` first, a number before its negative and Roblox enum items last', () => {
+		const luau = compiled("layoutKeptLiterals");
+		expect(tables(luau).sort()).toEqual(
+			[
+				'{ "", 5 }',
+				"{ 0, -5 }",
+				'{ true, "", 5 }',
+				"{ 1, -1 }",
+				"{ 0, 1, -1 }",
+				"{ 0, 2, -2 }",
+				'{ "rare", Enum.KeyCode.W }',
+				'{ "common", "rare", "epic", Enum.KeyCode.W }',
+			].sort(),
+		);
+		// A mapped type's keys go the same way.
+		expect(luau).toMatch(/\["1"\] = \w+,\s*\["-1"\] = \w+,/);
+		expect(luau).toMatch(/\[""\] = \w+,\s*\["5"\] = \w+,/);
+	});
+
+	test("numbers the names `typeof` returns ahead of the other literals, in the order the checker creates them", () => {
+		const luau = compiled("layoutKeptTypeofNames");
+		// `"string"`, `"number"`, `"bigint"`, `"boolean"`, `"symbol"`, `"undefined"`, `"object"`,
+		// `"function"`, after `0` and ahead of every other value, `1` included.
+		expect(tables(luau)).toEqual([
+			'{ "string", "number" }',
+			'{ "string", "number", "boolean" }',
+			'{ "object", "npc", "player" }',
+			'{ "string", 1 }',
+		]);
+		// The Record's fields: `string`, then `number`.
+		expect(luau).toMatch(/\.string\)\n\s*buffer\w*\.writef64\([^)]*\.number\)/);
+		// In a member written as an alias (`Item | "number"`) and in one nothing writes out
+		// (`KindHolder[keyof KindHolder]`), `"number"` goes first, at its place, as a built-in type does:
+		// it is 0, then `Item`, then `Alpha`.
+		const reads = firstReads(luau);
+		expect(reads.length).toBe(2);
+		for (const read of reads) expect(read).toMatch(/^value\w* = "number"$/);
+	});
+
+	test("numbers a type ahead of the types made from it in a union nothing writes out", () => {
+		// `Item` (or `Zed`) is 0 in each: an array of it, or `Box<Item>`, is 1.
+		const reads = firstReads(compiled("layoutKeptMade"));
+		expect(reads.length).toBe(3);
+		for (const read of reads) expect(read).toMatch(/codec\.r_Item\(|^local zed = /);
+	});
+
+	test("numbers the parts of a written member at their types' places, `boolean` after `string` and `number`", () => {
+		const luau = compiled("layoutKeptMembers");
+		// `string` 0, `number` 1, `boolean` 2, then `Alpha` (read by its field, `alpha`), then the whole
+		// numbers' tag. `Holder`'s: `number`, then `""` (which reads nothing), then `Alpha`, then `Item`.
+		expect(tagKinds(luau).sort()).toEqual(
+			[
+				"string,number,boolean,varint",
+				"string,number,boolean,varint",
+				"string,number,boolean,alpha,varint",
+				"string,number,boolean,alpha,varint",
+				"number,boolean,alpha,varint",
+				"number,other,alpha,other,varint",
+			].sort(),
+		);
+		expect(luau).toMatch(/tag\w* == 1 then\n\s*value\w* = ""\n/);
+	});
+
+	test("numbers the built-in parts of a member written as an alias or in parentheses first, as 2.0.0-alpha.7 did", () => {
+		const luau = compiled("layoutKeptAliases");
+		// `Id | Alpha` and `(number | string) | Alpha`: `string` 0 and `number` 1, though both write
+		// `number` first, then `Alpha` (read by its field, `alpha`), then the whole numbers' tag.
+		// `Prim | Prim[]`: `string`, `number`, `boolean`, then the array; `Prim` alone keeps its own
+		// written order.
+		expect(tagKinds(luau).sort()).toEqual(
+			[
+				"boolean,number,string,varint",
+				"string,number,alpha,varint",
+				"string,number,alpha,varint",
+				"string,number,boolean,array,varint",
+			].sort(),
+		);
 	});
 });

@@ -276,11 +276,11 @@ export async function transformInProcess<T>(
 			},
 		};
 
-		const result = use(fixture);
-		// The artifacts are saved on a timer; let it run before they are put back.
-		await new Promise((resolve) => setTimeout(resolve, 100));
-		return result;
+		return use(fixture);
 	} finally {
+		// Each pass saves the artifacts on a 0 ms timer; let it run before they are put back, a `use`
+		// that throws included, or the save would land after them.
+		await new Promise((resolve) => setTimeout(resolve, 100));
 		process.chdir(cwd);
 		for (const name of names) fs.rmSync(path.join(FIXTURE, "src", `${name}.ts`), { force: true });
 		for (const [file, contents] of saved) {

@@ -901,11 +901,13 @@ serialized one always, a raw one never. A member marked both raw and serialized 
 that names it. A target typed as a union of members (a conditional, a helper that returns a member
 by name) is taken member by member: the call packs, as its first member would, when every member
 packs, and is left alone when none does. Members that disagree are a build error that names the
-call, and so are packed members whose argument lists (for `setCallback`, results) are laid out
-differently on the wire: `packingKey` gives the generator's `wireKey` of the list each member's
-decoder reads (widths, literal tables, field names and union members in order), so one TypeScript
-type spelled two ways (`(x: string | number)`, `(x: number | string)`) differs, and members laid out
-alike pack together whatever their types. Two members packed the same way whose types differ only in
+call, and so are packed members whose argument lists (for `setCallback`, results) are not laid
+out and checked alike: `packingKey` gives the generator's `wireKey` of the list each member's
+decoder reads (widths, literal tables, field names and union members in order, and which widths and
+lengths are checked), so one TypeScript type spelled two ways (`(x: string | number)`,
+`(x: number | string)`) differs, and members laid out and checked alike pack together whatever their
+types. The key is stricter than the bytes: `u8` against `Implicit.u8`, or an empty argument list
+against one whose only argument is `undefined`, write the same bytes and are still refused. Two members packed the same way whose types differ only in
 such a spelling are one type to TypeScript, and a conditional's or an inferred return type's subtype
 reduction keeps one of them, so that case never reaches the check. For the union to still hold every member there, each sender and function
 receiver carries how it is packed as a type argument of its own (`_flamework_packing`, from
@@ -971,19 +973,58 @@ anonymous one off the spelling the value is reached through -- the parameter, pr
 type or tuple element, walked into array, `Set`, `Map` and `Promise` arguments -- as a union kind
 of that spelling's own (`spell`), since TypeScript's own order is by internal type id and it keeps
 one type for every spelling of `string | number`. A member written as another union follows that
-union's own written order (`orderAlternatives` walks into a non-generic alias's declaration). The
+union's own written order (`orderAlternatives` walks into parentheses and a non-generic alias's
+declaration), after its parts the checker creates when it starts, which go first, at their places
+(`memberRank`, below), where alpha.7's ids put them whatever order the union wrote them in: with
+`type Id = number | string`, `Id | Alpha` numbers `string` 0. The
 members no spelling orders -- a union with no node, reached through a generic's type argument, or
-the members of a generic alias's instance -- follow the written ones in the order of `typeKey`: a
-text of the type alone (a named type's name inside its namespaces, with its type arguments; sorted
+the members of a generic alias's instance -- follow the written ones by `alternativeRank` (`byKey`):
+first the group `alternativesOf` lists them in, which 2.0.0-alpha.7 numbered them by and which never
+depended on ids (`boolean`, the other types, whole Roblox enums, the literal group). The types split
+in two. The built-in ones (`string`, `number`, `object`) go first, by their place in
+`INTRINSIC_ORDER`: `createTypeChecker` creates them ahead of every other type, in one fixed order,
+the same in TypeScript 5.5.3 and 5.9.3, so their ids put them first, in that order, in alpha.7 too.
+The list holds their `intrinsicName`s in that order, written out, so it never reads an id and does not
+depend on the TypeScript version loaded. The rest go first by `nestingDepth`, how deeply a type
+nests type arguments: the checker can only create an array, a tuple, a generic's instance or an
+intersection after the types it is made from, so alpha.7's ids put `Item` ahead of `Item[]` and
+`Box<Item>` in every build. It ranks by depth whether or not one type is made from the other
+(`Zed` before `Alpha[]`), and sees no type arguments in a non-generic alias of a generic alias's
+instance (`type AZed = Wrapped<Zed>`), which TypeScript keeps without them. Then by `typeKey`, a text
+of the type alone (a named type's name inside its namespaces, with its type arguments; sorted
 members and properties otherwise), never `typeToString`, which prints a union's members in id order.
-Two members with one key stop the build (`byKey`). A literal group's plain values are sorted, and a
-TypeScript enum's members follow them in the enum's declaration order, several enums by name
-(`sortLiterals`; a member is a plain value by then, so `simplifyUnion` says which ones are, in
-`literalOrigins`). TypeScript creates an enum's member types together, in declaration order, so that
-order was already the ids' and an enum kept its 2.0.0-alpha.7 layout. An object with any field a
-mapped type made, or with no declaration, sends its fields by name (`fieldOrder`). TypeScript's type ids follow what the checker happened to create first
-in a compilation, so until 2026-10 a watcher's rebuild, which compiles a call site without the files
-that decode it, could number a literal union or lay out a `Record` differently from them. The order
+Generated text that never reaches the wire still follows ids, as in alpha.7: the type a check's or
+an array hole's message names (`displayName`) and a hoisted function's name (`generatedName`) come
+from `typeToString`. A TypeScript enum's computed member, a type of its own, ranks by the enum's
+name and its declaration index
+(`enumMemberOf`), so a whole enum keeps alpha.7's order, its computed members first; an enum written
+as a member goes by its declaration order (`byDeclaration`), as alpha.7's ids put it. Two members
+with one rank stop the build. A member written as a union that no spelling orders
+(`Prims[keyof Prims]` in `Prims[keyof Prims] | Alpha`) has its parts placed by `memberRank`: alpha.7
+put each part where the first of its types came in the member's ids, so a part holding a type the
+checker creates when it starts goes at the earliest such place (`startupRank`: a built-in type's place
+in `INTRINSIC_ORDER`, `false` and `true` among them, then `""` and `0`, which `createTypeChecker`
+creates later in its start, after `{}`, `` `${number}` `` and other types of its own, as
+`emptyStringType` and `zeroType`, then the names `typeof` returns, `TYPEOF_NAMES`, which
+`createTypeofType` makes next in `typeofNEFacts`' key order: `"string"`, `"number"`, `"bigint"`,
+`"boolean"`, `"symbol"`, `"undefined"`, `"object"`, `"function"`, in TypeScript 5.5.3 and 5.9.3).
+So `boolean` goes at `false`'s place, after `string` and `number`, not first as in a union with no
+node; the other parts follow by `alternativeRank`. A literal group's values start with `false`,
+`true`, `""` and `0`, then the
+names `typeof` returns, in that order, ahead of every other literal, as alpha.7's ids put them
+(`valueRank`): in `"number" | "string"` and in `1 | "string"`, `"string"` is 0. The other numbers
+follow by size, each before its negative: `checkPrefixUnaryExpression` checks `1` before it makes
+`-1`, in TypeScript 5.5.3 and 5.9.3. Then the strings, then a TypeScript enum's members in the enum's
+declaration order, several enums by name, then Roblox enum items by name, which `simplifyUnion` adds
+after every other value (`sortLiterals`; a member is a plain value by then, so `simplifyUnion` says
+which ones are, in `literalOrigins`). `keyRank` orders a mapped type's keys by the same
+`valueRank`. TypeScript creates an enum's member types
+together, in declaration order, so that order was already the ids' and an enum kept its 2.0.0-alpha.7
+layout. An enum declared in several declaration files lists its members in the
+program's file order, as it did in alpha.7, so a `/// <reference>` can renumber it (guide 06,
+Caveats). TypeScript's type ids follow what the checker happened to create first in a compilation,
+so until 2026-10 a watcher's rebuild, which compiles a call site without the files that decode it,
+could number a literal union or lay out a `Record` differently from them. The order
 used to be keyed on the type, first spelling wins, which made a sender in one file and a receiver in
 another disagree on the tags. Which member a value is
 written as is `evaluation`'s. Exact tests go first, in written order: a `type`/`typeof` check (for a
@@ -1024,6 +1065,22 @@ marked handler, so the transformer meets it and reports the conflict); the decod
 members with the switch off. `core/src/serialization/types.ts` holds only types: the
 brands and the `Serializer`/`Decoder` shapes. `Flamework.createSerializer<T>()` exposes the same
 generator through the `serializer` intrinsic.
+
+An object's fields go in TypeScript's order where that follows from the types, and sorted where it
+followed the ids (`fieldOrder`, `propertyOrder`). `getPropertiesOfType` lists an interface's or an
+object type's own properties as declared, then each base type's, and an intersection's part by part.
+A mapped type's come from `resolveMappedTypeMembers` (the same in TypeScript 5.5 and 5.9): with a
+`keyof T` constraint written in the declaration (`isMappedTypeWithKeyofConstraintDeclaration`:
+`Partial`, `Readonly`, `Required`, `{ [P in keyof T]?: ... }`) it walks `getPropertiesOfType` of
+the modifiers type `T`, so it keeps `T`'s order, worked out by the same rules (`mappedOrder` reads
+`T` off the type's `modifiersType`, and each property's place off its `syntheticOrigin`, which an
+`as` clause keeps). Over any other constraint (`Record`, `Pick`, `Omit`, `{ [K in U]: ... }`) it
+walks the key union's members, which is id order, so those go by each property's `keyType`
+(`keyRank`), sorted as a literal group's values are, which keeps a `Record` over one enum in its
+declaration order. A type holding a mapped type's properties among its own (an interface extending a
+`Record`) keeps its order and puts that run in the mapped type's; a property with no declaration that
+no mapped type made, or an intersection's property among a mapped type's, cannot be placed, and the
+type goes by name.
 
 Width checks (`serialization.checks` in the project config, read by the transformer only and
 never written to the runtime config) are generated into the writes. `findBrand` reads a brand's

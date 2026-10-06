@@ -28,8 +28,8 @@ import { getNetworkMode, isPackedMode, NetworkMode } from "../util/functions/net
  * A target typed as a union of members (a conditional, or a helper that returns one of several
  * members) is packed when every member in it is, the same way, and left alone when none is. Members
  * that are packed differently are refused, since whatever the call site did would not suit some of
- * them, and so are packed members whose argument lists (for `setCallback`, results) are laid out
- * differently on the wire. Their handler types carry how they are packed (`_flamework_packing`), so
+ * them, and so are packed members whose argument lists (for `setCallback`, results) are not laid out
+ * and checked alike. Their handler types carry how they are packed (`_flamework_packing`), so
  * that such a union does not reduce to the one member type the others extend. Members packed the same
  * way whose types are the same but for how their unions are spelled are one type to TypeScript all the
  * same, and a conditional or an inferred return type keeps only one of them: see the known limit in
@@ -98,8 +98,8 @@ interface TargetMember {
  *
  * A target typed as a union of members is packed only when every member is, and then as the first
  * of them. Members that are packed differently are refused, and so are packed members whose
- * argument lists (for `setCallback`, results) are laid out differently on the wire (`packingKey`):
- * one call site packs one way.
+ * argument lists (for `setCallback`, results) are not laid out and checked alike (`packingKey`): one
+ * call site packs one way, and a receiver that checks what the other does not would refuse a value.
  */
 function packedMember(
 	state: TransformState,
@@ -154,7 +154,7 @@ function packedMember(
 			const what = isCallback ? "results" : "argument lists";
 			refuseMixedTarget(
 				node,
-				`their ${what} are laid out differently ('${keyed[0].text}' and '${other.text}')`,
+				`their ${what} are not laid out and checked alike ('${keyed[0].text}' and '${other.text}')`,
 				isCallback
 					? "One call site packs the callback's results one way, so the callers of the other would read them wrong."
 					: "One call site packs one way, so the receiver of the other would read what it sends wrong.",

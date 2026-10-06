@@ -6,6 +6,7 @@ import { f } from "../factory";
 import {
 	buildGuardFromType,
 	EnumMemberOrigin,
+	enumMemberOf,
 	enumMemberOrigins,
 	extractTypes,
 	getLiteral,
@@ -30,7 +31,8 @@ import { isArrayType, isTupleType } from "./isTupleType";
  * - numbers: 8 (f64) unless branded (`u8` .. `f64`, or `varint` for a LEB128 unsigned integer); booleans 1
  * - strings and buffers: varint length + bytes (a fixed 1 / 2 / 4 with the `u8_string` .. `u32_buffer` brands)
  * - literal unions: a 1-byte index (2 past 255 members) into the values in canonical order (see
- *   `sortLiterals`: sorted, a TypeScript enum's in declaration order); a single literal costs nothing
+ *   `sortLiterals`: `false`, `true`, `""`, `0` and the names `typeof` returns first, then sorted, a
+ *   TypeScript enum's in declaration order, Roblox enum items last); a single literal costs nothing
  * - optionals: 1 presence byte, then the value when present
  * - arrays, sets, maps and tuple rest elements: varint count + elements. A tuple is the elements
  *   before its rest, the rest, then the elements after it (`[A, ...B[], C]`)
@@ -38,10 +40,17 @@ import { isArrayType, isTupleType } from "./isTupleType";
  *   `number | string` is 0 for the number and 1 for the string; past 255 members the union is a
  *   blob. A plain `number` member gives the whole numbers from 0 to 2^35 - 1 a tag of their own,
  *   one past the written members, and writes them as a varint: `number | string` sends 3 as tag 2
- *   and one byte. Members no spelling orders go after the others by a key of their type (see
- *   `orderAlternatives`). Which member a value is written as is decided by `evaluation`, not by the
- *   written order alone. Objects: fields in declaration order, a mapped type's in name order (see
- *   `fieldOrder`), nothing spent on names
+ *   and one byte. A member written as another union (`type Id = number | string` in `Id | Alpha`)
+ *   numbers its built-in types first, in the order TypeScript creates them (`string`, `number`, then
+ *   `boolean`), then `""`, `0` and the names `typeof` returns (`"string"`, `"number"`, ...), then the
+ *   rest as written. Members no spelling orders go after the others: `boolean` first, then the
+ *   built-in types (`string`, `number`), in the order TypeScript creates them, then the rest by how
+ *   deeply they nest type arguments (`Item` before `Item[]` and `Box<Item>`, and `Zed` before
+ *   `Alpha[]` too), then by a key of their type, a name for a named one (see `orderAlternatives`).
+ *   Which member a value is written as is decided by `evaluation`, not by the written order alone.
+ *   Objects: fields in TypeScript's order -- declaration order, a homomorphic
+ *   mapped type's (`Partial<T>`) as `T`'s -- except a mapped type over a union of keys (`Record`,
+ *   `Pick`), whose fields go by their keys, sorted (see `fieldOrder`); nothing spent on names
  * - Vector3 12, Vector2 8, Vector3int16 6, Vector2int16 4, Color3 12, UDim 8, UDim2 16, NumberRange 8,
  *   Rect 16, BrickColor 2, CFrame 48 (its twelve components), EnumItems 2 (their `Value`), blobs 4
  *
@@ -120,6 +129,47 @@ const ZERO_SIZE_COUNT_MAX = 0xffff;
 
 /** Where roblox-ts declares the Roblox API: everything in there without a layout travels as a blob. */
 const ROBLOX_TYPES = /[\\/]@rbxts[\\/]types[\\/]/;
+
+/**
+ * TypeScript's built-in types by `intrinsicName`, in the order its checker creates them when it
+ * starts, ahead of every other type (`createTypeChecker`, from `anyType` to `nonPrimitiveType`, the
+ * same in TypeScript 5.5.3 and 5.9.3): the order their type ids gave them, which 2.0.0-alpha.7
+ * numbered a union's members by. Written out, never read off the ids, so that it is the same
+ * whatever TypeScript version is loaded. Few of them reach a union's members (`string`, `number`,
+ * `object`, `null`): `any` and `unknown` absorb a union, `undefined` and `void` make it optional,
+ * `never` drops out, `boolean` is a group of its own (but for the parts of a written member, where it
+ * goes at `false`'s place: see `memberRank`), and `true` and `false` go with the literal values
+ * (`sortLiterals`). Later in its start, after some types of its own (`{}`, `` `${number}` ``, ...),
+ * the checker creates `""` and `0` (`emptyStringType` and `zeroType`), then the names `typeof` returns
+ * ({@link TYPEOF_NAMES}), ahead of every literal a program writes; `valueRank` puts them after `true`.
+ */
+const INTRINSIC_ORDER = [
+	"any",
+	"error",
+	"unresolved",
+	"intrinsic",
+	"unknown",
+	"undefined",
+	"null",
+	"string",
+	"number",
+	"bigint",
+	"false",
+	"true",
+	"symbol",
+	"void",
+	"never",
+	"object",
+];
+
+/**
+ * The names `typeof` returns, in the order the checker creates their string literal types when it
+ * starts (`createTypeofType`, in `typeofNEFacts`' key order), right after `""`, `0` and `0n` and
+ * ahead of every literal a program writes, the same in TypeScript 5.5.3 and 5.9.3. So 2.0.0-alpha.7's
+ * type ids put `"string"` ahead of `"number"`, and both ahead of `1` and `"npc"`, in every build
+ * (`valueRank`, `startupRank`).
+ */
+const TYPEOF_NAMES = ["string", "number", "bigint", "boolean", "symbol", "undefined", "object", "function"];
 
 /** Roblox datatypes with a buffer representation: the fields written, in constructor order. */
 const DATATYPES: Record<string, Array<[Width, string[]]>> = {
@@ -277,6 +327,21 @@ interface Alternative {
 	shape: Shape;
 	type?: ts.Type;
 }
+
+/**
+ * Where a union member that no spelling orders goes: by group, then depth, then key, then index
+ * (`alternativeRank`).
+ */
+interface AlternativeRank {
+	group: number;
+	/** How deeply a type nests type arguments (`nestingDepth`); 0 for anything else. */
+	depth: number;
+	key: string;
+	index: number;
+}
+
+/** Where a literal value goes in its group (`sortLiterals`): by group, then key, then index. */
+type LiteralRank = [group: number, key: number | string, index: number];
 
 interface Layout {
 	/** Byte size when every value of the type takes the same number of bytes. */
@@ -751,11 +816,12 @@ export function buildInlineResultEncoding(
 
 /**
  * Networking: how an argument list (a member's `_flamework_send` tuple) or, with `result`, a function
- * type's result is laid out on the wire, as text; it builds no code. Lists with one key are packed and
- * decoded alike: a call site whose target may be several members packs for all of them only when
- * their keys agree (see `transformNetworkingCall`). The key is read off the same list the call site
- * packs and each member's decoder reads, so their spellings count: `(x: string | number)` and
- * `(x: number | string)` differ.
+ * type's result is laid out on the wire, and what is checked there, as text; it builds no code. Lists
+ * with one key are packed, checked and decoded alike: a call site whose target may be several members
+ * packs for all of them only when their keys agree (see `transformNetworkingCall`). The key is read
+ * off the same list the call site packs and each member's decoder reads, so their spellings count:
+ * `(x: string | number)` and `(x: number | string)` differ. It is stricter than the bytes: a `u8`
+ * and an `Implicit.u8` write one byte alike, but only the second is checked.
  */
 export function packingKey(
 	state: TransformState,
@@ -1819,11 +1885,15 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 * 1. TypeScript lists them by internal type id instead, which follows what the checker happened to
 	 * create first in a compilation, so the order comes from the union's type node: an alias's own
 	 * declaration, or the spelling the value is reached through (see {@link spell}). A member written as
-	 * another union goes by that union's own spelling: written out in place, or a non-generic alias's
-	 * declaration. The members no spelling orders -- a union with no node at all (`Box<A | B>` reaches
-	 * `value: T`), the members of a generic alias's instantiation (`Maybe<A>`) -- go by
-	 * {@link alternativeKey}, after the members ahead of them. So the order never depends on type ids:
-	 * a watcher's rebuild compiles a sender without its receiver, and a stored buffer outlives a build.
+	 * another union goes by that union's own spelling, in parentheses or a non-generic alias's
+	 * declaration, after its parts the checker creates when it starts (`string`, `number`, `boolean`,
+	 * `""`, `0`, `"number"`), which go first, at their places ({@link memberRank}), as 2.0.0-alpha.7's
+	 * type ids put them. A TypeScript enum written as a member goes by its declaration order (see
+	 * {@link byDeclaration}). The members no spelling orders -- a union with no node at all (`Box<A | B>`
+	 * reaches `value: T`), the members of a generic alias's instantiation (`Maybe<A>`) -- go by
+	 * {@link byKey}, after the members ahead of them; the parts of a written member that no spelling
+	 * orders (`Prims[keyof Prims]`) by {@link memberRank}. So the order never depends on type ids: a
+	 * watcher's rebuild compiles a sender without its receiver, and a stored buffer outlives a build.
 	 */
 	function orderAlternatives(
 		alternatives: Alternative[],
@@ -1834,34 +1904,50 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const place = (alternative: Alternative | undefined) => {
 			if (alternative && !ordered.includes(alternative)) ordered.push(alternative);
 		};
-		const placeByKey = (group: Alternative[]) =>
+		const placeByKey = (group: Alternative[], rank?: (alternative: Alternative) => AlternativeRank) =>
 			byKey(
 				group.filter((member) => !ordered.includes(member)),
 				union,
+				rank,
 			).forEach(place);
 
 		const aliases = new Set<ts.Node>();
 		const visit = (member: ts.TypeNode): void => {
 			if (ts.isParenthesizedTypeNode(member)) return visit(member.type);
-			if (ts.isUnionTypeNode(member)) return member.types.forEach(visit);
 
 			const memberType = typeChecker.getTypeFromTypeNode(member);
 			if (!memberType.isUnion()) return place(alternativeFor(alternatives, memberType));
 
 			// `boolean`, a literal union or a whole enum is one alternative, whatever order its parts are in.
 			const found = new Array<Alternative>();
+			const startup = new Map<Alternative, number>();
 			for (const constituent of memberType.types) {
 				const alternative = alternativeFor(alternatives, constituent);
-				if (alternative && !found.includes(alternative)) found.push(alternative);
+				if (!alternative) continue;
+				if (!found.includes(alternative)) found.push(alternative);
+				const at = startupRank(constituent);
+				if (at !== undefined) startup.set(alternative, Math.min(startup.get(alternative) ?? Infinity, at));
 			}
 			if (found.length <= 1) return found.forEach(place);
+			if (isTypeScriptEnum(memberType)) return byDeclaration(memberType, found).forEach(place);
+
+			// Its parts the checker creates when it starts go first, at their places, where 2.0.0-alpha.7's
+			// type ids put them whatever order the member writes them in (`Id | Alpha` with
+			// `type Id = number | string` numbers `string` 0). Its own written order, in parentheses or in
+			// a non-generic alias's declaration, numbers the others; `memberRank` the parts nothing writes.
+			const rank = (alternative: Alternative) => memberRank(alternative, startup.get(alternative));
+			placeByKey(
+				found.filter((alternative) => startup.has(alternative)),
+				rank,
+			);
+			if (ts.isUnionTypeNode(member)) return member.types.forEach(visit);
 
 			const alias = memberType.aliasTypeArguments === undefined ? aliasNode(memberType) : undefined;
 			if (alias && !aliases.has(alias)) {
 				aliases.add(alias);
 				visit(alias);
 			}
-			placeByKey(found);
+			placeByKey(found, rank);
 		};
 		node?.types.forEach(visit);
 		placeByKey(alternatives);
@@ -1869,36 +1955,164 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	}
 
 	/**
-	 * Members no spelling orders, by {@link alternativeKey}, in code units. Two with one key could only
-	 * be put in an order that depends on something other than the types, so the build stops, naming
-	 * them, rather than pick one.
+	 * Members no spelling orders, by `rank` ({@link alternativeRank} unless given). Two with one rank
+	 * could only be put in an order that depends on something other than the types, so the build
+	 * stops, naming them, rather than pick one.
 	 */
-	function byKey(members: Alternative[], union: ts.UnionType): Alternative[] {
-		const keyed = members.map((alternative) => ({ alternative, key: alternativeKey(alternative) }));
-		keyed.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-		for (let i = 1; i < keyed.length; i++) {
-			if (keyed[i].key !== keyed[i - 1].key) continue;
-			const [a, b] = [keyed[i - 1], keyed[i]].map(({ alternative }) => alternativeName(alternative));
+	function byKey(
+		members: Alternative[],
+		union: ts.UnionType,
+		rank: (alternative: Alternative) => AlternativeRank = alternativeRank,
+	): Alternative[] {
+		const ranked = members.map((alternative) => ({ alternative, rank: rank(alternative) }));
+		ranked.sort((a, b) => compareRanks(a.rank, b.rank));
+		for (let i = 1; i < ranked.length; i++) {
+			if (compareRanks(ranked[i].rank, ranked[i - 1].rank) !== 0) continue;
+			const [a, b] = [ranked[i - 1], ranked[i]].map(({ alternative }) => alternativeName(alternative));
 			fail(
 				`the union '${typeText(union)}' has two members, '${a}' and '${b}', that nothing but TypeScript's internal type ids would put in an order, and a union's members are numbered by their order. ` +
 					"Declare an alias for the union (`type Choice = A | B`) and use it where the value is declared, so that its written order numbers them, or rename one of the two",
 			);
 		}
 
-		return keyed.map(({ alternative }) => alternative);
+		return ranked.map(({ alternative }) => alternative);
 	}
 
 	/**
-	 * What orders a union member that no spelling orders: an enum by its name (`Enum.KeyCode`), a
-	 * literal group by its values, and a type by {@link typeKey}.
+	 * What orders a union member that no spelling orders. First its group, in the order `alternativesOf`
+	 * lists them, which 2.0.0-alpha.7 numbered such a union by and which never depended on type ids:
+	 * `boolean`, then the other types, then whole Roblox enums, then the literal values. The types
+	 * split in two: TypeScript's built-in ones (`string`, `number`, `object`), which its checker creates
+	 * first of all, so their ids put them ahead of every other type, go first, in that creation order
+	 * ({@link INTRINSIC_ORDER}); then the rest by {@link nestingDepth}, how deeply each nests type
+	 * arguments, made from one another or not: so a type goes ahead of the types made from it (`Item`
+	 * before `Item[]` and `Box<Item>`, which the checker can only create after `Item`), and `Zed` ahead
+	 * of `Alpha[]` too. Then a key: a type's {@link typeKey}, an enum's name (`Enum.KeyCode`), the
+	 * literal values. A TypeScript enum's computed member (`C = "abc".size()`), a type of its own, goes
+	 * by the enum's name and then its place among the enum's members, so a whole enum keeps the order
+	 * 2.0.0-alpha.7 gave it: its computed members as declared, then its values. Only the order of the
+	 * rest of the types among themselves followed the ids then.
 	 */
-	function alternativeKey(alternative: Alternative): string {
-		if (alternative.type) return typeKey(alternative.type);
+	function alternativeRank(alternative: Alternative): AlternativeRank {
+		const type = alternative.type;
+		if (type) {
+			if (type === typeChecker.getBooleanType()) return { group: 0, depth: 0, key: "boolean", index: 0 };
+			const intrinsic = intrinsicRank(type);
+			if (intrinsic !== undefined) return { group: 1, depth: 0, key: "", index: intrinsic };
+			const member = enumMemberOf(type);
+			if (member) return { group: 2, depth: 0, key: qualifiedName(member.enum), index: member.index };
+			return { group: 2, depth: nestingDepth(type), key: typeKey(type), index: -1 };
+		}
+
 		const kind = describe(alternative.shape);
-		if (kind.kind === "constant") return literalKey(kind.value);
-		if (kind.kind === "literals") return kind.values.map(literalKey).join(" | ");
-		if (kind.kind === "enum") return `Enum.${kind.name}`;
-		return kind.kind;
+		if (kind.kind === "enum") return { group: 3, depth: 0, key: `Enum.${kind.name}`, index: 0 };
+		if (kind.kind === "constant") return { group: 4, depth: 0, key: literalKey(kind.value), index: 0 };
+		if (kind.kind === "literals") {
+			return { group: 4, depth: 0, key: kind.values.map(literalKey).join(" | "), index: 0 };
+		}
+		return { group: 2, depth: 0, key: kind.kind, index: -1 };
+	}
+
+	/**
+	 * What orders the parts of a member written as a union that no spelling orders, such as
+	 * `Prims[keyof Prims]` in `Prims[keyof Prims] | Alpha`. 2.0.0-alpha.7 put each part where the first
+	 * of its types came in the member's type ids. So, unlike in a union nothing writes out, `boolean`
+	 * did not go first: it went at `false`'s place among the built-in types, after `string` and
+	 * `number`, and a literal group holding `false`, `true`, `""`, `0` or a name `typeof` returns
+	 * (`"number"`), which the checker creates when it starts, at its earliest such value's place.
+	 * `startup` is that place ({@link startupRank}), for a part that has one; every other part goes by
+	 * {@link alternativeRank}, after them. The parts that have one go first in a member written out
+	 * too, in parentheses or as an alias, ahead of its written order, which numbers only the others:
+	 * alpha.7 put them there from the same ids.
+	 */
+	function memberRank(alternative: Alternative, startup: number | undefined): AlternativeRank {
+		if (startup !== undefined) return { group: 1, depth: 0, key: "", index: startup };
+		return alternativeRank(alternative);
+	}
+
+	/** A built-in type's place in {@link INTRINSIC_ORDER}, by its name. */
+	function intrinsicRank(type: ts.Type): number | undefined {
+		if (!(type.flags & ts.TypeFlags.Intrinsic)) return;
+		const index = INTRINSIC_ORDER.indexOf((type as ts.IntrinsicType).intrinsicName);
+		return index >= 0 ? index : undefined;
+	}
+
+	/**
+	 * Where the checker creates `type` when it starts, ahead of every type a program makes: a built-in
+	 * type at its place in {@link INTRINSIC_ORDER} (`false` and `true` among them), then `""` and `0`,
+	 * which `createTypeChecker` creates later in its start (`emptyStringType`, `zeroType`), then the
+	 * names `typeof` returns, in {@link TYPEOF_NAMES}' order, which it creates next; the same in
+	 * TypeScript 5.5.3 and 5.9.3. `undefined` for any other type, an enum member whose value is `""`,
+	 * `0` or `"number"` included: that is a type of its own.
+	 */
+	function startupRank(type: ts.Type): number | undefined {
+		const intrinsic = intrinsicRank(type);
+		if (intrinsic !== undefined) return intrinsic;
+		if (type.flags & ts.TypeFlags.EnumLiteral) return;
+		if (type.isStringLiteral() && type.value === "") return INTRINSIC_ORDER.length;
+		if (type.isNumberLiteral() && type.value === 0) return INTRINSIC_ORDER.length + 1;
+		const typeofName = type.isStringLiteral() ? TYPEOF_NAMES.indexOf(type.value) : -1;
+		if (typeofName >= 0) return INTRINSIC_ORDER.length + 2 + typeofName;
+	}
+
+	/**
+	 * How deeply `type` nests type arguments: 0 for a type with none, one more than its deepest
+	 * argument for an array, a tuple, a generic's instance (an interface's, a class's or an alias's)
+	 * or an intersection; a union counts as its deepest member. TypeScript can only create such a type
+	 * after the types it is made from, so 2.0.0-alpha.7's type ids put `Item` ahead of `Item[]`,
+	 * `[Item, number]` and `Box<Item>` in every compilation. It cannot see what a non-generic alias of
+	 * a generic alias's instance is made from (`type AZed = Wrapped<Zed>`, which TypeScript keeps
+	 * without type arguments): that is 0, so `AZed` goes by its name, ahead of `Zed`.
+	 */
+	function nestingDepth(type: ts.Type, seen = new Set<ts.Type>()): number {
+		if (type.isUnion()) return Math.max(0, ...type.types.map((member) => nestingDepth(member, seen)));
+
+		const parts = [...(type.aliasTypeArguments ?? [])];
+		if (type.isIntersection()) parts.push(...type.types);
+		else if (ts.getObjectFlags(type) & ts.ObjectFlags.Reference) {
+			const reference = type as ts.TypeReference;
+			const typeArguments = typeChecker.getTypeArguments(reference);
+			parts.push(...typeArguments.slice(0, reference.target.typeParameters?.length ?? 0));
+		}
+		if (parts.length === 0 || seen.has(type)) return 0;
+
+		seen.add(type);
+		try {
+			return 1 + Math.max(...parts.map((part) => nestingDepth(part, seen)));
+		} finally {
+			seen.delete(type);
+		}
+	}
+
+	function compareRanks(a: AlternativeRank, b: AlternativeRank): number {
+		return (
+			a.group - b.group || a.depth - b.depth || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0) || a.index - b.index
+		);
+	}
+
+	/** Whether `type` is a TypeScript enum with several members: a union of its members' types. */
+	function isTypeScriptEnum(type: ts.UnionType): boolean {
+		return (type.flags & ts.TypeFlags.EnumLiteral) !== 0 && ((type.symbol?.flags ?? 0) & ts.SymbolFlags.Enum) !== 0;
+	}
+
+	/**
+	 * The alternatives a TypeScript enum's members fall into, in the enum's declaration order: each
+	 * where its first member is declared. TypeScript creates an enum's member types together, in
+	 * declaration order, so the order 2.0.0-alpha.7 took from their type ids was already this one: a
+	 * value group before a computed member declared after its first value, and after one declared
+	 * ahead of it.
+	 */
+	function byDeclaration(enumType: ts.UnionType, found: Alternative[]): Alternative[] {
+		const first = new Map<Alternative, number>();
+		for (const constituent of enumType.types) {
+			const alternative = alternativeFor(found, constituent);
+			const index = enumMemberOf(constituent)?.index;
+			if (!alternative || index === undefined) continue;
+			first.set(alternative, Math.min(first.get(alternative) ?? Infinity, index));
+		}
+
+		const at = (alternative: Alternative) => first.get(alternative) ?? Number.MAX_SAFE_INTEGER;
+		return [...found].sort((a, b) => at(a) - at(b));
 	}
 
 	/**
@@ -2255,25 +2469,154 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	}
 
 	/**
-	 * The order an object's fields go on the wire. An interface or an object literal type lists them as
-	 * declared, which every compilation of the same source shares. A mapped type (`Record`, `Pick`,
-	 * `Omit`, `Partial`, `Readonly`, `{ [K in U]: ... }`) lists them in the order of its keys, which for a
-	 * union of literals is TypeScript's internal type id order: whichever key the checker happened to
-	 * create first in that compilation came first. An object with any field a mapped type made
-	 * (inherited, or through an intersection, too) or with no declaration sends them all in name order,
-	 * by code units, which needs no declaration and is the same on every machine.
+	 * The order an object's fields go on the wire: TypeScript's own, which 2.0.0-alpha.7 sent, wherever
+	 * that follows from the types alone, and a sorted one where it followed TypeScript's type ids (see
+	 * {@link propertyOrder}). A field missing from that order goes last, by name.
 	 */
 	function fieldOrder(type: ts.Type, properties: ts.Symbol[]): ts.Symbol[] {
-		const isMapped = (member: ts.Type) => (ts.getObjectFlags(member) & ts.ObjectFlags.Mapped) !== 0;
-		const mapped =
-			(type.isIntersection() ? type.types.some(isMapped) : isMapped(type)) ||
-			properties.some(
-				(property) =>
-					(ts.getCheckFlags(property) & ts.CheckFlags.Mapped) !== 0 || !property.declarations?.length,
-			);
-		if (!mapped) return properties;
+		const order = propertyOrder(type, new Set());
+		const position = new Map(order.map((name, i) => [name, i]));
+		const at = (property: ts.Symbol) => position.get(property.name) ?? Number.MAX_SAFE_INTEGER;
+		return [...properties].sort((a, b) => at(a) - at(b) || compareText(a.name, b.name));
+	}
 
-		return [...properties].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+	/**
+	 * A type's property names in wire order. TypeScript lists an interface's or an object literal
+	 * type's properties as declared, then those it inherits, base by base, and an intersection's part
+	 * by part: all of it follows from the source. A mapped type is where its order can follow the type
+	 * ids instead (`resolveMappedTypeMembers` in TypeScript's checker, 5.5 and 5.9 alike):
+	 * - A homomorphic one, `{ [P in keyof T]: ... }` (`Partial`, `Readonly`, `Required`, and the
+	 *   project's own) makes its properties in the order `T` lists its own (`getPropertiesOfType` of
+	 *   `T`), so it follows `T`'s order, worked out by these same rules.
+	 * - One over a union of keys (`Record<K, V>`, `Pick`, `Omit`, `{ [P in K]: ... }`) makes them in the
+	 *   order of the union's members, which is by type id: whichever key literal the checker happened to
+	 *   create first in that compilation came first. Those go by their keys, sorted as a literal group's
+	 *   values are (`sortLiterals`): numbers by value, then strings by code units, then a TypeScript
+	 *   enum's members as the enum declares them (which is what the ids gave them too: `Record<E, V>`
+	 *   keeps its order), the enums by name.
+	 * A type whose properties came from a mapped type (an interface extending a `Record`, a spread)
+	 * keeps TypeScript's order around them and puts that mapped type's run in the mapped type's order.
+	 * Where the origin cannot be told -- a property with no declaration that no mapped type made, one
+	 * an intersection made among a mapped type's -- the type's properties go by name.
+	 */
+	function propertyOrder(type: ts.Type, seen: Set<ts.Type>): string[] {
+		const properties = typeChecker.getPropertiesOfType(type);
+		const byName = () => properties.map((property) => property.name).sort(compareText);
+		if (seen.has(type)) return byName();
+
+		seen.add(type);
+		try {
+			if (type.isIntersection()) {
+				// `getPropertiesOfUnionOrIntersectionType`: each part's in turn, a name where it first comes.
+				const order = new Array<string>();
+				for (const part of type.types) {
+					for (const name of propertyOrder(part, seen)) if (!order.includes(name)) order.push(name);
+				}
+				return order;
+			}
+
+			if (ts.getObjectFlags(type) & ts.ObjectFlags.Mapped) return mappedOrder(type as ts.MappedType, seen);
+
+			const mappedBy = (property: ts.Symbol) =>
+				ts.getCheckFlags(property) & ts.CheckFlags.Mapped
+					? (property as ts.MappedSymbol).links.mappedType
+					: undefined;
+			const unknownOrigin = properties.some((property) => !mappedBy(property) && !property.declarations?.length);
+			const synthetic = properties.some(
+				(property) => (ts.getCheckFlags(property) & ts.CheckFlags.SyntheticProperty) !== 0,
+			);
+			if (unknownOrigin || (synthetic && properties.some(mappedBy))) return byName();
+
+			// A mapped type's properties come in one run, in that type's order: put the run in its wire order.
+			const order = new Array<string>();
+			let start = 0;
+			while (start < properties.length) {
+				const mapped = mappedBy(properties[start]);
+				let end = start + 1;
+				while (mapped && end < properties.length && mappedBy(properties[end]) === mapped) end++;
+
+				const run = properties.slice(start, end).map((property) => property.name);
+				if (mapped) {
+					const inner = propertyOrder(mapped, seen);
+					run.sort((a, b) => inner.indexOf(a) - inner.indexOf(b));
+				}
+				order.push(...run);
+				start = end;
+			}
+			return order;
+		} finally {
+			seen.delete(type);
+		}
+	}
+
+	/** {@link propertyOrder} of a mapped type. */
+	function mappedOrder(type: ts.MappedType, seen: Set<ts.Type>): string[] {
+		const properties = typeChecker.getPropertiesOfType(type);
+		const links = (property: ts.Symbol) =>
+			ts.getCheckFlags(property) & ts.CheckFlags.Mapped ? (property as ts.MappedSymbol).links : undefined;
+		const constraint = ts.getEffectiveConstraintOfTypeParameter(type.declaration.typeParameter);
+		const homomorphic =
+			constraint !== undefined &&
+			ts.isTypeOperatorNode(constraint) &&
+			constraint.operator === ts.SyntaxKind.KeyOfKeyword;
+
+		let rank: (property: ts.Symbol) => Array<number | string>;
+		if (homomorphic && type.modifiersType) {
+			// Made from the properties of `T` (which resolving the type's members cached as `modifiersType`),
+			// each where `T` has the property its key names; a key remapped (`as`) into several names makes
+			// them together.
+			const inner = propertyOrder(typeChecker.getApparentType(type.modifiersType), seen);
+			rank = (property) => {
+				const origin = links(property)?.syntheticOrigin ?? property;
+				const at = inner.indexOf(origin.name);
+				return [at >= 0 ? at : Number.MAX_SAFE_INTEGER];
+			};
+		} else if (!homomorphic) {
+			rank = (property) => {
+				const key = links(property)?.keyType;
+				return key ? keyRank(key) : [Number.MAX_SAFE_INTEGER];
+			};
+		} else {
+			return properties.map((property) => property.name).sort(compareText);
+		}
+
+		return [...properties]
+			.sort((a, b) => compareTuples(rank(a), rank(b)) || compareText(a.name, b.name))
+			.map((property) => property.name);
+	}
+
+	/**
+	 * Where a mapped type's key goes, as `sortLiterals` puts a literal group's values ({@link valueRank}):
+	 * `""`, `0` and the names `typeof` returns first, then numbers by size, each before its negative,
+	 * then strings by code units, then a TypeScript enum's members by the enum's name and declaration
+	 * order (`Record<"number" | "string", V>` sends `string`, then `number`). A key that names
+	 * several properties (`as`) goes where the first of them would.
+	 */
+	function keyRank(key: ts.Type): Array<number | string> {
+		if (key.isUnion()) {
+			return key.types.map(keyRank).reduce((least, rank) => (compareTuples(rank, least) < 0 ? rank : least));
+		}
+
+		const member = enumMemberOf(key);
+		if (member) return [3, qualifiedName(member.enum), member.index];
+		if (key.isNumberLiteral() || key.isStringLiteral()) return valueRank(key.value);
+		return [5, "", 0];
+	}
+
+	function compareTuples(a: ReadonlyArray<number | string>, b: ReadonlyArray<number | string>): number {
+		for (let i = 0; i < Math.min(a.length, b.length); i++) {
+			const [x, y] = [a[i], b[i]];
+			if (x === y) continue;
+			if (typeof x === "number" && typeof y === "number") return x - y;
+			return compareText(String(x), String(y));
+		}
+
+		return a.length - b.length;
+	}
+
+	/** Text by code units, the same on every machine (`localeCompare` is not). */
+	function compareText(a: string, b: string): number {
+		return a < b ? -1 : a > b ? 1 : 0;
 	}
 
 	function hasUndefined(type: ts.Type) {
@@ -3855,36 +4198,36 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	}
 
 	/**
-	 * A literal group's values in the order they are numbered on the wire. First the plain values,
-	 * sorted: numbers by value, then strings by their text in code units, then `false` and `true`. Then
-	 * Roblox enum items by name (`Enum.Material.Plastic`). Then a TypeScript enum's members as the enum
-	 * declares them, a whole enum or some of its members alike; the members of several enums go by the
-	 * enum's name inside its namespaces (never a file's), then as declared. `origins` says which values
+	 * A literal group's values in the order they are numbered on the wire. First `false`, `true`, `""`
+	 * and `0`, in that order, then the names `typeof` returns, in {@link TYPEOF_NAMES}' order (in
+	 * `"number" | "string"`, `"string"` is 0). Then the other plain values, sorted: numbers by size,
+	 * each before its negative (`1`, `-1`, `2`), then strings by their text in code units. Then a
+	 * TypeScript enum's members as the enum declares them, a whole enum or some of its members alike;
+	 * the members of several enums go by the enum's name inside its namespaces (never a file's), then
+	 * as declared. Then Roblox enum items by name (`Enum.Material.Plastic`). `origins` says which values
 	 * are a TypeScript enum's members (see `enumMemberOrigins`), since a member is a plain string or
 	 * number by the time it is a value here.
 	 *
 	 * TypeScript lists a union's literals by internal type id, which follows whichever literal the
 	 * checker happened to create first in a compilation, so the same union could be numbered one way
-	 * in a sender and another way in its receiver after a partial rebuild. An enum's members were
-	 * already in a fixed order: TypeScript creates them together, in declaration order, so the ids put
-	 * them in that order, and an enum keeps the layout 2.0.0-alpha.7 gave it.
+	 * in a sender and another way in its receiver after a partial rebuild. Some orders were already
+	 * fixed, and keep the layout 2.0.0-alpha.7 gave them (see {@link valueRank}): the values the checker
+	 * creates when it starts came first, a number came before its negative, and TypeScript creates an
+	 * enum's members together, in declaration order, so the ids put them in that order. `simplifyUnion`
+	 * adds the Roblox enum items after every other value.
 	 */
 	function sortLiterals(
 		values: ts.Expression[],
 		origins: ReadonlyArray<EnumMemberOrigin | undefined>,
 	): ts.Expression[] {
-		const rank = (
-			value: ts.Expression,
-			origin: EnumMemberOrigin | undefined,
-		): [number, number | string, number] => {
-			if (origin) return [4, qualifiedName(origin.enum), origin.index];
+		const rank = (value: ts.Expression, origin: EnumMemberOrigin | undefined): LiteralRank => {
+			if (origin) return [3, qualifiedName(origin.enum), origin.index];
+			if (value.kind === ts.SyntaxKind.FalseKeyword) return valueRank(false);
+			if (value.kind === ts.SyntaxKind.TrueKeyword) return valueRank(true);
 			const number = literalNumber(value);
-			if (number !== undefined) return [0, number, 0];
-			if (f.is.string(value)) return [1, value.text, 0];
-			if (value.kind === ts.SyntaxKind.FalseKeyword || value.kind === ts.SyntaxKind.TrueKeyword) {
-				return [2, literalKey(value), 0];
-			}
-			return [3, literalKey(value), 0];
+			if (number !== undefined) return valueRank(number);
+			if (f.is.string(value)) return valueRank(value.text);
+			return [4, literalKey(value), 0];
 		};
 		const compare = (x: number | string, y: number | string) => (x < y ? -1 : x > y ? 1 : 0);
 
@@ -3900,6 +4243,27 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 					compare(a.text, b.text),
 			)
 			.map(({ value }) => value);
+	}
+
+	/**
+	 * Where a plain literal value goes among a literal group's values ({@link sortLiterals}) and a
+	 * mapped type's keys ({@link keyRank}), keeping the orders 2.0.0-alpha.7's type ids already fixed.
+	 * `false`, `true`, `""` and `0` come first, in that order, then the names `typeof` returns, in
+	 * {@link TYPEOF_NAMES}' order (`"string"`, `"number"`, ...): the checker creates them when it starts,
+	 * ahead of every literal a program writes (see {@link startupRank}). Then the other numbers, by
+	 * size, each before its negative: the checker gets `-1` by checking `1` first
+	 * (`checkPrefixUnaryExpression`, the same in TypeScript 5.5.3 and 5.9.3). Then the strings, by code
+	 * units. The order of two values of different size or of two strings followed the ids alone.
+	 */
+	function valueRank(value: boolean | number | string): LiteralRank {
+		if (value === false) return [0, 0, 0];
+		if (value === true) return [0, 1, 0];
+		if (value === "") return [0, 2, 0];
+		if (value === 0) return [0, 3, 0];
+		const typeofName = typeof value === "string" ? TYPEOF_NAMES.indexOf(value) : -1;
+		if (typeofName >= 0) return [0, 4 + typeofName, 0];
+		if (typeof value === "number") return [1, Math.abs(value), value < 0 ? 1 : 0];
+		return [2, value, 0];
 	}
 
 	/**

@@ -415,12 +415,12 @@ export function run(flag: boolean) {
 			`${PLAIN_ON}; ${RAW}`,
 		);
 		expect(refused.get("(flag ? client.plainPing : client.wide).fire(...)")).toBe(
-			"their argument lists are laid out differently ('ProbeServerEvents.plainPing(value: number): void' and 'ProbeServerEvents.wide(value: number | string): void')",
+			"their argument lists are not laid out and checked alike ('ProbeServerEvents.plainPing(value: number): void' and 'ProbeServerEvents.wide(value: number | string): void')",
 		);
 		expect(
 			refused.get("(flag ? serverFunctions.serializedFn : serverFunctions.serializedText).setCallback(...)"),
 		).toBe(
-			"their results are laid out differently ('ProbeFunctions.serializedFn(v: number): number' and 'ProbeFunctions.serializedText(v: number): string')",
+			"their results are not laid out and checked alike ('ProbeFunctions.serializedFn(v: number): number' and 'ProbeFunctions.serializedText(v: number): string')",
 		);
 		expect(refused.size).toBe(5);
 	});
@@ -534,7 +534,7 @@ export function run(flag: boolean) {
 			].map((match) => [match[1], match[2]]),
 		);
 
-	test("refuses members whose argument lists or results are laid out differently, naming them", () => {
+	test("refuses members whose argument lists or results are not laid out and checked alike, naming them", () => {
 		const result = compileProbes({
 			layoutEvent: either(["client.textFirst", "client.numberFirst"], 'fire("x")'),
 			layoutCallback: either(
@@ -546,17 +546,17 @@ export function run(flag: boolean) {
 		expect(result.status).not.toBe(0);
 		const refused = refusals(result.output);
 		expect(refused.get("(flag ? client.textFirst : client.numberFirst).fire(...)")).toBe(
-			"their argument lists are laid out differently ('LayoutServerEvents.numberFirst(value: number | string): void' and 'LayoutServerEvents.textFirst(value: string | number): void')",
+			"their argument lists are not laid out and checked alike ('LayoutServerEvents.numberFirst(value: number | string): void' and 'LayoutServerEvents.textFirst(value: string | number): void')",
 		);
 		expect(refused.get("(flag ? serverFunctions.textFirst : serverFunctions.numberFirst).setCallback(...)")).toBe(
-			"their results are laid out differently ('LayoutFunctions.numberFirst(): number | string' and 'LayoutFunctions.textFirst(): string | number')",
+			"their results are not laid out and checked alike ('LayoutFunctions.numberFirst(): number | string' and 'LayoutFunctions.textFirst(): string | number')",
 		);
 		expect(refused.size).toBe(2);
 		expect(plainOutput(result.output)).toContain("so the receiver of the other would read what it sends wrong");
 		expect(plainOutput(result.output)).toContain("so the callers of the other would read them wrong");
 	});
 
-	test("packs members laid out alike as one of them would, whatever their types", () => {
+	test("packs members laid out and checked alike as one of them would, whatever their types", () => {
 		const result = compileProbes({
 			alikeEvent: either(["client.textFirst", "client.textFirstToo"], 'fire("x")'),
 			// Results that are not assignable either way, but both a plain f64. (TypeScript cannot call

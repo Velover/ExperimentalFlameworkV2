@@ -60,29 +60,89 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   window than the run opens at once (one, or `--parallel`'s n) are not run, and fail saying why.
 - **Packed layouts change for some types** (with `networking.serialization`, for `Serialized`
   members, and in `Flamework.createSerializer`): every order on the wire now follows from the types
-  alone.
-  - A literal union's values are numbered in sorted order: numbers by value, then strings, then
-    `false` and `true`, then Roblox enum items by name. That includes a union of some of a Roblox
-    enum's items.
-  - A TypeScript `enum` keeps its 2.0.0-alpha.7 layout: its members, the whole enum or some of them
-    (`Rarity.Epic | Rarity.Rare`), are numbered in the order the enum declares them, which is the
-    order they already had. Only a union that mixes them with plain literals, or the members of
-    several enums, changes: the plain literals come first, sorted, then each enum's members as
-    declared, the enums by name.
-  - An object made by a mapped type (`Record`, `Pick`, `Omit`, `Partial`, `Readonly`, `Required`,
-    `{ [K in U]: ... }`), or holding a field one made, sends its fields in name order.
-  - The members of a union that is not written out where the value is reached (a generic's type
-    argument, as in `Box<A | B>`, or a generic alias's instance) are numbered by their types, after
-    the written ones. A union written as a member of another (`type Choice = Pair | Gamma`) keeps
-    its own written order there.
+  alone. What changes, compared with 2.0.0-alpha.7, is exactly the orders below. Those marked
+  "stable, but changed" came out the same in every build of alpha.7; the others followed whichever
+  literal or type TypeScript happened to create first in a build:
+  - **The values of a union of literal values other than one TypeScript `enum`'s members,** but for
+    the orders kept below: numbers by size, then strings, then TypeScript enum members, each enum's
+    as it declares them, the enums by name, then Roblox enum items by name (a union of some of a
+    Roblox enum's items too).
+  - **The fields of a mapped type over a union of keys** (`Record<"speed" | "power", V>`, `Pick`,
+    `Omit`, `{ [K in U]: ... }`): in the order of their keys, sorted the same way. An interface that
+    extends such a mapped type, or an intersection with one, keeps its other fields where they were.
+  - **The types of a union not written out where the value is reached** (a generic's type argument,
+    as in `Box<A | B>`, a generic alias's instance, or an optional property, parameter or tuple
+    element typed as an alias of a union without `undefined`, as in `reward?: Reward`, which
+    TypeScript makes a new union with `undefined`), other than the built-in ones: by how deeply
+    they nest type arguments, then by name, or by structure for an anonymous one. So a type still
+    goes ahead of the types made from it (`Item` before `Item[]`), and in `Box<Zed | Alpha[]>`,
+    `Zed` is 0 too. Several whole Roblox enums in such a union go by name too.
+  - **The members of a union written as a member of another** (`type Choice = Pair | Gamma`), but
+    for its built-in types, `boolean`, and a literal group holding `false`, `true`, `""`, `0` or a
+    name `typeof` returns, which keep their places ahead of them: in `Pair`'s own written order now,
+    as its alias declares it or as parentheses write it. Where nothing writes that union out
+    (`Prims[keyof Prims] | Alpha`), its other members follow as in a union not written out.
+  - **Stable, but changed: object types written inline in a union not written out,** such as
+    `Packet<{ kind: "move"; to: number } | { kind: "chat"; text: string }>`. TypeScript creates
+    each inline type as it reads it, left to right, so 2.0.0-alpha.7 numbered them in their written
+    order in every build; they now go by structure, as above, so `chat` is 0. Named types
+    (interfaces, aliases) in such a union were never stable that way and go by name.
+  - **Stable, but changed: a type TypeScript creates when its checker starts,** such as `{}`,
+    `any[]` or `` `${number}` ``, in a union not written out, or in a member written as another
+    union (an alias's, or in parentheses). 2.0.0-alpha.7 numbered it ahead of every other type but
+    the built-in ones; it now goes by the rules above, so in `Box<Alpha | any[]>`, `Alpha` is 0, and
+    with `type AnyArr = Alpha | any[]`, `AnyArr | Beta` numbers `Alpha` 0 too.
+  - **Stable, but changed: a type written ahead of a type made from it, in a member written as
+    another union** (an alias's, or in parentheses). With `type Rewards = Reward[] | Reward`,
+    2.0.0-alpha.7 numbered `Reward[]` after `Reward`'s members in `rewards: Rewards | undefined`,
+    since TypeScript can only make `Reward[]` after `Reward`; the alias's written order now numbers
+    `Reward[]` 0. The same goes for an alias of `Box<Item> | Item`, `Partial<Item> | Item`,
+    `Wrapped<Zed> | Zed`, `Set<Zed> | Zed`, `[Zed, number] | Zed` or `Item[][] | Item[]` in
+    `... | Alpha`, and for `(Item[] | Item) | Alpha`. The alias alone (`rewards: Rewards`), a
+    generic alias (`type OneOrMany<T> = T[] | T`) and a union that writes the type first
+    (`Reward | Reward[]`) keep their layout. Likewise, in a union not written out, a non-generic
+    alias of a generic alias's instance (`type AZed = Wrapped<Zed>`, which TypeScript keeps without
+    type arguments) goes by its name, as a type made from nothing: `Box<Zed | AZed>` numbered `Zed`
+    0, and now numbers `AZed` 0.
+  - **Stable, but changed: some of an enum's members, at least one of them computed, as a member
+    of another union, written (in an alias or in parentheses) in an order the enum does not declare
+    them in.** 2.0.0-alpha.7 numbered them as the enum declares them, each computed member at its
+    own place and the members with values together, at the first of them; the written order
+    numbers them now. With `type Out = Computed.D | Computed.C`, where `C` is computed and declared
+    ahead of `D`, `Out | Beta` numbered `C` 0, and now numbers `D` 0. With
+    `Computed.D | Computed.C | Computed.A`, the layout is kept: `A`, a value declared ahead of `C`,
+    puts the values first either way. A whole enum, or members none of which is computed, keep
+    their layout.
 
-  A server and its client build together, so a game only has to rebuild. A buffer stored with
+  Everything else keeps its layout: an interface's or an object type's fields; a homomorphic mapped
+  type's (`Partial<T>`, `Readonly<T>`, `Required<T>`, `{ [P in keyof T]?: ... }`), which keep `T`'s
+  order; a `Record` over one TypeScript enum, and a TypeScript `enum` alone, whole or some of its
+  members (`Rarity.Epic | Rarity.Rare`), its values in the order the enum declares them in; in a
+  union of literal values, `false`, `true`, `""` and `0` ahead of the others, in that order, then
+  the names `typeof` returns, `"string"`, `"number"`, `"bigint"`, `"boolean"`, `"symbol"`,
+  `"undefined"`, `"object"` and `"function"`, in that order (in `"b" | true`, `true` is 0, in
+  `"" | 5`, `""` is 0, and in `"number" | "string"` and `1 | "string"`, `"string"` is 0), a number
+  ahead of its negative (in `1 | -1`, `1` is 0), and Roblox enum items after the other values; the
+  keys of a mapped type the same way (`Record<1 | -1, V>` sends `1`, then `-1`, and
+  `Record<"number" | "string", V>` `string`, then `number`); a union written out member by member
+  where the value is reached; the groups of a union not written out: `boolean`, then the built-in
+  types in TypeScript's own fixed order (in `Box<string | number>`, `string` is 0, and in
+  `Box<Item | number>`, `number` is 0), then the other types (an enum's computed members among them,
+  as declared, ahead of its values, and a type ahead of the types made from it: in
+  `Box<Item | Item[]>` and `Box<Item | Box<Item>>`, `Item` is 0), then whole Roblox enums, then the
+  literal values; and, in a member written as another union, an alias's (`Id | Alpha` with
+  `type Id = number | string`), in parentheses (`(number | string) | Alpha`) or one that nothing
+  writes out (`Prims[keyof Prims]` in `Prims[keyof Prims] | undefined`), its built-in types,
+  `boolean`, and its `false`, `true`, `""`, `0` and names `typeof` returns first, in TypeScript's
+  own fixed order, whatever order it writes them in (`string` 0, `number` 1, `boolean` 2; with
+  `type ItemOrNumber = Item | "number"`, `ItemOrNumber | Alpha` numbers `"number"` 0).
+
+  The orders that change, but for the stable ones marked above, could already change between two
+  builds after an unrelated edit, so a stored buffer holding them was never safe across builds. A
+  server and its client build together, so a game only has to rebuild. A buffer stored with
   `createSerializer` under 2.0.0-alpha.7 or earlier, in a DataStore say, that holds one of these
   types may read wrong or not at all. Read such data with the old build and save it again with the
   new one, or store a version next to each buffer and keep the old reader for the old version.
-  Before this release these orders could already change between two builds after an unrelated edit
-  (they followed whichever literal or type TypeScript happened to create first), so a stored buffer
-  holding them was never safe across builds.
 - **A union whose members only TypeScript's internal ids could put in an order stops the build,**
   such as two interfaces of one name from two files, imported under other names and reached through
   a generic (`Box<SameA | SameB>`). Declare an alias for the union where the value is declared, and
@@ -283,24 +343,27 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   and the decorator cache are kept per transform pass now. roblox-ts 3.0.0 makes new `SourceFile`s
   for every rebuild and was not affected.
 - **A sender and its receiver no longer disagree on a layout after a partial rebuild.** A literal
-  union's indices, a mapped type's fields and the members of a union nothing spells out followed
-  TypeScript's internal type ids, which follow whatever the checker happened to create first in a
-  compilation. A watcher's rebuild, or an incremental build, that recompiles a call site without the
-  files that decode it could then send `"rare"` as the index its receiver reads as `"common"`, or swap
-  the fields of a `Record<"speed" | "power", number>`. On roblox-ts 3.0.0 a
-  `const STARTER: Gear = { id: "starter", rarity: "rare" }` added to the call site's file was enough.
+  union's indices, the fields of a mapped type over a union of keys and the members of a union
+  nothing spells out followed TypeScript's internal type ids, which follow whatever the checker
+  happened to create first in a compilation. A watcher's rebuild, or an incremental build, that
+  recompiles a call site without the files that decode it could then send `"rare"` as the index
+  its receiver reads as `"common"`, or swap the fields of a `Record<"speed" | "power", number>`. On
+  roblox-ts 3.0.0 a `const STARTER: Gear = { id: "starter", rarity: "rare" }` added to the call
+  site's file was enough.
   See the upgrade notes.
 - **A call whose target may be several packed members is refused when their argument lists (for
-  `setCallback`, their results) are laid out differently on the wire,** naming two of them, such as
+  `setCallback`, their results) are not laid out and checked alike,** naming two of them, such as
   `a(x: string | number)` and a `Serialized` `b(x: number | string)`: one TypeScript type, but each
   member's receiver numbers the union as its own declaration spells it. Such a call used to be packed
   as whichever member TypeScript listed first, since the types were assignable both ways, and the
-  other member's receiver read the tags wrong. The layouts are what is compared now, so members laid
-  out alike are packed together even when their types differ (`number & { unit?: "meters" }` against
-  `number & { unit?: "seconds" }`, both eight bytes). Two members packed the same way whose types
-  differ only in how a union is spelled are still one type to TypeScript, which keeps one of them in
-  a conditional or a helper's inferred return type, so the build cannot see that case (guide 06,
-  Caveats).
+  other member's receiver read the tags wrong. The layouts and their checks are what is compared
+  now, so members laid out and checked alike are packed together even when their types differ
+  (`number & { unit?: "meters" }` against `number & { unit?: "seconds" }`, both eight bytes). The
+  comparison is stricter than the bytes: a `Serialization.u8` and a `Serialization.Implicit.u8`, one
+  byte either way but by default checked only as the second, are refused. Two members packed the
+  same way whose types differ only in how a union is spelled are still one type to TypeScript, which
+  keeps one of them in a conditional or a helper's inferred return type, so the build cannot see
+  that case (guide 06, Caveats).
 - A type whose hoisted functions fail to build is no longer left recorded, half built, for the file's
   next value to call, and the varint and check helpers count as there only once they are built. A
   build that met this already failed with the type's error.

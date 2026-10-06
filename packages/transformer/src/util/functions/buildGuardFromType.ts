@@ -704,13 +704,9 @@ export interface EnumMemberOrigin {
  */
 export function enumMemberOrigins(type: ts.Type, count: number): Array<EnumMemberOrigin | undefined> {
 	// A member (`E.A`): a literal type whose symbol is the member, whose parent is the enum.
-	if (
-		type.flags & ts.TypeFlags.EnumLiteral &&
-		type.flags & (ts.TypeFlags.StringLiteral | ts.TypeFlags.NumberLiteral) &&
-		type.symbol?.parent
-	) {
-		const enumSymbol = type.checker.getMergedSymbol(type.symbol.parent);
-		return [{ enum: enumSymbol, index: enumMemberIndex(enumSymbol, type.symbol) }];
+	if (type.flags & (ts.TypeFlags.StringLiteral | ts.TypeFlags.NumberLiteral)) {
+		const member = enumMemberOf(type);
+		if (member) return [member];
 	}
 
 	// A whole enum that `getLiteral` lists itself, from its one declaration, in order.
@@ -720,6 +716,20 @@ export function enumMemberOrigins(type: ts.Type, count: number): Array<EnumMembe
 	}
 
 	return new Array<EnumMemberOrigin | undefined>(count).fill(undefined);
+}
+
+/**
+ * The TypeScript enum member `type` is (see {@link EnumMemberOrigin}): a member with a constant value,
+ * whose type is a literal, or a computed one (`C = "abc".size()`), whose type is an `Enum` type of its
+ * own. Either way the type's symbol is the member and its parent the enum.
+ */
+export function enumMemberOf(type: ts.Type): EnumMemberOrigin | undefined {
+	const symbol = type.symbol;
+	if (!(type.flags & (ts.TypeFlags.EnumLiteral | ts.TypeFlags.Enum))) return;
+	if (!symbol || !(symbol.flags & ts.SymbolFlags.EnumMember) || !symbol.parent) return;
+
+	const enumSymbol = type.checker.getMergedSymbol(symbol.parent);
+	return { enum: enumSymbol, index: enumMemberIndex(enumSymbol, symbol) };
 }
 
 function enumMemberIndex(enumSymbol: ts.Symbol, member: ts.Symbol): number {
