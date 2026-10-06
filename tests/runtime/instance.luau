@@ -183,6 +183,11 @@ function instances.markOpaque(value: any, kind: string)
 	opaque[value] = kind
 end
 
+--- What a value marked opaque stands for (`"EnumItem"`, `"Enum"`), which is its `typeof`; `nil` for any other value.
+function instances.opaqueKind(value: any): string?
+	return opaque[value]
+end
+
 --- The `typeof`s an attribute holds besides the Lua primitives and InstanceHandle.
 local ATTRIBUTE_TYPES: { [string]: boolean } = {
 	UDim = true,
@@ -999,7 +1004,7 @@ local function bindableKey(key: any): string
 	elseif instances.is(key) then
 		return `<Instance> ({rawget(key, "_name")})`
 	elseif opaque[key] == "EnumItem" then
-		return `<token> (Enum.{key.EnumType}.{key.Name})`
+		return `<token> ({tostring(key)})`
 	elseif kind == "table" then
 		return `<Table> ({tostring(key)})`
 	elseif kind == "function" then

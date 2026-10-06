@@ -11,6 +11,7 @@ small change never needs it.
 | `packages/testing/cli` | `bun test packages/testing/cli/tests` (one file when the change is local) and `tsc -p packages/testing/cli` | 20 s |
 | runtime code in `packages/core`, `components`, `networking`, `testing/src` | `bun run build`, then `bun run test:runtime` | 3 min |
 | `packages/transformer` | the test files of that area: `bun test --timeout 120000 packages/transformer/tests/<file>` | 1–3 min |
+| what can change a byte on the wire: `buildSerializerFromType.ts`, the packing in `transformNetworkingCall.ts`, the networking runtime's packed paths | also `bun run build`, then `bun run test:runtime`: its `golden layouts` suite writes every sample of `packages/specs/src/golden/layouts.ts` and compares the bytes with `packages/specs/golden`, then reads each golden back. A deliberate layout change only: `bun run test:runtime --update-golden` rewrites the goldens on any shell (the Server run writes, the Client run checks), committed with a CHANGELOG upgrade note | 3 min |
 | packaging: a package's `files`, `scripts/copy-*.mjs`, `scripts/links.mjs` | `bun run test:packaging` | 1 min |
 | behaviour only the engine shows (signals, replication, streaming) | `bun run test:place --sections <section>`, one project | several min, Studio; all four projects 7 min 20 s, about 5 min with `--parallel 2` |
 

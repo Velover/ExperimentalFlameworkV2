@@ -9,7 +9,9 @@
 	players. The replication runner builds two of them and bridges their ReplicatedStorage.
 ]]
 
+local fs = require("@lune/fs")
 local luneTask = require("@lune/task")
+local process = require("@lune/process")
 
 local collection = require("./collection")
 local harness = require("./harness")
@@ -19,6 +21,14 @@ local signals = require("./signals")
 local roblox = {}
 
 roblox.instances = instances
+
+--- A golden file of packages/specs/golden, by its name; run from the repository root, as the runners are.
+local function goldenPath(name: string): string
+	if not string.match(name, "^[%w%-]+%.txt$") then
+		error(`harness: '{name}' is not a golden file's name`, 3)
+	end
+	return process.cwd .. "/packages/specs/golden/" .. name
+end
 
 --[[
 	`task.wait` and `task.delay`, resumed the way the engine resumes them.
@@ -276,9 +286,25 @@ function roblox.create(initialRealm: "Server" | "Client")
 
 	env.game = game
 
-	--- A lazily-populated `Enum` global. Enum items only need identity and a name here, which is
-	--- all the compiled output compares them by.
+	--- A lazily-populated `Enum` global. Its items are tables, compared by identity as the compiled
+	--- output compares them, and answer what the engine's do: `typeof` names them `EnumItem` (and an
+	--- enum `Enum`), `EnumType` is their enum, `tostring` gives `Enum.Material.Plastic`, and `Value`
+	--- is the engine's number, from Lune's enum database, which also lists an enum's items for
+	--- `GetEnumItems`: the serializer sends an item as its `Value` and reads it back through that
+	--- list. An enum or an item Lune does not know is still made, with its name as its `Value`.
 	local enumCache: { [string]: any } = {}
+	local luneEnum = (require("@lune/roblox") :: any).Enum
+
+	--- Lune's enum or item of that name, or `nil` (Lune raises for a name it does not know).
+	local function known(container: any, name: string): any
+		if container == nil then
+			return nil
+		end
+		local ok, found = pcall(function()
+			return container[name]
+		end)
+		return if ok then found else nil
+	end
 
 	local Enum = setmetatable({}, {
 		__index = function(_, enumName: string)
@@ -287,19 +313,43 @@ function roblox.create(initialRealm: "Server" | "Client")
 				return existing
 			end
 
+			local real = known(luneEnum, enumName)
 			local items: { [string]: any } = {}
-			local enumType = setmetatable({}, {
-				__index = function(_, itemName: string)
-					if not items[itemName] then
-						items[itemName] = {
-							Name = itemName,
-							Value = itemName,
-							EnumType = enumName,
-						}
-						-- An EnumItem to an attribute and a BindableEvent, not a table.
-						instances.markOpaque(items[itemName], "EnumItem")
+			local enumType
+
+			local itemMeta = {}
+			function itemMeta.__tostring(item: any)
+				return `Enum.{enumName}.{item.Name}`
+			end
+
+			local function item(itemName: string): any
+				if not items[itemName] then
+					local realItem = known(real, itemName)
+					items[itemName] = setmetatable({
+						Name = itemName,
+						Value = if realItem ~= nil then realItem.Value else itemName,
+						EnumType = enumType,
+					}, itemMeta)
+					-- An EnumItem to an attribute and a BindableEvent, not a table.
+					instances.markOpaque(items[itemName], "EnumItem")
+				end
+				return items[itemName]
+			end
+
+			enumType = setmetatable({
+				GetEnumItems = function(_self: any): { any }
+					if real == nil then
+						error(`harness: Lune's enum database has no Enum.{enumName}`, 2)
 					end
-					return items[itemName]
+					local list = {}
+					for _, realItem in real:GetEnumItems() do
+						table.insert(list, item(realItem.Name))
+					end
+					return list
+				end,
+			}, {
+				__index = function(_, itemName: string)
+					return item(itemName)
 				end,
 				__tostring = function()
 					return "Enum." .. enumName
@@ -447,6 +497,10 @@ function roblox.create(initialRealm: "Server" | "Client")
 			if instances.isHandle(value) then
 				return "InstanceHandle"
 			end
+			local opaqueKind = instances.opaqueKind(value)
+			if opaqueKind ~= nil then
+				return opaqueKind
+			end
 			return typeof(value)
 		end
 
@@ -559,6 +613,20 @@ function roblox.create(initialRealm: "Server" | "Client")
 			checkVariant = function(name: string)
 				return context.require("@flamework-experimental/specs", "variants", name, "out", "widthChecks", "codecs")
 			end,
+			--- The golden byte layouts in packages/specs/golden, which the `golden layouts` spec
+			--- checks the serializer against. `updating` is true when the run was started with
+			--- UPDATE_GOLDEN=1, which `bun run test:runtime --update-golden` sets for its runs (and
+			--- clears without the flag), the only time the spec rewrites them.
+			golden = {
+				updating = process.env.UPDATE_GOLDEN == "1",
+				read = function(name: string): string?
+					local path = goldenPath(name)
+					return if fs.isFile(path) then fs.readFile(path) else nil
+				end,
+				write = function(name: string, contents: string)
+					fs.writeFile(goldenPath(name), contents)
+				end,
+			},
 		})
 
 		context.setGlobal("typeof", robloxTypeof)

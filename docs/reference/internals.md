@@ -1381,10 +1381,14 @@ module lives at `main` (`lib/ts.lua`).
 **Roblox globals.** `roblox.luau` builds one realm's world: services, `Enum`, `task`, an Instance
 emulation with attributes, ancestry and signals, CollectionService, RemoteEvents, Players. `typeof`
 is shadowed, because `t.instanceIsA` gates on `typeof(value) == "Instance"` and the harness's
-instances are tables. A Heartbeat pump drives `Promise.delay`, which every request timeout is built
-on; Promise.lua is loaded with a `game` of its own (`context.setPromiseGlobal`) so that the pump
-does not touch the graph's `RunService.Heartbeat`, which carries `onTick` and only fires from
-`__harness.step(delta)`.
+instances are tables. Enum items are tables as well, and answer as the engine's do: `typeof` names
+them `EnumItem` (an enum `Enum`), `EnumType` is their enum, `tostring` gives
+`Enum.Material.Plastic`, and `Value` is the engine's number, from Lune's enum database, which also
+lists an enum's items for `GetEnumItems`: the serializer writes an item as its `Value` and reads a
+whole Roblox enum back through that list. A Heartbeat pump drives `Promise.delay`, which every
+request timeout is built on; Promise.lua is loaded with a `game` of its own
+(`context.setPromiseGlobal`) so that the pump does not touch the graph's `RunService.Heartbeat`,
+which carries `onTick` and only fires from `__harness.step(delta)`.
 
 **Two graphs.** `harness.create()` returns an independent module graph and `roblox.create(realm)` an
 independent world, which is what lets `replication.luau` hold a real server and a real client in one
@@ -1395,7 +1399,30 @@ agree on generated remote ids -- identical remote trees on both sides is the ass
 replication works.
 
 `main.luau` runs the single-realm suites once per realm in separate processes, because a graph
-caches realm-dependent decisions at require time.
+caches realm-dependent decisions at require time. A spec module that fails to load ends the run at
+once, with its error; the Heartbeat pump used to keep the process alive until the runner's timeout.
+
+**Golden layouts.** The `golden layouts` suite (`specs/goldenLayouts.ts`) pins what the serializer
+writes. Its fixture, `src/golden/layouts.ts`, holds a wide set of types, each with sample values:
+every width, check and brand, strings, buffers, objects, collections and tuples (index signatures,
+holes, and counts that take two bytes of varint among them), unions written out and not, literal
+unions under every ordering rule, TypeScript and Roblox enums, mapped types, the datatypes (NaN,
+the infinities and -0 inside the float ones) and the blobs; and a few packed networking members,
+with what their events, requests and results send. The suite writes every sample and compares
+each buffer, as hex with its blob list's shape, with `packages/specs/golden/serializer.txt` and
+`networking.txt`, listing every line that differs with both hex strings; then it reads each golden
+back with this build's decoders and wants the sample again, bit for bit, which is what a buffer a
+game stored with an earlier build needs: numbers, and the float datatypes component by component,
+are compared by their bits, since Luau's `==` takes -0 for 0 (a decoder that lost the sign would
+pass) and never takes NaN as itself. A normal run never writes them.
+`bun run test:runtime --update-golden` hands its runs `UPDATE_GOLDEN=1`, which makes the Server run
+rewrite them (`__harness.golden`) and the Client run check what it wrote, for a deliberate layout
+change, named in the CHANGELOG's upgrade notes. A build with `networking.serialization` off refuses
+before writing either file. The update is a flag of the runner rather than the variable itself
+because a flag reads the same on every shell, and the runner clears the variable when the flag is
+not given: one left set in a PowerShell session would otherwise rewrite the goldens on every later
+run, and every such run would pass. Maps and sets in the fixture hold one entry at most, since a
+table's iteration order is the runtime's, not the layout's, and a NaN sample has fixed bits.
 
 **`@rbxts/signal` is deferred in the engine, and on request here.** The library wraps a
 BindableEvent, so every dispatch through it -- `onComponentAdded`, `onComponentRemoved`,

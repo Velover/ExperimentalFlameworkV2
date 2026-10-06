@@ -1,0 +1,30 @@
+# Golden packed argument lists: what a remote carries for each send of
+# packages/specs/src/golden/layouts.ts -- an event's arguments, a function's request after its
+# id, a result after its id and status. Checked, and read back, by the golden layouts spec of the
+# runtime suite. Never edit by hand: a deliberate layout change rewrites this file with
+# bun run test:runtime --update-golden and is named in the CHANGELOG's upgrade notes.
+#
+# <member> :: <sample> => <bytes>[ + blobs [<typeof>, ...]] | nothing | raw <values>
+
+goldenMove :: 1, 2, 3 at 16, walking => 0000803f00000040000040401001
+goldenMove :: zero at 255, running => 000000000000000000000000ff00
+goldenChat :: "hi", no target => 02686900
+goldenChat :: "", Folder => 000101000000 + blobs [Instance]
+goldenInventory :: empty => 0000
+goldenInventory :: two stacks, "gold" -> 3 => 0201000573776f726401ffff00ff0104676f6c640000000000000840
+goldenPing :: no arguments => nothing
+goldenRest :: 1 => 000000000000f03f00
+goldenRest :: 2, "a", "b" => 00000000000000400201610162
+goldenTick :: 4294967295, "x" => ffffffff010178
+goldenTick :: 0, 7 (whole) => 000000000207
+goldenPlain :: 1, 2, 3 at 16, walking => 0000803f00000040000040401001
+goldenRaw :: 7, "seven" => raw 7, "seven"
+goldenLookup request :: [1, 2, 3] => 03000000000000f03f00000000000000400000000000000840
+goldenLookup result :: two stacks => 0201000573776f726401ffff00ff
+goldenLookup result :: no stacks => 00
+goldenFind request :: "a", no place => 016100
+goldenFind request :: "b", Part => 01620101000000 + blobs [Instance]
+goldenFind result :: Folder => 0101000000 + blobs [Instance]
+goldenFind result :: undefined => 00
+goldenPlainLookup request :: [1, 2, 3] => 03000000000000f03f00000000000000400000000000000840
+goldenPlainLookup result :: two stacks => 0201000573776f726401ffff00ff

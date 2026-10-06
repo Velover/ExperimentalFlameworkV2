@@ -4,6 +4,7 @@ import components = require("./specs/components");
 import duplicateIds = require("./specs/duplicateIds");
 import functions = require("./specs/functions");
 import generatedCode = require("./specs/generatedCode");
+import goldenLayouts = require("./specs/goldenLayouts");
 import lifecycle = require("./specs/lifecycle");
 import middleware = require("./specs/middleware");
 import modding = require("./specs/modding");
@@ -43,4 +44,5 @@ export const suites: TestSuite[] = [
 	typeChecks,
 	generatedCode,
 	testing,
+	goldenLayouts,
 ];

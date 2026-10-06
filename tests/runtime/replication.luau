@@ -50,11 +50,27 @@ end)
 
 local link = bridge.link(serverEnv, clientEnv)
 
-local server = serverContext.require("@flamework-experimental/specs", "out", "replication")
-local client = clientContext.require("@flamework-experimental/specs", "out", "replication")
-local clientSender = clientContext.require("@flamework-experimental/specs", "out", "replicationSender")
-local serverShapes = serverContext.require("@flamework-experimental/specs", "out", "replicationShapes")
-local clientShapes = clientContext.require("@flamework-experimental/specs", "out", "replicationShapes")
+-- A spec module that fails to load raises here, and the pump above would keep the process alive
+-- until the runner's timeout: report it and exit instead, as main.luau does.
+local loaded, modules = pcall(function()
+	return {
+		server = serverContext.require("@flamework-experimental/specs", "out", "replication"),
+		client = clientContext.require("@flamework-experimental/specs", "out", "replication"),
+		clientSender = clientContext.require("@flamework-experimental/specs", "out", "replicationSender"),
+		serverShapes = serverContext.require("@flamework-experimental/specs", "out", "replicationShapes"),
+		clientShapes = clientContext.require("@flamework-experimental/specs", "out", "replicationShapes"),
+	}
+end)
+if not loaded then
+	print(string.format("\n  Flamework replication specs: the specs failed to load\n\n  %s\n", tostring(modules)))
+	process.exit(1)
+end
+
+local server = modules.server
+local client = modules.client
+local clientSender = modules.clientSender
+local serverShapes = modules.serverShapes
+local clientShapes = modules.clientShapes
 
 --- Lets deferred work -- remote wiring, replication, delivery -- run.
 local function flush(frames: number?)

@@ -262,10 +262,16 @@ export = suite("type checks", [
 				"[Flamework] string expected, got number, at Shape.label",
 				"inside a member",
 			);
-			// Enum items as literal types are named as the items. What came is shown as itself; Lune's
-			// stand-in for Enum makes an item a table, so for another item only the expected part is compared.
+			// Enum items as literal types are named as the items. What came is shown as itself: Lune's
+			// stand-in for Enum makes an item a table, but one whose `typeof` is EnumItem and whose
+			// `tostring` is the engine's, so another item is named in full.
 			refuses(v.plastic, "x", `[Flamework] Enum.Material.Plastic expected, got "x", at value`, "an enum item");
-			refuses(v.plastic, Enum.Material.Wood, "[Flamework] Enum.Material.Plastic expected, got ", "another item");
+			refuses(
+				v.plastic,
+				Enum.Material.Wood,
+				"[Flamework] Enum.Material.Plastic expected, got Enum.Material.Wood, at value",
+				"another item",
+			);
 			refuses(
 				v.plasticOrWood,
 				"x",

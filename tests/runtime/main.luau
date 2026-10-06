@@ -54,7 +54,13 @@ luneTask.spawn(function()
 	end
 end)
 
-local testing = context.require("@flamework-experimental/specs", "out")
+-- A spec module that fails to load raises here, and the pump above would keep the process alive
+-- until the runner's timeout: report it and exit instead.
+local loaded, testing = pcall(context.require, "@flamework-experimental/specs", "out")
+if not loaded then
+	print(string.format("\n  Flamework runtime specs (%s): the specs failed to load\n\n  %s\n", realm, tostring(testing)))
+	process.exit(1)
+end
 local suites = testing.suites
 
 local passed = 0

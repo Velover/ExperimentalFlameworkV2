@@ -24,6 +24,20 @@ const RUNS = [
  */
 const RUN_TIMEOUT_MS = Number(process.env.FLAMEWORK_RUNTIME_TIMEOUT_MS) || 10 * 60 * 1000;
 
+/**
+ * `--update-golden` rewrites the golden layouts in packages/specs/golden (see the `golden layouts`
+ * spec): the runs get UPDATE_GOLDEN=1, which the harness reads, the same on every shell. Without
+ * the flag they never get it, so a variable left set in a shell cannot rewrite them by accident.
+ */
+const UPDATE_GOLDEN = process.argv.slice(2).includes("--update-golden");
+const RUN_ENV = { ...process.env };
+// Windows matches a variable's name in any case.
+for (const name of Object.keys(RUN_ENV)) if (name.toUpperCase() === "UPDATE_GOLDEN") delete RUN_ENV[name];
+if (UPDATE_GOLDEN) {
+	RUN_ENV.UPDATE_GOLDEN = "1";
+	console.log("[test] --update-golden: the Server run rewrites packages/specs/golden, the Client run checks it");
+}
+
 /** The last line a run printed that names a case, so a hang can be placed. */
 function lastCaseLine(output) {
 	const lines = output.split(/\r?\n/).filter((line) => /^\s+(pass|FAIL|HANG)\s+/.test(line));
@@ -40,7 +54,7 @@ function killTree(child) {
 
 function run(script, args) {
 	return new Promise((resolve) => {
-		const child = spawn("lune", ["run", script, ...args], { cwd: root, shell: true });
+		const child = spawn("lune", ["run", script, ...args], { cwd: root, shell: true, env: RUN_ENV });
 		let output = "";
 		let timedOut = false;
 
