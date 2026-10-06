@@ -180,6 +180,10 @@ match is rejected: the component is not created, and `addComponent` throws
 
 Optional properties really are optional: `label?: string` accepts a missing attribute.
 
+Attribute names are strings, as the engine stores them. Declare a name that looks like a number
+with a string key (`"10": number`, read as `this.attributes["10"]`): a number key (`10: number`)
+type-checks, but `this.attributes[10]` reads nil, since roblox-ts indexes by the number.
+
 ### Defaults
 
 Instead of rejecting the instance, you can write a default value back to it:

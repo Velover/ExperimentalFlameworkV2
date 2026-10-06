@@ -15,6 +15,7 @@ import {
 	simplifyUnion,
 } from "./buildGuardFromType";
 import { localName } from "./identifierName";
+import { getPropertyKey, keyAccess, keyName, keySegment, TableKey } from "./propertyKey";
 import { isArrayType, isTupleType } from "./isTupleType";
 
 /**
@@ -221,7 +222,6 @@ const DATATYPES: Record<string, Array<[Width, string[]]>> = {
 
 const CFRAME_COMPONENTS = 12;
 
-const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
 const MALFORMED = "malformed payload";
 
 /**
@@ -249,7 +249,8 @@ type Kind =
 	| { kind: "map"; key: Shape; value: Shape }
 	/** A tuple: `elements`, then any number of `rest` values, then `after` (only with a rest). */
 	| { kind: "list"; elements: Shape[]; rest?: Shape; after?: Shape[] }
-	| { kind: "object"; fields: Array<{ name: string; shape: Shape }> }
+	/** `name` is TypeScript's name of a field, `key` its key in the table (see {@link getPropertyKey}). */
+	| { kind: "object"; fields: Array<{ name: string; key: TableKey; shape: Shape }> }
 	| {
 			kind: "union";
 			alternatives: Alternative[];
@@ -1370,10 +1371,11 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	/**
 	 * The wire format of a shape as text, which builds no code: what each byte is and what a decoder
 	 * makes of it -- widths and lengths, which of them are checked, literal tables in order, field
-	 * names in order, union members in tag order -- so that two shapes with one key are written and
-	 * read alike, whatever their types are called and however their code is hoisted. A type met again
-	 * inside itself is `^n`, n levels up. `reaches` is the outermost place on `stack` the key refers
-	 * to; a key that refers to nothing outside itself is the same wherever it is met, and is kept.
+	 * keys in order (`10` and `"10"` differ), union members in tag order -- so that two shapes with one
+	 * key are written and read alike, whatever their types are called and however their code is hoisted.
+	 * A type met again inside itself is `^n`, n levels up. `reaches` is the outermost place on `stack`
+	 * the key refers to; a key that refers to nothing outside itself is the same wherever it is met, and
+	 * is kept.
 	 */
 	function wireKey(shape: Shape, stack: Shape[]): { text: string; reaches: number } {
 		const at = stack.indexOf(shape);
@@ -1436,7 +1438,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 					break;
 				}
 				case "object":
-					text = `object(${kind.fields.map((field) => `${JSON.stringify(field.name)}: ${key(field.shape)}`).join(", ")})`;
+					text = `object(${kind.fields.map((field) => `${JSON.stringify(field.key)}: ${key(field.shape)}`).join(", ")})`;
 					break;
 				case "union": {
 					const whole = kind.whole !== undefined ? `; whole ${kind.whole}` : "";
@@ -2462,7 +2464,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 			const optional = (property.flags & ts.SymbolFlags.Optional) !== 0 && !hasUndefined(propertyType);
 			const shape: Shape = optional ? { kind: "optional", inner: written } : written;
-			return { name: property.name, shape };
+			return { name: property.name, key: getPropertyKey(typeChecker, property), shape };
 		});
 
 		return { kind: "object", fields };
@@ -3827,11 +3829,6 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		};
 	}
 
-	/** A field as a path segment: `.pos`, or `["two words"]` for a name that is not an identifier. */
-	function fieldSegment(name: string): string {
-		return IDENTIFIER.test(name) ? `.${name}` : `[${JSON.stringify(name)}]`;
-	}
-
 	/**
 	 * Where a check's path starts in `Flamework.createSerializer<T>()`: the name of a named object,
 	 * union or tuple type (`Entity.id`), else `value` (`value[0]`, or `value` itself for a width).
@@ -4143,12 +4140,15 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 * discriminant, compared (`v.kind == "a"`), or else a required field no other object member
 	 * declares, whose presence is enough (`v.Coins ~= nil`).
 	 */
-	function objectKey(union: UnionKind, kind: ObjectKind): { name: string; value?: ts.Expression } | undefined {
+	function objectKey(
+		union: UnionKind,
+		kind: ObjectKind,
+	): { name: string; key: TableKey; value?: ts.Expression } | undefined {
 		const discriminant = discriminantOf(union);
 		const field = discriminant !== undefined ? kind.fields.find((field) => field.name === discriminant) : undefined;
 		if (field) {
 			const constant = describe(field.shape) as Extract<Kind, { kind: "constant" }>;
-			return { name: field.name, value: constant.value };
+			return { name: field.name, key: field.key, value: constant.value };
 		}
 
 		// A collection among the members could hold any key, so presence is only trusted when the
@@ -4163,7 +4163,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 					(other) => other.kind !== "object" || !other.fields.some((field) => field.name === candidate.name),
 				),
 		);
-		if (unique) return { name: unique.name };
+		if (unique) return { name: unique.name, key: unique.key };
 	}
 
 	/**
@@ -4351,7 +4351,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				// A map value holds any of its keys, so it can always hold one the object does not declare.
 				for (const field of a.fields) {
 					if (!isRequired(field.shape)) continue;
-					if (!keyFits(mapB.key, field.name) || fit(field.shape, mapB.value) === "none") return "none";
+					if (!keyFits(mapB.key, field.key) || fit(field.shape, mapB.value) === "none") return "none";
 				}
 				return "lossy";
 			}
@@ -4363,7 +4363,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			if (b.kind === "object") {
 				let result: Fit = "whole";
 				for (const field of b.fields) {
-					const value = keyFits(mapA.key, field.name) ? fit(mapA.value, field.shape) : "none";
+					const value = keyFits(mapA.key, field.key) ? fit(mapA.value, field.shape) : "none";
 					if (value === "none") {
 						if (isRequired(field.shape)) return "none";
 						continue;
@@ -4690,12 +4690,6 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return f.is.string(expression) || f.is.number(expression) || f.is.bool(expression) || f.is.nil(expression);
 	}
 
-	function fieldAccess(object: ts.Expression, name: string): ts.Expression {
-		return IDENTIFIER.test(name)
-			? factory.createPropertyAccessExpression(object, name)
-			: factory.createElementAccessExpression(object, f.string(name));
-	}
-
 	function path(object: ts.Expression, names: string[]): ts.Expression {
 		return names.reduce((current, name) => prop(current, name), object);
 	}
@@ -4826,8 +4820,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				const object = bind(out, cast(value, T.record()), "object");
 				const total = new Sum();
 				for (const field of kind.fields) {
-					const at = within(place, fieldSegment(field.name));
-					total.add(emitSize(field.shape, fieldAccess(object, field.name), out, at));
+					const at = within(place, keySegment(field.key));
+					total.add(emitSize(field.shape, keyAccess(object, field.key), out, at));
 				}
 
 				return total.build();
@@ -5195,10 +5189,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "object": {
 				const object = bind(ctx.out, cast(value, T.record()), "object");
 				for (const field of kind.fields) {
-					const place = within(ctx, fieldSegment(field.name));
+					const place = within(ctx, keySegment(field.key));
 					// A union's discriminant has compared this one already.
 					const compared = field.name === ctx.compared ? { ...place, tested: true } : place;
-					emitScopedWrite(field.shape, fieldAccess(object, field.name), compared);
+					emitScopedWrite(field.shape, keyAccess(object, field.key), compared);
 				}
 				return;
 			}
@@ -5368,7 +5362,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		if (kind.kind === "object") {
 			const key = objectKey(union, kind);
 			if (key) {
-				const field = fieldAccess(cast(value, T.record()), key.name);
+				const field = keyAccess(cast(value, T.record()), key.key);
 				const test = key.value ? equals(field, checkGlobalsIn(key.value)) : notNil(field);
 				// Indexing is only safe once the value is known to be a table.
 				const tables = union.alternatives.every((other) => TABLE_KINDS.has(describe(other.shape).kind));
@@ -5618,7 +5612,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			}
 			case "object": {
 				const fields = kind.fields.map((field) =>
-					f.propertyAssignmentDeclaration(field.name, readInto(field.shape, ctx, field.name)),
+					f.propertyAssignmentDeclaration(keyName(field.key), readInto(field.shape, ctx, field.name)),
 				);
 				return f.object(fields);
 			}

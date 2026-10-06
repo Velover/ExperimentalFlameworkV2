@@ -266,6 +266,68 @@ describe("Flamework.createSerializer", () => {
 	});
 });
 
+describe("a field keyed by a number", () => {
+	// roblox-ts keys `{ 10: v }` and `v[10]` by the number 10, and `{ "10": v }` by the string, though
+	// TypeScript names the property "10" either way. 2.0.0-alpha.7 read, wrote and decoded every field
+	// by its name as a string (`v["10"]`), so a required one raised, an optional one was dropped, and
+	// the decoded table held a key the game never reads.
+	const NUMBER_KEYS = `import { Flamework, Serialization } from "@flamework-experimental/core";
+export enum Level { Low = 20, High = 21 }
+export enum Tier { Bronze = 40, Silver = 41 }
+interface Source { 70: string; "71": string; a: string }
+export interface Declared { 10: string; "11": string; 1.5: string; 1e21: string; [-2]: string; [Level.High]: string; plain: string }
+export const declared = Flamework.createSerializer<Declared>();
+export const mapped = Flamework.createSerializer<{ r: Record<30 | 31, string>; m: Record<"" | 50, string>; k: { [K in 60 | 61]: string } }>();
+export const partialEnum = Flamework.createSerializer<Partial<Record<Tier, string>>>();
+export const derived = Flamework.createSerializer<{ p: Pick<Source, 70 | "71">; o: Omit<Source, "a">; ro: Readonly<Record<80, string>>; pa: Partial<Source> }>();
+export const checked = Flamework.createSerializer<{ 90: Serialization.Implicit.u8 }>();
+`;
+
+	let compiled: ReturnType<typeof compileProbes> | undefined;
+	const luau = () => {
+		compiled ??= compileProbes({ numberKeys: NUMBER_KEYS });
+		expect(compiled.status).toBe(0);
+		return compiled.files.get("numberKeys")!;
+	};
+	/** The key as Luau spells it, escaped for a pattern: `10`, `1e+21`, `"11"`. */
+	const spelled = (key: string) => key.replace(/[.+[\]]/g, "\\$&");
+	/** Measured (`#(v[10])`), read for writing (`= v[10]`) and decoded into a table (`[10] = text`). */
+	const expectKeyed = (key: string) => {
+		const at = spelled(key);
+		expect(luau()).toMatch(new RegExp(`#\\(\\w+\\[${at}\\]\\)`));
+		expect(luau()).toMatch(new RegExp(`= \\w+\\[${at}\\]\\n`));
+		expect(luau()).toMatch(new RegExp(`\\n\\s*\\[${at}\\] = \\w+,`));
+	};
+
+	test("is read, written and decoded at that number, whatever the number", () => {
+		for (const key of ["10", "1.5", "1e+21", "-2"]) expectKeyed(key);
+		// `[Level.High]`: the member's value.
+		expectKeyed("21");
+	});
+
+	test("written as a string stays a string, and a name stays a name", () => {
+		expectKeyed('"11"');
+		expect(luau()).toMatch(/#\(\w+\.plain\)/);
+		expect(luau()).not.toMatch(/\["(10|1\.5|1e\+21|-2|21)"\]/);
+	});
+
+	test("of a mapped type is keyed by the number its key type is", () => {
+		// `Record<30 | 31, V>`, `{ [K in 60 | 61]: V }`, `Partial<Record<Tier, V>>`, `Pick`, `Omit`,
+		// `Readonly` and `Partial` of a type with a number key.
+		for (const key of ["30", "31", "50", "60", "61", "70", "80"]) expectKeyed(key);
+		expect(luau()).toMatch(/= \w+\[40\]\n/);
+		expect(luau()).toMatch(/\n\s*\[41\] = \w+,/);
+		// `Record<"" | 50, V>`'s other key is a string, and `Pick<Source, 70 | "71">`'s is too.
+		expectKeyed('""');
+		expectKeyed('"71"');
+		expect(luau()).not.toMatch(/\["(30|31|40|41|50|60|61|70|80)"\]/);
+	});
+
+	test("is named by its number in a width check's message", () => {
+		expect(luau()).toMatch(/codec\.checkWidth\("u8", \w+, "value\[90\]"\)/);
+	});
+});
+
 /** Where the fixture's serialization.ts builds `name`: the line and column of its `createSerializer` call. */
 function locate(name: string): string {
 	const text = fs.readFileSync(path.join(import.meta.dir, "fixture", "src", "serialization.ts"), "utf8");
@@ -643,7 +705,7 @@ export const FIRST_BETA = Beta.X;
 	});
 });
 
-/** The keys of each table the decoders build, in order: `{ zebra = ..., ["30"] = ... }` is "zebra,30". */
+/** The keys of each table the decoders build, in order: `{ zebra = ..., [30] = ... }` is "zebra,30". */
 function tableKeys(luau: string): string[] {
 	return [...luau.matchAll(/= \{\n((?:\t+\S+ = [^\n{]+,\n)+)\t*\}/g)].map((table) =>
 		[...table[1].matchAll(/^\t+\[?"?(\w+)"?\]? = /gm)].map((key) => key[1]).join(","),
@@ -1021,9 +1083,9 @@ export const IDS: Array<Id | Alpha> = [];
 				'{ "common", "rare", "epic", Enum.KeyCode.W }',
 			].sort(),
 		);
-		// A mapped type's keys go the same way.
-		expect(luau).toMatch(/\["1"\] = \w+,\s*\["-1"\] = \w+,/);
-		expect(luau).toMatch(/\[""\] = \w+,\s*\["5"\] = \w+,/);
+		// A mapped type's keys go the same way, a number key decoded as the number.
+		expect(luau).toMatch(/\[1\] = text\w*,\s*\[-1\] = text\w*,/);
+		expect(luau).toMatch(/\[""\] = text\w*,\s*\[5\] = text\w*,/);
 	});
 
 	test("numbers the names `typeof` returns ahead of the other literals, in the order the checker creates them", () => {

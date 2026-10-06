@@ -5,6 +5,7 @@ import { f } from "../factory";
 import { getDeclarationOfType } from "./getDeclarationOfType";
 import { getInstanceTypeFromType } from "./getInstanceTypeFromType";
 import { localName } from "./identifierName";
+import { getPropertyKey, keyName } from "./propertyKey";
 import assert from "assert";
 
 /**
@@ -12,7 +13,9 @@ import assert from "assert";
  * @param state The TransformState
  * @param file The file that this type belongs to
  * @param type The type to convert
- * @param isInterfaceType Determines whether unknown should be omitted.
+ * @param isInterfaceType Determines whether unknown should be omitted, and whether a property keyed by a
+ * number (`{ 10: V }`) is keyed by that number, as `t.interface` needs; otherwise every key is the
+ * property's name, as a component's attributes need.
  * @returns An array of property assignments.
  */
 export function buildGuardsFromType(
@@ -656,7 +659,11 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 			}
 
 			const attribute = buildGuard(propertyType);
-			guards.push(f.propertyAssignmentDeclaration(property.name, attribute));
+			// `t.interface` checks the value at each guard's key, so a property keyed by a number
+			// (`{ 10: V }`, `Record<Level, V>`) is checked at the number roblox-ts keys it by. A
+			// component's attributes are named by strings, as the engine stores them.
+			const name = isInterfaceType ? keyName(getPropertyKey(typeChecker, property)) : property.name;
+			guards.push(f.propertyAssignmentDeclaration(name, attribute));
 
 			if (declaration) {
 				assert(tracking.pop()?.[0] === declaration, "Popped value was not expected");

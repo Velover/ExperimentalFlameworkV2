@@ -30,6 +30,19 @@ const RUN_TIMEOUT_MS = Number(process.env.FLAMEWORK_RUNTIME_TIMEOUT_MS) || 10 * 
  * the flag they never get it, so a variable left set in a shell cannot rewrite them by accident.
  */
 const UPDATE_GOLDEN = process.argv.slice(2).includes("--update-golden");
+
+/**
+ * The arguments the runner takes. Any other is refused before anything runs: a misspelt flag
+ * (`--update-goldens`) would otherwise run a normal check and pass, as if the goldens had been rewritten.
+ */
+const KNOWN_ARGS = ["--update-golden"];
+const unknownArgs = process.argv.slice(2).filter((arg) => !KNOWN_ARGS.includes(arg));
+if (unknownArgs.length > 0) {
+	console.error(
+		`\x1b[31m[test]\x1b[0m unknown argument${unknownArgs.length > 1 ? "s" : ""} ${unknownArgs.map((arg) => `'${arg}'`).join(", ")}; test:runtime takes only ${KNOWN_ARGS.join(", ")}`,
+	);
+	process.exit(1);
+}
 const RUN_ENV = { ...process.env };
 // Windows matches a variable's name in any case.
 for (const name of Object.keys(RUN_ENV)) if (name.toUpperCase() === "UPDATE_GOLDEN") delete RUN_ENV[name];

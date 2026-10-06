@@ -22,6 +22,7 @@ import {
 } from "../util/functions/buildSerializerFromType";
 import { isTupleType } from "../util/functions/isTupleType";
 import { localName } from "../util/functions/identifierName";
+import { getPropertyKey, keyName, TableKey } from "../util/functions/propertyKey";
 import { getNetworkMode, hasNetworkMarker, isPackedMode } from "../util/functions/networkMode";
 import { inlineMacroIntrinsic } from "./macros/intrinsics/inlining";
 import { addLeadingComment } from "../util/functions/addLeadingComment";
@@ -240,7 +241,7 @@ function buildUserMacro(state: TransformState, node: ts.Node, macro: UserMacro):
 					continue;
 				}
 
-				elements.push(f.propertyAssignmentDeclaration(f.string(name), expression));
+				elements.push(f.propertyAssignmentDeclaration(keyName(name), expression));
 			}
 
 			return f.asNever(f.object(elements, false));
@@ -543,14 +544,15 @@ function getUserMacroOfMany(state: TransformState, node: ts.Node, target: ts.Typ
 			members: userMacros,
 		};
 	} else if (isObjectType(target)) {
-		const userMacros = new Map<string, UserMacro>();
+		// Keyed as the type declares its properties: `{ 10: ... }` by the number, as the macro's code reads it.
+		const userMacros = new Map<TableKey, UserMacro>();
 
 		for (const member of target.getProperties()) {
 			const memberType = state.typeChecker.getTypeOfPropertyOfType(target, member.name);
 			if (!memberType) continue;
 
 			const userMacro = getUserMacroOfMany(state, node, memberType);
-			userMacros.set(member.name, userMacro);
+			userMacros.set(getPropertyKey(state.typeChecker, member), userMacro);
 		}
 
 		return {
@@ -768,7 +770,7 @@ export type UserMacro =
 	  }
 	| {
 			kind: "many";
-			members: Map<string, UserMacro> | Array<UserMacro>;
+			members: Map<TableKey, UserMacro> | Array<UserMacro>;
 	  }
 	| {
 			kind: "literal";

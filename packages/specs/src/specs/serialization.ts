@@ -275,6 +275,26 @@ interface AroundRest {
 
 const aroundRestSerializer = Flamework.createSerializer<AroundRest>();
 
+/**
+ * Fields roblox-ts keys by a number: `{ 10: v }`, `{ [-1]: v }` and a numeric enum's members are
+ * number keys, `{ "11": v }` a string one, though TypeScript names each property with a string.
+ */
+interface NumberKeyed {
+	10: string;
+	[-1]?: Serialization.u8;
+	"11": boolean;
+}
+
+enum Gear {
+	Hat = 1,
+	Gloves = 2,
+}
+
+const numberKeyedSerializer = Flamework.createSerializer<NumberKeyed>();
+const numberKeyedGuard = Flamework.createGuard<NumberKeyed>();
+const gearSerializer = Flamework.createSerializer<Partial<Record<Gear, string>>>();
+const gearGuard = Flamework.createGuard<Partial<Record<Gear, string>>>();
+
 /** Whether decoding raises, which is how a malformed payload is reported. */
 function rejects(run: () => unknown): boolean {
 	const [ok] = pcall(run);
@@ -1058,6 +1078,36 @@ export = suite("serialization", [
 				expectTrue(deepEquals(roundTrip(serializer, [1, "a", "b"]), [1, "a", "b"]), "with rest elements");
 				expectTrue(deepEquals(roundTrip(serializer, { a: 2 }), { a: 2 }), "the object");
 			}
+		},
+	],
+	[
+		// Regression: the generated code read, wrote and checked every field by its name as a string
+		// (`v["10"]`), so a required number-keyed field raised as it was written, an optional one was
+		// dropped, the decoded table held string keys, and the guard checked the wrong key.
+		"keys a field named by a number by that number, in a serializer and in a guard",
+		() => {
+			const value: NumberKeyed = { 10: "ten", [-1]: 5 as Serialization.u8, "11": true };
+			const decoded = roundTrip(numberKeyedSerializer, value);
+			expectEqual(decoded[10], "ten", "the required number-keyed field");
+			expectEqual(decoded[-1], 5, "the optional number-keyed field");
+			expectEqual(decoded["11"], true, "the field written as a string");
+			const keys = decoded as unknown as Map<unknown, unknown>;
+			expectEqual(keys.get("10"), undefined, "no string key 10 in the decoded table");
+			expectEqual(keys.get("-1"), undefined, "no string key -1 in the decoded table");
+			const absent = roundTrip(numberKeyedSerializer, { 10: "ten", "11": false });
+			expectEqual(absent[-1], undefined, "the optional absent");
+
+			expectTrue(numberKeyedGuard(value), "the guard takes the value");
+			expectTrue(numberKeyedGuard({ 10: "ten", "11": false }), "and the value without its optional field");
+			expectFalse(numberKeyedGuard({ ["10"]: "ten", "11": true }), "a string key 10 is not the field");
+			expectFalse(numberKeyedGuard({ 10: "ten", [-1]: "five", "11": true }), "the optional field is checked");
+
+			const gear = roundTrip(gearSerializer, { [Gear.Gloves]: "wool" });
+			expectEqual(gear[Gear.Gloves], "wool", "a numeric enum's member");
+			expectEqual(gear[Gear.Hat], undefined, "the absent member");
+			expectEqual((gear as unknown as Map<unknown, unknown>).get("2"), undefined, "no string key 2");
+			expectTrue(gearGuard({ [Gear.Hat]: "felt" }), "the guard takes a member's value");
+			expectFalse(gearGuard({ [Gear.Hat]: 1 }), "and checks it");
 		},
 	],
 ]);

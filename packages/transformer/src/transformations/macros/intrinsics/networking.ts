@@ -76,7 +76,8 @@ export function transformObfuscatedObjectIntrinsic(state: TransformState, macro:
 		// Maps are order-preserving, so we can shuffle the map directly.
 		for (const [key, inner] of state.obfuscateArray([...macro.members])) {
 			macro.members.delete(key);
-			macro.members.set(state.obfuscateText(key, hashContext), inner);
+			// A number key is no name the runtime looks up: networking's names are `keyof T & string`.
+			macro.members.set(typeof key === "string" ? state.obfuscateText(key, hashContext) : key, inner);
 		}
 	}
 }

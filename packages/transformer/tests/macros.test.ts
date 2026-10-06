@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { compileFixture, compileProbe, emitted, normalize } from "./compile";
+import { compileFixture, compileProbe, compileProbes, emitted, normalize } from "./compile";
 
 beforeAll(() => {
 	const result = compileFixture();
@@ -84,6 +84,51 @@ describe("guard generation", () => {
 
 	test("emits Roblox datatype guards by alias", () => {
 		expect(emitted("guards")).toContain("t.CFrame");
+	});
+});
+
+describe("a property keyed by a number", () => {
+	// roblox-ts keys `{ 10: v }` and `v[10]` by the number 10, and `{ "10": v }` by the string, though
+	// TypeScript names the property "10" either way. 2.0.0-alpha.7 keyed every guard and every user
+	// macro's table by the name as a string, so `t.interface` checked `value["10"]`: a required field
+	// was refused and an optional one never checked.
+	const NUMBER_KEYS = `import { Flamework, Modding } from "@flamework-experimental/core";
+import { BaseComponent, Component } from "@flamework-experimental/components";
+export enum Tier { Bronze = 40, Silver = 41 }
+export interface Target { value: number }
+export const keyed = Flamework.createGuard<{ 10: string; "11": number; [-1]?: boolean }>();
+export const byTier = Flamework.createGuard<Partial<Record<Tier, string>>>();
+
+/** @metadata macro */
+export function keyedIds<T>(ids?: Modding.Emit<{ 10: Modding.Target.Id<T>; "11": Modding.Target.Id<T> }>) {
+	return ids!;
+}
+export const ids = keyedIds<Target>();
+
+@Component({ tag: "NumberKeyGuards" })
+export class NumberKeyComponent extends BaseComponent<{ 10: number }> {}
+`;
+
+	let compiled: ReturnType<typeof compileProbes> | undefined;
+	const luau = () => {
+		compiled ??= compileProbes({ numberKeyGuards: NUMBER_KEYS });
+		expect(compiled.status).toBe(0);
+		return normalize(compiled.files.get("numberKeyGuards")!);
+	};
+
+	test("is checked by a guard at that number, and one written as a string at the string", () => {
+		expect(luau()).toContain('t.interface({ [10] = t.string, ["11"] = t.number, [-1] = t.optional(t.boolean), })');
+		// A mapped type over a numeric enum.
+		expect(luau()).toContain("t.interface({ [40] = t.optional(t.string), [41] = t.optional(t.string), })");
+	});
+
+	test("is keyed by that number in a user macro's table", () => {
+		const id = '"fw:numberKeyGuards@Target"';
+		expect(luau()).toContain(`local ids = keyedIds({ [10] = ${id}, ["11"] = ${id}, })`);
+	});
+
+	test("names a component's attribute by a string, as the engine does", () => {
+		expect(luau()).toContain('attributes = { ["10"] = t.number, }');
 	});
 });
 

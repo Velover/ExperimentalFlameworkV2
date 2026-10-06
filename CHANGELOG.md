@@ -161,6 +161,11 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   such as two interfaces of one name from two files, imported under other names and reached through
   a generic (`Box<SameA | SameB>`). Declare an alias for the union where the value is declared, and
   its written order numbers them.
+- **A field whose type declares a number key is read and checked at that number** (`{ 10: V }`,
+  `Record<1 | 2, V>`, `Record<NumericEnum, V>`; see transformer, Fixed). A game that built such
+  values with string keys to get round the old behaviour (`{ ["10"]: v }`) now has them refused by
+  guards and dropped or refused by serializers: write the key as a number (`{ 10: v }`), or declare
+  it as a string (`"10": V`) if the data really is keyed by strings.
 
 ### core
 
@@ -349,6 +354,24 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 #### Fixed
 
+- **A field keyed by a number is read, written, decoded and checked at that number, as roblox-ts
+  keys it.** roblox-ts compiles `{ 10: v }`, `{ [-1]: v }`, `{ [Level.High]: v }` and `v[10]` with
+  the number as the key, and only `{ "10": v }` with the string, but the generated code keyed every
+  property by its name as a string (`v["10"]`). In every 2.0.0 alpha so far, for an object type with
+  such a field (`{ 10: V }`, `Record<10 | 2, V>`, `Record<1 | -1, V>`, `Record<"" | 5, V>`,
+  `Record<NumericEnum, V>`, and `Partial`, `Pick`, `Omit` or `Readonly` of them),
+  `Flamework.createSerializer` and the packed networking calls wrote a required one wrong (raising
+  `attempt to get length of a nil value`, or writing a boolean as `false`), dropped an optional one,
+  and decoded a table with string keys, which the game's `v[10]` never finds; a guard
+  (`Flamework.createGuard`, networking's checks of arguments and results) checked `value["10"]`, so
+  it refused a value with the required field and never checked an optional one; and a user macro's
+  `Modding.Emit<{ 10: ... }>` table had the key `"10"`. The key now follows the type's declaration,
+  as `keyof` does: a numeric literal, a computed number or numeric enum member, or a mapped type's
+  number key is a number, and a key written as a string stays a string. A component's attributes
+  keep their string names, as the engine stores them. The bytes on the wire are unchanged, since
+  keys are never written: a buffer stored earlier still decodes, into number keys now. A check's
+  message names such a field `value[10]`, and a networking call through a union of a member typed
+  `{ 10: V }` and one typed `{ "10": V }` is refused, as the two key the field differently.
 - **A function declared under one name in both directions packs each side's results as that side
   declares them.** Since 2.0.0-alpha.5, with `networking.serialization` on or for a `Serialized`
   member, `serverFunctions.both.setCallback(...)` packed its result as the client's `both` (the

@@ -239,6 +239,17 @@ An instance type intersected with an object type is read as required children:
 `Model & { Humanoid: Humanoid }` becomes
 `t.intersection(t.instanceIsA("Model"), t.children({ Humanoid: t.instanceIsA("Humanoid") }))`.
 
+**Keys.** A property roblox-ts keys by a number (`{ 10: v }`, `{ [-1]: v }`, `{ [Level.High]: v }`,
+read as `v[10]`) is keyed by that number in generated code too: `t.interface({ [10] = ... })`, the
+serializer's `v[10]` and decoded `{ [10] = ... }`, a user macro's `Modding.Emit` table. TypeScript
+names every property with a string, so `getPropertyKey`
+([`src/util/functions/propertyKey.ts`](../../packages/transformer/src/util/functions/propertyKey.ts))
+works the key out as `keyof` does: a mapped or late-bound property carries its key's literal type
+(TypeScript's `nameType`: `Record<10, V>`, `Partial<Record<Level, V>>`), any other has its
+declaration's name, a number for a numeric literal or a computed number. A key written as a string
+(`{ "10": v }`) stays a string, and so do a component's attribute names and an instance's child
+names, which the engine keeps as strings.
+
 ## The plugin host
 
 Transformer plugins register additional macro types. A plugin is a CommonJS module that calls
@@ -912,7 +923,7 @@ by name) is taken member by member: the call packs, as its first member would, w
 packs, and is left alone when none does. Members that disagree are a build error that names the
 call, and so are packed members whose argument lists (for `setCallback`, results) are not laid
 out and checked alike: `packingKey` gives the generator's `wireKey` of the list each member's
-decoder reads (widths, literal tables, field names and union members in order, and which widths and
+decoder reads (widths, literal tables, field keys and union members in order, and which widths and
 lengths are checked), so one TypeScript type spelled two ways (`(x: string | number)`,
 `(x: number | string)`) differs, and members laid out and checked alike pack together whatever their
 types. The key is stricter than the bytes: `u8` against `Implicit.u8`, or an empty argument list

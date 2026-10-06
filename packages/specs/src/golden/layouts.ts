@@ -281,6 +281,7 @@ function numberCases(): SerializerCase[] {
 		),
 		golden("Serialization.f32", Flamework.createSerializer<Serialization.f32>(), [
 			["0", 0 as Serialization.f32],
+			["-0", NEGATIVE_ZERO as Serialization.f32],
 			["1.5", 1.5 as Serialization.f32],
 			["-2.25", -2.25 as Serialization.f32],
 			["f32 max", F32_MAX as Serialization.f32],
@@ -332,6 +333,7 @@ function numberCases(): SerializerCase[] {
 			whole(-2147483648, 2147483647),
 		),
 		golden("Serialization.Implicit.f32", Flamework.createSerializer<Serialization.Implicit.f32>(), [
+			["-0", NEGATIVE_ZERO],
 			["1.5", 1.5],
 			["f32 max", F32_MAX],
 			["inf", math.huge],
@@ -905,9 +907,7 @@ function robloxEnumCases(): SerializerCase[] {
 	];
 }
 
-// Mapped types: a homomorphic one keeps its type's order, the others go by their keys, sorted. The
-// generated code reads and writes a number key as a string (`v["10"]`), where roblox-ts makes the
-// key of `{ 10: "a" }` a number, so the samples spell such keys as strings.
+// Mapped types: a homomorphic one keeps its type's order, the others go by their keys, sorted.
 function mappedCases(): SerializerCase[] {
 	return [
 		golden("Partial<Zoo>", Flamework.createSerializer<Partial<Zoo>>(), [
@@ -927,7 +927,7 @@ function mappedCases(): SerializerCase[] {
 		]),
 		golden("Partial<Record<Level, string>>", Flamework.createSerializer<Partial<Record<Level, string>>>(), [
 			["empty", {}],
-			["High", { ["30"]: "h" }],
+			["High", { [Level.High]: "h" }],
 		]),
 		golden('Record<"speed" | "power", number>', Flamework.createSerializer<Record<"speed" | "power", number>>(), [
 			["1, 2", { speed: 1, power: 2 }],
@@ -942,13 +942,13 @@ function mappedCases(): SerializerCase[] {
 			["rest", { zebra: 1, mole: true }],
 		]),
 		golden("Record<10 | 2 | 1, string>", Flamework.createSerializer<Record<10 | 2 | 1, string>>(), [
-			["a, b, c", { ["10"]: "a", ["2"]: "b", ["1"]: "c" }],
+			["a, b, c", { 10: "a", 2: "b", 1: "c" }],
 		]),
 		golden("Record<1 | -1, string>", Flamework.createSerializer<Record<1 | -1, string>>(), [
-			["p, n", { ["1"]: "p", ["-1"]: "n" }],
+			["p, n", { 1: "p", [-1]: "n" }],
 		]),
 		golden('Record<"" | 5, string>', Flamework.createSerializer<Record<"" | 5, string>>(), [
-			["e, f", { [""]: "e", ["5"]: "f" }],
+			["e, f", { [""]: "e", 5: "f" }],
 		]),
 		golden(
 			'Record<"number" | "string", number>',

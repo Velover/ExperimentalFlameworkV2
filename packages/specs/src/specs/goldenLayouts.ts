@@ -78,16 +78,22 @@ function blobKinds(blobs: Array<defined>): string {
 	return `[${blobs.map((blob) => typeOf(blob)).join(", ")}]`;
 }
 
-/** A value, briefly, for a failure message. */
-function show(value: unknown, depth = 0): string {
+/**
+ * A value, briefly, for a failure message. With `bits`, each number is followed by its f64 bytes, and
+ * a float datatype by its components' (see {@link showPair}).
+ */
+function show(value: unknown, depth = 0, bits = false): string {
 	if (typeIs(value, "string")) return `"${value}"`;
 	if (typeIs(value, "buffer")) return `buffer ${hex(value)}`;
 	// `typeOf`, not `typeIs`, which roblox-ts makes Luau's `type`: an Instance or an EnumItem is a table there.
-	if (typeOf(value) !== "table") return tostring(value);
+	if (typeOf(value) !== "table") {
+		const numbers = !bits ? undefined : typeIs(value, "number") ? [value] : components(value);
+		return numbers ? `${tostring(value)} (f64 ${numbers.map(f64Bytes).join(", ")})` : tostring(value);
+	}
 	if (depth > 2) return "{...}";
 	const parts = new Array<string>();
 	for (const [key, item] of value as Map<unknown, unknown>) {
-		parts.push(`${show(key, depth + 1)}: ${show(item, depth + 1)}`);
+		parts.push(`${show(key, depth + 1, bits)}: ${show(item, depth + 1, bits)}`);
 	}
 	parts.sort();
 	return `{ ${parts.join(", ")} }`;
@@ -210,6 +216,13 @@ function sameNumber(a: number, b: number): boolean {
 	return buffer.readstring(numberBits, 0, 8) === buffer.readstring(numberBits, 8, 8);
 }
 
+/** A number's f64 bytes as hex, in buffer order, as the goldens write them: `000000000000f87f` is NaN. */
+function f64Bytes(value: number): string {
+	const bytes = buffer.create(8);
+	buffer.writef64(bytes, 0, value);
+	return hex(bytes);
+}
+
 /**
  * The numbers a float datatype is written as, which `same` compares with `sameNumber`: a
  * datatype's `==` compares its components with Luau's, so it takes a -0 inside for 0 and refuses
@@ -226,6 +239,16 @@ function components(value: unknown): number[] | undefined {
 	if (typeIs(value, "Rect")) return [value.Min.X, value.Min.Y, value.Max.X, value.Max.Y];
 	if (typeIs(value, "CFrame")) return [...value.GetComponents()];
 	return undefined;
+}
+
+/**
+ * What was read back and the sample, for a failure message. Where `show` prints them alike, as it
+ * does a NaN read with another payload or sign (`nan` against `nan`), each number's f64 bytes follow
+ * it, which is where they differ.
+ */
+function showPair(read: unknown, sample: unknown): [string, string] {
+	const [left, right] = [show(read), show(sample)];
+	return left !== right ? [left, right] : [show(read, 0, true), show(sample, 0, true)];
 }
 
 /**
@@ -384,7 +407,8 @@ export = suite("golden layouts", [
 				if (!ok) {
 					problems.push(`  ${key}: raised ${tostring(decoded)}`);
 				} else if (!same(decoded, sample)) {
-					problems.push(`  ${key}: read ${show(decoded)}, sample ${show(sample)}`);
+					const [read, wanted] = showPair(decoded, sample);
+					problems.push(`  ${key}: read ${read}, sample ${wanted}`);
 				}
 			}
 			report(SERIALIZER_FILE, problems);
@@ -418,7 +442,8 @@ export = suite("golden layouts", [
 				if (!ok) {
 					problems.push(`  ${key}: raised ${tostring(received)}`);
 				} else if (!same(received, networkCase.expected)) {
-					problems.push(`  ${key}: received ${show(received)}, sent ${show(networkCase.expected)}`);
+					const [got, wanted] = showPair(received, networkCase.expected);
+					problems.push(`  ${key}: received ${got}, sent ${wanted}`);
 				}
 			}
 			report(NETWORKING_FILE, problems);
