@@ -25,15 +25,16 @@ import { getNetworkMode, isPackedMode, NetworkMode } from "../util/functions/net
  * as malformed). A handler reached through `?.` is typed with `undefined` in it; the marker is looked
  * for on the rest. An argument list that carries nothing (`bump(): void`) sends no payload at all.
  *
- * A target typed as a union of members (a conditional, or a helper that returns one of several
- * members) is packed when every member in it is, the same way, and left alone when none is. Members
- * that are packed differently are refused, since whatever the call site did would not suit some of
- * them, and so are packed members whose argument lists (for `setCallback`, results) are not laid out
- * and checked alike. Their handler types carry how they are packed (`_flamework_packing`), so
- * that such a union does not reduce to the one member type the others extend. Members packed the same
- * way whose types are the same but for how their unions are spelled are one type to TypeScript all the
- * same, and a conditional or an inferred return type keeps only one of them: see the known limit in
- * guide 06.
+ * A target typed as a union of members (a conditional, a helper that returns one of several members,
+ * or a variable typed as either) is packed when every member in it is, the same way, and left alone
+ * when none is. Members that are packed differently are refused, since whatever the call site did
+ * would not suit some of them, and so are packed members whose argument lists (for `setCallback`,
+ * results) are not laid out and checked alike. Their handler types carry how they are packed
+ * (`_flamework_packing`) and the member's name after its namespaces' names (`_flamework_member`), so
+ * that such a union keeps every member: it reduces neither to the one member type the others extend
+ * nor to one of two members whose types are the same but for how a union is spelled or the order of
+ * an object type's fields. Members of two networks with the same names and the same types are still
+ * one type to TypeScript: see the known limit in guide 06.
  */
 
 /** Sending methods and the hidden entry point each becomes. */

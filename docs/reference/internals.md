@@ -907,12 +907,23 @@ decoder reads (widths, literal tables, field names and union members in order, a
 lengths are checked), so one TypeScript type spelled two ways (`(x: string | number)`,
 `(x: number | string)`) differs, and members laid out and checked alike pack together whatever their
 types. The key is stricter than the bytes: `u8` against `Implicit.u8`, or an empty argument list
-against one whose only argument is `undefined`, write the same bytes and are still refused. Two members packed the same way whose types differ only in
-such a spelling are one type to TypeScript, and a conditional's or an inferred return type's subtype
-reduction keeps one of them, so that case never reaches the check. For the union to still hold every member there, each sender and function
-receiver carries how it is packed as a type argument of its own (`_flamework_packing`, from
-`NetworkPacking<F>`): otherwise TypeScript's subtype reduction would keep only the member type the
-others extend, a plain member in place of a `Serialized` one and a `Raw` one in place of any.
+against one whose only argument is `undefined`, write the same bytes and are still refused.
+For the union to hold every member, each sender and function receiver carries two type arguments
+of its own, each as a hidden field that is never set. One is how it is packed (`_flamework_packing`,
+from `NetworkPacking<F>`): without it TypeScript's subtype reduction, in a conditional or an
+inferred return type, would keep only the member type the others extend, a plain member in place
+of a `Serialized` one and a `Raw` one in place of any. The other is the member's name after its
+namespaces' names (`_flamework_member`, from `NetworkMemberName<P, k>`: `"setA"`,
+`"items.setA"`): without it two members packed the same way whose types differ only in such a
+spelling, or in the order of an object type's fields, would be one TypeScript type, and the
+reduction would keep one of them before the check saw the call. The handler types thread the
+namespace path through their recursion (`ServerHandler<E, R, P>`, `P` from `""` to `"items."`).
+The name's type parameter defaults to `string`, so a sender type written by hand
+(`ClientSender<[number]>`) takes any member's packed as it says (a `Serialized` member's needs its
+packing argument, as before); raw senders carry no name, since no call on them
+packs. The transformer never reads `_flamework_member`: it only keeps the union apart. Members of
+two networks with the same names, namespace paths included, and the same types are still one type
+(guide 06, Caveats).
 The packing goes ahead of the statement when that runs it exactly when the call would --
 once, unconditionally, after nothing with side effects; behind `&&`/`||`/`??` or a conditional, in
 a loop condition, after a sibling with side effects, or in an expression-bodied arrow, the call is

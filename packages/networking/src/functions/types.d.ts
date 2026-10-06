@@ -8,6 +8,7 @@ import {
 	IntrinsicObfuscate,
 	IsRawMember,
 	NetworkingObfuscationMarker,
+	NetworkMemberName,
 	NetworkPacking,
 	ObfuscateNames,
 } from "../types";
@@ -40,16 +41,25 @@ export interface RawServerSender<I extends unknown[], O, M = "raw"> {
 	invokeWithTimeout(player: Player, timeout: number, ...args: I): Promise<O>;
 }
 
-export interface ServerSender<I extends unknown[], O, F = unknown, M = NetworkPacking<F>> extends RawServerSender<
-	I,
+export interface ServerSender<
+	I extends unknown[],
 	O,
-	M
-> {
+	F = unknown,
+	M = NetworkPacking<F>,
+	K extends string = string,
+> extends RawServerSender<I, O, M> {
 	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
 	readonly _flamework_send?: I;
 
 	/** @hidden The declared function type, whose markers (`Serialized`) say whether its call sites pack. */
 	readonly _flamework_fn?: F;
+
+	/**
+	 * @hidden The member's name after its namespaces' names (`items.setA`; see `NetworkMemberName`),
+	 * which keeps members whose types are otherwise the same apart in a union. A sender type written
+	 * without it (`ClientSender<[number]>`) takes any member's.
+	 */
+	readonly _flamework_member?: K;
 
 	/** @hidden Sends an argument list the transformer already packed; nothing when the list carries nothing. */
 	_invoke(player: Player, payload?: buffer, blobs?: Array<defined>): Promise<O>;
@@ -76,16 +86,25 @@ export interface RawServerReceiver<I extends unknown[], O, M = "raw"> {
 	predict(player: Player, ...args: I): Promise<O>;
 }
 
-export interface ServerReceiver<I extends unknown[], O, F = unknown, M = NetworkPacking<F>> extends RawServerReceiver<
-	I,
+export interface ServerReceiver<
+	I extends unknown[],
 	O,
-	M
-> {
+	F = unknown,
+	M = NetworkPacking<F>,
+	K extends string = string,
+> extends RawServerReceiver<I, O, M> {
 	/** @hidden Marks a receiver for the transformer, which packs the callback's result at the call site. */
 	readonly _flamework_receive?: I;
 
 	/** @hidden The declared function type: its return type is what the transformer packs, its markers say how. */
 	readonly _flamework_fn?: F;
+
+	/**
+	 * @hidden The member's name after its namespaces' names (`items.setA`; see `NetworkMemberName`),
+	 * which keeps members whose types are otherwise the same apart in a union. A receiver type written
+	 * without it (`ServerReceiver<[number], string>`) takes any member's.
+	 */
+	readonly _flamework_member?: K;
 
 	/** @hidden Registers a callback with `pack`, which turns a successful result into `[payload, blobs?]`. */
 	_setCallback(callback: (player: Player, ...args: never[]) => unknown, pack: (value: unknown) => unknown): void;
@@ -109,16 +128,25 @@ export interface RawClientSender<I extends unknown[], O, M = "raw"> {
 	invokeWithTimeout(timeout: number, ...args: I): Promise<O>;
 }
 
-export interface ClientSender<I extends unknown[], O, F = unknown, M = NetworkPacking<F>> extends RawClientSender<
-	I,
+export interface ClientSender<
+	I extends unknown[],
 	O,
-	M
-> {
+	F = unknown,
+	M = NetworkPacking<F>,
+	K extends string = string,
+> extends RawClientSender<I, O, M> {
 	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
 	readonly _flamework_send?: I;
 
 	/** @hidden The declared function type, whose markers (`Serialized`) say whether its call sites pack. */
 	readonly _flamework_fn?: F;
+
+	/**
+	 * @hidden The member's name after its namespaces' names (`items.setA`; see `NetworkMemberName`),
+	 * which keeps members whose types are otherwise the same apart in a union. A sender type written
+	 * without it (`ClientSender<[number]>`) takes any member's.
+	 */
+	readonly _flamework_member?: K;
 
 	/** @hidden Sends an argument list the transformer already packed; nothing when the list carries nothing. */
 	_invoke(payload?: buffer, blobs?: Array<defined>): Promise<O>;
@@ -144,47 +172,102 @@ export interface RawClientReceiver<I extends unknown[], O, M = "raw"> {
 	predict(...args: I): Promise<O>;
 }
 
-export interface ClientReceiver<I extends unknown[], O, F = unknown, M = NetworkPacking<F>> extends RawClientReceiver<
-	I,
+export interface ClientReceiver<
+	I extends unknown[],
 	O,
-	M
-> {
+	F = unknown,
+	M = NetworkPacking<F>,
+	K extends string = string,
+> extends RawClientReceiver<I, O, M> {
 	/** @hidden Marks a receiver for the transformer, which packs the callback's result at the call site. */
 	readonly _flamework_receive?: I;
 
 	/** @hidden The declared function type: its return type is what the transformer packs, its markers say how. */
 	readonly _flamework_fn?: F;
 
+	/**
+	 * @hidden The member's name after its namespaces' names (`items.setA`; see `NetworkMemberName`),
+	 * which keeps members whose types are otherwise the same apart in a union. A receiver type written
+	 * without it (`ServerReceiver<[number], string>`) takes any member's.
+	 */
+	readonly _flamework_member?: K;
+
 	/** @hidden Registers a callback with `pack`, which turns a successful result into `[payload, blobs?]`. */
 	_setCallback(callback: (...args: never[]) => unknown, pack: (value: unknown) => unknown): void;
 }
 
-export type ServerHandler<E, R> = NetworkingObfuscationMarker & {
+/**
+ * The server's handler: senders for the functions `E`, receivers for the functions `R`, and a handler
+ * of the same kind for each namespace. `P` is the namespace path of its members (`"items."`), which
+ * each sender and receiver carries in its name (`NetworkMemberName`).
+ */
+export type ServerHandler<E, R, P extends string = ""> = NetworkingObfuscationMarker & {
 	[k in keyof Functions<E>]: IsRawMember<E[k]> extends true
 		? RawServerSender<FunctionParameters<E[k]>, FunctionReturn<E[k]>>
-		: ServerSender<FunctionParameters<E[k]>, FunctionReturn<E[k]>, E[k]>;
+		: ServerSender<
+				FunctionParameters<E[k]>,
+				FunctionReturn<E[k]>,
+				E[k],
+				NetworkPacking<E[k]>,
+				NetworkMemberName<P, k>
+			>;
 } & {
 	[k in keyof Functions<R>]: IsRawMember<R[k]> extends true
 		? RawServerReceiver<FunctionParameters<R[k]>, FunctionReturn<R[k]>>
-		: ServerReceiver<FunctionParameters<R[k]>, FunctionReturn<R[k]>, R[k]>;
+		: ServerReceiver<
+				FunctionParameters<R[k]>,
+				FunctionReturn<R[k]>,
+				R[k],
+				NetworkPacking<R[k]>,
+				NetworkMemberName<P, k>
+			>;
 } & {
-	[k in keyof FunctionNamespaces<E>]: ServerHandler<E[k], k extends keyof R ? R[k] : {}>;
+	[k in keyof FunctionNamespaces<E>]: ServerHandler<
+		E[k],
+		k extends keyof R ? R[k] : {},
+		`${NetworkMemberName<P, k>}.`
+	>;
 } & {
-	[k in keyof FunctionNamespaces<R>]: ServerHandler<k extends keyof E ? E[k] : {}, R[k]>;
+	[k in keyof FunctionNamespaces<R>]: ServerHandler<
+		k extends keyof E ? E[k] : {},
+		R[k],
+		`${NetworkMemberName<P, k>}.`
+	>;
 };
 
-export type ClientHandler<E, R> = NetworkingObfuscationMarker & {
+/** The client's handler; see {@link ServerHandler}. */
+export type ClientHandler<E, R, P extends string = ""> = NetworkingObfuscationMarker & {
 	[k in keyof Functions<E>]: IsRawMember<E[k]> extends true
 		? RawClientSender<FunctionParameters<E[k]>, FunctionReturn<E[k]>>
-		: ClientSender<FunctionParameters<E[k]>, FunctionReturn<E[k]>, E[k]>;
+		: ClientSender<
+				FunctionParameters<E[k]>,
+				FunctionReturn<E[k]>,
+				E[k],
+				NetworkPacking<E[k]>,
+				NetworkMemberName<P, k>
+			>;
 } & {
 	[k in keyof Functions<R>]: IsRawMember<R[k]> extends true
 		? RawClientReceiver<FunctionParameters<R[k]>, FunctionReturn<R[k]>>
-		: ClientReceiver<FunctionParameters<R[k]>, FunctionReturn<R[k]>, R[k]>;
+		: ClientReceiver<
+				FunctionParameters<R[k]>,
+				FunctionReturn<R[k]>,
+				R[k],
+				NetworkPacking<R[k]>,
+				NetworkMemberName<P, k>
+			>;
 } & {
-	[k in keyof FunctionNamespaces<E>]: ClientHandler<E[k], k extends keyof R ? R[k] : {}>;
+	[k in keyof FunctionNamespaces<E>]: ClientHandler<
+		E[k],
+		k extends keyof R ? R[k] : {},
+		`${NetworkMemberName<P, k>}.`
+	>;
 } & {
-	[k in keyof FunctionNamespaces<R>]: ClientHandler<k extends keyof E ? E[k] : {}, R[k]>;
+	[k in keyof FunctionNamespaces<R>]: ClientHandler<
+		k extends keyof E ? E[k] : {},
+		R[k],
+		`${NetworkMemberName<P, k>}.`
+	>;
 };
 
 export interface FunctionCreateConfiguration<T> {

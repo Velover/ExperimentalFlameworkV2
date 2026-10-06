@@ -143,6 +143,20 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `createSerializer` under 2.0.0-alpha.7 or earlier, in a DataStore say, that holds one of these
   types may read wrong or not at all. Read such data with the old build and save it again with the
   new one, or store a version next to each buffer and keep the old reader for the old version.
+- **A place typed as one networking member's sender no longer takes another member's,** even of
+  the same type, as each member's handler type now carries its name: `let send = Events.a`
+  followed by `send = Events.b`; a field or property set from one member and later another; a
+  parameter, return type, generic constraint, `Array`, `Record` or `Map` written with
+  `typeof Events.a` and given `Events.b`; an array inferred from some members
+  (`[Events.a, Events.b]`) given a third through `push` or `includes`; a generic `<T>(x: T, y: T)`
+  called with two members; a namespace reassigned to another of the same shape; and a hand-built
+  fake assigned to a handler's type. The error names both senders, their member's name as the last
+  type argument:
+  `Type 'ClientSender<..., "b">' is not assignable to type 'ClientSender<..., "a">'`.
+  Type such a place as the members it may hold (`let send: typeof Events.a | typeof Events.b`,
+  `Array<typeof Events.a | typeof Events.b>`), give a generic call that union as its type
+  argument, and cast a fake to its member's type (`fake as typeof Events.a`); the build checks a
+  call through the union against each member.
 - **A union whose members only TypeScript's internal ids could put in an order stops the build,**
   such as two interfaces of one name from two files, imported under other names and reached through
   a generic (`Box<SameA | SameB>`). Declare an alias for the union where the value is declared, and
@@ -360,15 +374,36 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   now, so members laid out and checked alike are packed together even when their types differ
   (`number & { unit?: "meters" }` against `number & { unit?: "seconds" }`, both eight bytes). The
   comparison is stricter than the bytes: a `Serialization.u8` and a `Serialization.Implicit.u8`, one
-  byte either way but by default checked only as the second, are refused. Two members packed the
-  same way whose types differ only in how a union is spelled are still one type to TypeScript, which
-  keeps one of them in a conditional or a helper's inferred return type, so the build cannot see
-  that case (guide 06, Caveats).
+  byte either way but by default checked only as the second, are refused.
+- **The same check now sees a call through a conditional, a helper's inferred return type or a
+  variable inferred from one over two members whose types differ only in how a union is spelled, or
+  in the order of an object type's fields,** such as plain `a(x: string | number)` and
+  `b(x: number | string)`. TypeScript took such members for one type and kept only one of them, so
+  the call was packed as that one and the other member's receiver read it wrong; each member's
+  handler type now carries its name (see networking), so the call is refused, and packed as before
+  where the layouts agree. Members of two networks with the same names, namespace paths included,
+  and the same types are still one type, which the build cannot see (guide 06, Caveats).
 - A type whose hoisted functions fail to build is no longer left recorded, half built, for the file's
   next value to call, and the varint and check helpers count as there only once they are built. A
   build that met this already failed with the type's error.
 - What a file's failed last statement hoisted no longer lands at the top of the next file
   transformed. Only `--writeTransformedFiles` showed it, on a build that failed anyway.
+
+### networking
+
+#### Changed
+
+- **Each sender and function receiver type carries its member's name,** after its namespaces' names
+  (`"setA"`, `"items.setA"`), in a hidden field that is never set (`_flamework_member`), from a new
+  last type argument of the event senders and of the function senders and receivers. Two members
+  whose types TypeScript took for one, such as `a(x: string | number)` and `b(x: number | string)`,
+  now stay apart in a conditional, a helper's inferred return type or a variable inferred from one,
+  so the transformer checks a call through one (see transformer, Fixed). Nothing changes at runtime
+  or on the wire, and a call on one member compiles as before. The type argument defaults to
+  `string`, so a sender type written by hand without it, such as `ClientSender<[number]>`, still
+  takes the sender of any member packed as it says (a `Serialized` member's needs its packing
+  argument, as before). A place typed as one member's sender (a variable, parameter, field or
+  collection) no longer takes another member's; see the upgrade notes.
 
 ## 2026-10-02: core, networking and testing 2.0.0-alpha.6; transformer 2.0.0-alpha.7
 

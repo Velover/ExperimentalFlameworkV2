@@ -51,6 +51,18 @@ export type IsRawMember<T> =
 export type NetworkPacking<F> =
 	IsRawMember<F> extends true ? "raw" : F extends NetworkSerialized<unknown> ? "serialized" : "plain";
 
+/**
+ * The name of the member `K` under the namespace path `P` (`""` at the top, `"items."` inside
+ * `items`): `"items.setA"`. Each sender and function receiver takes it as a type argument of its
+ * own and carries it as the hidden `_flamework_member`, so members whose types are otherwise the
+ * same have unrelated handler types too: one union spelled two ways, or one object type with its
+ * fields in two orders, which each member's receiver lays out as its own declaration has it. A
+ * union of them then keeps every one, and the transformer checks a call on it as it does any other
+ * (see `NetworkPacking`). Members of two networks with the same names, namespaces included, and the
+ * same types are still one type.
+ */
+export type NetworkMemberName<P extends string, K> = `${P}${K & (string | number)}`;
+
 export interface NetworkingObfuscationMarker {
 	/**
 	 * An internal marker type used to signify to Flamework to obfuscate access expressions.

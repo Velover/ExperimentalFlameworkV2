@@ -275,15 +275,21 @@ the output describes the type: there is no schema table and no runtime library.
 
 The transformer finds call sites by their type. Send and register callbacks through the handler's
 own type: `Events.X.fire(...)`, a typed reference to `Events.X`, or a helper generic over the event
-name. Such a helper must not return members that are packed differently, such as a `Serialized`
-member and a plain one while `networking.serialization` is off, or a `Raw` member and a packed one:
-a call through it is packed one way, so the build refuses it. It refuses packed members whose
-argument lists (for `setCallback`, results) are not laid out and checked alike, for the same
-reason: even one TypeScript type spelled two ways, `a(x: string | number)` and
-`b(x: number | string)` (see [What each type costs](#what-each-type-costs)), or a
-`Serialization.u8` against a `Serialization.Implicit.u8`, one byte either way but by default
-checked only as the second. Members laid out and checked alike are packed together, whatever
-their types.
+name. A call whose target may be one of several members is checked against each of them: a
+conditional (`(flag ? Events.a : Events.b).fire(...)`), a helper whose inferred return type is one
+of several members, or a variable typed as either (`typeof Events.a | typeof Events.b`). The
+members must not be packed differently, such as a `Serialized` member and a plain one while
+`networking.serialization` is off, or a `Raw` member and a packed one: the call is packed one way,
+so the build refuses it. It refuses packed members whose argument lists (for `setCallback`,
+results) are not laid out and checked alike, for the same reason, even where TypeScript sees one
+type: `a(x: string | number)` and `b(x: number | string)` (see
+[What each type costs](#what-each-type-costs)), `{ p: number; q: string }` and
+`{ q: string; p: number }`, or a `Serialization.u8` against a `Serialization.Implicit.u8`, one
+byte either way but by default checked only as the second. Members laid out and checked alike are
+packed together, whatever their types. What keeps two members of one type apart is their names,
+which each member's handler type carries; so a variable that holds one member's sender
+(`let send = Events.a`) takes no other member's, and one that may hold either is typed as both
+(`let send: typeof Events.a | typeof Events.b`).
 Don't go through a hand-written interface that widens
 `fire` to `(...args: unknown[])`. Such a call is left alone and sends unpacked values, which the peer drops as malformed. A handler reached
 through `?.` (`this.events?.X.fire(...)`) is packed like any other, behind the same short-circuit.
@@ -890,13 +896,18 @@ logging. Game rules belong in the handler, where you can test them.
   markers are per member, and both realms read the same `flamework.config.json` and the same types,
   so one build always agrees with itself. A client built without the switch, or with a member marked
   differently, cannot talk to a server built with it.
-- **Two members whose types differ only in how a union is spelled are one type to TypeScript.**
-  Plain `a(x: string | number)` and `b(x: number | string)` lay `x` out differently, but a
-  conditional over them (`flag ? Events.a : Events.b`) or a helper's inferred return type keeps only
-  one of them, and the call is packed as that one; the other's receiver then reads it wrong, and the
-  build cannot see it. Spell such members' unions alike, or make the call where the member is known.
-  Members packed differently (a `Serialized` one with a plain one) stay apart, and their call is
-  checked.
+- **Members of two networks with the same names and the same types are one type to TypeScript.**
+  Each member's handler type carries its name, namespaces included (`items.setA`), so two members
+  of one network stay apart in a conditional, a helper's inferred return type or a variable inferred
+  from one, and the build checks the call. One exception: a quoted member key with a dot in it
+  (`"items.setA"`) gets the same name as member `setA` of namespace `items`, and the two can merge
+  the same way. Two networks whose interfaces give a member the same name,
+  at the same namespace path, with types that differ only in how a union is spelled or in the order
+  of an object type's fields, give one handler type: plain `setA(x: string | number)` in one and
+  `setA(x: number | string)` in the other lay `x` out differently, but a conditional over
+  `EventsA.setA` and `EventsB.setA` keeps only one of them, and the call is packed as that one; the
+  other's receiver then reads it wrong, and the build cannot see it. Spell such members' unions
+  alike, or make the call where the member is known.
 - **An ambient enum declared in several declaration files is numbered in the order TypeScript reads
   them.** `declare enum Spread { Q = 9, R = 3 }` in one `.d.ts` file and
   `declare enum Spread { P = 5 }` in another are one enum, and TypeScript lists its members file by

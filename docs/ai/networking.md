@@ -67,6 +67,10 @@ since v1.
   `SerializedUnreliable<...>` for an event, `Networking.Serialized<...>` for a function (`Raw*`
   does the opposite). The build refuses a call that may reach members packed differently, such as
   a helper returning either a `Serialized` member or a plain one.
+- Anything that holds one of several members' senders (a variable, parameter, field, array,
+  `Record` or `Map`) must be typed as all of them: `let send: typeof Events.setA |
+  typeof Events.setB = ...`. Each sender's type names its member, so `let send = Events.setA`
+  refuses a later `send = Events.setB`, and the build checks the union's members pack alike.
 - Packed values are not type-tested before they are written. A value of the wrong type (after an
   `as any`, say) fails with the buffer library's own error, which names no field:
   `invalid argument #3 to 'writef64' (number expected, got string)`. `"types": true` under

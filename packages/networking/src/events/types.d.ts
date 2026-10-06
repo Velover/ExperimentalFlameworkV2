@@ -6,6 +6,7 @@ import {
 	IntrinsicObfuscate,
 	IsRawMember,
 	NetworkingObfuscationMarker,
+	NetworkMemberName,
 	NetworkPacking,
 	ObfuscateNames,
 } from "../types";
@@ -42,12 +43,24 @@ export interface RawServerSender<I extends unknown[], M = "raw"> {
 	broadcast(...args: I): void;
 }
 
-export interface ServerSender<I extends unknown[], F = unknown, M = NetworkPacking<F>> extends RawServerSender<I, M> {
+export interface ServerSender<
+	I extends unknown[],
+	F = unknown,
+	M = NetworkPacking<F>,
+	K extends string = string,
+> extends RawServerSender<I, M> {
 	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
 	readonly _flamework_send?: I;
 
 	/** @hidden The declared member, whose markers (`Serialized`) say whether its call sites pack. */
 	readonly _flamework_fn?: F;
+
+	/**
+	 * @hidden The member's name after its namespaces' names (`items.setA`; see `NetworkMemberName`),
+	 * which keeps members whose types are otherwise the same apart in a union. A sender type written
+	 * without it (`ClientSender<[number]>`) takes any member's.
+	 */
+	readonly _flamework_member?: K;
 
 	/** @hidden Sends an argument list the transformer already packed; nothing when the list carries nothing. */
 	_fire(players: Player | Player[], payload?: buffer, blobs?: Array<defined>): void;
@@ -89,12 +102,24 @@ export interface RawClientSender<I extends unknown[], M = "raw"> {
 	fire(...args: I): void;
 }
 
-export interface ClientSender<I extends unknown[], F = unknown, M = NetworkPacking<F>> extends RawClientSender<I, M> {
+export interface ClientSender<
+	I extends unknown[],
+	F = unknown,
+	M = NetworkPacking<F>,
+	K extends string = string,
+> extends RawClientSender<I, M> {
 	/** @hidden Marks a sender for the transformer, which packs its arguments at each call site. */
 	readonly _flamework_send?: I;
 
 	/** @hidden The declared member, whose markers (`Serialized`) say whether its call sites pack. */
 	readonly _flamework_fn?: F;
+
+	/**
+	 * @hidden The member's name after its namespaces' names (`items.setA`; see `NetworkMemberName`),
+	 * which keeps members whose types are otherwise the same apart in a union. A sender type written
+	 * without it (`ClientSender<[number]>`) takes any member's.
+	 */
+	readonly _flamework_member?: K;
 
 	/** @hidden Sends an argument list the transformer already packed; nothing when the list carries nothing. */
 	_fire(payload?: buffer, blobs?: Array<defined>): void;
@@ -118,32 +143,38 @@ export interface ClientReceiver<I extends unknown[]> extends RawClientReceiver<I
 	readonly _flamework_receive?: I;
 }
 
-export type ServerHandler<E, R> = NetworkingObfuscationMarker & {
+/**
+ * The server's handler: senders for the events `E`, receivers for the events `R`, and a handler of
+ * the same kind for each namespace. `P` is the namespace path of its members (`"items."`), which each
+ * sender carries in its name (`NetworkMemberName`).
+ */
+export type ServerHandler<E, R, P extends string = ""> = NetworkingObfuscationMarker & {
 	[k in keyof Events<E>]: IsRawMember<E[k]> extends true
 		? RawServerSender<FunctionParameters<E[k]>>
-		: ServerSender<FunctionParameters<E[k]>, E[k]>;
+		: ServerSender<FunctionParameters<E[k]>, E[k], NetworkPacking<E[k]>, NetworkMemberName<P, k>>;
 } & {
 	[k in keyof Events<R>]: IsRawMember<R[k]> extends true
 		? RawServerReceiver<FunctionParameters<R[k]>>
 		: ServerReceiver<FunctionParameters<R[k]>>;
 } & {
-	[k in keyof EventNamespaces<E>]: ServerHandler<E[k], k extends keyof R ? R[k] : {}>;
+	[k in keyof EventNamespaces<E>]: ServerHandler<E[k], k extends keyof R ? R[k] : {}, `${NetworkMemberName<P, k>}.`>;
 } & {
-	[k in keyof EventNamespaces<R>]: ServerHandler<k extends keyof E ? E[k] : {}, R[k]>;
+	[k in keyof EventNamespaces<R>]: ServerHandler<k extends keyof E ? E[k] : {}, R[k], `${NetworkMemberName<P, k>}.`>;
 };
 
-export type ClientHandler<E, R> = NetworkingObfuscationMarker & {
+/** The client's handler; see {@link ServerHandler}. */
+export type ClientHandler<E, R, P extends string = ""> = NetworkingObfuscationMarker & {
 	[k in keyof Events<E>]: IsRawMember<E[k]> extends true
 		? RawClientSender<FunctionParameters<E[k]>>
-		: ClientSender<FunctionParameters<E[k]>, E[k]>;
+		: ClientSender<FunctionParameters<E[k]>, E[k], NetworkPacking<E[k]>, NetworkMemberName<P, k>>;
 } & {
 	[k in keyof Events<R>]: IsRawMember<R[k]> extends true
 		? RawClientReceiver<FunctionParameters<R[k]>>
 		: ClientReceiver<FunctionParameters<R[k]>>;
 } & {
-	[k in keyof EventNamespaces<E>]: ClientHandler<E[k], k extends keyof R ? R[k] : {}>;
+	[k in keyof EventNamespaces<E>]: ClientHandler<E[k], k extends keyof R ? R[k] : {}, `${NetworkMemberName<P, k>}.`>;
 } & {
-	[k in keyof EventNamespaces<R>]: ClientHandler<k extends keyof E ? E[k] : {}, R[k]>;
+	[k in keyof EventNamespaces<R>]: ClientHandler<k extends keyof E ? E[k] : {}, R[k], `${NetworkMemberName<P, k>}.`>;
 };
 
 export interface EventCreateConfiguration<T> {

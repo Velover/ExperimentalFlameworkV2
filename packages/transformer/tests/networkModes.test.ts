@@ -601,6 +601,284 @@ export function sendNumberFirst() {
 	});
 });
 
+/*
+ * Members whose types are one to TypeScript -- a union spelled two ways, an object type's fields
+ * written in two orders -- that lay their values out differently. A conditional, a helper's inferred
+ * return type or a variable inferred from one used to keep only one of them, and the call was packed
+ * as that one (a variable annotated as the union of both was already checked). Each sender and
+ * function receiver carries its member's name, after its namespaces' names (`_flamework_member`),
+ * so the members stay apart and the call is checked like any other.
+ */
+describe("targets whose members only their names tell apart", () => {
+	const header = `import { Networking } from "@flamework-experimental/networking";
+
+interface MergeServerEvents {
+	textFirst(value: string | number): void;
+	numberFirst(value: number | string): void;
+	textFirstToo(value: string | number): void;
+	fieldsPQ(value: { p: number; q: string }): void;
+	fieldsQP(value: { q: string; p: number }): void;
+	items: {
+		textFirst(value: string | number): void;
+		numberFirst(value: number | string): void;
+		fieldsQP(value: { q: string; p: number }): void;
+	};
+}
+
+interface MergeClientEvents {
+	textFirst(value: string | number): void;
+	numberFirst(value: number | string): void;
+	textFirstToo(value: string | number): void;
+}
+
+interface MergeFunctions {
+	textFirst(value: string | number): number;
+	numberFirst(value: number | string): number;
+	textFirstToo(value: string | number): number;
+	resultTextFirst(): string | number;
+	resultNumberFirst(): number | string;
+	resultTextFirstToo(): string | number;
+}
+
+const events = Networking.createEvent<MergeServerEvents, MergeClientEvents>();
+const functions = Networking.createFunction<MergeFunctions, {}>();
+export const client = events.createClient({});
+export const server = events.createServer({});
+export const clientFunctions = functions.createClient({});
+export const serverFunctions = functions.createServer({});
+`;
+
+	/** Two members a call's target may be, and the call (`fire(1)`). */
+	interface Case {
+		members: [string, string];
+		call: string;
+	}
+
+	/**
+	 * The ways a call's target may be either member, by the suffix of the probe's name: each gives the
+	 * probe's source and the call as a refusal names it.
+	 */
+	const forms: Record<string, (members: [string, string], call: string) => [source: string, named: string]> = {
+		Either: ([a, b], call) => [
+			`${header}
+export function run(flag: boolean) {
+	return (flag ? ${a} : ${b}).${call};
+}
+`,
+			`(flag ? ${a} : ${b}).${call.split("(")[0]}(...)`,
+		],
+		ByName: ([a, b], call) => [
+			`${header}
+function member(name: "a" | "b") {
+	switch (name) {
+		case "a":
+			return ${a};
+		case "b":
+			return ${b};
+	}
+}
+
+export function run(name: "a" | "b") {
+	return member(name).${call};
+}
+`,
+			`member(name).${call.split("(")[0]}(...)`,
+		],
+		Variable: ([a, b], call) => [
+			`${header}
+export function run(flag: boolean) {
+	let target: typeof ${a} | typeof ${b} = ${a};
+	if (flag) target = ${b};
+	return target.${call};
+}
+`,
+			`target.${call.split("(")[0]}(...)`,
+		],
+	};
+
+	/** One probe per form for each case, named `<case><form>`. */
+	function probes(cases: Record<string, Case>): Record<string, string> {
+		const sources: Record<string, string> = {};
+		for (const [name, { members, call }] of Object.entries(cases)) {
+			for (const [form, make] of Object.entries(forms)) sources[`${name}${form}`] = make(members, call)[0];
+		}
+		return sources;
+	}
+
+	/** Every "packed differently" error of a build, by the probe it is in, as `[call, what differs]`. */
+	function refusalsByProbe(output: string): Map<string, [string, string]> {
+		const plain = output.replace(/\x1b\[[0-9;]*m/g, "");
+		const pattern =
+			/src\/(\w+)\.ts:\d+:\d+ - error TS @flamework-experimental\/transformer: The call '(.+?)' may reach networking members that are packed differently: (.+)\./g;
+		return new Map(
+			[...plain.matchAll(pattern)].map((match) => [match[1], [match[2], match[3]] as [string, string]]),
+		);
+	}
+
+	const lists = (a: string, b: string) =>
+		`their argument lists are not laid out and checked alike ('${a}' and '${b}')`;
+
+	test("refuses a conditional, a helper or a variable over members laid out differently", () => {
+		const cases: Record<string, Case & { what: string }> = {
+			mergeUnion: {
+				members: ["client.textFirst", "client.numberFirst"],
+				call: "fire(1)",
+				what: lists(
+					"MergeServerEvents.numberFirst(value: number | string): void",
+					"MergeServerEvents.textFirst(value: string | number): void",
+				),
+			},
+			mergeFields: {
+				members: ["client.fieldsPQ", "client.fieldsQP"],
+				call: 'fire({ p: 1, q: "x" })',
+				what: lists(
+					"MergeServerEvents.fieldsPQ(value: { p: number; q: string }): void",
+					"MergeServerEvents.fieldsQP(value: { q: string; p: number }): void",
+				),
+			},
+			// A namespace written inline has no interface name to give.
+			mergeNamespace: {
+				members: ["client.items.textFirst", "client.items.numberFirst"],
+				call: "fire(1)",
+				what: lists("numberFirst(value: number | string): void", "textFirst(value: string | number): void"),
+			},
+			mergeAcross: {
+				members: ["client.fieldsPQ", "client.items.fieldsQP"],
+				call: 'fire({ p: 1, q: "x" })',
+				what: lists(
+					"MergeServerEvents.fieldsPQ(value: { p: number; q: string }): void",
+					"fieldsQP(value: { q: string; p: number }): void",
+				),
+			},
+			mergeServer: {
+				members: ["server.textFirst", "server.numberFirst"],
+				call: "broadcast(1)",
+				what: lists(
+					"MergeClientEvents.numberFirst(value: number | string): void",
+					"MergeClientEvents.textFirst(value: string | number): void",
+				),
+			},
+			mergeInvoke: {
+				members: ["clientFunctions.textFirst", "clientFunctions.numberFirst"],
+				call: "invoke(1)",
+				what: lists(
+					"MergeFunctions.numberFirst(value: number | string): number",
+					"MergeFunctions.textFirst(value: string | number): number",
+				),
+			},
+			mergeCallback: {
+				members: ["serverFunctions.resultTextFirst", "serverFunctions.resultNumberFirst"],
+				call: "setCallback(() => 1)",
+				what: "their results are not laid out and checked alike ('MergeFunctions.resultNumberFirst(): number | string' and 'MergeFunctions.resultTextFirst(): string | number')",
+			},
+		};
+
+		const result = compileProbes(probes(cases));
+		expect(result.status).not.toBe(0);
+		// TypeScript took every probe: the refusals are the transformer's.
+		expect(result.output.replace(/\x1b\[[0-9;]*m/g, "")).not.toMatch(/error TS\d+/);
+
+		const refused = refusalsByProbe(result.output);
+		for (const [name, { members, call, what }] of Object.entries(cases)) {
+			for (const [form, make] of Object.entries(forms)) {
+				const probe = `${name}${form}`;
+				expect([probe, ...(refused.get(probe) ?? ["not refused"])]).toEqual([
+					probe,
+					make(members, call)[1],
+					what,
+				]);
+			}
+		}
+		expect(refused.size).toBe(Object.keys(cases).length * Object.keys(forms).length);
+	});
+
+	test("packs a conditional, a helper or a variable over members laid out alike, as one of them", () => {
+		const cases: Record<string, Case> = {
+			alikeUnion: { members: ["client.textFirst", "client.textFirstToo"], call: "fire(1)" },
+			alikeAcross: { members: ["client.textFirst", "client.items.textFirst"], call: "fire(1)" },
+			alikeServer: { members: ["server.textFirst", "server.textFirstToo"], call: "broadcast(1)" },
+			alikeInvoke: { members: ["clientFunctions.textFirst", "clientFunctions.textFirstToo"], call: "invoke(1)" },
+			alikeCallback: {
+				members: ["serverFunctions.resultTextFirst", "serverFunctions.resultTextFirstToo"],
+				call: "setCallback(() => 1)",
+			},
+			// A callback packs only the result, which both declare `number`.
+			alikeResults: {
+				members: ["serverFunctions.textFirst", "serverFunctions.numberFirst"],
+				call: "setCallback(() => 1)",
+			},
+		};
+
+		const result = compileProbes(probes(cases));
+		expect(result.status).toBe(0);
+		expect(result.files.size).toBe(Object.keys(cases).length * Object.keys(forms).length);
+
+		// The string is numbered 0, as every one of them declares it.
+		const textFirst = /if type\(v\) == "string" then\s*buffer\.writeu8\(buf, o, 0\)/;
+		for (const form of Object.keys(forms)) {
+			const emit = (name: string) => stripSuffixes(result.files.get(`${name}${form}`)!);
+			for (const name of ["alikeUnion", "alikeAcross"]) {
+				expect(emit(name)).toMatch(new RegExp(`${textFirst.source}[\\s\\S]*return target:_fire\\(buf\\)`));
+			}
+			expect(emit("alikeServer")).toMatch(
+				new RegExp(`${textFirst.source}[\\s\\S]*return target:_broadcast\\(buf\\)`),
+			);
+			expect(emit("alikeInvoke")).toMatch(
+				new RegExp(`${textFirst.source}[\\s\\S]*return target:_invoke\\(buf\\)`),
+			);
+			expect(emit("alikeCallback")).toMatch(
+				new RegExp(`target:_setCallback\\(callback, function\\(value\\)[\\s\\S]*?${textFirst.source}`),
+			);
+			expect(emit("alikeResults")).toMatch(
+				/target:_setCallback\(callback, function\(value\)\s*local buf = buffer\.create\(8\)\s*buffer\.writef64\(buf, 0, value\)/,
+			);
+		}
+	});
+
+	test("packs a call on one member with that member's own layout, namespaces included", () => {
+		const result = compileProbes({
+			mergeDirect: `${header}
+export function sendNumberFirst() {
+	client.numberFirst.fire("x");
+}
+
+export function sendNestedNumberFirst() {
+	client.items.numberFirst.fire("x");
+}
+
+export function sendFieldsPQ() {
+	client.fieldsPQ.fire({ p: 1, q: "x" });
+}
+
+export function sendNestedFieldsQP() {
+	client.items.fieldsQP.fire({ p: 1, q: "x" });
+}
+`,
+		});
+
+		expect(result.status).toBe(0);
+		const luau = result.files.get("mergeDirect")!;
+		expect(functionBody(luau, "sendNumberFirst")).toMatch(
+			/type\(v\) == "string" then\s*buffer\.writeu8\(buf, o, 1\)/,
+		);
+		expect(functionBody(luau, "sendNestedNumberFirst")).toBe(
+			functionBody(luau, "sendNumberFirst")
+				.replace("sendNumberFirst", "sendNestedNumberFirst")
+				.replace("client.numberFirst", "client.items.numberFirst"),
+		);
+		// `p` first for one, `q` first for the other, as each declares them. Both object types are
+		// repeated in the file, so each send calls a shared writer of its own.
+		const packing = (send: string) => {
+			const writer = luau.match(
+				new RegExp(`local function ${send}\\(\\)\\n(?:(?!\\nend\\n)[\\s\\S])*?codec\\.(w_\\w+)\\(`),
+			)?.[1];
+			return writer && luau.match(new RegExp(`codec\\.${writer} = function[\\s\\S]*?\\nend\\n`))?.[0];
+		};
+		expect(packing("sendFieldsPQ")).toMatch(/writef64[\s\S]*writestring/);
+		expect(packing("sendNestedFieldsQP")).toMatch(/writestring[\s\S]*writef64/);
+	});
+});
+
 describe("argument lists with elements after their rest", () => {
 	test("guard the elements after the rest on their own, in both builds", () => {
 		for (const source of [on(), offSource()]) {
