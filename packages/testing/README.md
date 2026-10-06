@@ -350,6 +350,8 @@ lock. Run what the change can break:
 - **Shared code:** the sections of that code and of what uses it directly.
 - **The whole run, every Rojo project (`--project`), cloud runs and benchmarks:** only when the user
   asks, or after you suggest it, saying why and how long it takes, and the user agrees.
+- **Several Rojo projects:** with `--parallel 2`, unless the run measures time or needs a window's
+  focus ([Side by side](#side-by-side)).
 
 ## Cloud commands
 
@@ -430,8 +432,8 @@ use renews its hold every 30 seconds). So do `--parallel`: `FLAMEWORK_TEST_PARAL
 `"testing": { "parallel": 2 }` (a whole number, 1 or more), and `--show`: `FLAMEWORK_TEST_SHOW`,
 then `"testing": { "showWindows": true }` (a switch, as above; see [Hidden
 windows](#hidden-windows)). A cloud run reads neither variable nor key. Only the CLI reads them; the
-place ignores them. The four config keys need a `@flamework-experimental/transformer` released after
-2.0.0-alpha.7, whose schema has them.
+place ignores them. The four config keys need `@flamework-experimental/transformer` 2.0.0-alpha.8
+or later, whose schema has them.
 
 ## Patching a copy of the original place
 
@@ -493,7 +495,7 @@ To test under one of these, write a project file that differs from `default.proj
 
 ```console
 bunx flamework-test test place.rbxl --project tests/deferred.project.json
-bunx flamework-test test place.rbxl --project tests/deferred.project.json --project tests/streaming.project.json
+bunx flamework-test test place.rbxl --project tests/deferred.project.json --project tests/streaming.project.json --parallel 2
 ```
 
 Each project gets one run of every realm, in a place named after it (`place.deferred.rbxl`), under
@@ -502,6 +504,10 @@ is still open, and keeps its place among the windows the run has open at once (o
 `--parallel`'s n), so the projects that would need another are not run, and fail saying why. The
 output ends with `projects: deferred passed, streaming FAILED`, and the exit code is the worst of
 them.
+
+Several projects are best run side by side, with `--parallel 2`, or more when memory allows (see
+[Side by side](#side-by-side)). Run them one after another only when the run measures time or needs
+a window's focus.
 
 - `--project` may be repeated or comma-separated.
   `ROJO_PROJECT=tests/deferred.project.json,tests/streaming.project.json` in `.env` does the same
@@ -518,6 +524,12 @@ them.
 project order, the next as soon as a project's window has closed. A framework tested under several
 configurations then costs about what the slowest windows do, not the sum: this repository's four
 projects took 7 min 20 s one after another and about 5 min with `--parallel 2` (2026-10-05).
+
+It is the preferred way to run several projects: `--parallel 2`, or more when memory allows (about
+3 GB a window). Leave it out (or pass `--parallel 1` over a configured number) when the run measures
+time, such as a benchmark or a timing-sensitive case, since windows running side by side compete for
+the CPU and skew the timings (see the last point below), or when it needs a window's focus, such as
+input that needs a visible, focused window (`--show`).
 
 - Each window takes about 3 GB with its play session, which runs a server and a client (2.8 to 3.1
   GB measured): two windows need about 6 GB free, four about 12. At most 4 run at once, whatever is

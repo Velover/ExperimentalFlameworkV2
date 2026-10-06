@@ -1,6 +1,6 @@
 {
   "name": "@flamework-experimental/networking",
-  "version": "2.0.0-alpha.6",
+  "version": "2.0.0-alpha.8",
   "main": "out/init.luau",
   "types": "out/index.d.ts",
   "repository": {
@@ -24,7 +24,7 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@flamework-experimental/core": "^2.0.0-alpha.0"
+    "@flamework-experimental/core": "^2.0.0-alpha.8"
   },
   "devDependencies": {
     "@flamework-experimental/core": "workspace:*",

@@ -57,16 +57,41 @@ describe.each(PACKAGES)("@flamework-experimental/%s", (pkg) => {
 	});
 });
 
+const manifest = (pkg: string) =>
+	JSON.parse(fs.readFileSync(path.join(ROOT, "packages", pkg, "package.json"), "utf8")) as {
+		version: string;
+		peerDependencies?: Record<string, string>;
+		dependencies?: Record<string, string>;
+	};
+
+describe("one version", () => {
+	// Every published package is released at the same version, the unchanged ones included, so an
+	// update installs them all at one number. Each range on a sibling asks for exactly that version
+	// (`^<version>`), so installing one package at it beside another left at an older alpha warns.
+	const PUBLISHED = ["core", "components", "networking", "testing", "transformer", "transformer-plugin"];
+	const shared = manifest("core").version;
+
+	test("the six published packages share one version", () => {
+		const versions = Object.fromEntries(PUBLISHED.map((pkg) => [pkg, manifest(pkg).version]));
+		expect(versions).toEqual(Object.fromEntries(PUBLISHED.map((pkg) => [pkg, shared])));
+	});
+
+	test.each(PUBLISHED)("%s's ranges on its siblings ask for that version", (pkg) => {
+		const { peerDependencies = {}, dependencies = {} } = manifest(pkg);
+		const siblings = [...Object.entries(peerDependencies), ...Object.entries(dependencies)].filter(([name]) =>
+			name.startsWith("@flamework-experimental/"),
+		);
+
+		expect(siblings.map(([name, range]) => `${name}@${range}`)).toEqual(
+			siblings.map(([name]) => `${name}@^${shared}`),
+		);
+	});
+});
+
 describe("peer dependency ranges", () => {
 	// A range such as `*` matches no prerelease under semver, so every install of an alpha printed
 	// `incorrect peer dependency` for each package that names core. Each Flamework peer range has to
 	// take the version the package it names is at now, prerelease or not.
-	const manifest = (pkg: string) =>
-		JSON.parse(fs.readFileSync(path.join(ROOT, "packages", pkg, "package.json"), "utf8")) as {
-			version: string;
-			peerDependencies?: Record<string, string>;
-		};
-
 	test.each(["components", "networking", "testing"])(
 		"%s accepts the Flamework versions it is released with",
 		(pkg) => {

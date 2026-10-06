@@ -483,6 +483,12 @@ are written this way.
 shell, `.env` or `.env.local`. A cloud run reads no `parallel` and no `showWindows`.
 `--fail-on-skip=false`, `--keep-awake=false` and `--show=false` turn them off for one run.
 
+For a run of several Rojo projects, two windows at once (`"parallel": 2`, or `--parallel 2`; more
+when memory allows, about 3 GB a window) is the preferred way. Leave it at 1 for a run that
+measures time, such as a benchmark or a timing-sensitive case, since windows running side by side
+compete for the CPU and skew the timings, and for one that needs a window's focus, such as input
+that needs a visible, focused window (`--show`).
+
 `entry` exists for one reason. An Open Cloud task loads the place but runs none of its Scripts, so
 nothing ignites the game there. The runner has to require a ModuleScript and call its `ignite()`
 itself, and `entry` names that ModuleScript. In Studio, the place runs its own Scripts, and the

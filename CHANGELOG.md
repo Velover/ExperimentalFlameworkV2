@@ -3,10 +3,21 @@
 Notable changes to the `@flamework-experimental` packages. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 2026-10-06: every package 2.0.0-alpha.8
+
+From this release on, every package shares one version: components (2.0.0-alpha.5 until now) and
+transformer-plugin (2.0.0-alpha.3) are released at 2.0.0-alpha.8 with no code changes (components'
+peer range on core moves to `^2.0.0-alpha.8`, below).
 
 ### Upgrade notes
 
+- **Install every `@flamework-experimental` package at 2.0.0-alpha.8, together.** The peer ranges
+  now ask for it: components, networking and testing take core at `^2.0.0-alpha.8`, and testing
+  the transformer too, where they took any 2.0.0 alpha (`^2.0.0-alpha.0`). So an older core beside
+  one of those three at 2.0.0-alpha.8, or an older transformer beside testing at 2.0.0-alpha.8, is
+  caught: bun warns, and npm stops the install. Nothing catches an older core without any of those
+  three, an older transformer without testing, an older transformer-plugin, or an older
+  components, networking or testing beside a newer core.
 - **`studio close`, `play`, `stop`, `exec` and `run` act only on the window flamework-test opened
   for this project.** Any other window is refused before anything is sent to it, naming the window
   and `--any-window`: a window the user opened (the testing place's included), one opened by
@@ -35,8 +46,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   seconds for the Studio lock while another project's window holds it, then fail naming it;
   `--lock-timeout 0` fails at once instead. `test --keep` under several projects is refused: one
   window is kept at a time.
-- **`testing.lockTimeout` and `testing.lockHold` need the next transformer.** Its schema has them;
-  2.0.0-alpha.7 refuses a `flamework.config.json` with them. The flags and the variables need
+- **`testing.lockTimeout` and `testing.lockHold` need transformer 2.0.0-alpha.8.** Its schema has
+  them; 2.0.0-alpha.7 refuses a `flamework.config.json` with them. The flags and the variables need
   nothing.
 - **The window-name claims moved out of the temp folder,** to the per-user folder the Studio lock
   lives in (`%LOCALAPPDATA%\flamework-test` on Windows). A claim 2.0.0-alpha.6 left in
@@ -44,17 +55,19 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   has gone. Running alpha.6 and this version side by side is not supported: alpha.6 takes no lock.
 - **`studio call` of a tool whose arguments have no `studio_id` needs `--any-window`,** except
   `list_roblox_studios`, which acts on no window: which window such a tool acts on cannot be told.
-- **`testing.concurrency` needs the next transformer.** Its schema has it; 2.0.0-alpha.7 refuses a
-  `flamework.config.json` with it. `--concurrency` and a run's `concurrency` option need nothing.
-- **`testing.parallel` needs the next transformer.** Its schema has it; 2.0.0-alpha.7 refuses a
-  `flamework.config.json` with it. `--parallel` and `FLAMEWORK_TEST_PARALLEL` need nothing.
+- **`testing.concurrency` needs transformer 2.0.0-alpha.8.** Its schema has it; 2.0.0-alpha.7
+  refuses a `flamework.config.json` with it. `--concurrency` and a run's `concurrency` option
+  need nothing.
+- **`testing.parallel` needs transformer 2.0.0-alpha.8.** Its schema has it; 2.0.0-alpha.7
+  refuses a `flamework.config.json` with it. `--parallel` and `FLAMEWORK_TEST_PARALLEL` need
+  nothing.
 - **`test` no longer shows its Studio windows (Windows).** It opens them on a hidden desktop of
   their own, so a run never pops up a window or takes the focus. `--show`, `FLAMEWORK_TEST_SHOW=1`
   or `"testing": { "showWindows": true }` opens them where they are seen, as before. `test --keep`
   leaves its window hidden, driven by the studio commands; `--show --keep` keeps one to look at.
   `studio open` still shows its window.
-- **`testing.showWindows` needs the next transformer.** Its schema has it; 2.0.0-alpha.7 refuses a
-  `flamework.config.json` with it. `--show` and `FLAMEWORK_TEST_SHOW` need nothing.
+- **`testing.showWindows` needs transformer 2.0.0-alpha.8.** Its schema has it; 2.0.0-alpha.7
+  refuses a `flamework.config.json` with it. `--show` and `FLAMEWORK_TEST_SHOW` need nothing.
 - **A window that will not close keeps its place.** A run of several projects whose window would not
   close no longer opens the next project's window beside it: the projects that would need one more
   window than the run opens at once (one, or `--parallel`'s n) are not run, and fail saying why.
@@ -186,8 +199,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `version`. `Serialization.SerializerOptions` is the options' type. Without options nothing
   changes: no header, and the same bytes. The header has no mark of its own, so a buffer written
   without a version reads its first byte as one; guide 07 ("Versions") has the recipe for data
-  stored before a version was added. Needs the next transformer: `createSerializer` raises when
-  given options and a serializer built without its header, which is what 2.0.0-alpha.7 builds.
+  stored before a version was added. Needs transformer 2.0.0-alpha.8: `createSerializer` raises
+  when given options and a serializer built without its header, which is what 2.0.0-alpha.7 builds.
 - **Instructions for a coding assistant ship in core,** in `docs/ai/`, next to the guide, so they
   match the installed version. `flamework.md` holds the rules every project follows. A project's
   `CLAUDE.md` loads it, in every session, with the line

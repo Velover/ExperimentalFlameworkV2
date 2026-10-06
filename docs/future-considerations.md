@@ -521,7 +521,7 @@ Edge cases found and deliberately left alone, because the fix would cost more th
 - **core, `loadOrder`:** objects handed over with `provideInstance` join before any provider, so an
   `onInit`/`onStart` on one (none exists today) would precede every `loadOrder`. A lazy provider
   resolved during ignition runs `onInit` where it was resolved, and `onStart` at the default 1.
-- **packaging:** the peer range `^2.0.0-alpha.0` stops matching at the first 2.1.0 prerelease; widen
+- **packaging:** the peer range `^2.0.0-alpha.8` stops matching at the first 2.1.0 prerelease; widen
   it when one ships.
 - **core, components, left-out folder registrations:** only a registration's own condition keeps its
   folder from loading (a failing inclusion also skips the registrations a plugin's setup makes); the

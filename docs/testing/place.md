@@ -459,6 +459,12 @@ project order, and short lines on stderr say how the ones waiting to print are g
 window takes about 3 GB; `FLAMEWORK_TEST_PARALLEL` or `"testing": { "parallel": 2 }` set it too.
 See the package's [README](../../packages/testing/README.md#side-by-side).
 
+It is the preferred way to run several projects: `--parallel 2`, or more when memory allows. Leave
+it out (or pass `--parallel 1` over a configured number) when the run measures time, such as a
+benchmark or a timing-sensitive case, since windows running side by side compete for the CPU and
+skew the timings, or needs a window's focus, such as input that needs a visible, focused window
+(`--show`).
+
 ```console
 bunx flamework-test test place.rbxl --project default.project.json,tests/deferred.project.json --parallel
 ```

@@ -25,7 +25,7 @@
     },
     "packages/components": {
       "name": "@flamework-experimental/components",
-      "version": "2.0.0-alpha.5",
+      "version": "2.0.0-alpha.8",
       "dependencies": {
         "@rbxts/maid": "^1.0.0-ts.1",
         "@rbxts/services": "^1.1.5",
@@ -39,12 +39,12 @@
         "roblox-ts": "^3.0.0",
       },
       "peerDependencies": {
-        "@flamework-experimental/core": "^2.0.0-alpha.0",
+        "@flamework-experimental/core": "^2.0.0-alpha.8",
       },
     },
     "packages/core": {
       "name": "@flamework-experimental/core",
-      "version": "2.0.0-alpha.6",
+      "version": "2.0.0-alpha.8",
       "dependencies": {
         "@rbxts/maid": "^1.0.0-ts.1",
         "@rbxts/object-utils": "^1.0.4",
@@ -60,7 +60,7 @@
     },
     "packages/networking": {
       "name": "@flamework-experimental/networking",
-      "version": "2.0.0-alpha.6",
+      "version": "2.0.0-alpha.8",
       "dependencies": {
         "@rbxts/object-utils": "^1.0.4",
         "@rbxts/services": "^1.1.5",
@@ -73,7 +73,7 @@
         "roblox-ts": "^3.0.0",
       },
       "peerDependencies": {
-        "@flamework-experimental/core": "^2.0.0-alpha.0",
+        "@flamework-experimental/core": "^2.0.0-alpha.8",
       },
     },
     "packages/specs": {
@@ -95,7 +95,7 @@
     },
     "packages/testing": {
       "name": "@flamework-experimental/testing",
-      "version": "2.0.0-alpha.6",
+      "version": "2.0.0-alpha.8",
       "bin": {
         "flamework-test": "./cli/src/cli.ts",
       },
@@ -113,13 +113,13 @@
         "typescript": "^5.9.3",
       },
       "peerDependencies": {
-        "@flamework-experimental/core": "^2.0.0-alpha.0",
-        "@flamework-experimental/transformer": "^2.0.0-alpha.0",
+        "@flamework-experimental/core": "^2.0.0-alpha.8",
+        "@flamework-experimental/transformer": "^2.0.0-alpha.8",
       },
     },
     "packages/transformer": {
       "name": "@flamework-experimental/transformer",
-      "version": "2.0.0-alpha.7",
+      "version": "2.0.0-alpha.8",
       "dependencies": {
         "@roblox-ts/path-translator": "^1.1.0",
         "@roblox-ts/rojo-resolver": "^1.1.0",
@@ -146,7 +146,7 @@
     },
     "packages/transformer-plugin": {
       "name": "@flamework-experimental/transformer-plugin",
-      "version": "2.0.0-alpha.3",
+      "version": "2.0.0-alpha.8",
       "devDependencies": {
         "@types/node": "^16.11.1",
       },

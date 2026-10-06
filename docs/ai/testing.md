@@ -93,8 +93,10 @@ export class ShopTests implements OnStart {
   while it sleeps RenderStepped stops and `onRender` tests fail), `--list`, `--keep`, `--timeout`,
   `--concurrency 1` (concurrent tests one at a time).
 - `--parallel [n]` runs a run of several Rojo projects with that many windows side by side (each
-  about 3 GB). Add it only when the user wants a multi-project run anyway: it is no reason to run
-  more.
+  about 3 GB). Use `--parallel 2` for every run of several projects, except one that measures time
+  (a benchmark, a timing-sensitive case: windows side by side compete for the CPU and skew the
+  timings) or needs a window's focus (input that needs a visible, focused window, `--show`). It is
+  no reason to run more projects than the change needs.
 - On Windows `test` opens Studio on a hidden desktop, so it never interrupts the user; `test --keep`
   leaves the window there for the studio commands. Pass `--show` only when the user wants to watch,
   or when a hidden window `never showed up on the MCP proxy` (a dialog may be waiting there).

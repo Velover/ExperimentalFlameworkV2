@@ -381,7 +381,7 @@ keeps its hash about once in four billion times.
 - Without options nothing changes: no header, and the same bytes as before.
 - `versionOf` returns `undefined` for a buffer shorter than a header (5 bytes). The serializer has
   the version too, as `saves.version` (`undefined` for one without).
-- A versioned serializer needs a transformer that knows versions; with an older one,
+- A versioned serializer needs transformer 2.0.0-alpha.8 or later; with an older one,
   `createSerializer` raises when the module loads instead of handing back a serializer without the
   header.
 

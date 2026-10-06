@@ -17,10 +17,15 @@ own assistant's instructions, with one line:
 - **v1** is `@flamework/*` and `rbxts-transformer-flamework`. The Flamework website
   (flamework.fireboltofdeath.dev) documents v1. Don't use v1 docs, or v1's API from memory.
 - A project pins every `@flamework-experimental/*` package exactly and upgrades them together, to
-  one release. The
+  one release. From 2.0.0-alpha.8 on, a release gives every package the same version, the
+  unchanged ones included, so every `@flamework-experimental/*` entry in `package.json` names the
+  same version. Don't count on the package manager to catch a mix: only components, networking
+  and testing name core in their peer ranges (and testing the transformer), so an older core
+  without any of those three, an older transformer without testing, an older transformer-plugin, or
+  an older components, networking or testing beside a newer core installs without a word. The
   [CHANGELOG](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/CHANGELOG.md) heads each
-  release with the versions it changed, which differ per package, and lists its upgrade notes. A
-  package a release leaves out keeps its earlier version.
+  release with its version and lists its upgrade notes; before alpha.8, versions differed per
+  package.
 
 ## Before you work on
 

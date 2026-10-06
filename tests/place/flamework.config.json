@@ -16,7 +16,8 @@
 		"active": "${FLAMEWORK_SCOPES:-}"
 	},
 	"testing": {
-		"entry": "src/server/Core/main"
+		"entry": "src/server/Core/main",
+		"parallel": 2
 	},
 	"cloud": {
 		"testingUniverseId": "${TESTING_UNIVERSE_ID:-10765968722}",
