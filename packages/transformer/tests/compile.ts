@@ -206,6 +206,90 @@ export function compileWithEntry(entry: Record<string, unknown>): CompileResult 
 	}
 }
 
+export interface InProcessFixture {
+	/** A new program over the fixture's sources, the extra ones included, with a checker of its own. */
+	program(): ts.Program;
+	/** A source file of `program`, by its name under `src` without the extension (`"serialization"`). */
+	file(program: ts.Program, name: string): ts.SourceFile;
+	/**
+	 * One transform pass over `files`, as rbxtsc runs one: a fresh call of the plugin factory and one
+	 * `ts.transformNodes`. Returns each file printed as TypeScript, and every diagnostic's first line.
+	 */
+	pass(program: ts.Program, files: ts.SourceFile[]): { printed: string[]; diagnostics: string[] };
+}
+
+/**
+ * Runs the built transformer in this process over the fixture, with extra source files, for what a
+ * spawned rbxtsc cannot show: the same `SourceFile` transformed by two passes, or a checker that
+ * created some type before another. The transformer saves its artifacts (`flamework.build`,
+ * `include/flamework`) once the pass is over; those are put back as they were, and the extra files
+ * removed, before this returns.
+ */
+export async function transformInProcess<T>(
+	sources: Record<string, string>,
+	use: (fixture: InProcessFixture) => T,
+): Promise<T> {
+	const artifacts = [
+		"flamework.build",
+		"include/flamework/config.json",
+		"include/flamework/globs.json",
+		"include/flamework/paths.json",
+	];
+	const saved = new Map(
+		artifacts.map((file) => {
+			const full = path.join(FIXTURE, file);
+			return [full, fs.existsSync(full) ? fs.readFileSync(full) : undefined] as const;
+		}),
+	);
+	const names = Object.keys(sources);
+	for (const name of names) fs.writeFileSync(path.join(FIXTURE, "src", `${name}.ts`), sources[name]);
+
+	const cwd = process.cwd();
+	process.chdir(FIXTURE);
+	try {
+		// eslint-disable-next-line @typescript-eslint/no-require-imports
+		const transformer = require("../out/transformer").default;
+		const config = ts.getParsedCommandLineOfConfigFile(path.join(FIXTURE, "tsconfig.json"), {}, {
+			...ts.sys,
+			onUnRecoverableConfigFileDiagnostic() {},
+		} as never)!;
+		const fixture: InProcessFixture = {
+			program: () => ts.createProgram(config.fileNames, config.options),
+			file: (program, name) =>
+				program.getSourceFile(path.join(FIXTURE, "src", `${name}.ts`).replace(/\\/g, "/"))!,
+			pass: (program, files) => {
+				const result = ts.transformNodes(
+					undefined,
+					undefined,
+					ts.factory,
+					config.options,
+					files,
+					[transformer(program, {})],
+					false,
+				);
+				return {
+					printed: result.transformed.map((file) => ts.createPrinter().printFile(file as ts.SourceFile)),
+					diagnostics: (result.diagnostics ?? []).map(
+						(diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n").split("\n")[0],
+					),
+				};
+			},
+		};
+
+		const result = use(fixture);
+		// The artifacts are saved on a timer; let it run before they are put back.
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		return result;
+	} finally {
+		process.chdir(cwd);
+		for (const name of names) fs.rmSync(path.join(FIXTURE, "src", `${name}.ts`), { force: true });
+		for (const [file, contents] of saved) {
+			if (contents) fs.writeFileSync(file, contents);
+			else fs.rmSync(file, { force: true });
+		}
+	}
+}
+
 export function emitted(name: string): string {
 	const file = compileFixture().files.get(name);
 	if (file === undefined) {

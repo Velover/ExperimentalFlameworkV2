@@ -2,11 +2,16 @@ import ts from "typescript";
 import { Diagnostics } from "../classes/diagnostics";
 import { TransformState } from "../classes/transformState";
 import { f } from "../util/factory";
+import { checkSerializerOutput } from "../util/functions/buildSerializerFromType";
 import { transformStatementList } from "./transformStatementList";
 
 export function transformFile(state: TransformState, file: ts.SourceFile): ts.SourceFile {
 	state.buildInfo.invalidateGlobs(state.getFileId(file));
 	state.buildInfo.invalidatePathUses(state.getFileId(file));
+
+	// What a root statement hoisted lands ahead of the next one that succeeds. When the last root
+	// statement of the previous file failed, what it hoisted is that file's, and must not open this one.
+	state.nextRootStatements = [];
 
 	const statements = transformStatementList(state, file.statements);
 
@@ -29,6 +34,8 @@ export function transformFile(state: TransformState, file: ts.SourceFile): ts.So
 			ts.removeAllComments(firstStatement);
 		}
 	}
+
+	checkSerializerOutput(state, file);
 
 	for (const diag of Diagnostics.flush()) {
 		state.addDiagnostic(diag);

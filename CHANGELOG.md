@@ -58,6 +58,35 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - **A window that will not close keeps its place.** A run of several projects whose window would not
   close no longer opens the next project's window beside it: the projects that would need one more
   window than the run opens at once (one, or `--parallel`'s n) are not run, and fail saying why.
+- **Packed layouts change for some types** (with `networking.serialization`, for `Serialized`
+  members, and in `Flamework.createSerializer`): every order on the wire now follows from the types
+  alone.
+  - A literal union's values are numbered in sorted order: numbers by value, then strings, then
+    `false` and `true`, then Roblox enum items by name. That includes a union of some of a Roblox
+    enum's items.
+  - A TypeScript `enum` keeps its 2.0.0-alpha.7 layout: its members, the whole enum or some of them
+    (`Rarity.Epic | Rarity.Rare`), are numbered in the order the enum declares them, which is the
+    order they already had. Only a union that mixes them with plain literals, or the members of
+    several enums, changes: the plain literals come first, sorted, then each enum's members as
+    declared, the enums by name.
+  - An object made by a mapped type (`Record`, `Pick`, `Omit`, `Partial`, `Readonly`, `Required`,
+    `{ [K in U]: ... }`), or holding a field one made, sends its fields in name order.
+  - The members of a union that is not written out where the value is reached (a generic's type
+    argument, as in `Box<A | B>`, or a generic alias's instance) are numbered by their types, after
+    the written ones. A union written as a member of another (`type Choice = Pair | Gamma`) keeps
+    its own written order there.
+
+  A server and its client build together, so a game only has to rebuild. A buffer stored with
+  `createSerializer` under 2.0.0-alpha.7 or earlier, in a DataStore say, that holds one of these
+  types may read wrong or not at all. Read such data with the old build and save it again with the
+  new one, or store a version next to each buffer and keep the old reader for the old version.
+  Before this release these orders could already change between two builds after an unrelated edit
+  (they followed whichever literal or type TypeScript happened to create first), so a stored buffer
+  holding them was never safe across builds.
+- **A union whose members only TypeScript's internal ids could put in an order stops the build,**
+  such as two interfaces of one name from two files, imported under other names and reached through
+  a generic (`Box<SameA | SameB>`). Declare an alias for the union where the value is declared, and
+  its written order numbers them.
 
 ### core
 
@@ -238,6 +267,45 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - `testing.showWindows` in `flamework.config.json`'s schema: `flamework-test test` opens its Studio
   windows where they are seen rather than on a hidden desktop (false by default), read by
   `flamework-test` alone and left out of the place's config, as `keepAwake` is.
+- **A build-time self-check of the generated serializer code.** A file whose code calls a field of
+  its `codec` table that it never defines stops the build, naming the type (`Flamework's generated
+  code for the type 'Pair' calls 'codec.w_Pair', which this file never defines.`), where the call
+  would have failed at runtime as a call of nil. TypeScript does not see it: the table has an index
+  signature.
+
+#### Fixed
+
+- **A watcher's rebuild on a roblox-ts newer than 3.0.0 no longer emits serializer code that uses
+  `codec`, `vsize`, `vwrite` and `vread` without declaring them** (TS2304), nor crashes the watcher
+  in `ts.copyComments`. Such a roblox-ts (`3.0.0-dev`, from master) hands a rebuild the same
+  `SourceFile` for a file whose text did not change, and the serializer's generator, kept per
+  `SourceFile`, took the earlier rebuild's table and helpers for emitted. Generators, `NodeMetadata`
+  and the decorator cache are kept per transform pass now. roblox-ts 3.0.0 makes new `SourceFile`s
+  for every rebuild and was not affected.
+- **A sender and its receiver no longer disagree on a layout after a partial rebuild.** A literal
+  union's indices, a mapped type's fields and the members of a union nothing spells out followed
+  TypeScript's internal type ids, which follow whatever the checker happened to create first in a
+  compilation. A watcher's rebuild, or an incremental build, that recompiles a call site without the
+  files that decode it could then send `"rare"` as the index its receiver reads as `"common"`, or swap
+  the fields of a `Record<"speed" | "power", number>`. On roblox-ts 3.0.0 a
+  `const STARTER: Gear = { id: "starter", rarity: "rare" }` added to the call site's file was enough.
+  See the upgrade notes.
+- **A call whose target may be several packed members is refused when their argument lists (for
+  `setCallback`, their results) are laid out differently on the wire,** naming two of them, such as
+  `a(x: string | number)` and a `Serialized` `b(x: number | string)`: one TypeScript type, but each
+  member's receiver numbers the union as its own declaration spells it. Such a call used to be packed
+  as whichever member TypeScript listed first, since the types were assignable both ways, and the
+  other member's receiver read the tags wrong. The layouts are what is compared now, so members laid
+  out alike are packed together even when their types differ (`number & { unit?: "meters" }` against
+  `number & { unit?: "seconds" }`, both eight bytes). Two members packed the same way whose types
+  differ only in how a union is spelled are still one type to TypeScript, which keeps one of them in
+  a conditional or a helper's inferred return type, so the build cannot see that case (guide 06,
+  Caveats).
+- A type whose hoisted functions fail to build is no longer left recorded, half built, for the file's
+  next value to call, and the varint and check helpers count as there only once they are built. A
+  build that met this already failed with the type's error.
+- What a file's failed last statement hoisted no longer lands at the top of the next file
+  transformed. Only `--writeTransformedFiles` showed it, on a build that failed anyway.
 
 ## 2026-10-02: core, networking and testing 2.0.0-alpha.6; transformer 2.0.0-alpha.7
 

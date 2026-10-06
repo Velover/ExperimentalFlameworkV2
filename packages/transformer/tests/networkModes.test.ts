@@ -415,11 +415,13 @@ export function run(flag: boolean) {
 			`${PLAIN_ON}; ${RAW}`,
 		);
 		expect(refused.get("(flag ? client.plainPing : client.wide).fire(...)")).toBe(
-			"their argument lists are not the same type ('[value: number]' and '[value: string | number]')",
+			"their argument lists are laid out differently ('ProbeServerEvents.plainPing(value: number): void' and 'ProbeServerEvents.wide(value: number | string): void')",
 		);
 		expect(
 			refused.get("(flag ? serverFunctions.serializedFn : serverFunctions.serializedText).setCallback(...)"),
-		).toBe("their results are not the same type ('number' and 'string')");
+		).toBe(
+			"their results are laid out differently ('ProbeFunctions.serializedFn(v: number): number' and 'ProbeFunctions.serializedText(v: number): string')",
+		);
 		expect(refused.size).toBe(5);
 	});
 
@@ -482,6 +484,119 @@ export function run(flag: boolean) {
 		);
 		expect(functionBody(offSource(), "eitherSend")).toMatch(
 			/\(if flag then modeClient\.plainPing else modeClient\.plainPingToo\):fire\(value\)/,
+		);
+	});
+});
+
+/**
+ * Members a call's target may be, all packed, can lay out one TypeScript type differently: a union's
+ * members are numbered as each declaration spells them, and each member's receiver (for a callback,
+ * each caller) decodes with its own declaration's layout. One call site packs one way, so the call is
+ * refused unless every member's layout is the same, whatever their types; then any member's packing
+ * suits all of them. A Serialized member and a plain one stay apart in a union (`_flamework_packing`).
+ */
+describe("targets whose members lay their values out differently", () => {
+	const header = `import { Networking } from "@flamework-experimental/networking";
+
+interface LayoutServerEvents {
+	textFirst(value: string | number): void;
+	numberFirst: Networking.SerializedReliable<(value: number | string) => void>;
+	textFirstToo: Networking.SerializedReliable<(value: string | number) => void>;
+}
+
+interface LayoutFunctions {
+	textFirst(): string | number;
+	numberFirst: Networking.Serialized<() => number | string>;
+	meters(): number & { readonly unit?: "meters" };
+	seconds: Networking.Serialized<() => number & { readonly unit?: "seconds" }>;
+}
+
+const events = Networking.createEvent<LayoutServerEvents, {}>();
+const functions = Networking.createFunction<LayoutFunctions, {}>();
+export const client = events.createClient({});
+export const server = events.createServer({});
+export const serverFunctions = functions.createServer({});
+`;
+
+	const either = (members: [string, string], call: string) => `${header}
+export function run(flag: boolean) {
+	return (flag ? ${members[0]} : ${members[1]}).${call};
+}
+`;
+
+	const plainOutput = (output: string) => output.replace(/\x1b\[[0-9;]*m/g, "");
+	const refusals = (output: string) =>
+		new Map(
+			[
+				...plainOutput(output).matchAll(
+					/The call '(.+?)' may reach networking members that are packed differently: (.+)\./g,
+				),
+			].map((match) => [match[1], match[2]]),
+		);
+
+	test("refuses members whose argument lists or results are laid out differently, naming them", () => {
+		const result = compileProbes({
+			layoutEvent: either(["client.textFirst", "client.numberFirst"], 'fire("x")'),
+			layoutCallback: either(
+				["serverFunctions.textFirst", "serverFunctions.numberFirst"],
+				"setCallback(() => 1)",
+			),
+		});
+
+		expect(result.status).not.toBe(0);
+		const refused = refusals(result.output);
+		expect(refused.get("(flag ? client.textFirst : client.numberFirst).fire(...)")).toBe(
+			"their argument lists are laid out differently ('LayoutServerEvents.numberFirst(value: number | string): void' and 'LayoutServerEvents.textFirst(value: string | number): void')",
+		);
+		expect(refused.get("(flag ? serverFunctions.textFirst : serverFunctions.numberFirst).setCallback(...)")).toBe(
+			"their results are laid out differently ('LayoutFunctions.numberFirst(): number | string' and 'LayoutFunctions.textFirst(): string | number')",
+		);
+		expect(refused.size).toBe(2);
+		expect(plainOutput(result.output)).toContain("so the receiver of the other would read what it sends wrong");
+		expect(plainOutput(result.output)).toContain("so the callers of the other would read them wrong");
+	});
+
+	test("packs members laid out alike as one of them would, whatever their types", () => {
+		const result = compileProbes({
+			alikeEvent: either(["client.textFirst", "client.textFirstToo"], 'fire("x")'),
+			// Results that are not assignable either way, but both a plain f64. (TypeScript cannot call
+			// `fire` on a union of senders whose argument types differ, so results show it.)
+			alikeBranded: either(
+				["serverFunctions.meters", "serverFunctions.seconds"],
+				"setCallback(() => 5 as never)",
+			),
+		});
+
+		expect(result.status).toBe(0);
+		expect(stripSuffixes(result.files.get("alikeEvent")!)).toMatch(
+			/if type\(v\) == "string" then\s*buffer\.writeu8\(buf, o, 0\)[\s\S]*return target:_fire\(buf\)/,
+		);
+		expect(stripSuffixes(result.files.get("alikeBranded")!)).toMatch(
+			/target:_setCallback\(callback, function\(value\)\s*local buf = buffer\.create\(8\)\s*buffer\.writef64\(buf, 0, value\)/,
+		);
+	});
+
+	test("packs a call on one member with that member's own layout, as before", () => {
+		const result = compileProbes({
+			layoutDirect: `${header}
+export function sendTextFirst() {
+	client.textFirst.fire("x");
+}
+
+export function sendNumberFirst() {
+	client.numberFirst.fire("x");
+}
+`,
+		});
+
+		expect(result.status).toBe(0);
+		// `textFirst` numbers the string 0 and `numberFirst` 1, as each declares it.
+		const luau = result.files.get("layoutDirect")!;
+		expect(functionBody(luau, "sendTextFirst")).toMatch(
+			/type\(v\) == "string" then\s*buffer\.writeu8\(buf, o, 0\)/,
+		);
+		expect(functionBody(luau, "sendNumberFirst")).toMatch(
+			/type\(v\) == "string" then\s*buffer\.writeu8\(buf, o, 1\)/,
 		);
 	});
 });

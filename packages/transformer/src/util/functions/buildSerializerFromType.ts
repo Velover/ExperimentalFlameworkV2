@@ -5,6 +5,8 @@ import { TransformState } from "../../classes/transformState";
 import { f } from "../factory";
 import {
 	buildGuardFromType,
+	EnumMemberOrigin,
+	enumMemberOrigins,
 	extractTypes,
 	getLiteral,
 	isConditionalType,
@@ -27,7 +29,8 @@ import { isArrayType, isTupleType } from "./isTupleType";
  * Wire format, in bytes:
  * - numbers: 8 (f64) unless branded (`u8` .. `f64`, or `varint` for a LEB128 unsigned integer); booleans 1
  * - strings and buffers: varint length + bytes (a fixed 1 / 2 / 4 with the `u8_string` .. `u32_buffer` brands)
- * - literal unions: a 1-byte index (2 past 255 members); a single literal costs nothing
+ * - literal unions: a 1-byte index (2 past 255 members) into the values in canonical order (see
+ *   `sortLiterals`: sorted, a TypeScript enum's in declaration order); a single literal costs nothing
  * - optionals: 1 presence byte, then the value when present
  * - arrays, sets, maps and tuple rest elements: varint count + elements. A tuple is the elements
  *   before its rest, the rest, then the elements after it (`[A, ...B[], C]`)
@@ -35,10 +38,16 @@ import { isArrayType, isTupleType } from "./isTupleType";
  *   `number | string` is 0 for the number and 1 for the string; past 255 members the union is a
  *   blob. A plain `number` member gives the whole numbers from 0 to 2^35 - 1 a tag of their own,
  *   one past the written members, and writes them as a varint: `number | string` sends 3 as tag 2
- *   and one byte. Which member a value is written as is decided by `evaluation`, not by the written
- *   order alone. Objects: fields in declaration order, nothing spent on names
+ *   and one byte. Members no spelling orders go after the others by a key of their type (see
+ *   `orderAlternatives`). Which member a value is written as is decided by `evaluation`, not by the
+ *   written order alone. Objects: fields in declaration order, a mapped type's in name order (see
+ *   `fieldOrder`), nothing spent on names
  * - Vector3 12, Vector2 8, Vector3int16 6, Vector2int16 4, Color3 12, UDim 8, UDim2 16, NumberRange 8,
  *   Rect 16, BrickColor 2, CFrame 48 (its twelve components), EnumItems 2 (their `Value`), blobs 4
+ *
+ * Every order on the wire is a function of the types alone, never of TypeScript's internal type ids,
+ * which follow what the checker happened to create first in a compilation: a watcher's rebuild
+ * compiles a sender without its receiver, and a buffer `createSerializer` wrote can be stored.
  *
  * A varint is 1 byte below 128, 2 below 16384, and so on up to 5; the three helpers that handle it
  * are hoisted once per file. A named object, union or tuple with a variable size, and any other
@@ -357,6 +366,8 @@ export interface EncodingSite {
 /** A hoisted type: its functions are `s_<name>`, `w_<name>` and `r_<name>` in the file's table. */
 interface Hoisted {
 	name: string;
+	/** The type as the self-check's message names it (`the type 'Pair'`); see `checkSerializerOutput`. */
+	owner: string;
 	layout: Layout;
 	/**
 	 * Whether a value of the type can fail a width check. Its `w_` then takes where the value is as a
@@ -560,22 +571,69 @@ const GLOBAL_TYPES = new Set(["buffer", "defined", "Map", "Set", "EnumItem", "Lu
 
 // --- entry points -----------------------------------------------------------------------------------
 
+type Generator = ReturnType<typeof createSerializerGenerator>;
+
 /**
- * One generator per file: every intrinsic and call site in it shares the hoisted helpers (a named
- * type's functions, guards, literal and enum tables), which land at file scope ahead of the root
- * statement that first needed them.
+ * One generator per file and transform pass: every intrinsic and call site in the file shares the
+ * hoisted helpers (a named type's functions, guards, literal and enum tables), which land at file
+ * scope ahead of the root statement that first needed them. Kept per pass as well: a watcher that
+ * keeps an unchanged file's `SourceFile` (roblox-ts after 3.0.0) transforms it again in a later pass,
+ * which has to start with nothing emitted. A generator kept by file alone believed its table and
+ * helpers were already there, and the file's new output called `codec`, `vsize`, `vwrite` and `vread`
+ * without declaring them.
  */
-const generators = new WeakMap<ts.SourceFile, ReturnType<typeof createSerializerGenerator>>();
+const generators = new WeakMap<TransformState, Map<ts.SourceFile, Generator>>();
 
 function generatorFor(state: TransformState, node: ts.Node, file: ts.SourceFile) {
-	let generator = generators.get(file);
+	let perPass = generators.get(state);
+	if (!perPass) generators.set(state, (perPass = new Map()));
+
+	let generator = perPass.get(file);
 	if (!generator) {
 		generator = createSerializerGenerator(state, file, node);
-		generators.set(file, generator);
+		perPass.set(file, generator);
 	}
 
 	generator.use(node);
 	return generator;
+}
+
+/**
+ * The build-time self-check, at the end of a file's transform: every field of the file's `codec`
+ * table that the code built for it calls has to have been handed out with its definition. `codec`
+ * has an index signature, so TypeScript says nothing about a missing field, and the call would only
+ * fail at runtime, as a call of nil; this turns it into a build error naming the type. A file whose
+ * transform already reported an error is left alone: its code is not emitted, and what a failed value
+ * left behind is not this check's to report.
+ */
+export function checkSerializerOutput(state: TransformState, file: ts.SourceFile) {
+	// Generators are kept by the file their nodes come from, the original one.
+	const generator = generators.get(state)?.get(ts.getParseTreeNode(file, ts.isSourceFile) ?? file);
+	if (!generator) return;
+
+	const missing = generator.finishFile();
+	if (Diagnostics.diagnostics.some((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)) return;
+
+	// One error per type (or helper), where the file first called one of its functions.
+	const byOwner = new Map<string, { node: ts.Node; fields: string[] }>();
+	for (const { field, node, owner } of missing) {
+		let entry = byOwner.get(owner);
+		if (!entry) byOwner.set(owner, (entry = { node, fields: [] }));
+		entry.fields.push(`'codec.${field}'`);
+	}
+
+	for (const [owner, { node, fields }] of byOwner) {
+		const list =
+			fields.length > 1 ? `${fields.slice(0, -1).join(", ")} and ${fields[fields.length - 1]}` : fields[0];
+		Diagnostics.addDiagnostic(
+			Diagnostics.createDiagnostic(
+				node,
+				ts.DiagnosticCategory.Error,
+				`Flamework's generated code for ${owner} calls ${list}, which this file never defines.`,
+				"This is a bug in Flamework: please report it, with the file. Building again from scratch (delete the output folder) may get past it.",
+			),
+		);
+	}
 }
 
 function emitHoisted(state: TransformState, generator: ReturnType<typeof createSerializerGenerator>) {
@@ -691,6 +749,25 @@ export function buildInlineResultEncoding(
 	return encoding;
 }
 
+/**
+ * Networking: how an argument list (a member's `_flamework_send` tuple) or, with `result`, a function
+ * type's result is laid out on the wire, as text; it builds no code. Lists with one key are packed and
+ * decoded alike: a call site whose target may be several members packs for all of them only when
+ * their keys agree (see `transformNetworkingCall`). The key is read off the same list the call site
+ * packs and each member's decoder reads, so their spellings count: `(x: string | number)` and
+ * `(x: number | string)` differ.
+ */
+export function packingKey(
+	state: TransformState,
+	node: ts.Node,
+	type: ts.Type,
+	result = false,
+	file = state.getSourceFile(node),
+): string {
+	const generator = generatorFor(state, node, file);
+	return generator.listKey(result ? resultOf(state, generator, type, node) : type);
+}
+
 /** The one-element list a function's (resolved) result travels as, shaped by its declared return type node. */
 function resultOf(
 	state: TransformState,
@@ -753,6 +830,14 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	const hoisted = new Map<ts.Type, Hoisted>();
 	const hoistedNames = new Set<string>();
 	let functionTable: ts.Identifier | undefined;
+	/**
+	 * For the self-check (see {@link finishFile}): each field of the table the code built since the
+	 * file's transform began calls, with where it was first called and what for; the field each
+	 * definition statement assigns; and the fields whose definitions {@link takeHoisted} handed out.
+	 */
+	const called = new Map<string, { node: ts.Node; owner: string }>();
+	const definitionOf = new Map<ts.Statement, string>();
+	const handedOut = new Set<string>();
 	const guards = new Map<ts.Type, ts.Identifier>();
 	const enumTables = new Map<string, ts.Identifier>();
 	const literalTables = new Map<Kind, { list: ts.Identifier; index: ts.Identifier }>();
@@ -773,6 +858,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	const writtenAs = new Map<ts.Type, ts.TypeNode>();
 	/** A union's members as alternatives, shared by every spelling of it so a literal group is one table. */
 	const unionAlternatives = new Map<ts.UnionType, { isOptional: boolean; alternatives: Alternative[] }>();
+	/** {@link wireKey}'s results for the shapes whose key reads nothing outside them. */
+	const wireKeys = new Map<Shape, string>();
 	let varint: Varint | undefined;
 	/** The per-file tally of zero-size elements the payload being decoded has announced; see `readCount`. */
 	let zeros: ts.Identifier | undefined;
@@ -814,7 +901,17 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	const T = typeNodes(globalType);
 
-	return { buildSerializer, buildDecoder, encodeList, use, spell, markParameter, takeHoisted };
+	return {
+		buildSerializer,
+		buildDecoder,
+		encodeList,
+		use,
+		spell,
+		markParameter,
+		takeHoisted,
+		finishFile,
+		listKey,
+	};
 
 	/** A fresh identifier declared as a parameter of a generated function. */
 	function parameter(hint: string): ts.Identifier {
@@ -1076,7 +1173,40 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			...definitions.slice(emitted[2]),
 		];
 		emitted = [declarations.length, tables.length, definitions.length];
+		for (const statement of statements) {
+			const field = definitionOf.get(statement);
+			if (field !== undefined) handedOut.add(field);
+		}
+
 		return statements;
+	}
+
+	/**
+	 * `table.<field> = <value>`, a definition of a field of the file's table, recorded for the self-check.
+	 */
+	function define(field: string, value: ts.Expression): ts.Statement {
+		const statement = assign(prop(hoistedTable(), field), value);
+		definitionOf.set(statement, field);
+		return statement;
+	}
+
+	/** Records a call of a field of the file's table, for the self-check: `owner` says what the code is for. */
+	function noteCall(field: string, owner: string) {
+		if (!called.has(field)) called.set(field, { node: diagnosticNode, owner });
+	}
+
+	/**
+	 * The end of the file's transform: the fields called since it began whose definitions were not
+	 * handed out (see `checkSerializerOutput`). Both records start again empty, so that a second
+	 * transform of the file by this generator, which would hand nothing out again, is caught too.
+	 */
+	function finishFile(): Array<{ field: string; node: ts.Node; owner: string }> {
+		const missing = [...called]
+			.filter(([field]) => !handedOut.has(field))
+			.map(([field, { node, owner }]) => ({ field, node, owner }));
+		called.clear();
+		handedOut.clear();
+		return missing;
 	}
 
 	function fail(message: string): never {
@@ -1164,6 +1294,98 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	/** A list with nothing to carry: no elements, or only `void` ones. Such a list sends no payload. */
 	function carriesNothing(list: ListKind): boolean {
 		return !list.rest && list.elements.every((element) => describe(element).kind === "nothing");
+	}
+
+	/** {@link wireKey} of an argument list, given as its tuple type or as a list (a function's result). */
+	function listKey(type: ts.Type | ListKind): string {
+		return wireKey(isKind(type) ? type : listOf(type), []).text;
+	}
+
+	/**
+	 * The wire format of a shape as text, which builds no code: what each byte is and what a decoder
+	 * makes of it -- widths and lengths, which of them are checked, literal tables in order, field
+	 * names in order, union members in tag order -- so that two shapes with one key are written and
+	 * read alike, whatever their types are called and however their code is hoisted. A type met again
+	 * inside itself is `^n`, n levels up. `reaches` is the outermost place on `stack` the key refers
+	 * to; a key that refers to nothing outside itself is the same wherever it is met, and is kept.
+	 */
+	function wireKey(shape: Shape, stack: Shape[]): { text: string; reaches: number } {
+		const at = stack.indexOf(shape);
+		if (at >= 0) return { text: `^${stack.length - at}`, reaches: at };
+		const known = wireKeys.get(shape);
+		if (known !== undefined) return { text: known, reaches: Infinity };
+
+		const depth = stack.length;
+		let reaches = Infinity;
+		const key = (inner: Shape) => {
+			const result = wireKey(inner, stack);
+			reaches = Math.min(reaches, result.reaches);
+			return result.text;
+		};
+		const keys = (inner: Shape[]) => inner.map(key).join(", ");
+		const checked = (implicit: boolean | undefined) => (implicit ? " checked" : "");
+
+		const kind = describe(shape);
+		stack.push(shape);
+		let text: string;
+		try {
+			switch (kind.kind) {
+				case "number":
+					text = `${kind.width}${checked(kind.implicit)}`;
+					break;
+				case "varint":
+					text = `varint${checked(kind.implicit)}`;
+					break;
+				case "string":
+				case "buffer":
+					text = `${kind.kind}(${kind.length})${checked(kind.implicit)}`;
+					break;
+				case "constant":
+					text = `=${literalKey(kind.value)}`;
+					break;
+				case "literals":
+					text = `literals(${kind.values.map(literalKey).join(", ")})`;
+					break;
+				case "blob":
+					text = kind.typeofName !== undefined ? `blob(${kind.typeofName})` : "blob";
+					break;
+				case "datatype":
+				case "enum":
+					text = `${kind.kind}(${kind.name})`;
+					break;
+				case "optional":
+					text = `optional(${key(kind.inner)})`;
+					break;
+				case "array":
+				case "set":
+					text = `${kind.kind}(${key(kind.element)})`;
+					break;
+				case "map":
+					text = `map(${key(kind.key)}, ${key(kind.value)})`;
+					break;
+				case "list": {
+					const rest = kind.rest ? `; ...${key(kind.rest)}` : "";
+					const after = kind.after?.length ? `; ${keys(kind.after)}` : "";
+					text = `list(${keys(kind.elements)}${rest}${after})`;
+					break;
+				}
+				case "object":
+					text = `object(${kind.fields.map((field) => `${JSON.stringify(field.name)}: ${key(field.shape)}`).join(", ")})`;
+					break;
+				case "union": {
+					const whole = kind.whole !== undefined ? `; whole ${kind.whole}` : "";
+					text = `union(${keys(kind.alternatives.map((alternative) => alternative.shape))}${whole})`;
+					break;
+				}
+				default:
+					text = kind.kind;
+			}
+		} finally {
+			stack.pop();
+		}
+
+		if (reaches >= depth) wireKeys.set(shape, text);
+		return { text, reaches };
 	}
 
 	/**
@@ -1450,7 +1672,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		if (literals) {
 			return literals.length === 1
 				? { kind: "constant", value: literals[0] }
-				: { kind: "literals", values: literals };
+				: { kind: "literals", values: sortLiterals(literals, enumMemberOrigins(type, literals.length)) };
 		}
 
 		if (type.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined | ts.TypeFlags.Null)) return { kind: "nothing" };
@@ -1548,7 +1770,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		else if (alternatives.length === 1) inner = alternatives[0].shape;
 		// A one-byte tag numbers at most 256 members; past that the value travels whole.
 		else if (alternatives.length > 0xff) inner = { kind: "blob" };
-		else inner = unionKind(orderAlternatives(alternatives, node ?? aliasNode(type)), type);
+		else inner = unionKind(orderAlternatives(alternatives, node ?? aliasNode(type), type), type);
 
 		if (isOptional) return { kind: "optional", inner };
 		return describe(inner);
@@ -1574,14 +1796,16 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	function alternativesOf(type: ts.UnionType): { isOptional: boolean; alternatives: Alternative[] } {
 		let entry = unionAlternatives.get(type);
 		if (!entry) {
-			const { enums, literals, types } = simplifyUnion(type);
+			const { enums, literals, literalOrigins, types } = simplifyUnion(type);
 			const [isOptional, members] = extractTypes(typeChecker, types);
 			const alternatives = new Array<Alternative>();
 
 			for (const member of members) alternatives.push({ shape: member, type: member });
 			for (const name of enums) alternatives.push({ shape: { kind: "enum", name } });
 			if (literals.length === 1) alternatives.push({ shape: { kind: "constant", value: literals[0] } });
-			if (literals.length > 1) alternatives.push({ shape: { kind: "literals", values: literals } });
+			if (literals.length > 1) {
+				alternatives.push({ shape: { kind: "literals", values: sortLiterals(literals, literalOrigins) } });
+			}
 
 			entry = { isOptional, alternatives };
 			unionAlternatives.set(type, entry);
@@ -1592,27 +1816,170 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 	/**
 	 * Union members in the order they were written: `{ Coins } | { Items }` numbers Coins 0 and Items
-	 * 1. TypeScript lists them by internal id instead, so the order comes from the union's type node:
-	 * an alias's own declaration, or the spelling the value is reached through (see {@link spell}).
-	 * Members that node does not account for (a generic alias instantiation, say) keep TypeScript's
-	 * order after the others; a union with no node at all keeps it throughout, which is the same in
-	 * every file of a program.
+	 * 1. TypeScript lists them by internal type id instead, which follows what the checker happened to
+	 * create first in a compilation, so the order comes from the union's type node: an alias's own
+	 * declaration, or the spelling the value is reached through (see {@link spell}). A member written as
+	 * another union goes by that union's own spelling: written out in place, or a non-generic alias's
+	 * declaration. The members no spelling orders -- a union with no node at all (`Box<A | B>` reaches
+	 * `value: T`), the members of a generic alias's instantiation (`Maybe<A>`) -- go by
+	 * {@link alternativeKey}, after the members ahead of them. So the order never depends on type ids:
+	 * a watcher's rebuild compiles a sender without its receiver, and a stored buffer outlives a build.
 	 */
-	function orderAlternatives(alternatives: Alternative[], node: ts.UnionTypeNode | undefined): Alternative[] {
-		if (!node) return alternatives;
+	function orderAlternatives(
+		alternatives: Alternative[],
+		node: ts.UnionTypeNode | undefined,
+		union: ts.UnionType,
+	): Alternative[] {
+		const ordered = new Array<Alternative>();
+		const place = (alternative: Alternative | undefined) => {
+			if (alternative && !ordered.includes(alternative)) ordered.push(alternative);
+		};
+		const placeByKey = (group: Alternative[]) =>
+			byKey(
+				group.filter((member) => !ordered.includes(member)),
+				union,
+			).forEach(place);
 
-		const positions = new Map<Alternative, number>();
-		for (const member of node.types) {
+		const aliases = new Set<ts.Node>();
+		const visit = (member: ts.TypeNode): void => {
+			if (ts.isParenthesizedTypeNode(member)) return visit(member.type);
+			if (ts.isUnionTypeNode(member)) return member.types.forEach(visit);
+
 			const memberType = typeChecker.getTypeFromTypeNode(member);
-			for (const constituent of memberType.isUnion() ? memberType.types : [memberType]) {
+			if (!memberType.isUnion()) return place(alternativeFor(alternatives, memberType));
+
+			// `boolean`, a literal union or a whole enum is one alternative, whatever order its parts are in.
+			const found = new Array<Alternative>();
+			for (const constituent of memberType.types) {
 				const alternative = alternativeFor(alternatives, constituent);
-				if (alternative && !positions.has(alternative)) positions.set(alternative, positions.size);
+				if (alternative && !found.includes(alternative)) found.push(alternative);
 			}
+			if (found.length <= 1) return found.forEach(place);
+
+			const alias = memberType.aliasTypeArguments === undefined ? aliasNode(memberType) : undefined;
+			if (alias && !aliases.has(alias)) {
+				aliases.add(alias);
+				visit(alias);
+			}
+			placeByKey(found);
+		};
+		node?.types.forEach(visit);
+		placeByKey(alternatives);
+		return ordered;
+	}
+
+	/**
+	 * Members no spelling orders, by {@link alternativeKey}, in code units. Two with one key could only
+	 * be put in an order that depends on something other than the types, so the build stops, naming
+	 * them, rather than pick one.
+	 */
+	function byKey(members: Alternative[], union: ts.UnionType): Alternative[] {
+		const keyed = members.map((alternative) => ({ alternative, key: alternativeKey(alternative) }));
+		keyed.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+		for (let i = 1; i < keyed.length; i++) {
+			if (keyed[i].key !== keyed[i - 1].key) continue;
+			const [a, b] = [keyed[i - 1], keyed[i]].map(({ alternative }) => alternativeName(alternative));
+			fail(
+				`the union '${typeText(union)}' has two members, '${a}' and '${b}', that nothing but TypeScript's internal type ids would put in an order, and a union's members are numbered by their order. ` +
+					"Declare an alias for the union (`type Choice = A | B`) and use it where the value is declared, so that its written order numbers them, or rename one of the two",
+			);
 		}
 
-		const rank = (alternative: Alternative) =>
-			positions.get(alternative) ?? positions.size + alternatives.indexOf(alternative);
-		return [...alternatives].sort((a, b) => rank(a) - rank(b));
+		return keyed.map(({ alternative }) => alternative);
+	}
+
+	/**
+	 * What orders a union member that no spelling orders: an enum by its name (`Enum.KeyCode`), a
+	 * literal group by its values, and a type by {@link typeKey}.
+	 */
+	function alternativeKey(alternative: Alternative): string {
+		if (alternative.type) return typeKey(alternative.type);
+		const kind = describe(alternative.shape);
+		if (kind.kind === "constant") return literalKey(kind.value);
+		if (kind.kind === "literals") return kind.values.map(literalKey).join(" | ");
+		if (kind.kind === "enum") return `Enum.${kind.name}`;
+		return kind.kind;
+	}
+
+	/**
+	 * A type as text that depends on nothing but the type, where TypeScript's own printing follows
+	 * internal type ids (it prints a union's members in that order): a named type is its name, inside
+	 * the namespaces that declare it, with its type arguments (`Wrapper<Item>`, `Enum.KeyCode.A`); the
+	 * members of a union or an intersection and the properties of an object literal type are sorted; a
+	 * literal is its value. Two different types can share one (two interfaces of one name in two
+	 * files), which {@link byKey} refuses.
+	 */
+	function typeKey(type: ts.Type, seen = new Set<ts.Type>()): string {
+		if (type === typeChecker.getBooleanType()) return "boolean";
+		if (type.flags & ts.TypeFlags.EnumLiteral && type.symbol) return qualifiedName(type.symbol);
+		const literals = getLiteral(type, true);
+		if (literals) {
+			return sortLiterals(literals, enumMemberOrigins(type, literals.length)).map(literalKey).join(" | ");
+		}
+		if (type.flags & ts.TypeFlags.Intrinsic) return (type as ts.IntrinsicType).intrinsicName;
+		if (seen.has(type)) return "...";
+
+		seen.add(type);
+		try {
+			const key = (inner: ts.Type) => typeKey(inner, seen);
+			const sorted = (parts: string[]) => [...parts].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+			const args = (list: readonly ts.Type[] | undefined) =>
+				list && list.length > 0 ? `<${list.map(key).join(", ")}>` : "";
+
+			if (type.aliasSymbol) return `${qualifiedName(type.aliasSymbol)}${args(type.aliasTypeArguments)}`;
+			if (type.isUnion()) return sorted(type.types.map(key)).join(" | ");
+			if (type.isIntersection()) return sorted(type.types.map(key)).join(" & ");
+
+			if (isTupleType(state, type)) {
+				const flags = type.target.elementFlags;
+				const elements = typeChecker.getTypeArguments(type).map((element, i) => {
+					if (flags[i] & ts.ElementFlags.Variable) return `...${key(element)}[]`;
+					return flags[i] & ts.ElementFlags.Optional ? `${key(element)}?` : key(element);
+				});
+				return `[${elements.join(", ")}]`;
+			}
+
+			const symbol = type.getSymbol();
+			if (symbol && symbol.name !== "__type" && symbol.name !== "__object") {
+				const target =
+					ts.getObjectFlags(type) & ts.ObjectFlags.Reference ? (type as ts.TypeReference).target : undefined;
+				const typeArguments = target
+					? typeChecker
+							.getTypeArguments(type as ts.TypeReference)
+							.slice(0, target.typeParameters?.length ?? 0)
+					: undefined;
+				return `${qualifiedName(symbol)}${args(typeArguments)}`;
+			}
+
+			if (type.flags & ts.TypeFlags.Object) {
+				const parts = type.getProperties().map((property) => {
+					const optional = property.flags & ts.SymbolFlags.Optional ? "?" : "";
+					const propertyType = typeChecker.getTypeOfPropertyOfType(type, property.name);
+					return `${property.name}${optional}: ${propertyType ? key(propertyType) : "unknown"}`;
+				});
+				for (const info of typeChecker.getIndexInfosOfType(type)) {
+					parts.push(`[${key(info.keyType)}]: ${key(info.type)}`);
+				}
+				if (type.getCallSignatures().length > 0) parts.push("()");
+				return `{ ${sorted(parts).join("; ")} }`;
+			}
+
+			return typeChecker.typeToString(type, undefined, ts.TypeFormatFlags.NoTruncation);
+		} finally {
+			seen.delete(type);
+		}
+	}
+
+	/** A symbol's name inside the namespaces that declare it (`Enum.KeyCode.A`), never a file's. */
+	function qualifiedName(symbol: ts.Symbol): string {
+		let name = symbol.name;
+		for (let parent = symbol.parent; parent; parent = parent.parent) {
+			// A module's symbol is named after its file (`"C:/.../types"`): a path, not a namespace.
+			if (!(parent.flags & ts.SymbolFlags.Namespace) || parent.name.startsWith('"')) break;
+			name = `${parent.name}.${name}`;
+		}
+
+		return name;
 	}
 
 	function aliasNode(type: ts.UnionType): ts.UnionTypeNode | undefined {
@@ -1670,8 +2037,9 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 * into array elements, `Set`, `Map` and `Promise` arguments, tuple elements, `readonly` and
 	 * parentheses. Where the node adds nothing -- a reference to an alias, whose own declaration
 	 * decides; a generic's type argument, which is not where the value is reached -- the type
-	 * itself, whose unions keep TypeScript's order. Either way the sender and the receiver of a
-	 * value go through the same declaration and number its members the same way.
+	 * itself, whose unions go by their alias's declaration or else by `orderAlternatives`'s key.
+	 * Either way the sender and the receiver of a value go through the same declaration and number its
+	 * members the same way.
 	 */
 	function spell(node: ts.TypeNode | undefined, type: ts.Type): Shape {
 		if (!node) return type;
@@ -1872,8 +2240,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			return { kind: "map", key: indexInfos[0].keyType, value: indexInfos[0].type };
 		}
 
-		// Declaration order, which every compilation of the same source shares.
-		const fields = properties.map((property) => {
+		const fields = fieldOrder(type, properties).map((property) => {
 			const propertyType = typeChecker.getTypeOfPropertyOfType(type, property.name)!;
 			if (propertyType.getCallSignatures().length > 0) fail(`property '${property.name}' is a function`);
 			const written = spell(declaredTypeNode(property.valueDeclaration), propertyType);
@@ -1885,6 +2252,28 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		});
 
 		return { kind: "object", fields };
+	}
+
+	/**
+	 * The order an object's fields go on the wire. An interface or an object literal type lists them as
+	 * declared, which every compilation of the same source shares. A mapped type (`Record`, `Pick`,
+	 * `Omit`, `Partial`, `Readonly`, `{ [K in U]: ... }`) lists them in the order of its keys, which for a
+	 * union of literals is TypeScript's internal type id order: whichever key the checker happened to
+	 * create first in that compilation came first. An object with any field a mapped type made
+	 * (inherited, or through an intersection, too) or with no declaration sends them all in name order,
+	 * by code units, which needs no declaration and is the same on every machine.
+	 */
+	function fieldOrder(type: ts.Type, properties: ts.Symbol[]): ts.Symbol[] {
+		const isMapped = (member: ts.Type) => (ts.getObjectFlags(member) & ts.ObjectFlags.Mapped) !== 0;
+		const mapped =
+			(type.isIntersection() ? type.types.some(isMapped) : isMapped(type)) ||
+			properties.some(
+				(property) =>
+					(ts.getCheckFlags(property) & ts.CheckFlags.Mapped) !== 0 || !property.declarations?.length,
+			);
+		if (!mapped) return properties;
+
+		return [...properties].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 	}
 
 	function hasUndefined(type: ts.Type) {
@@ -2066,15 +2455,29 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		const info: Hoisted = {
 			name: unique,
+			owner: `the type '${typeText(type)}'`,
 			layout,
 			checks: hasChecks(type),
 			sizeChecks: hasTypeChecks(type, "size"),
 		};
-		hoisted.set(type, info);
 
-		// The functions are looked up in the table when called, which is what lets a type refer to
-		// itself, and their bodies can be built now. They land at the top of the file.
-		atFileLevel(() => buildHoisted(type, info));
+		// Recorded ahead of its functions, which is what lets a type refer to itself: they are looked
+		// up in the table when called, so their bodies can be built now. They land at the top of the
+		// file. When building them fails, the type is taken out again, with every type hoisted while it
+		// was built (one of those may call it), so that a later value of the file builds them anew
+		// rather than calling functions that were never finished. Their names stay taken: what was
+		// built of them before the failure may still be handed out, and a new build must not define
+		// the same fields twice.
+		// A Map keeps insertion order: what was hoisted from here on is what comes after `before`.
+		const before = hoisted.size;
+		hoisted.set(type, info);
+		try {
+			atFileLevel(() => buildHoisted(type, info));
+		} catch (error) {
+			for (const key of [...hoisted.keys()].slice(before)) hoisted.delete(key);
+			throw error;
+		}
+
 		return info;
 	}
 
@@ -2100,7 +2503,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		sizeBody.push(f.returnStatement(size));
 		const sizeParameters = [f.parameterDeclaration(value, T.unknown())];
 		if (sizeWhere) sizeParameters.push(f.parameterDeclaration(sizeWhere, T.string()));
-		definitions.push(assign(hoistedField(info, "s"), f.arrowFunction(f.block(sizeBody), sizeParameters)));
+		definitions.push(define(fieldName(info, "s"), f.arrowFunction(f.block(sizeBody), sizeParameters)));
 
 		const buf = uid("buf");
 		const o = uid("o");
@@ -2132,7 +2535,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			[value, T.unknown()],
 		]);
 		if (where) writeParameters.push(f.parameterDeclaration(where, T.string()));
-		definitions.push(assign(hoistedField(info, "w"), f.arrowFunction(f.block(writeBody), writeParameters)));
+		definitions.push(define(fieldName(info, "w"), f.arrowFunction(f.block(writeBody), writeParameters)));
 
 		const readBody = new Array<ts.Statement>();
 		const readCtx: Ctx = { buf, blobs, cursor: { variable: o, base: o, offset: 0 }, out: readBody };
@@ -2141,8 +2544,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		sync(readCtx);
 		readBody.push(f.returnStatement(tuple([bound, o])));
 		definitions.push(
-			assign(
-				hoistedField(info, "r"),
+			define(
+				fieldName(info, "r"),
 				f.arrowFunction(
 					f.block(readBody),
 					withBlobs([
@@ -2168,8 +2571,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return functionTable;
 	}
 
-	function hoistedField(info: Hoisted, role: HoistedRole): ts.Expression {
-		return prop(hoistedTable(), `${role}_${info.name}`);
+	function fieldName(info: Hoisted, role: HoistedRole): string {
+		return `${role}_${info.name}`;
 	}
 
 	/** A call of a hoisted function, typed as it is so the call's result has the right type. */
@@ -2183,7 +2586,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				: role === "w"
 					? T.fn([["buf", T.buffer()], ["o", T.number()], ["v", T.unknown()], ...blobs, ...where], T.number())
 					: T.fn([["buf", T.buffer()], ["o", T.number()], ...blobs], T.tuple([T.unknown(), T.number()]));
-		return f.call(f.as(hoistedField(info, role), type), args);
+		noteCall(fieldName(info, role), info.owner);
+		return f.call(f.as(prop(hoistedTable(), fieldName(info, role)), type), args);
 	}
 
 	/**
@@ -2342,8 +2746,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	function varintHelpers(): Varint {
 		if (varint) return varint;
 		const helpers = { size: uid("vsize"), write: uid("vwrite"), read: uid("vread") };
-		varint = helpers;
+		// Kept once they are built: helpers whose build failed (a global they name is hidden) are built
+		// again, under new names, for the file's next value instead of being called undeclared.
 		atFileLevel(() => buildVarintHelpers(helpers));
+		varint = helpers;
 		return helpers;
 	}
 
@@ -2533,10 +2939,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 */
 	function checkHelper(): ts.Expression {
 		const helper = prop(hoistedTable(), "checkWidth");
+		// Flagged once it is built: a helper whose build failed (a global it names is hidden) is built
+		// again for the file's next value instead of being called unbuilt.
 		if (!checkFunction) {
+			atFileLevel(() => buildCheckHelper());
 			checkFunction = true;
-			atFileLevel(() => buildCheckHelper(helper));
 		}
+		noteCall("checkWidth", "a width check");
 
 		const parameter = (name: string, type: ts.TypeNode, optional = false) =>
 			f.parameterDeclaration(name, type, undefined, optional);
@@ -2554,7 +2963,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		);
 	}
 
-	function buildCheckHelper(checkFunction: ts.Expression) {
+	function buildCheckHelper() {
 		const width = uid("width");
 		const value = uid("value");
 		const where = uid("where");
@@ -2588,8 +2997,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		}
 
 		tables.push(
-			assign(
-				checkFunction,
+			define(
+				"checkWidth",
 				f.arrowFunction(
 					f.block(body),
 					[
@@ -2867,10 +3276,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 */
 	function typeCheckHelper(): ts.Expression {
 		const helper = prop(hoistedTable(), "checkType");
+		// Flagged once it is built, as `checkWidth` is.
 		if (!typeCheckFunction) {
+			atFileLevel(() => buildTypeCheckHelper());
 			typeCheckFunction = true;
-			atFileLevel(() => buildTypeCheckHelper(helper));
 		}
+		noteCall("checkType", "a type check");
 
 		const parameter = (name: string, type: ts.TypeNode, optional = false) =>
 			f.parameterDeclaration(name, type, undefined, optional);
@@ -2888,7 +3299,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		);
 	}
 
-	function buildTypeCheckHelper(helper: ts.Expression) {
+	function buildTypeCheckHelper() {
 		const expected = uid("expected");
 		const value = uid("value");
 		const where = uid("where");
@@ -2938,8 +3349,8 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		body.push(f.statement(f.call(globalRef("error"), [message, num(2)])));
 
 		tables.push(
-			assign(
-				helper,
+			define(
+				"checkType",
 				f.arrowFunction(
 					f.block(body),
 					[
@@ -3441,6 +3852,54 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		if (kind.kind === "literals") return kind.values.map(literalKey).join(" | ");
 		if (kind.kind === "enum") return `Enum.${kind.name}`;
 		return kind.kind;
+	}
+
+	/**
+	 * A literal group's values in the order they are numbered on the wire. First the plain values,
+	 * sorted: numbers by value, then strings by their text in code units, then `false` and `true`. Then
+	 * Roblox enum items by name (`Enum.Material.Plastic`). Then a TypeScript enum's members as the enum
+	 * declares them, a whole enum or some of its members alike; the members of several enums go by the
+	 * enum's name inside its namespaces (never a file's), then as declared. `origins` says which values
+	 * are a TypeScript enum's members (see `enumMemberOrigins`), since a member is a plain string or
+	 * number by the time it is a value here.
+	 *
+	 * TypeScript lists a union's literals by internal type id, which follows whichever literal the
+	 * checker happened to create first in a compilation, so the same union could be numbered one way
+	 * in a sender and another way in its receiver after a partial rebuild. An enum's members were
+	 * already in a fixed order: TypeScript creates them together, in declaration order, so the ids put
+	 * them in that order, and an enum keeps the layout 2.0.0-alpha.7 gave it.
+	 */
+	function sortLiterals(
+		values: ts.Expression[],
+		origins: ReadonlyArray<EnumMemberOrigin | undefined>,
+	): ts.Expression[] {
+		const rank = (
+			value: ts.Expression,
+			origin: EnumMemberOrigin | undefined,
+		): [number, number | string, number] => {
+			if (origin) return [4, qualifiedName(origin.enum), origin.index];
+			const number = literalNumber(value);
+			if (number !== undefined) return [0, number, 0];
+			if (f.is.string(value)) return [1, value.text, 0];
+			if (value.kind === ts.SyntaxKind.FalseKeyword || value.kind === ts.SyntaxKind.TrueKeyword) {
+				return [2, literalKey(value), 0];
+			}
+			return [3, literalKey(value), 0];
+		};
+		const compare = (x: number | string, y: number | string) => (x < y ? -1 : x > y ? 1 : 0);
+
+		// Two enums of one name from two files whose members share an index are put in order by value,
+		// which is still the types' alone; equal values are the same entry either way.
+		return values
+			.map((value, i) => ({ value, rank: rank(value, origins[i]), text: literalKey(value) }))
+			.sort(
+				(a, b) =>
+					a.rank[0] - b.rank[0] ||
+					compare(a.rank[1], b.rank[1]) ||
+					a.rank[2] - b.rank[2] ||
+					compare(a.text, b.text),
+			)
+			.map(({ value }) => value);
 	}
 
 	/**

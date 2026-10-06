@@ -3,7 +3,13 @@ import { f } from "../util/factory";
 import { TransformState } from "./transformState";
 
 export class NodeMetadata {
-	private static metadataCache = new WeakMap<ts.Node, NodeMetadata>();
+	/**
+	 * Per transform pass, then per node. The metadata holds types and symbols from the pass's checker,
+	 * and reads declarations in other files. A watcher may hand a later pass the same node for a file
+	 * whose text did not change (roblox-ts after 3.0.0), so a cache kept by node alone would give that
+	 * pass an old checker's types and what the other files declared back then.
+	 */
+	private static metadataCache = new WeakMap<TransformState, WeakMap<ts.Node, NodeMetadata>>();
 
 	public static fromSymbol(state: TransformState, symbol: ts.Symbol) {
 		if (symbol.valueDeclaration) {
@@ -12,13 +18,16 @@ export class NodeMetadata {
 	}
 
 	public static fromCache(state: TransformState, node: ts.Node) {
-		const existing = NodeMetadata.metadataCache.get(node);
+		let cache = NodeMetadata.metadataCache.get(state);
+		if (!cache) NodeMetadata.metadataCache.set(state, (cache = new WeakMap()));
+
+		const existing = cache.get(node);
 		if (existing) {
 			return existing;
 		}
 
 		const metadata = new NodeMetadata(state, node);
-		NodeMetadata.metadataCache.set(node, metadata);
+		cache.set(node, metadata);
 
 		return metadata;
 	}

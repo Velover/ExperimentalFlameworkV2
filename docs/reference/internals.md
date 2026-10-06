@@ -901,8 +901,13 @@ serialized one always, a raw one never. A member marked both raw and serialized 
 that names it. A target typed as a union of members (a conditional, a helper that returns a member
 by name) is taken member by member: the call packs, as its first member would, when every member
 packs, and is left alone when none does. Members that disagree are a build error that names the
-call, and so are packed members whose argument lists (for `setCallback`, results) are not
-assignable both ways. For the union to still hold every member there, each sender and function
+call, and so are packed members whose argument lists (for `setCallback`, results) are laid out
+differently on the wire: `packingKey` gives the generator's `wireKey` of the list each member's
+decoder reads (widths, literal tables, field names and union members in order), so one TypeScript
+type spelled two ways (`(x: string | number)`, `(x: number | string)`) differs, and members laid out
+alike pack together whatever their types. Two members packed the same way whose types differ only in
+such a spelling are one type to TypeScript, and a conditional's or an inferred return type's subtype
+reduction keeps one of them, so that case never reaches the check. For the union to still hold every member there, each sender and function
 receiver carries how it is packed as a type argument of its own (`_flamework_packing`, from
 `NetworkPacking<F>`): otherwise TypeScript's subtype reduction would keep only the member type the
 others extend, a plain member in place of a `Serialized` one and a `Raw` one in place of any.
@@ -965,10 +970,22 @@ the order they were written: an aliased union reads the order off its own declar
 anonymous one off the spelling the value is reached through -- the parameter, property, return
 type or tuple element, walked into array, `Set`, `Map` and `Promise` arguments -- as a union kind
 of that spelling's own (`spell`), since TypeScript's own order is by internal type id and it keeps
-one type for every spelling of `string | number`. A union that reaches the generator with no
-spelling of its own (through a generic's type argument) keeps TypeScript's order, which is the same
-in every file of a program. The order used to be keyed on the type, first spelling wins, which
-made a sender in one file and a receiver in another disagree on the tags. Which member a value is
+one type for every spelling of `string | number`. A member written as another union follows that
+union's own written order (`orderAlternatives` walks into a non-generic alias's declaration). The
+members no spelling orders -- a union with no node, reached through a generic's type argument, or
+the members of a generic alias's instance -- follow the written ones in the order of `typeKey`: a
+text of the type alone (a named type's name inside its namespaces, with its type arguments; sorted
+members and properties otherwise), never `typeToString`, which prints a union's members in id order.
+Two members with one key stop the build (`byKey`). A literal group's plain values are sorted, and a
+TypeScript enum's members follow them in the enum's declaration order, several enums by name
+(`sortLiterals`; a member is a plain value by then, so `simplifyUnion` says which ones are, in
+`literalOrigins`). TypeScript creates an enum's member types together, in declaration order, so that
+order was already the ids' and an enum kept its 2.0.0-alpha.7 layout. An object with any field a
+mapped type made, or with no declaration, sends its fields by name (`fieldOrder`). TypeScript's type ids follow what the checker happened to create first
+in a compilation, so until 2026-10 a watcher's rebuild, which compiles a call site without the files
+that decode it, could number a literal union or lay out a `Record` differently from them. The order
+used to be keyed on the type, first spelling wins, which made a sender in one file and a receiver in
+another disagree on the tags. Which member a value is
 written as is `evaluation`'s. Exact tests go first, in written order: a `type`/`typeof` check (for a
 branded number, also that the value fits its width: range and wholeness for an integer width,
 range only for `f32`), a literal, a discriminant, a required key no
@@ -985,6 +1002,17 @@ a whole number below 2^35 travels as a varint. Named variable-size objects, unio
 far in the file reach more than once (`countUses`), which is also what hoists a recursive type with
 no name of its own. The functions are fields of one table per file (`hoistedTable`): three locals
 per type ran a file with about 66 hoisted types past Luau's 200 locals, and it no longer loaded.
+There is one generator per file and transform pass (`generatorFor`, keyed by the `TransformState`
+and then the `SourceFile`): roblox-ts after 3.0.0 hands a watcher's rebuild the same `SourceFile`
+for a file whose text did not change, and a generator kept by file alone took the earlier pass's
+table and helpers for emitted. `NodeMetadata` and `getFlameworkDecorators` cache per pass for the
+same reason. `hoist` records a type before building its functions, so that it can call itself, and
+takes it out again, with every type hoisted while it was built, when building throws; the varint,
+width-check and type-check helpers count as built only once they are. The generator records each
+definition of a table field it makes (`define`) and each call of one (`noteCall`), and at the end of
+a file's transform `checkSerializerOutput` stops the build, naming the type, when the file calls a
+field whose definition was never handed out (`takeHoisted`); a file that already has an error is
+left to it. The table has an index signature, so TypeScript would not notice.
 Result decoders take the function type (`network-result-decoder`), so the declared return type
 node is available for that.
 A count of elements that take no bytes cannot be checked against what is left, so such counts are

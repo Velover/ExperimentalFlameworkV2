@@ -2,11 +2,7 @@ import ts from "typescript";
 import { Diagnostics } from "../classes/diagnostics";
 import { TransformState } from "../classes/transformState";
 import { f } from "../util/factory";
-import {
-	buildInlineEncoding,
-	buildInlineResultEncoding,
-	unwrapPromise,
-} from "../util/functions/buildSerializerFromType";
+import { buildInlineEncoding, buildInlineResultEncoding, packingKey } from "../util/functions/buildSerializerFromType";
 import { getNetworkMode, isPackedMode, NetworkMode } from "../util/functions/networkMode";
 
 /**
@@ -32,8 +28,12 @@ import { getNetworkMode, isPackedMode, NetworkMode } from "../util/functions/net
  * A target typed as a union of members (a conditional, or a helper that returns one of several
  * members) is packed when every member in it is, the same way, and left alone when none is. Members
  * that are packed differently are refused, since whatever the call site did would not suit some of
- * them. Their handler types carry how they are packed (`_flamework_packing`), so that such a union
- * does not reduce to the one member type the others extend.
+ * them, and so are packed members whose argument lists (for `setCallback`, results) are laid out
+ * differently on the wire. Their handler types carry how they are packed (`_flamework_packing`), so
+ * that such a union does not reduce to the one member type the others extend. Members packed the same
+ * way whose types are the same but for how their unions are spelled are one type to TypeScript all the
+ * same, and a conditional or an inferred return type keeps only one of them: see the known limit in
+ * guide 06.
  */
 
 /** Sending methods and the hidden entry point each becomes. */
@@ -98,7 +98,8 @@ interface TargetMember {
  *
  * A target typed as a union of members is packed only when every member is, and then as the first
  * of them. Members that are packed differently are refused, and so are packed members whose
- * argument lists (for `setCallback`, results) are not the same type: one call site packs one way.
+ * argument lists (for `setCallback`, results) are laid out differently on the wire (`packingKey`):
+ * one call site packs one way.
  */
 function packedMember(
 	state: TransformState,
@@ -136,31 +137,61 @@ function packedMember(
 		);
 	}
 
-	// Several members that all pack: the one encoding has to suit each of them.
-	const carried = (member: ts.Type) =>
-		isCallback ? resultType(state, member, node) : markerType(state, member, "_flamework_send", node);
-	const first = carried(packed[0].type);
-	for (const member of packed.slice(1)) {
-		const other = carried(member.type);
-		if (
-			first !== undefined &&
-			other !== undefined &&
-			typeChecker.isTypeAssignableTo(first, other) &&
-			typeChecker.isTypeAssignableTo(other, first)
-		) {
-			continue;
+	// Several members that all pack: the one encoding has to suit each of them. Each member's receiver
+	// (for a callback, each caller) decodes with the layout of its own declaration, which follows how its
+	// unions are spelled as much as its types (`(x: string | number)` against `(x: number | string)`, one
+	// TypeScript type), so the layouts are what is compared. Where they agree, any member packs the same.
+	if (packed.length > 1) {
+		const keyed = packed
+			.map((member) => {
+				const carried = markerType(state, member.type, isCallback ? "_flamework_fn" : "_flamework_send", node);
+				const key = carried ? packingKey(state, node, carried, isCallback) : undefined;
+				return { key, text: memberText(state, member.type, node) };
+			})
+			.sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+		const other = keyed.find(({ key }) => key === undefined || key !== keyed[0].key);
+		if (other) {
+			const what = isCallback ? "results" : "argument lists";
+			refuseMixedTarget(
+				node,
+				`their ${what} are laid out differently ('${keyed[0].text}' and '${other.text}')`,
+				isCallback
+					? "One call site packs the callback's results one way, so the callers of the other would read them wrong."
+					: "One call site packs one way, so the receiver of the other would read what it sends wrong.",
+			);
 		}
-
-		const what = isCallback ? "results" : "argument lists";
-		const show = (type: ts.Type | undefined) => (type ? `'${typeChecker.typeToString(type)}'` : "none");
-		refuseMixedTarget(
-			node,
-			`their ${what} are not the same type (${show(first)} and ${show(other)})`,
-			`One call site packs one of them, which the members with the other ${what} cannot read.`,
-		);
 	}
 
 	return packed[0].type;
+}
+
+/**
+ * A member as declared, for a message: the interface and the member's name, then its parameters and
+ * result as written (`ServerEvents.move(x: string | number): void`), where TypeScript's own printing
+ * would show every spelling of a union in one order.
+ */
+function memberText(state: TransformState, member: ts.Type, node: ts.Node): string {
+	const declaration = markerType(state, member, "_flamework_fn", node)?.getCallSignatures()[0]?.getDeclaration();
+	if (!declaration || !ts.isFunctionLike(declaration)) return state.typeChecker.typeToString(member);
+
+	// A method (`move(x): void`), or the property (`move: Networking.Unreliable<(x) => void>`) or alias a
+	// function type is written in.
+	const owner = ts.findAncestor(
+		declaration,
+		(ancestor) =>
+			ts.isMethodSignature(ancestor) || ts.isPropertySignature(ancestor) || ts.isTypeAliasDeclaration(ancestor),
+	);
+	let name = "";
+	if (owner && ts.isTypeAliasDeclaration(owner)) {
+		name = owner.name.text;
+	} else if (owner && (ts.isMethodSignature(owner) || ts.isPropertySignature(owner))) {
+		const container = ts.isInterfaceDeclaration(owner.parent) ? `${owner.parent.name.text}.` : "";
+		name = `${container}${owner.name.getText()}`;
+	}
+
+	const parameters = declaration.parameters.map((parameter) => parameter.getText()).join(", ");
+	const result = declaration.type ? `: ${declaration.type.getText()}` : "";
+	return `${name}(${parameters})${result}`.replace(/\s+/g, " ");
 }
 
 /** How the members of a mixed target are sent, one phrase per way. */
@@ -192,12 +223,6 @@ function refuseMixedTarget(node: ts.CallExpression, what: string, consequence: s
 		consequence,
 		"Make the call where the member's own type is known, such as in each case of a switch over the name, or declare these members the same way.",
 	);
-}
-
-/** What a function member's callback returns, as it travels: without a Promise around it. */
-function resultType(state: TransformState, member: ts.Type, node: ts.Node): ts.Type | undefined {
-	const signature = markerType(state, member, "_flamework_fn", node)?.getCallSignatures()[0];
-	return signature ? unwrapPromise(state, signature.getReturnType()) : undefined;
 }
 
 /**

@@ -1,7 +1,8 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import fs from "fs";
 import path from "path";
-import { compileFixture, compileProbe, emitted } from "./compile";
+import ts from "typescript";
+import { compileFixture, compileProbe, compileProbes, emitted, transformInProcess } from "./compile";
 
 beforeAll(() => {
 	const result = compileFixture();
@@ -437,5 +438,207 @@ export const probeClient = probeEvents.createClient({});
 		expect(result.output).not.toContain("TS7022");
 		expect(result.output).not.toContain("TS2448");
 		expect(result.status).toBe(0);
+	});
+});
+
+describe("wire order does not depend on which literals TypeScript created first", () => {
+	// TypeScript lists a union's literals, and the keys of a mapped type over a union, in the order it
+	// first created each literal type in that compilation. A watcher's rebuild compiles a sender without
+	// its receiver, so an order taken from TypeScript let them disagree: "rare" sent as index 0 was read
+	// as "common", and Record<"speed" | "power", number> swapped its fields.
+	const sender =
+		'import { Flamework } from "@flamework-experimental/core";\nexport interface WireOrder { rarity: "common" | "rare" | "epic"; stats: Record<"speed" | "power", number>; picked: Pick<{ speed: number; power: number }, "power" | "speed"> }\nexport const wireOrder = Flamework.createSerializer<WireOrder>();\n';
+	// Checked ahead of the sender (it sorts first), it creates "epic" and "power" first.
+	const early = 'export const FAVOURITE = "epic";\nexport const FIRST_STAT = "power";\n';
+	const tables = (luau: string) => [...luau.matchAll(/local literals\w* = \{[^}]*\}/g)].map((m) => m[0]);
+	const fields = (luau: string) => [...luau.matchAll(/buffer\.writef64\([^)]*\.(speed|power)\)/g)].map((m) => m[1]);
+
+	test("a literal union's indices and a mapped type's fields are the same either way", () => {
+		const alone = compileProbes({ wireOrderSender: sender });
+		const afterEarly = compileProbes({ aaaWireOrderEarly: early, wireOrderSender: sender });
+		expect(alone.status).toBe(0);
+		expect(afterEarly.status).toBe(0);
+		expect(tables(afterEarly.files.get("wireOrderSender")!)).toEqual(tables(alone.files.get("wireOrderSender")!));
+		expect(fields(afterEarly.files.get("wireOrderSender")!)).toEqual(fields(alone.files.get("wireOrderSender")!));
+	});
+});
+
+describe("wire order is a function of the types alone", () => {
+	// Each order below came from TypeScript's internal type ids, or from declarations a mapped type
+	// does not have, before. The ids follow whatever the checker happened to create first in a
+	// compilation, which a partial rebuild changes.
+	test("numbers a literal union's values by value, and sends a mapped type's fields by name", () => {
+		const result = compileProbes({
+			canonicalOrder: `import { Flamework } from "@flamework-experimental/core";
+export enum Mode { Single = "single", Double = "double" }
+interface Zoo { zebra: number; aardvark: string }
+export interface Ordered {
+	animal: "zebra" | "aardvark";
+	amount: 300 | -5 | 12.5;
+	material: Enum.Material.Wood | Enum.Material.Plastic;
+	mode: Mode;
+	patch: Partial<Zoo>;
+}
+export const ordered = Flamework.createSerializer<Ordered>();
+`,
+		});
+		expect(result.status).toBe(0);
+		const luau = result.files.get("canonicalOrder")!;
+
+		// Numbers by value, then strings by code units, then Roblox enum items by name. A TypeScript enum
+		// keeps the order it declares its members in, as 2.0.0-alpha.7 did: see the next describe.
+		expect(luau).toMatch(/local literals\w* = \{ "aardvark", "zebra" \}/);
+		expect(luau).toMatch(/local literals\w* = \{ -5, 12\.5, 300 \}/);
+		expect(luau).toMatch(/local literals\w* = \{ Enum\.Material\.Plastic, Enum\.Material\.Wood \}/);
+		expect(luau).toMatch(/local literals\w* = \{ "single", "double" \}/);
+		// `Partial<Zoo>` is a mapped type: its fields go by name, not as `Zoo` declares them.
+		expect(luau.indexOf(".aardvark")).toBeGreaterThan(-1);
+		expect(luau.indexOf(".aardvark")).toBeLessThan(luau.indexOf(".zebra"));
+		expect(luau).toMatch(/aardvark = \w+,\s*zebra = \w+,/);
+	});
+
+	/** Makes `program`'s checker create the declared type of the interface `name` before anything else in `file`. */
+	function createFirst(program: ts.Program, file: ts.SourceFile, name: string) {
+		const checker = program.getTypeChecker();
+		const declaration = file.statements.find(
+			(statement): statement is ts.InterfaceDeclaration =>
+				ts.isInterfaceDeclaration(statement) && statement.name.text === name,
+		)!;
+		checker.getDeclaredTypeOfSymbol(checker.getSymbolAtLocation(declaration.name)!);
+	}
+
+	test("numbers the members of a union no spelling orders by their types, whichever TypeScript created first", async () => {
+		// `Box<Alpha | Beta>` reaches its union through `value: T`, where nothing spells it out.
+		const source = `import { Flamework } from "@flamework-experimental/core";
+export interface Alpha { alpha: number }
+export interface Beta { beta: string }
+interface Box<T> { value: T }
+export const boxed = Flamework.createSerializer<Box<Alpha | Beta>>();
+`;
+		await transformInProcess({ unspelledUnion: source }, (fixture) => {
+			const emit = (first: string) => {
+				const program = fixture.program();
+				const file = fixture.file(program, "unspelledUnion");
+				createFirst(program, file, first);
+				const { printed, diagnostics } = fixture.pass(program, [file]);
+				expect(diagnostics).toEqual([]);
+				return printed[0];
+			};
+
+			const betaFirst = emit("Beta");
+			expect(betaFirst).toBe(emit("Alpha"));
+			// By name: Alpha is 0, Beta 1.
+			expect(betaFirst).toMatch(/\.alpha !== undefined\) \{\s*buffer\w*\.writeu8\(buf\w*, o\w*, 0\)/);
+		});
+	}, 120_000);
+
+	test("numbers a union written inside another as that union is written", async () => {
+		// `Pair` is a member of `Choice`; its own members go in its written order, Beta first.
+		const source = `import { Flamework } from "@flamework-experimental/core";
+export interface Alpha { alpha: number }
+export interface Beta { beta: string }
+export interface Gamma { gamma: boolean }
+type Pair = Beta | Alpha;
+type Choice = Pair | Gamma;
+export const chosen = Flamework.createSerializer<Choice>();
+`;
+		await transformInProcess({ nestedUnion: source }, (fixture) => {
+			const emit = (first: string) => {
+				const program = fixture.program();
+				const file = fixture.file(program, "nestedUnion");
+				createFirst(program, file, first);
+				const { printed, diagnostics } = fixture.pass(program, [file]);
+				expect(diagnostics).toEqual([]);
+				return printed[0];
+			};
+
+			const alphaFirst = emit("Alpha");
+			expect(alphaFirst).toBe(emit("Beta"));
+			expect(alphaFirst).toMatch(/\.beta !== undefined\) \{\s*buffer\w*\.writeu8\(buf\w*, o\w*, 0\)/);
+			expect(alphaFirst).toMatch(/\.alpha !== undefined\) \{\s*buffer\w*\.writeu8\(buf\w*, o\w*, 1\)/);
+		});
+	}, 120_000);
+
+	test("refuses a union whose members only TypeScript's type ids would put in an order", () => {
+		// Two interfaces of one name, reached through a generic: nothing but the ids tells them apart.
+		const result = compileProbes({
+			sameNameA: "export interface Same { a: number }\n",
+			sameNameB: "export interface Same { b: string }\n",
+			sameNameUnion: `import { Flamework } from "@flamework-experimental/core";
+import type { Same as SameA } from "./sameNameA";
+import type { Same as SameB } from "./sameNameB";
+interface Box<T> { value: T }
+export const tied = Flamework.createSerializer<Box<SameA | SameB>>();
+`,
+		});
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain(
+			"has two members, 'Same' and 'Same', that nothing but TypeScript's internal type ids would put in an order",
+		);
+		expect(result.output).toContain("Declare an alias for the union");
+	});
+});
+
+describe("a TypeScript enum's members keep their declaration order", () => {
+	// TypeScript creates an enum's member types together, in declaration order, so the order its
+	// values came in was already the types' own, and 2.0.0-alpha.7 numbered an enum that way: a buffer
+	// stored with one still reads the same. Values from several enums, or from an enum and plain
+	// literals, came in the order the checker created those types, which a partial rebuild changes.
+	const layout = `import { Flamework } from "@flamework-experimental/core";
+export enum Rarity { Common = "common", Rare = "rare", Epic = "epic" }
+export enum Level { High = 30, Low = 10, Mid = 20 }
+export interface EnumLayout { rarity: Rarity; level: Level; subset: Rarity.Epic | Rarity.Rare }
+export const enumLayout = Flamework.createSerializer<EnumLayout>();
+`;
+	const mixed = `import { Flamework } from "@flamework-experimental/core";
+import { Alpha } from "./enumOrderAlpha";
+import { Beta } from "./enumOrderBeta";
+export interface TwoEnums { both: Alpha | Beta; mixed: "zeta" | 7 | Beta.Y | Alpha.Q | "alpha" }
+export const twoEnums = Flamework.createSerializer<TwoEnums>();
+`;
+	const sources = {
+		enumOrderAlpha: "export enum Alpha { Q = 2, P = 1 }\n",
+		enumOrderBeta: 'export enum Beta { Y = "y", X = "x" }\n',
+		enumOrderLayout: layout,
+		enumOrderMixed: mixed,
+	};
+	// Checked ahead of the others (it sorts first, after the files it imports), it makes the checker
+	// create Beta's members before Alpha's, and asks for a later member of Rarity first.
+	const early = `import { Beta } from "./enumOrderBeta";
+import { Rarity } from "./enumOrderLayout";
+export const FAVOURITE = Rarity.Epic;
+export const FIRST_BETA = Beta.X;
+`;
+	const tables = (luau: string) => [...luau.matchAll(/local literals\w* = (\{[^}]*\})/g)].map((match) => match[1]);
+
+	let alone: ReturnType<typeof compileProbes> | undefined;
+	const compiledAlone = () => (alone ??= compileProbes(sources));
+
+	test("numbers a string enum, a numeric one and some of an enum's members as declared, as 2.0.0-alpha.7 did", () => {
+		const result = compiledAlone();
+		expect(result.status).toBe(0);
+		// Not sorted: "epic" before "rare", 10 before 30. The subset is written Epic first.
+		expect(tables(result.files.get("enumOrderLayout")!)).toEqual([
+			'{ "common", "rare", "epic" }',
+			"{ 30, 10, 20 }",
+			'{ "rare", "epic" }',
+		]);
+	});
+
+	test("numbers them the same whichever enum or member TypeScript created first", () => {
+		const afterEarly = compileProbes({ aaaEnumOrderEarly: early, ...sources });
+		expect(afterEarly.status).toBe(0);
+		for (const name of ["enumOrderLayout", "enumOrderMixed"]) {
+			expect(tables(afterEarly.files.get(name)!)).toEqual(tables(compiledAlone().files.get(name)!));
+		}
+	});
+
+	test("puts plain literals first, sorted, then each enum's members as declared, the enums by name", () => {
+		// Alpha before Beta by name, though the second union writes Beta first; 7, "alpha" and "zeta"
+		// ahead of both.
+		expect(tables(compiledAlone().files.get("enumOrderMixed")!)).toEqual([
+			'{ 2, 1, "y", "x" }',
+			'{ 7, "alpha", "zeta", 2, "y" }',
+		]);
 	});
 });

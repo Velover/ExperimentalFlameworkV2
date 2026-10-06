@@ -688,6 +688,53 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 	}
 }
 
+/**
+ * The TypeScript enum member a literal is: the enum, merged across its declarations, and the member's
+ * place among the enum's members as declared, counted across its declarations in order.
+ */
+export interface EnumMemberOrigin {
+	enum: ts.Symbol;
+	index: number;
+}
+
+/**
+ * For each of the `count` literals {@link getLiteral} gave for `type`, the TypeScript enum member it
+ * is (see {@link EnumMemberOrigin}), or `undefined` for a plain literal. The serializer numbers an
+ * enum's values in its declaration order (`sortLiterals`).
+ */
+export function enumMemberOrigins(type: ts.Type, count: number): Array<EnumMemberOrigin | undefined> {
+	// A member (`E.A`): a literal type whose symbol is the member, whose parent is the enum.
+	if (
+		type.flags & ts.TypeFlags.EnumLiteral &&
+		type.flags & (ts.TypeFlags.StringLiteral | ts.TypeFlags.NumberLiteral) &&
+		type.symbol?.parent
+	) {
+		const enumSymbol = type.checker.getMergedSymbol(type.symbol.parent);
+		return [{ enum: enumSymbol, index: enumMemberIndex(enumSymbol, type.symbol) }];
+	}
+
+	// A whole enum that `getLiteral` lists itself, from its one declaration, in order.
+	if (type.flags & ts.TypeFlags.Enum && type.symbol) {
+		const enumSymbol = type.checker.getMergedSymbol(type.symbol);
+		return Array.from({ length: count }, (_, index) => ({ enum: enumSymbol, index }));
+	}
+
+	return new Array<EnumMemberOrigin | undefined>(count).fill(undefined);
+}
+
+function enumMemberIndex(enumSymbol: ts.Symbol, member: ts.Symbol): number {
+	let index = 0;
+	for (const declaration of enumSymbol.declarations ?? []) {
+		if (!ts.isEnumDeclaration(declaration)) continue;
+		for (const declared of declaration.members) {
+			if (declared === member.valueDeclaration) return index;
+			index++;
+		}
+	}
+
+	return index;
+}
+
 export function simplifyUnion(type: ts.UnionType) {
 	const enumType = type.checker.resolveName("Enum", undefined, ts.SymbolFlags.Type, false);
 	if (
@@ -695,7 +742,7 @@ export function simplifyUnion(type: ts.UnionType) {
 		type.aliasSymbol.parent &&
 		type.checker.getMergedSymbol(type.aliasSymbol.parent) === enumType
 	) {
-		return { enums: [type.aliasSymbol.name], types: [], literals: [] };
+		return { enums: [type.aliasSymbol.name], types: [], literals: [], literalOrigins: [] };
 	}
 
 	const currentTypes = type.types;
@@ -703,6 +750,8 @@ export function simplifyUnion(type: ts.UnionType) {
 	const enums = new Array<string>();
 	const types = new Array<ts.Type>();
 	const literals = new Array<ts.Expression>();
+	/** Parallel to `literals`: the TypeScript enum member each one is, if any (see `enumMemberOrigins`). */
+	const literalOrigins = new Array<EnumMemberOrigin | undefined>();
 	const isBoolean = currentTypes.filter((v) => v.flags & ts.TypeFlags.BooleanLiteral).length === 2;
 
 	if (isBoolean) {
@@ -723,6 +772,7 @@ export function simplifyUnion(type: ts.UnionType) {
 		const literal = getLiteral(type, true);
 		if (literal) {
 			literals.push(...literal);
+			literalOrigins.push(...enumMemberOrigins(type, literal.length));
 			continue;
 		}
 
@@ -758,11 +808,12 @@ export function simplifyUnion(type: ts.UnionType) {
 		} else {
 			for (const type of set) {
 				literals.push(f.field(f.field("Enum", symbol.name), type.symbol.name));
+				literalOrigins.push(undefined);
 			}
 		}
 	}
 
-	return { enums, types, literals };
+	return { enums, types, literals, literalOrigins };
 }
 
 export function extractTypes(typeChecker: ts.TypeChecker, types: ts.Type[]): [isOptional: boolean, types: ts.Type[]] {

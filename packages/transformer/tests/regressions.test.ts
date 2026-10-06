@@ -12,6 +12,7 @@ import {
 	compileProbes,
 	emitted,
 	normalize,
+	transformInProcess,
 } from "./compile";
 
 const FIXTURE = path.resolve(import.meta.dir, "fixture");
@@ -1111,4 +1112,50 @@ describe("a flamework.build that cannot be used", () => {
 			restore();
 		}
 	}, 300_000);
+});
+
+describe("a file transformed again in a later pass", () => {
+	// roblox-ts after 3.0.0 gives a watcher's rebuild the same SourceFile for a file whose text did not
+	// change, and transforms it again when a file it imports changed. A generator kept per SourceFile
+	// believed its codec table and helpers were already emitted, and the second output called `codec`,
+	// `vsize`, `vwrite` and `vread` without declaring them.
+	test("emits its codec table, helpers and hoisted functions again", async () => {
+		await transformInProcess({}, (fixture) => {
+			const program = fixture.program();
+			const file = fixture.file(program, "serialization");
+			const first = fixture.pass(program, [file]);
+			const second = fixture.pass(program, [file]);
+
+			const fields = [...first.printed[0].matchAll(/^codec\.(\w+) = /gm)].map((match) => match[1]);
+			expect(fields).toContain("w_Payload");
+			expect(second.printed[0]).toMatch(/const codec\w*: \{/);
+			expect(second.printed[0]).toMatch(/const vsize\w* = /);
+			for (const field of fields) expect(second.printed[0]).toContain(`codec.${field} = `);
+			expect(second.diagnostics.filter((message) => message.includes("never defines"))).toEqual([]);
+		});
+	}, 120_000);
+});
+
+describe("the serializer's self-check", () => {
+	// Every field of a file's `codec` table that its generated code calls has to be defined in that
+	// file. The table has an index signature, so nothing else notices a missing one until the call
+	// runs, as a call of nil. Forced here by transforming one file twice in one pass: the file's one
+	// generator hands its definitions out the first time only, so the second output calls every one of
+	// them without defining it, which is what reusing a generator across passes did.
+	test("stops a build whose file calls a codec field it never defines, naming the type", async () => {
+		await transformInProcess({}, (fixture) => {
+			const program = fixture.program();
+			const file = fixture.file(program, "serialization");
+
+			const once = fixture.pass(program, [file]);
+			expect(once.diagnostics.filter((message) => message.includes("never defines"))).toEqual([]);
+
+			const twice = fixture.pass(program, [file, file]);
+			expect(twice.diagnostics).toContainEqual(
+				expect.stringMatching(
+					/^Flamework's generated code for the type 'Payload' calls .*'codec\.w_Payload'.*, which this file never defines\.$/,
+				),
+			);
+		});
+	}, 120_000);
 });

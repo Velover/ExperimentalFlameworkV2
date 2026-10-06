@@ -14,7 +14,12 @@ const DECORATORS: ReadonlyArray<[kind: FlameworkDecoratorKind, pkg: string, name
 	["component", COMPONENTS_PACKAGE, "Component"],
 ];
 
-const cache = new WeakMap<ts.ClassLikeDeclaration, ReadonlySet<FlameworkDecoratorKind>>();
+/**
+ * Per transform pass, then per declaration. What a decorator's name resolves to follows the files it
+ * is imported from, and a watcher may hand a later pass the same declaration for a file whose text
+ * did not change (roblox-ts after 3.0.0) while a file it imports did.
+ */
+const cache = new WeakMap<TransformState, WeakMap<ts.ClassLikeDeclaration, ReadonlySet<FlameworkDecoratorKind>>>();
 
 /**
  * Which of `@Provider()` and `@Component()` a class declaration carries itself -- not through a
@@ -26,7 +31,10 @@ const cache = new WeakMap<ts.ClassLikeDeclaration, ReadonlySet<FlameworkDecorato
  * happens to share the name is not mistaken for it.
  */
 export function getFlameworkDecorators(state: TransformState, declaration: ts.ClassLikeDeclaration) {
-	const cached = cache.get(declaration);
+	let perPass = cache.get(state);
+	if (!perPass) cache.set(state, (perPass = new WeakMap()));
+
+	const cached = perPass.get(declaration);
 	if (cached) return cached;
 
 	const kinds = new Set<FlameworkDecoratorKind>();
@@ -45,7 +53,7 @@ export function getFlameworkDecorators(state: TransformState, declaration: ts.Cl
 		}
 	}
 
-	cache.set(declaration, kinds);
+	perPass.set(declaration, kinds);
 	return kinds;
 }
 

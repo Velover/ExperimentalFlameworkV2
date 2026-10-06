@@ -315,9 +315,12 @@ any of it, and nothing in the output describes the type.
   [Implicit widths and checks](06-networking.md#implicit-widths-and-checks).
 - The format follows the types as written: fields in declaration order, and a union's members
   numbered in the order written in the type argument and the declarations it reaches
-  ([What each type costs](06-networking.md#what-each-type-costs)). Reordering either, or changing a
-  width, changes the format: a buffer written before is then read wrong, or not at all. Keep that in
-  mind before you store buffers, in a DataStore say.
+  ([What each type costs](06-networking.md#what-each-type-costs)). A literal union's values are
+  numbered in sorted order, a TypeScript enum's members in the order the enum declares them, and a
+  mapped type's fields (`Record`, `Partial`) go by name. Reordering fields, members or an enum's
+  members, adding a literal value or an enum member (which can renumber the others), or changing a
+  width changes the format: a buffer written before is then read wrong, or not at all. Keep that in
+  mind before you store buffers, in a DataStore say, and store a version with them.
 - `deserialize` checks lengths, counts, union tags and literal indices, and trusts no count or
   length it reads
   ([Payloads that cannot be decoded](06-networking.md#payloads-that-cannot-be-decoded)). It does not

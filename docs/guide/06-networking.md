@@ -278,7 +278,10 @@ own type: `Events.X.fire(...)`, a typed reference to `Events.X`, or a helper gen
 name. Such a helper must not return members that are packed differently, such as a `Serialized`
 member and a plain one while `networking.serialization` is off, or a `Raw` member and a packed one:
 a call through it is packed one way, so the build refuses it. It refuses packed members whose
-argument lists differ for the same reason. Don't go through a hand-written interface that widens
+argument lists (for `setCallback`, results) are laid out differently for the same reason, even one
+TypeScript type spelled two ways, `a(x: string | number)` and `b(x: number | string)` (see
+[What each type costs](#what-each-type-costs)); members laid out alike are packed together.
+Don't go through a hand-written interface that widens
 `fire` to `(...args: unknown[])`. Such a call is left alone and sends unpacked values, which the peer drops as malformed. A handler reached
 through `?.` (`this.events?.X.fire(...)`) is packed like any other, behind the same short-circuit.
 `predict` takes plain values and needs no typing, and `connect` is left as it is.
@@ -290,8 +293,13 @@ The same generator is available on its own as `Flamework.createSerializer<T>()`;
 
 Sizes follow the types:
 
-- A `number` is eight bytes. A `boolean` is one byte, and so is an `"idle" | "walk" | "run"`.
-- An object is its fields in declaration order, with nothing spent on names.
+- A `number` is eight bytes. A `boolean` is one byte, and so is an `"idle" | "walk" | "run"`: the
+  value's place among the union's values sorted, numbers by value first, then strings by their
+  character codes, then `false` and `true`, then Roblox enum items by name. A TypeScript `enum`'s
+  members, all of them or some, keep the order the enum declares them in, after any plain values in
+  the same union; the members of several enums go by the enum's name.
+- An object is its fields in declaration order, with nothing spent on names. An object a mapped type
+  makes (`Record`, `Pick`, `Omit`, `Partial`, `Readonly`) sends its fields in name order.
 - A `Vector3` is three floats.
 - Counts and lengths (of arrays, sets, maps, strings and buffers) are varints: one byte below 128,
   two below 16384, up to five.
@@ -316,10 +324,19 @@ small that way. A `number` that is not in a union is always eight bytes.
 "As written" means at the declaration the value is reached through: the parameter, property, return
 type or tuple element, including inside arrays, sets, maps and Promises. So `a(x: string | number)`
 and `b(x: number | string)` number their members differently, even though they are one TypeScript
-type. Both sides agree, because both read the same declaration. A union that is not spelled out
-where it is reached keeps TypeScript's order, which is the same everywhere in a program. One example
-is a union that only arrives as a generic's type argument, as in `Box<A | B>`. If the order matters
-to you, declare an alias for it.
+type. Both sides agree, because both read the same declaration. A union written as a member of
+another (`type Choice = Pair | Gamma`) keeps its own written order there.
+
+A union that is not spelled out where it is reached numbers its members by their types instead: a
+named type by its name (`Alpha` before `Beta`), anything else by its structure, after any members
+that are written out. One example is a union that only arrives as a generic's type argument, as in
+`Box<A | B>`, whose `value: T` names only `T`. Two members that only TypeScript's internal ids
+could tell apart, such as two interfaces of one name from two files, stop the build. Declare an alias
+for the union and use it where the value is declared, and its written order numbers them.
+
+None of these orders depends on what TypeScript happened to check first in a build. So a watcher's
+rebuild, which compiles a sender without its receiver, and a buffer stored with
+`Flamework.createSerializer` read the same layout as a full build.
 
 Object members of a union are told apart by a shared discriminant (`kind: "a"` against
 `kind: "b"`) or by a key only one of them has, so no guard is generated for them. A union with more
@@ -843,6 +860,13 @@ logging. Game rules belong in the handler, where you can test them.
   markers are per member, and both realms read the same `flamework.config.json` and the same types,
   so one build always agrees with itself. A client built without the switch, or with a member marked
   differently, cannot talk to a server built with it.
+- **Two members whose types differ only in how a union is spelled are one type to TypeScript.**
+  Plain `a(x: string | number)` and `b(x: number | string)` lay `x` out differently, but a
+  conditional over them (`flag ? Events.a : Events.b`) or a helper's inferred return type keeps only
+  one of them, and the call is packed as that one; the other's receiver then reads it wrong, and the
+  build cannot see it. Spell such members' unions alike, or make the call where the member is known.
+  Members packed differently (a `Serialized` one with a plain one) stay apart, and their call is
+  checked.
 - **Unreliable events can be dropped.** Never make later messages depend on an earlier one.
 - **An event uses one remote for both directions; a function uses two.** In ReplicatedStorage, a
   function's two remotes share a name and differ only by their `id` attribute (`$name` for one
