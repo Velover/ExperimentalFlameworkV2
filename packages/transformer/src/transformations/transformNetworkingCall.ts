@@ -20,7 +20,11 @@ import { getNetworkMode, isPackedMode, NetworkMode } from "../util/functions/net
  *
  * Call sites are found by type: the handler members carry hidden `_flamework_send` /
  * `_flamework_fn` markers, the second holding the declared member, whose own markers say how it is
- * packed. A member declared `Networking.Raw*` has no marker and is left alone, as is
+ * packed. A name declared in both directions is a sender and a receiver at once; a call reads the
+ * declared member of the side it works on (`declaredMember`): a function's sender and receiver each
+ * carry their own direction's, while an event's receiver, which no call packs for, carries none. A
+ * sender of networking 2.0.0-alpha.3 or earlier carries none either and packs as a plain member. A
+ * member declared `Networking.Raw*` has no marker and is left alone, as is
  * a handler reached through a widened type (which then sends unpacked values that the peer rejects
  * as malformed). A handler reached through `?.` is typed with `undefined` in it; the marker is looked
  * for on the rest. An argument list that carries nothing (`bump(): void`) sends no payload at all.
@@ -60,14 +64,14 @@ export function transformNetworkingCall(state: TransformState, node: ts.CallExpr
 			const member = packedMember(
 				state,
 				target,
-				isCallback ? "_flamework_fn" : "_flamework_send",
+				isCallback ? "_flamework_receive" : "_flamework_send",
 				callee.expression,
 				node,
 			);
 			if (member) {
 				return isCallback
-					? transformReceiverCallback(state, node, callee.expression, member, optional)
-					: transformSend(state, node, callee.expression, member, SENDERS[name], optional);
+					? transformReceiverCallback(state, node, callee.expression, member.fn, optional)
+					: transformSend(state, node, callee.expression, member.type, SENDERS[name], optional);
 			}
 		}
 	}
@@ -78,24 +82,33 @@ export function transformNetworkingCall(state: TransformState, node: ts.CallExpr
 	const member = packedMember(state, target, "_flamework_send", callee, node);
 	if (!member) return;
 
-	const method = member.getProperty("_invoke") ? "_invoke" : "_fire";
-	return transformSend(state, node, callee, member, method, node.questionDotToken !== undefined);
+	const method = member.type.getProperty("_invoke") ? "_invoke" : "_fire";
+	return transformSend(state, node, callee, member.type, method, node.questionDotToken !== undefined);
 }
+
+/**
+ * The side of a handler member a call works on, by the hidden marker only that side carries: the
+ * sender (`_flamework_send`) for a send, the function receiver (`_flamework_receive`) for
+ * `setCallback`.
+ */
+type Side = "_flamework_send" | "_flamework_receive";
 
 /** One of the types a call's target may be, and how a call on it is sent. */
 interface TargetMember {
 	type: ts.Type;
+	/** The declared member of the side the call works on (see `declaredMember`), for a networking member. */
+	fn?: ts.Type;
 	/** `other` for a value that is not a networking member this kind of call packs for. */
 	mode: NetworkMode | "other";
 	packed: boolean;
 }
 
 /**
- * The handler member a call on `targetType` packs for, or `undefined` when the call is left as it is.
- * `marker` is what makes a member one this kind of call can pack: `_flamework_send` for a send,
- * `_flamework_fn` for `setCallback`. Whether it does follows the markers on its declared type
- * (`_flamework_fn`) and the project's switch; a member declared with conflicting markers is refused
- * here.
+ * The handler member a call on `targetType` packs for, with its side's declared member, or
+ * `undefined` when the call is left as it is. `side` is the side of a member this kind of call works
+ * on: the sender for a send, the receiver for `setCallback`. Whether it packs follows the markers on
+ * that side's declared member (`_flamework_fn`) and the project's switch; a member declared with
+ * conflicting markers is refused here.
  *
  * A target typed as a union of members is packed only when every member is, and then as the first
  * of them. Members that are packed differently are refused, and so are packed members whose
@@ -105,29 +118,30 @@ interface TargetMember {
 function packedMember(
 	state: TransformState,
 	targetType: ts.Type,
-	marker: "_flamework_send" | "_flamework_fn",
+	side: Side,
 	target: ts.Expression,
 	node: ts.CallExpression,
-): ts.Type | undefined {
+): { type: ts.Type; fn: ts.Type } | undefined {
 	const typeChecker = state.typeChecker;
 	const targetName = ts.getParseTreeNode(target)?.getText();
 	const resolved =
 		targetType.flags & ts.TypeFlags.Instantiable ? typeChecker.getApparentType(targetType) : targetType;
 
 	const members = (resolved.isUnion() ? resolved.types : [resolved]).map((type): TargetMember => {
-		if (type.getProperty(marker)) {
-			const mode = getNetworkMode(markerType(state, type, "_flamework_fn", node), node, targetName);
-			return { type, mode, packed: isPackedMode(state, mode) };
+		const fn = declaredMember(state, type, side, node);
+		if (fn) {
+			const mode = getNetworkMode(fn, node, targetName);
+			return { type, fn, mode, packed: isPackedMode(state, mode) };
 		}
 
 		// A raw member carries `_flamework_packing` without the marker.
 		return { type, mode: type.getProperty("_flamework_packing") ? "raw" : "other", packed: false };
 	});
 
-	const packed = members.filter((member) => member.packed);
+	const packed = members.filter((member): member is TargetMember & { fn: ts.Type } => member.packed);
 	if (packed.length === 0) return;
 
-	const isCallback = marker === "_flamework_fn";
+	const isCallback = side === "_flamework_receive";
 	if (packed.length < members.length) {
 		refuseMixedTarget(
 			node,
@@ -145,9 +159,9 @@ function packedMember(
 	if (packed.length > 1) {
 		const keyed = packed
 			.map((member) => {
-				const carried = markerType(state, member.type, isCallback ? "_flamework_fn" : "_flamework_send", node);
+				const carried = isCallback ? member.fn : markerType(state, member.type, "_flamework_send", node);
 				const key = carried ? packingKey(state, node, carried, isCallback) : undefined;
-				return { key, text: memberText(state, member.type, node) };
+				return { key, text: memberText(state, member.type, member.fn) };
 			})
 			.sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
 		const other = keyed.find(({ key }) => key === undefined || key !== keyed[0].key);
@@ -163,16 +177,17 @@ function packedMember(
 		}
 	}
 
-	return packed[0].type;
+	return packed[0];
 }
 
 /**
  * A member as declared, for a message: the interface and the member's name, then its parameters and
  * result as written (`ServerEvents.move(x: string | number): void`), where TypeScript's own printing
- * would show every spelling of a union in one order.
+ * would show every spelling of a union in one order. `fn` is the declared member of the side the call
+ * works on.
  */
-function memberText(state: TransformState, member: ts.Type, node: ts.Node): string {
-	const declaration = markerType(state, member, "_flamework_fn", node)?.getCallSignatures()[0]?.getDeclaration();
+function memberText(state: TransformState, member: ts.Type, fn: ts.Type): string {
+	const declaration = fn.getCallSignatures()[0]?.getDeclaration();
 	if (!declaration || !ts.isFunctionLike(declaration)) return state.typeChecker.typeToString(member);
 
 	// A method (`move(x): void`), or the property (`move: Networking.Unreliable<(x) => void>`) or alias a
@@ -618,19 +633,18 @@ function isConstant(node: ts.Expression): boolean {
  * `pack` turns a successful result into `[payload, blobs?]` (or nothing, for a `void` result). The
  * callback itself is registered as it is: the runtime packs whatever the middleware chain resolves
  * with, so middleware sees plain results and one it returns is packed like the callback's own.
+ * `fnType` is the receiver's declared member, whose result type `pack` is built from: the one its
+ * callers decode the result with.
  */
 function transformReceiverCallback(
 	state: TransformState,
 	node: ts.CallExpression,
 	target: ts.Expression,
-	targetType: ts.Type,
+	fnType: ts.Type,
 	optionalTarget: boolean,
 ): ts.Expression | undefined {
 	const callbackArgument = node.arguments[0];
 	if (!callbackArgument) return;
-
-	const fnType = markerType(state, targetType, "_flamework_fn", node);
-	if (!fnType) return;
 
 	const statements = new Array<ts.Statement>();
 
@@ -685,6 +699,29 @@ function memberName(state: TransformState, target: ts.Expression): string | unde
 	if (ts.isPropertyAccessExpression(original)) return original.name.text;
 	if (ts.isElementAccessExpression(original) && ts.isStringLiteralLike(original.argumentExpression)) {
 		return original.argumentExpression.text;
+	}
+}
+
+/**
+ * The declared member (`_flamework_fn`) of the side of `type` that a call works on, or `undefined`
+ * when `type` has no such side: a raw one, or none at all.
+ *
+ * A name declared in both directions makes a handler member that is a sender and a receiver at once,
+ * `Sender<the other direction's declaration> & Receiver<its own>`. For a function, whose sender and
+ * receiver each carry `_flamework_fn`, the one read off the whole of it would be the intersection of
+ * the two declarations: its first call signature the sender's, which `setCallback` would have packed
+ * its results with, and the markers (`Serialized`) of either, which would have decided whether either
+ * side packs. Only the part that carries the side's own marker is read, so each side packs as its own
+ * declaration says, whatever the other one declares.
+ */
+function declaredMember(state: TransformState, type: ts.Type, side: Side, node: ts.Node): ts.Type | undefined {
+	for (const part of type.isIntersection() ? type.types : [type]) {
+		if (!part.getProperty(side)) continue;
+		const fn = markerType(state, part, "_flamework_fn", node);
+		// A sender of networking 2.0.0-alpha.3 or earlier carries no declared member (senders gained one in
+		// 2.0.0-alpha.4): `any`, which has no markers, packs it as a plain member, as it always did.
+		// Function receivers, the only ones `setCallback` is called on, have carried one in every release.
+		if (fn || side === "_flamework_send") return fn ?? state.typeChecker.getAnyType();
 	}
 }
 

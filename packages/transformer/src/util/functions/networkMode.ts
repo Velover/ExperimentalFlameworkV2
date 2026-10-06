@@ -26,8 +26,8 @@ export function hasNetworkMarker(member: ts.Type | undefined, marker: keyof type
  * wherever the transformer first meets it: a call site that sends it or registers its callback, or
  * the metadata of a handler of its network.
  *
- * `member` is the member's declared type (`undefined` or `unknown` reads as plain), `name` what to
- * call it in the message.
+ * `member` is the member's declared type (`undefined`, `unknown` or `any` reads as plain), `name`
+ * what to call it in the message.
  */
 export function getNetworkMode(member: ts.Type | undefined, node: ts.Node, name?: string): NetworkMode {
 	const raw = hasNetworkMarker(member, "raw");

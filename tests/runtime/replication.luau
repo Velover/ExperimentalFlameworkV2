@@ -134,11 +134,13 @@ end
 
 server.setupServer()
 server.setupModeServer()
+server.setupBothServer()
 serverShapes.setupServer()
 flush()
 
 client.setupClient()
 client.setupModeClient()
+client.setupBothClient()
 clientShapes.setupClient()
 flush()
 
@@ -366,6 +368,22 @@ local cases: { { name: string, run: () -> () } } = {
 			assertList(found2, { "none", "Mark" }, "results")
 			assertList(argumentCounts(serverRequests), { "FireClient:2", "FireClient:3" }, "the server's requests")
 			assertList(argumentCounts(clientResults), { "FireServer:3", "FireServer:4" }, "the client's results")
+		end,
+	},
+	{
+		-- Regression: a name declared in both directions is a sender and a receiver at once, and each
+		-- side's callback packed its result as the other direction's declaration lays it out, so the
+		-- caller, decoding with its own, read a string or a float under the other's tag (a malformed
+		-- response), and a result of another type failed as it was packed.
+		name = "a function declared in both directions answers each side as that side declared it",
+		run = function()
+			local status, answers = client.invokeBothServer():awaitStatus()
+			assertEqual(status, "Resolved", `client-to-server requests ({tostring(answers)})`)
+			assertList(answers, { "string:text", "number:7", "number:2.5", "number:42" }, "the server's answers")
+
+			local status2, answers2 = server.invokeBothClient(link.serverPlayer):awaitStatus()
+			assertEqual(status2, "Resolved", `server-to-client requests ({tostring(answers2)})`)
+			assertList(answers2, { "string:text", "number:7", "number:2.5", "string:count:21" }, "the client's answers")
 		end,
 	},
 	-- The shapes whose generated code once failed to compile or wrote the wrong thing (see

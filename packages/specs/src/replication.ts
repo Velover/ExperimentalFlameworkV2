@@ -250,3 +250,62 @@ export function invokeModeClient(player: Player) {
 	const functions = ModeFunctions.createServer({});
 	return functions.serializedAsk.invoke(player, "why").then((items) => describeItems(items));
 }
+
+/*
+ * Names declared in both directions, with a different result in each: the server's `both`, which the
+ * client invokes and the server answers, and the client's `both`, which the server invokes and the
+ * client answers. Each side's callback packs its result as its own declaration lays it out, which is
+ * what the other side decodes it with: a union spelled two ways (a float is tagged as each spelling
+ * numbers it), and results of two different types. `count` is Serialized, so it is packed whether or
+ * not the project turns `networking.serialization` on.
+ */
+interface BothServerFunctions {
+	both(value: string | number): string | number;
+	count: Networking.Serialized<(value: number) => number>;
+}
+
+interface BothClientFunctions {
+	both(value: number | string): number | string;
+	count: Networking.Serialized<(value: number) => string>;
+}
+
+const BothFunctions = Networking.createFunction<BothServerFunctions, BothClientFunctions>();
+
+/** `type:value` for each answer. */
+function describeAnswers(answers: Array<string | number>) {
+	return answers.map((answer) => `${typeOf(answer)}:${answer}`);
+}
+
+export function setupBothServer() {
+	const functions = BothFunctions.createServer({});
+	functions.both.setCallback((_player, value) => value);
+	functions.count.setCallback((_player, value) => value * 2);
+}
+
+export function setupBothClient() {
+	const functions = BothFunctions.createClient({});
+	functions.both.setCallback((value) => value);
+	functions.count.setCallback((value) => `count:${value}`);
+}
+
+/** The client's requests, answered by the server's callbacks. */
+export function invokeBothServer() {
+	const functions = BothFunctions.createClient({});
+	return Promise.all([
+		functions.both.invoke("text"),
+		functions.both.invoke(7),
+		functions.both.invoke(2.5),
+		functions.count.invoke(21),
+	]).then(describeAnswers);
+}
+
+/** The server's requests, answered by the client's callbacks. */
+export function invokeBothClient(player: Player) {
+	const functions = BothFunctions.createServer({});
+	return Promise.all([
+		functions.both.invoke(player, "text"),
+		functions.both.invoke(player, 7),
+		functions.both.invoke(player, 2.5),
+		functions.count.invoke(player, 21),
+	]).then(describeAnswers);
+}

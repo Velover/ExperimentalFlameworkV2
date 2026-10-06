@@ -349,6 +349,26 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 #### Fixed
 
+- **A function declared under one name in both directions packs each side's results as that side
+  declares them.** Since 2.0.0-alpha.5, with `networking.serialization` on or for a `Serialized`
+  member, `serverFunctions.both.setCallback(...)` packed its result as the client's `both` (the
+  function the server invokes) declares it, and `clientFunctions.both.setCallback(...)` as the
+  server's, while each caller decodes the result with the declaration it invokes. Wherever the two
+  declarations differ, the caller read the result wrong or dropped it as malformed: a union spelled
+  the other way round (`string | number` against `number | string`, where 2.5 or a string crossed
+  under the other's tag), an object type's fields in another order, or another type altogether,
+  which could also fail in the callback's realm as it was packed (`attempt to get length of a
+  number value`). Each side's markers decided for both, too: with the switch off, a name declared
+  `Serialized` one way and plain the other packed the plain side's requests and results, which its
+  peer, decoding nothing, refused; with the switch on, a name declared `Raw` one way and plain the
+  other did not compile where the Raw side's callback was set (TS2551, `Property '_setCallback' does
+  not exist`); and a `setCallback` through a union of members (a conditional, a helper) compared the
+  other direction's result with the others', refusing members laid out alike and packing ones laid
+  out differently.
+  Each call now reads only its own side's declaration: a send its sender's, `setCallback` its
+  receiver's. Events, and names declared in one direction, were not affected, and nothing changes
+  for them with any release of networking: a sender of 2.0.0-alpha.3 or earlier, which carries no
+  declaration of its own, packs as a plain member, as before. The networking types are unchanged.
 - **A watcher's rebuild on a roblox-ts newer than 3.0.0 no longer emits serializer code that uses
   `codec`, `vsize`, `vwrite` and `vread` without declaring them** (TS2304), nor crashes the watcher
   in `ts.copyComments`. Such a roblox-ts (`3.0.0-dev`, from master) hands a rebuild the same

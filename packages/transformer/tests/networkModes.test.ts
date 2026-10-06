@@ -897,3 +897,367 @@ describe("argument lists with elements after their rest", () => {
 		expect(functionBody(offSource(), "restListSend")).toMatch(/modeClient\.restList:fire\(value, "a", "b", true\)/);
 	});
 });
+
+/*
+ * A name declared in both directions: the server's `both`, which the client invokes and the server
+ * answers, and the client's `both`, which the server invokes and the client answers. Its handler
+ * member is a sender and a receiver at once, `Sender<the other direction's declaration> &
+ * Receiver<its own>`. Each side's `setCallback` packs its result as its own declaration lays it out,
+ * which is what the other side's `invoke` decodes it with, and each side's sends pack as the
+ * declaration they go to. Whether a call packs at all follows that declaration's markers alone.
+ */
+describe("names declared in both directions", () => {
+	const header = `import { Networking } from "@flamework-experimental/networking";
+
+interface BothServerFunctions {
+	both(): string | number;
+	count(value: number): number;
+	same(): string | number;
+	other(): number | string;
+	items: { both(): string | number };
+}
+
+interface BothClientFunctions {
+	both(): number | string;
+	count(value: number): string;
+	items: { both(): number | string };
+}
+
+interface BothServerEvents {
+	both(value: string | number): void;
+}
+
+interface BothClientEvents {
+	both(value: number | string): void;
+}
+
+const functions = Networking.createFunction<BothServerFunctions, BothClientFunctions>();
+const events = Networking.createEvent<BothServerEvents, BothClientEvents>();
+export const serverFunctions = functions.createServer({});
+export const clientFunctions = functions.createClient({});
+export const server = events.createServer({});
+export const client = events.createClient({});
+`;
+
+	let built: string | undefined;
+	/** The probe's emit, built once for the tests that share it. */
+	function bothDirections(): string {
+		if (built !== undefined) return built;
+
+		const result = compileProbes({
+			bothDirections: `${header}
+export function serverAnswers() {
+	serverFunctions.both.setCallback(() => 1);
+}
+
+export function clientAnswers() {
+	clientFunctions.both.setCallback(() => 1);
+}
+
+export function serverAsks(player: Player) {
+	return serverFunctions.both.invoke(player);
+}
+
+export function clientAsks() {
+	return clientFunctions.both.invoke();
+}
+
+export function serverCounts() {
+	serverFunctions.count.setCallback((player, value) => value);
+}
+
+export function clientCounts() {
+	clientFunctions.count.setCallback((value) => tostring(value));
+}
+
+export function serverAnswersNested() {
+	serverFunctions.items.both.setCallback(() => 1);
+}
+
+export function clientAnswersNested() {
+	clientFunctions.items.both.setCallback(() => 1);
+}
+
+export function serverFires(player: Player) {
+	server.both.fire(player, "x");
+}
+
+export function clientFires() {
+	client.both.fire("x");
+}
+`,
+		});
+		if (result.status !== 0) throw new Error(`the probe failed to compile:\n${result.output}`);
+		built = result.files.get("bothDirections")!;
+		return built;
+	}
+
+	/**
+	 * A handler's decoder for `name` in one of its metadata tables, at `depth` tabs: 1 at the top,
+	 * 3 in a namespace. `undefined` when the table has none for it.
+	 */
+	function handlerDecoder(source: string, handler: string, table: string, name: string, depth = 1) {
+		const metadata = source.match(
+			new RegExp(`local ${handler} = \\w+:create\\w+\\(\\{\\}, \\{\\n[\\s\\S]*?\\n\\}\\)\\n`),
+		)?.[0];
+		const tabs = "\\t".repeat(depth);
+		const body = metadata?.match(new RegExp(`\\n${tabs}${table} = \\{\\n([\\s\\S]*?)\\n${tabs}\\},`))?.[1];
+		const entry = body?.match(new RegExp(`(?:^|\\n)${tabs}\\t${name} = \\(function[\\s\\S]*?\\n${tabs}\\tend\\),`));
+		return entry ? stripSuffixes(entry[0]) : undefined;
+	}
+
+	/** The tag a union's packing or decoding gives a string, as text. */
+	function stringTag(code: string | undefined): string | undefined {
+		return (
+			code?.match(/type\(v\w*\) == "string" then\s*buffer\.writeu8\(buf\w*, o\w*, (\d+)\)/)?.[1] ??
+			code?.match(/tag\w* == (\d+) then\s*local length\w*, o\w* = vread/)?.[1]
+		);
+	}
+
+	test("each side's callback packs its result as its own declaration does, as the other side's invoke decodes it", () => {
+		const luau = bothDirections();
+
+		// The server's `both` is `string | number`, so the string is 0; the client's is `number | string`.
+		expect(stringTag(functionBody(luau, "serverAnswers"))).toBe("0");
+		expect(stringTag(handlerDecoder(luau, "clientFunctions", "outgoingResults", "both"))).toBe("0");
+		expect(stringTag(functionBody(luau, "clientAnswers"))).toBe("1");
+		expect(stringTag(handlerDecoder(luau, "serverFunctions", "outgoingResults", "both"))).toBe("1");
+
+		expect(functionBody(luau, "serverAsks")).toMatch(/return serverFunctions\.both:_invoke\(player\)/);
+		expect(functionBody(luau, "clientAsks")).toMatch(/return clientFunctions\.both:_invoke\(\)/);
+	});
+
+	test("each side's callback packs its own result type when the two declare different ones", () => {
+		const luau = bothDirections();
+
+		// The server's `count` answers a number, the client's a string.
+		expect(functionBody(luau, "serverCounts")).toMatch(
+			/:_setCallback\(callback, function\(value\)\s*local buf = buffer\.create\(8\)\s*buffer\.writef64\(buf, 0, value\)\s*return \{ buf \}/,
+		);
+		expect(handlerDecoder(luau, "clientFunctions", "outgoingResults", "count")).toMatch(
+			/buffer\.readf64\(buf, 0\)/,
+		);
+		expect(functionBody(luau, "clientCounts")).toMatch(
+			/:_setCallback\(callback, function\(value\)\s*local length = #value[\s\S]*buffer\.writestring\(buf, o, value\)/,
+		);
+		expect(handlerDecoder(luau, "serverFunctions", "outgoingResults", "count")).toMatch(/buffer\.readstring/);
+	});
+
+	test("each side's callback packs its own result inside a namespace", () => {
+		const luau = bothDirections();
+
+		expect(stringTag(functionBody(luau, "serverAnswersNested"))).toBe("0");
+		expect(stringTag(handlerDecoder(luau, "clientFunctions", "outgoingResults", "both", 3))).toBe("0");
+		expect(stringTag(functionBody(luau, "clientAnswersNested"))).toBe("1");
+		expect(stringTag(handlerDecoder(luau, "serverFunctions", "outgoingResults", "both", 3))).toBe("1");
+	});
+
+	test("each side's event packs as the declaration it is sent to, as the other side decodes it", () => {
+		const luau = bothDirections();
+
+		// The server sends the client's `both` (`number | string`), the client the server's.
+		expect(stringTag(functionBody(luau, "serverFires"))).toBe("1");
+		expect(stringTag(handlerDecoder(luau, "client", "incomingSerializers", "both"))).toBe("1");
+		expect(stringTag(functionBody(luau, "clientFires"))).toBe("0");
+		expect(stringTag(handlerDecoder(luau, "server", "incomingSerializers", "both"))).toBe("0");
+	});
+
+	test("a callback through a union checks the receiver's own result against the others", () => {
+		// The server's `both` and `same` are both `string | number`: packed together, the string 0.
+		const alike = compileProbes({
+			bothAlike: `${header}
+export function run(flag: boolean) {
+	(flag ? serverFunctions.both : serverFunctions.same).setCallback(() => 1);
+}
+`,
+		});
+		expect(alike.status).toBe(0);
+		expect(stringTag(alike.files.get("bothAlike"))).toBe("0");
+
+		// The server's `other` is `number | string`, as the client's `both` is, which the call must not read.
+		const result = compileProbes({
+			bothRefused: `${header}
+export function run(flag: boolean) {
+	(flag ? serverFunctions.both : serverFunctions.other).setCallback(() => 1);
+}
+`,
+		});
+		expect(result.status).not.toBe(0);
+		expect(result.output.replace(/\x1b\[[0-9;]*m/g, "")).toContain(
+			"The call '(flag ? serverFunctions.both : serverFunctions.other).setCallback(...)' may reach networking members that are packed differently: their results are not laid out and checked alike ('BothServerFunctions.both(): string | number' and 'BothServerFunctions.other(): number | string').",
+		);
+	});
+
+	describe("declared differently in each direction", () => {
+		const modes = `import { Networking } from "@flamework-experimental/networking";
+
+interface ModeServerFunctions {
+	mixed: Networking.Serialized<(value: number) => number>;
+	rawOne: Networking.Raw<(value: number) => number>;
+}
+
+interface ModeClientFunctions {
+	mixed(value: number): number;
+	rawOne(value: number): number;
+}
+
+const functions = Networking.createFunction<ModeServerFunctions, ModeClientFunctions>();
+export const serverFunctions = functions.createServer({});
+export const clientFunctions = functions.createClient({});
+
+export function serverAnswersMixed() {
+	serverFunctions.mixed.setCallback((player, value) => value);
+}
+
+export function clientAnswersMixed() {
+	clientFunctions.mixed.setCallback((value) => value);
+}
+
+export function serverAsksMixed(player: Player) {
+	return serverFunctions.mixed.invoke(player, 1);
+}
+
+export function clientAsksMixed() {
+	return clientFunctions.mixed.invoke(1);
+}
+
+export function serverAnswersRaw() {
+	serverFunctions.rawOne.setCallback((player, value) => value);
+}
+
+export function clientAnswersRaw() {
+	clientFunctions.rawOne.setCallback((value) => value);
+}
+
+export function serverAsksRaw(player: Player) {
+	return serverFunctions.rawOne.invoke(player, 1);
+}
+
+export function clientAsksRaw() {
+	return clientFunctions.rawOne.invoke(1);
+}
+`;
+
+		test("packs only the side declared Serialized when the switch is off", () => {
+			const result = compileProbes({ bothModes: modes }, { FLAMEWORK_FIXTURE_SERIALIZATION: "false" });
+			expect(result.status).toBe(0);
+			const luau = result.files.get("bothModes")!;
+
+			// The server's `mixed` is Serialized: the client's requests and the server's results pack.
+			expect(functionBody(luau, "clientAsksMixed")).toMatch(/return clientFunctions\.mixed:_invoke\(buf\)/);
+			expect(functionBody(luau, "serverAnswersMixed")).toMatch(
+				/target:_setCallback\(callback, function\(value\)\s*local buf = buffer\.create\(8\)/,
+			);
+			expect(handlerDecoder(luau, "serverFunctions", "incomingSerializers", "mixed")).toBeDefined();
+			expect(handlerDecoder(luau, "clientFunctions", "outgoingResults", "mixed")).toBeDefined();
+
+			// The client's is plain: the server's requests and the client's results travel as they are.
+			expect(functionBody(luau, "serverAsksMixed")).toMatch(/return serverFunctions\.mixed:invoke\(player, 1\)/);
+			expect(functionBody(luau, "clientAnswersMixed")).toMatch(
+				/clientFunctions\.mixed:setCallback\(function\(value\)/,
+			);
+			expect(handlerDecoder(luau, "clientFunctions", "incomingSerializers", "mixed")).toBeUndefined();
+			expect(handlerDecoder(luau, "serverFunctions", "outgoingResults", "mixed")).toBeUndefined();
+		});
+
+		test("leaves the side declared Raw as written when the switch is on", () => {
+			const result = compileProbes({ bothModes: modes });
+			expect(result.status).toBe(0);
+			const luau = result.files.get("bothModes")!;
+
+			// The server's `rawOne` is Raw: the client's requests and the server's results go as they are.
+			expect(functionBody(luau, "clientAsksRaw")).toMatch(/return clientFunctions\.rawOne:invoke\(1\)/);
+			expect(functionBody(luau, "serverAnswersRaw")).toMatch(
+				/serverFunctions\.rawOne:setCallback\(function\(player, value\)/,
+			);
+			expect(handlerDecoder(luau, "serverFunctions", "incomingSerializers", "rawOne")).toBeUndefined();
+			expect(handlerDecoder(luau, "clientFunctions", "outgoingResults", "rawOne")).toBeUndefined();
+
+			// The client's is plain, packed with the switch on.
+			expect(functionBody(luau, "serverAsksRaw")).toMatch(
+				/return serverFunctions\.rawOne:_invoke\(player, buf\)/,
+			);
+			expect(functionBody(luau, "clientAnswersRaw")).toMatch(
+				/target:_setCallback\(callback, function\(value\)\s*local buf = buffer\.create\(8\)/,
+			);
+			expect(handlerDecoder(luau, "clientFunctions", "incomingSerializers", "rawOne")).toBeDefined();
+			expect(handlerDecoder(luau, "serverFunctions", "outgoingResults", "rawOne")).toBeDefined();
+		});
+	});
+
+	// Networking 2.0.0-alpha.3 and earlier: a sender carries `_flamework_send` but no declared member
+	// (`_flamework_fn`), which senders gained in 2.0.0-alpha.4; a function receiver carried one already.
+	// Picking the side's own declaration must not leave such a sender unpacked, or its peer, which
+	// decodes it, drops every message. The handler types are networking 2.0.0-alpha.3's, as published
+	// (`out/events/types.d.ts`, `out/functions/types.d.ts`), with their documentation left out.
+	test("packs a sender that carries no declared member, as networking 2.0.0-alpha.3 made them", () => {
+		const result = compileProbes({
+			oldSenders: `interface ServerSender<I extends unknown[]> {
+	(player: Player | Player[], ...args: I): void;
+	fire(players: Player | Player[], ...args: I): void;
+	except(players: Player | Player[], ...args: I): void;
+	broadcast(...args: I): void;
+	readonly _flamework_send?: I;
+	_fire(players: Player | Player[], payload?: buffer, blobs?: Array<defined>): void;
+	_except(players: Player | Player[], payload?: buffer, blobs?: Array<defined>): void;
+	_broadcast(payload?: buffer, blobs?: Array<defined>): void;
+}
+
+interface ClientFunctionSender<I extends unknown[], O> {
+	(...args: I): Promise<O>;
+	invoke(...args: I): Promise<O>;
+	invokeWithTimeout(timeout: number, ...args: I): Promise<O>;
+	readonly _flamework_send?: I;
+	_invoke(payload?: buffer, blobs?: Array<defined>): Promise<O>;
+	_invokeWithTimeout(timeout: number, payload?: buffer, blobs?: Array<defined>): Promise<O>;
+}
+
+interface ClientFunctionReceiver<I extends unknown[], O, F = unknown> {
+	setCallback(callback: (...args: I) => O | Promise<O>): void;
+	predict(...args: I): Promise<O>;
+	readonly _flamework_receive?: I;
+	readonly _flamework_fn?: F;
+	_setCallback(callback: (...args: never[]) => unknown, pack: (value: unknown) => unknown): void;
+}
+
+// The client's handler member for a name declared in both directions: the server's both(value: string): number,
+// which the client invokes, and the client's own both(value: number): string, which it answers.
+type Both = ClientFunctionSender<[value: string], number> &
+	ClientFunctionReceiver<[value: number], string, (value: number) => string>;
+
+export function serverFires(sender: ServerSender<[value: number]>, player: Player) {
+	sender.fire(player, 1);
+}
+
+export function clientInvokes(sender: ClientFunctionSender<[value: string], number>) {
+	return sender.invoke("x");
+}
+
+export function bothInvokes(member: Both) {
+	return member.invoke("x");
+}
+
+export function bothAnswers(member: Both) {
+	member.setCallback((value) => tostring(value));
+}
+`,
+		});
+		expect(result.status).toBe(0);
+		const luau = result.files.get("oldSenders")!;
+
+		expect(functionBody(luau, "serverFires")).toMatch(
+			/buffer\.writef64\(buf, 0, 1\)\s*sender:_fire\(player, buf\)/,
+		);
+		expect(functionBody(luau, "clientInvokes")).toMatch(
+			/local text = "x"[\s\S]*buffer\.writestring\(buf, o, text\)[\s\S]*return sender:_invoke\(buf\)/,
+		);
+		// The sender packs the list it declares, the string, not the receiver's number.
+		expect(functionBody(luau, "bothInvokes")).toMatch(
+			/local text = "x"[\s\S]*buffer\.writestring\(buf, o, text\)[\s\S]*return member:_invoke\(buf\)/,
+		);
+		// The receiver carries its own declaration, as it did then: its string result is packed.
+		expect(functionBody(luau, "bothAnswers")).toMatch(
+			/member:_setCallback\(callback, function\(value\)\s*local length = #value[\s\S]*buffer\.writestring\(buf, o, value\)/,
+		);
+	});
+});

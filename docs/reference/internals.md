@@ -894,10 +894,19 @@ a call to `fire`/`except`/`broadcast`/`invoke`/`invokeWithTimeout` (or the handl
 on a member whose type carries the hidden `_flamework_send` marker has its argument list packed
 inline and is rewritten to the member's hidden `_fire`/`_invoke` counterpart with `(payload,
 blobs?)`. Senders carry the declared member as `_flamework_fn`, as function receivers do (an event
-receiver carries only `_flamework_receive`), and `getNetworkMode`
+receiver carries only `_flamework_receive`; a sender of networking 2.0.0-alpha.3 or earlier carries
+none and is read as a plain member), and `getNetworkMode`
 (`transformer/src/util/functions/networkMode.ts`) reads its markers (`_flamework_raw`,
 `_flamework_serialized`) to decide whether the call packs: a plain member only with the switch on, a
-serialized one always, a raw one never. A member marked both raw and serialized is a build error
+serialized one always, a raw one never. A name declared in both directions makes a member that is
+a sender and a receiver at once, `Sender<the other direction's declaration> & Receiver<its own>`.
+For a function, whose sender and receiver each carry `_flamework_fn`, the one read off the whole is
+the intersection of the two declarations: the sender's call signature first, and the markers of
+either (an event's receiver carries none, so an event's is its sender's alone). So a call reads it
+off the part that carries its own side's marker (`declaredMember`): `_flamework_send` for a send,
+`_flamework_receive` for `setCallback`, whose result is then packed as the receiver's own
+declaration lays it out, the one its callers decode it with, and each side packs or not as its own
+declaration's markers say. A member marked both raw and serialized is a build error
 that names it. A target typed as a union of members (a conditional, a helper that returns a member
 by name) is taken member by member: the call packs, as its first member would, when every member
 packs, and is left alone when none does. Members that disagree are a build error that names the
@@ -938,9 +947,10 @@ well, in call order, since the packing reads it more than once. An empty list (`
 or a packed value) is bound as `never[]`, the type TypeScript gives the literal: roblox-ts checks
 the transformed file, where `const arg = []` is an implicit `any[]` that `noImplicitAny` refuses,
 and the parameter's own type might name a type the calling file cannot. The packing reads values
-through casts, so the annotation leaves the Luau as it was. `setCallback` on a member with
-`_flamework_fn` is registered through `_setCallback(callback, pack)`: the callback as written, and a
-generated `pack` that turns a successful result into `[payload, blobs?]`. The runtime applies `pack`
+through casts, so the annotation leaves the Luau as it was. `setCallback` on a member whose
+receiver carries `_flamework_fn` is registered through `_setCallback(callback, pack)`: the callback
+as written, and a generated `pack`, built from the receiver's declared result type, that turns a
+successful result into `[payload, blobs?]`. The runtime applies `pack`
 to what the middleware chain returns (a Promise already followed), so middleware sees plain
 results, a value a middleware returns is packed like the callback's own, and `predict` resolves
 with the value itself. Receiving is metadata:
