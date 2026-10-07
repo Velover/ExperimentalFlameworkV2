@@ -53,14 +53,25 @@ export interface ProjectChoice {
 	chosen: boolean;
 }
 
-/** What `tasks/patch-place.lune` is given: the operations, and the project's name for the place to carry. */
+/**
+ * What `tasks/patch-place.lune` is given: the operations, the project's name for the place to
+ * carry, and for a place a Studio `test` is about to open, the id of that one launch.
+ */
 export interface PatchPlan {
 	project: string;
 	ops: PatchOp[];
+	launch?: string;
 }
 
 /** The attribute the patch sets on Workspace, the name of the project the place was made under; `getProject()` in the place reads it. */
 export const PROJECT_ATTRIBUTE = "FlameworkTestProject";
+
+/**
+ * The attribute the patch sets on Workspace for a Studio `test`: a random id of the one launch the
+ * place file is made for. The MCP proxy may list a window under a name that is not its place's
+ * ("Game"), and says nothing of the process behind it, so the run asks such a window for this.
+ */
+export const LAUNCH_ATTRIBUTE = "FlameworkTestLaunch";
 
 /** `tests/deferred.project.json` is the project `deferred`: what its run, its patched file and the place's attribute are named. */
 export function projectNameOf(path: string): string {

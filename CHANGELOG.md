@@ -5,6 +5,48 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ## Unreleased
 
+### testing
+
+#### Added
+
+- **`--connect-timeout <seconds>` on `test` and `studio open`**, and
+  `FLAMEWORK_TEST_CONNECT_TIMEOUT` after it: how long a launched Studio window is waited for on
+  the MCP proxy, 180 seconds by default. No config key: the config file's schema is the
+  transformer's. `studio open` still takes its `--timeout` for that wait when the flag is not
+  given.
+
+#### Fixed
+
+- **`flamework-test test` finds its window when the MCP proxy lists it under another name.** A
+  hidden window could register with the proxy as `Game` and stay so, while `game.Name` inside was
+  right, and the run, looking for the file's name only, waited out its whole `--timeout` and failed
+  with `Studio started (PID n) but <place> never showed up on the MCP proxy` (6 of 7 hidden windows
+  of the monorepo's test place in two runs on 2026-10-07, and another project's too). A patched
+  place (an original, or a chosen `--project`) now carries `FlameworkTestLaunch` on Workspace, a
+  random id of the one launch it was made for. While it waits, the run still takes a new window
+  listed under the file's name; a new window listed under a name that names no place (neither a
+  file's nor a cloud place's: `Game`, `Place1`, or no name for over 30 seconds) that no
+  flamework-test project has claimed (the Studio lock's record, the windows closed for another
+  project) is asked, read-only, for its `game.Name` and that attribute, and is taken when the id is
+  this launch's. A plain run's build and `studio open`'s file get no id, and are told by
+  `game.Name`, whatever id the file carries from an earlier run, under the rule the listed name
+  follows. A window listed before the launch, or under another place's name, is never asked. One
+  that cannot say yet (unreachable, still loading its place, or naming the file before its id can
+  be read) is asked again every 5 seconds until the wait runs out, however slow its start; one
+  whose answers cannot be read at all, three times; each question gets 20 seconds, or what is left
+  of the wait. `--parallel` projects share the answers. The run says `connected: <file> (<id>),
+  which the MCP proxy lists as "Game": told by the launch id its place carries`, and drives the
+  window by its MCP id from then on: the Studio lock's record keeps the id and the listed name
+  (`mcpName`), so `studio run`, `exec`, `list`, `lock --check-window` and `close` find it too.
+- **The wait for a launched window no longer uses the run's `--timeout`.** `test --timeout 900s`
+  waited 15 minutes for a window that had connected under another name; the wait is now
+  `--connect-timeout` (180 seconds by default). When it runs out, the error says how long it waited
+  and what set that (`--connect-timeout`, `FLAMEWORK_TEST_CONNECT_TIMEOUT`, or `studio open`'s
+  `--timeout`), and names every window that registered with the proxy meanwhile, with its id, the
+  name it was listed under, and what it answered when asked (`asked: game.Name "...", launch id
+  ...; not this launch's`) or why it was not asked; the window the run launched is closed again, as
+  before (`--keep` leaves it).
+
 ### Docs
 
 - Guide 05, "What takes a component down again", and `docs/ai/components.md`: hiding a tagged child

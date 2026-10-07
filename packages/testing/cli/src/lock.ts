@@ -49,6 +49,12 @@ export interface LockWindow {
 	/** The window's id on the MCP proxy, once it has connected. */
 	mcpId?: string;
 	/**
+	 * The name the proxy listed the window under when it connected, when that was not its place's
+	 * ("Game"): the window was told by the launch id its place carries, and is known under that id
+	 * and that name from then on.
+	 */
+	mcpName?: string;
+	/**
 	 * Studio was launched on the hidden desktop (`test` without `--show`), where nobody sees it:
 	 * it is found and closed by its process, as every window flamework-test opened is.
 	 */

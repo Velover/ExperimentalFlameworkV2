@@ -172,6 +172,23 @@ anyone.
   some of the session's desktop heap, one desktop's worth, however many windows it holds.
 - **A window that never connects** may be held up by a dialog on the hidden desktop (a login, an
   update, a crash report), which the error names, with `--show` to see it.
+- **A window listed under another name.** On 2026-10-07 hidden windows of `tests/place` (6 of 7 in
+  two `--parallel 2` runs, and two of another project's) registered with the MCP proxy as `Game`
+  and stayed so, while `game.Name` inside was the file's name; `--show` runs connected by name.
+  The proxy lists a new window with no name (`""`) as it registers, 6 to 15 seconds after the
+  launch, and names it 4 to 13 seconds later; the stale `Game` is that second step going wrong.
+  It did not come back on demand the same evening: 12 hidden launches by a probe script (one alone,
+  two at once, two while a third played, two under a 16-thread CPU load, the very `place.immediate`
+  and `place.deferred` files) and a whole `--parallel 2` run of the four projects all registered
+  `""` and then the file's name. So the run no longer depends on the name: a new, unclaimed window
+  listed under a name that names no place (neither a file's nor a cloud place's: `Game`, `Place1`;
+  no name at all past 30 seconds) is asked for `game.Name` and Workspace's `FlameworkTestLaunch`,
+  the random id the patch writes into the place for that one launch, and taken when that id is its
+  own. One that cannot answer yet, or is still loading its place, is asked again every 5 seconds
+  until the wait runs out, so a slow start is still found (see the testing README, How `test`
+  handles Studio windows). The wait has its own limit, `--connect-timeout` (180 seconds), where it
+  used the run's `--timeout` before (a 900-second run waited 15 minutes for a window that had
+  connected as `Game`).
 - **`--keep`** leaves the window hidden: Windows moves no window between desktops, and a kept
   window is there to be driven through the MCP proxy, which reaches it as any other.
 

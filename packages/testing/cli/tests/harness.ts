@@ -389,6 +389,10 @@ export async function runCli(
 		 * it may throw (the function could not be reached) or return 0 (Windows refused).
 		 */
 		setExecutionState?: (state: number) => number;
+		/** The launch ids the run makes, in turn; by default random ones, as the real run makes. */
+		launchId?: () => string;
+		/** Runs when the CLI writes a text file (a patch's plan), with its path (forward slashes) and text. */
+		onWrite?: (path: string, text: string) => void;
 	} = {},
 ): Promise<Harness> {
 	const out: string[] = [];
@@ -462,6 +466,7 @@ export async function runCli(
 		},
 		writeTextFile: async (path, text) => {
 			written[path.replaceAll("\\", "/")] = text;
+			options.onWrite?.(path.replaceAll("\\", "/"), text);
 		},
 		exists: async (path) => find(path) !== undefined,
 		spawn: async (command, _cwd, timeoutMs, output) => {
@@ -610,6 +615,7 @@ export async function runCli(
 		writeBinaryFile: async (path, data) => {
 			binaries[path.replaceAll("\\", "/")] = data;
 		},
+		...(options.launchId !== undefined ? { launchId: options.launchId } : {}),
 	};
 
 	if (options.proxy === false) delete deps.connectStudio;

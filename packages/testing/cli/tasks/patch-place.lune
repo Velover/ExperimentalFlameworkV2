@@ -15,7 +15,9 @@
 	build, nothing is replaced and only the properties are set.
 
 	Last, Workspace gets the attribute FlameworkTestProject = the project's name, so a test can
-	tell which project it runs under.
+	tell which project it runs under; and for a place a Studio `test` is about to open, the plan's
+	`launch` as FlameworkTestLaunch, the id of that one launch, which the run asks a window for when
+	the MCP proxy lists it under a name that is not its place's.
 ]]
 local fs = require("@lune/fs")
 local process = require("@lune/process")
@@ -206,6 +208,11 @@ end
 -- The place carries the name of the project it was made under, for `getProject()` in a test.
 original:GetService("Workspace"):SetAttribute("FlameworkTestProject", projectName)
 note("set", { "Workspace" }, "FlameworkTestProject = " .. projectName .. " (attribute)")
+-- The one launch this file is made for, which the run tells its window by.
+if type(plan.launch) == "string" then
+	original:GetService("Workspace"):SetAttribute("FlameworkTestLaunch", plan.launch)
+	note("set", { "Workspace" }, "FlameworkTestLaunch = " .. plan.launch .. " (attribute)")
+end
 
 fs.writeFile(outPath, roblox.serializePlace(original))
 

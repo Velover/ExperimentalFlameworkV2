@@ -100,6 +100,12 @@ export class ShopTests implements OnStart {
 - On Windows `test` opens Studio on a hidden desktop, so it never interrupts the user; `test --keep`
   leaves the window there for the studio commands. Pass `--show` only when the user wants to watch,
   or when a hidden window `never showed up on the MCP proxy` (a dialog may be waiting there).
+- A window the MCP proxy lists as `Game` (not its file's name) is still found: the run asks new,
+  unclaimed windows listed under no place's name (`Game`, `Place1`, no name past 30 seconds) for
+  `game.Name` and the launch id its patched place carries, again every 5 seconds while one cannot
+  say yet, and prints `connected: <file> (<id>), which the MCP proxy lists as "Game": ...`. The
+  wait for a window is `--connect-timeout <seconds>` (180 by default), not `--timeout`; its error
+  names every window that registered meanwhile and what each answered.
 - `--sections` is judged across both realms: an entry only one realm has is listed for the other
   as `not among the client's sections: ...` without failing, and an entry no realm has fails the
   run with `MISS matched nothing in any realm: ...`. With `--realm`, the one realm judges alone.

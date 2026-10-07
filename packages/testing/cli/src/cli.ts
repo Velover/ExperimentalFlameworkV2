@@ -11,6 +11,7 @@
  * a file system, a Studio or a real API key.
  */
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -57,6 +58,7 @@ import {
 } from "./lock.ts";
 import { parseSections, renderFilter, renderOptions, renderShim, type Filter } from "./luau.ts";
 import {
+	LAUNCH_ATTRIBUTE,
 	patchCommand,
 	patchedPathFor,
 	planPatch,
@@ -118,8 +120,40 @@ export const VERSION_FILE = "build/version.json";
 export const DEFAULT_PROJECT = "default.project.json";
 export const DEFAULT_TIMEOUT = "120s";
 export const PROBE_TIMEOUT = "60s";
-/** How long a Studio window is waited for after launching it. */
-export const STUDIO_OPEN_TIMEOUT = "180s";
+/**
+ * How long a Studio window is waited for after launching it, to show up on the MCP proxy, in
+ * seconds; the run's own `--timeout` is not this. A hidden window registered 6 to 15 seconds after
+ * its launch here, and had its name 14 to 25 seconds after it (measured 2026-10-07, Studio
+ * 0.741, warm); a cold start with plugins to load can take a minute or more. `--connect-timeout`
+ * and FLAMEWORK_TEST_CONNECT_TIMEOUT change it.
+ */
+export const CONNECT_TIMEOUT_SECONDS = 180;
+/**
+ * How often the proxy's list is looked at while a launched window is waited for; also how soon a
+ * window that has not said which place it has open is asked again, after its last answer, however
+ * many projects of a `--parallel` run wait (see {@link askWindow}).
+ */
+export const CONNECT_POLL_MS = 5000;
+/**
+ * How long one window is given to answer who it is ({@link askWindow}), or less, what is left of
+ * the wait: measured 0.3 to 7.5 seconds, the longer while it was still loading its place.
+ */
+export const ASK_TIMEOUT_MS = 20_000;
+/**
+ * How many times a window whose answer cannot be read at all (not the JSON asked for) is asked: it
+ * has run the question, so it is not loading, and asking again tells nothing new. A window that
+ * cannot answer yet (`Target is not reachable`, as one asked while it registers says, its launch id
+ * following 3 seconds later, measured 2026-10-07) or answers `game.Name` "Game" while its place
+ * loads is asked again until the wait runs out, as slow as its start is.
+ */
+export const UNREADABLE_ASKS = 3;
+/**
+ * How long a window may be listed with no name at all before it is asked who it is: the proxy lists
+ * a window as it registers, before its place has loaded, and names it 4 to 13 seconds later
+ * (measured 2026-10-07). One still unnamed past this is taken to be stuck so, as a window listed
+ * as "Game" is.
+ */
+export const UNNAMED_GRACE_MS = 30_000;
 /** How long a run waits for another to finish opening a window of the same name. */
 export const CLAIM_TIMEOUT_MS = 600_000;
 /** How long a play session is waited for once started. */
@@ -235,6 +269,7 @@ const FLAGS: Record<string, FlagKind> = {
 	key: "string",
 	studio: "string",
 	"lock-timeout": "string",
+	"connect-timeout": "string",
 	hold: "string",
 	"any-window": "boolean",
 	"args-file": "string",
@@ -248,8 +283,8 @@ const COMMON_FLAGS = ["testing-universe", "testing-place", "key", "help"];
 const STUDIO_FLAGS = ["studio"];
 /** What a command that changes a window takes: its window, and leave to act on one flamework-test did not open for this project. */
 const CHANGING_FLAGS = ["studio", "any-window"];
-/** Commands that open a Studio window, and so take the Studio lock. */
-const LOCK_FLAGS = ["lock-timeout", "hold"];
+/** Commands that open a Studio window, and so take the Studio lock and wait for the window to connect. */
+const LOCK_FLAGS = ["lock-timeout", "hold", "connect-timeout"];
 /** Commands that take a file as a positional argument as well as `--file`. */
 const FILE_COMMANDS = ["test", "patch", "studio open", "cloud publish", "cloud test"];
 const PATCH_FLAGS = ["original", "project"];
@@ -347,6 +382,8 @@ export interface Flags {
 	studio?: string;
 	/** Seconds a command that opens a window waits for the Studio lock; after it, FLAMEWORK_TEST_LOCK_TIMEOUT and testing.lockTimeout. */
 	"lock-timeout"?: string;
+	/** Seconds a command that opens a window waits for it to show up on the MCP proxy; after it, FLAMEWORK_TEST_CONNECT_TIMEOUT. */
+	"connect-timeout"?: string;
 	/** Minutes the window a command leaves open may sit unused; after it, FLAMEWORK_TEST_LOCK_HOLD and testing.lockHold. */
 	hold?: string;
 	/** Acts on a window flamework-test did not open for this project. */
@@ -590,6 +627,9 @@ Flags:
              --lock-timeout <seconds>  how long to wait for the Studio lock; 0 does not wait
                                      (default: $FLAMEWORK_TEST_LOCK_TIMEOUT, else
                                      testing.lockTimeout, else ${LOCK_TIMEOUT_SECONDS})
+             --connect-timeout <seconds>  how long to wait for a window Studio opened to show up on
+                                     the MCP proxy; --timeout is the run's, not this (default:
+                                     $FLAMEWORK_TEST_CONNECT_TIMEOUT, else ${CONNECT_TIMEOUT_SECONDS})
              --hold <minutes>        with --keep: how long the window may sit unused before another
                                      project may close it, ${LOCK_HOLD_LEAST_MINUTES} or more (default:
                                      $FLAMEWORK_TEST_LOCK_HOLD, else testing.lockHold, else ${LOCK_HOLD_MINUTES})
@@ -600,7 +640,9 @@ Flags:
              --sections, --list, --json, --timeout, --concurrency, --fail-on-skip,
              --keep-awake            as for test
   studio exec --realm edit|server|client  default edit
-  studio open --json                 print the window as JSON;  --lock-timeout, --hold  as for test
+  studio open --json                 print the window as JSON;  --lock-timeout, --hold,
+                                     --connect-timeout  as for test; without --connect-timeout,
+                                     --timeout is the wait for the window
   studio call --args-file <file>     the tool's arguments as JSON in a file (no shell quoting)
              --out <dir>             where image answers (screen_capture) are written; default
                                      <temp>/flamework-test/captures
@@ -650,6 +692,7 @@ Environment (the shell, .env or .env.local):
   FAIL_ON_SKIP, KEEP_AWAKE                true or false (1 or 0), for --fail-on-skip and --keep-awake
   FLAMEWORK_TEST_LOCK_TIMEOUT             seconds, for --lock-timeout
   FLAMEWORK_TEST_LOCK_HOLD                minutes, for --hold
+  FLAMEWORK_TEST_CONNECT_TIMEOUT          seconds, for --connect-timeout
   FLAMEWORK_TEST_PARALLEL                 windows at once, for --parallel
   FLAMEWORK_TEST_SHOW                     true or false (1 or 0), for --show
   FLAMEWORK_TEST_STATE_DIR                where the Studio lock lives; every project must agree on it,
@@ -756,6 +799,11 @@ export interface CliDeps {
 	self?: () => SelfInfo;
 	/** Writes a file of bytes, making its folder; what `studio call` does with an image answer. */
 	writeBinaryFile?: (path: string, data: Uint8Array) => Promise<void>;
+	/**
+	 * A new id for one launch of Studio, which the place made for it carries (`FlameworkTestLaunch`
+	 * on Workspace) and its window is asked for; a random UUID by default.
+	 */
+	launchId?: () => string;
 }
 
 /** How a program is launched: `hidden` on the hidden desktop (Windows), or where the user sees it. */
@@ -779,8 +827,12 @@ interface Io extends Required<Omit<CliDeps, "fetch">> {
 	 * another's (`test --parallel`); nothing otherwise, its own lines saying it.
 	 */
 	progress: (line: string) => void;
-	/** What one invocation reads once, shared by every project's view of it. */
-	memo: { settings?: CloudSettings; project?: string };
+	/**
+	 * What one invocation reads once, shared by every project's view of it; `asked`: what each
+	 * window asked who it is answered, by MCP id, so the projects of a `test --parallel` share
+	 * every answer and ask a window no more often than one project would (see {@link askWindow}).
+	 */
+	memo: { settings?: CloudSettings; project?: string; asked?: Map<string, AskRecord> };
 	/** How many tests the results printed through this view skipped: one project's, for its line at the end. */
 	tally: { skipped: number };
 	/**
@@ -1054,6 +1106,7 @@ function resolveDeps(deps: CliDeps, interruption: Interruption): Io {
 				await mkdir(dirname(path), { recursive: true });
 				await Bun.write(path, data);
 			}),
+		launchId: deps.launchId ?? (() => randomUUID()),
 		interruption,
 		progress: () => {},
 		memo: {},
@@ -1185,6 +1238,36 @@ function holdOf(flags: Flags, io: Io): number {
 		io,
 		{ least: LOCK_HOLD_LEAST_MINUTES, unit: "minutes", key: "lockHold" },
 	);
+}
+
+/**
+ * How long, in milliseconds, a command that launches Studio waits for its window to show up on the
+ * MCP proxy: `--connect-timeout`, FLAMEWORK_TEST_CONNECT_TIMEOUT, 180 seconds. Never the run's own
+ * `--timeout`, which `test` gives each realm's run (a run of 15 minutes waited 15 minutes for a
+ * window that had connected under another name). `studio open`, whose only wait this is, still
+ * takes its `--timeout` for it. No config key: the config file's schema is the transformer's.
+ * `from`: what set it, as the error names it when the wait runs out.
+ */
+function connectTimeoutOf(
+	flags: Flags,
+	io: Io,
+	command: "test" | "studio open",
+): { ms: number; from: "--connect-timeout" | "--timeout" | "FLAMEWORK_TEST_CONNECT_TIMEOUT" } {
+	if (flags["connect-timeout"] === undefined && command === "studio open" && flags.timeout !== undefined) {
+		return { ms: parseDurationMs(flags.timeout, CONNECT_TIMEOUT_SECONDS * 1000), from: "--timeout" };
+	}
+	const variable = envOf(io, "FLAMEWORK_TEST_CONNECT_TIMEOUT");
+	const seconds = numberSetting(
+		flags["connect-timeout"],
+		"connect-timeout",
+		"FLAMEWORK_TEST_CONNECT_TIMEOUT",
+		undefined,
+		CONNECT_TIMEOUT_SECONDS,
+		io,
+		{ least: 1, unit: "seconds", key: "connectTimeout" },
+	);
+	const byVariable = flags["connect-timeout"] === undefined && variable !== undefined && variable.trim() !== "";
+	return { ms: seconds * 1000, from: byVariable ? "FLAMEWORK_TEST_CONNECT_TIMEOUT" : "--connect-timeout" };
 }
 
 /**
@@ -1418,7 +1501,8 @@ async function readProject(project: ProjectChoice, io: Io): Promise<RojoProject>
 /**
  * Makes the place a project's run uses and returns its path: the build laid over a copy of the
  * original when there is one, else the build with the project's properties set on it. Either
- * way the place carries the project's name.
+ * way the place carries the project's name, and `launch`, when given, as the id of the one launch
+ * of Studio it is made for.
  */
 async function patchPlace(
 	built: string,
@@ -1426,6 +1510,7 @@ async function patchPlace(
 	project: ProjectChoice,
 	flags: Flags,
 	io: Io,
+	launch?: string,
 ): Promise<string> {
 	const lune = await requireLune(
 		io,
@@ -1453,7 +1538,11 @@ async function patchPlace(
 	const releaseDir = io.interruption.hold(`the patch's temp folder ${workDir}`, "removed the patch's temp folder");
 	try {
 		const planPath = join(workDir, "patch-plan.json");
-		const plan: PatchPlan = { project: project.name, ops: planPatch(rojo) };
+		const plan: PatchPlan = {
+			project: project.name,
+			ops: planPatch(rojo),
+			...(launch !== undefined ? { launch } : {}),
+		};
 		await io.writeTextFile(planPath, JSON.stringify(plan));
 
 		// Lune runs a file, so the task ships as text and is written out beside the plan.
@@ -1514,19 +1603,22 @@ function plannedPlaceOf(flags: Flags, io: Io, command: string, project: ProjectC
 /**
  * The place to run or upload: the build as it is, or the place made under the project when an
  * original is named or the project was chosen. `label` is how it is spoken of: the name the build
- * was given, or the patched file's path.
+ * was given, or the patched file's path. `launch`, the id of the launch of Studio the place is for,
+ * goes into a place that is patched, which then carries it (`launch` in the answer); the build as
+ * it is carries none, since setting one would take lune, which a plain run does without.
  */
 async function placeToRun(
 	flags: Flags,
 	io: Io,
 	command: string,
 	project: ProjectChoice,
-): Promise<{ absolute: string; label: string }> {
+	launch?: string,
+): Promise<{ absolute: string; label: string; launch?: string }> {
 	const built = placeFileOf(flags, command);
 	const original = originalPlaceOf(flags, io);
 	if (original !== undefined || project.chosen) {
-		const patched = await patchPlace(built, original, project, flags, io);
-		return { absolute: patched, label: patched };
+		const patched = await patchPlace(built, original, project, flags, io, launch);
+		return { absolute: patched, label: patched, ...(launch !== undefined ? { launch } : {}) };
 	}
 
 	const absolute = resolve(io.cwd, built);
@@ -2015,8 +2107,11 @@ class LockSlot {
 		await this.lock.launched(this, pid, hidden);
 	}
 
-	async connected(mcpId: string): Promise<void> {
+	/** It showed up on the proxy as `mcpId`; `listedAs`: under a name that is not its place's. */
+	async connected(mcpId: string, listedAs?: string): Promise<void> {
 		this.window.mcpId = mcpId;
+		if (listedAs !== undefined) this.window.mcpName = listedAs;
+		else delete this.window.mcpName;
 		await this.lock.flush();
 	}
 
@@ -2103,6 +2198,7 @@ class HeldLock {
 	async launched(slot: LockSlot, pid: number | undefined, hidden = false): Promise<void> {
 		slot.open = true;
 		delete slot.window.mcpId;
+		delete slot.window.mcpName;
 		if (hidden) slot.window.hidden = true;
 		else delete slot.window.hidden;
 		if (pid !== undefined) {
@@ -2601,9 +2697,11 @@ async function withLease<T>(io: Io, mine: LockOwner | undefined, body: () => Pro
 
 /**
  * Whether an entry of the proxy's list shows the place a lock record's window was launched on: a
- * local file's window is listed by the file's name, a cloud place's with its place id.
+ * local file's window is listed by the file's name, a cloud place's with its place id; a window the
+ * run told by its launch id, under the name the proxy listed it as then ("Game").
  */
 function listsPlaceOf(window: LockWindow, entry: StudioEntry): boolean {
+	if (window.mcpName !== undefined && entry.name === window.mcpName) return true;
 	if (window.placeFile !== undefined) {
 		const file = (window.placeFile.split(/[\\/]/).pop() ?? window.placeFile).toLowerCase();
 		return entry.name.toLowerCase() === file || placeNameOf(entry.name).toLowerCase() === file;
@@ -2851,7 +2949,10 @@ async function withStudio<T>(
 				}
 			}
 		}
-		const found = studio;
+		// A window of this project's the proxy lists under a name not its place's ("Game") is still
+		// driven by its id, and spoken of by its place file's name.
+		const placeFile = mine?.window.mcpName === studio.name ? mine.window.placeFile : undefined;
+		const found = placeFile !== undefined ? { id: studio.id, name: basename(placeFile) } : studio;
 		return await withLease(io, mine?.owner, () => body(client, found, mine));
 	} finally {
 		if (shared === undefined) await client.close();
@@ -2889,18 +2990,21 @@ function requireStudioExe(io: Io): string {
 	return exe;
 }
 
-/** Polls the proxy until a window matches, or the deadline passes. */
+/**
+ * Polls the proxy until a window matches, or the wait (`timeoutMs`) runs out; `find` is told when
+ * that is (`deadline`, by `io.now()`), to ask nothing that would outlast it.
+ */
 async function waitForStudio(
 	client: StudioClient,
-	find: (studios: StudioEntry[]) => StudioEntry | undefined | Promise<StudioEntry | undefined>,
-	flags: Flags,
+	find: (studios: StudioEntry[], deadline: number) => StudioEntry | undefined | Promise<StudioEntry | undefined>,
+	timeoutMs: number,
 	io: Io,
 ): Promise<StudioEntry | undefined> {
-	const deadline = io.now().getTime() + parseDurationMs(flags.timeout ?? STUDIO_OPEN_TIMEOUT, 180_000);
+	const deadline = io.now().getTime() + timeoutMs;
 	while (io.now().getTime() < deadline) {
-		const studio = await find(await client.studios());
+		const studio = await find(await client.studios(), deadline);
 		if (studio !== undefined) return studio;
-		await io.sleep(5000);
+		await io.sleep(CONNECT_POLL_MS);
 	}
 	return undefined;
 }
@@ -2917,23 +3021,59 @@ function cannotTell(name: string, why: string, others: StudioWindow[]): CliError
 	);
 }
 
+/** A window that registered with the proxy while a launch was waited for, and what the run made of it. */
+export interface SeenWindow {
+	id: string;
+	/** The name the proxy listed it under, last. */
+	name: string;
+	/** When it was first listed. */
+	since: number;
+	/** Whether it had left the list again by the last look. */
+	gone?: boolean;
+	/** What the run made of it, as the error names it. */
+	verdict: string;
+}
+
+/** The windows a wait saw, as the error names them: `<id> "Game": asked: ...`. */
+function describeSeen(seen: readonly SeenWindow[]): string {
+	return seen
+		.map(
+			(window) =>
+				`${window.id} ${JSON.stringify(window.name)}${window.gone === true ? " (no longer listed)" : ""}: ${window.verdict}`,
+		)
+		.join("; ");
+}
+
 /**
  * A window flamework-test launched that never showed up on the proxy. What the hint says of the
  * window: left `open` (`--keep`), `closed` again, or nothing (`unstated`) when that close failed
  * and has said so itself. A window on the hidden desktop may be held up by a dialog nobody can see,
- * which `--show` shows. Written for whoever reads it next, an AI agent as often as a person.
+ * which `--show` shows. `waited`: how long the wait was, what set that (`from`: `--connect-timeout`,
+ * its variable, or `studio open`'s `--timeout`), and every window that registered with the proxy
+ * meanwhile with what the run made of each, so a window listed under a name the run did not expect
+ * ("Game") is named.
+ * Written for whoever reads it next, an AI agent as often as a person.
  */
 function neverConnected(
 	what: string,
 	window: "open" | "closed" | "unstated" = "open",
 	pid?: number,
 	hidden = false,
+	waited?: { ms: number; from: string; seen: readonly SeenWindow[] },
 ): CliError {
 	const advice = hidden
 		? 'it opened on the hidden desktop, where nobody sees it: it may be showing a dialog there that nobody can answer (a login, an update, a crash report), so run again with --show to see it. Showing none, Studio\'s "MCP server" setting is probably off, and a window with it off is never listed: ask the user to enable "MCP server" in Studio\'s Assistant settings'
 		: 'Studio\'s "MCP server" setting is probably off, and a window with it off is never listed: ask the user to enable "MCP server" in Studio\'s Assistant settings, then run this again';
+	const meanwhile =
+		waited === undefined
+			? ""
+			: ` within ${span(waited.ms)} (${waited.from})${
+					waited.seen.length === 0
+						? "; no other window registered with it meanwhile"
+						: `; the windows that registered with it meanwhile: ${describeSeen(waited.seen)}`
+				}`;
 	return new CliError(
-		`Studio started${pid !== undefined ? ` (PID ${pid})` : ""} but ${what} never showed up on the MCP proxy`,
+		`Studio started${pid !== undefined ? ` (PID ${pid})` : ""} but ${what} never showed up on the MCP proxy${meanwhile}`,
 		window === "open"
 			? `${advice}; the window is open, and holds the Studio lock until it closes (\`flamework-test studio close\` closes it)`
 			: window === "closed"
@@ -2942,25 +3082,239 @@ function neverConnected(
 	);
 }
 
+/** What a window says when asked who it is: its DataModel's name, and the launch id its place carries, if any. */
+export interface WindowIdentity {
+	name: string;
+	launch?: string;
+}
+
+/**
+ * The Luau that asks a window who it is, read-only: `game.Name` and Workspace's launch id (see
+ * {@link LAUNCH_ATTRIBUTE}), as JSON, and nothing else.
+ */
+export const ASK_WINDOW_LUAU = `return game:GetService("HttpService"):JSONEncode({ name = game.Name, launch = workspace:GetAttribute("${LAUNCH_ATTRIBUTE}") })`;
+
+/** A window's answer to {@link ASK_WINDOW_LUAU}; undefined when the text is not one. */
+export function parseIdentity(text: string): WindowIdentity | undefined {
+	try {
+		const parsed = JSON.parse(unquoteLuauResult(text)) as { name?: unknown; launch?: unknown } | null;
+		if (typeof parsed !== "object" || parsed === null || typeof parsed.name !== "string") return undefined;
+		return { name: parsed.name, ...(typeof parsed.launch === "string" ? { launch: parsed.launch } : {}) };
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * What a window's answer makes it to a run waiting for the file `lower` (its name, lower case)
+ * with `launch`, the id the place made for this launch carries, if any: `ours`, `theirs`, or, while
+ * it says nothing yet, why not.
+ *
+ * - With a launch id, only that id makes a window this launch's, and another id makes it another's.
+ *   No id at all says nothing yet when `game.Name` is the file's (the attribute may not be readable
+ *   yet) or `Game` or nothing (its place is still loading); another file's name makes it another's.
+ * - With none (a plain run's build, `studio open`'s file), `game.Name` alone tells, whatever launch
+ *   id the file carries from an earlier `test`'s patch; `Game` or nothing says nothing yet.
+ */
+function judgeAnswer(
+	answer: WindowIdentity,
+	lower: string,
+	launch: string | undefined,
+): "ours" | "theirs" | { unsettled: string } {
+	const named = answer.name.toLowerCase() === lower;
+	if (launch !== undefined && answer.launch !== undefined) return answer.launch === launch ? "ours" : "theirs";
+	if (launch !== undefined && named) {
+		return { unsettled: `game.Name ${JSON.stringify(answer.name)}, but no launch id yet` };
+	}
+	if (launch === undefined && named) return "ours";
+	if (answer.launch === undefined && (answer.name.trim() === "" || answer.name === "Game")) {
+		return { unsettled: `its place had not loaded yet (game.Name ${JSON.stringify(answer.name)})` };
+	}
+	return "theirs";
+}
+
+/** What one window asked who it is has said so far (see {@link askWindow}). */
+export interface AskRecord {
+	/** Its last answer that could be read, which each waiting run judges for itself ({@link judgeAnswer}). */
+	answer?: WindowIdentity;
+	/** How many times it was asked. */
+	attempts: number;
+	/** How many of its answers could not be read (see {@link UNREADABLE_ASKS}). */
+	unreadable: number;
+	/** Why the last time it was asked gave no answer to read: its error, or what it answered. */
+	why?: string;
+	/** When the last question to it ended, by `io.now()`. */
+	lastAt?: number;
+	/** The question in flight. */
+	pending?: Promise<void>;
+}
+
+/**
+ * Asks a window who it is ({@link ASK_WINDOW_LUAU}, read-only, in its Edit data model), unless what
+ * it has said already does for the asking run (`settled`). What it answered is kept in
+ * `io.memo.asked`, by MCP id, so the projects of a `test --parallel` share every answer. One that
+ * says nothing yet (an error such as `Target is not reachable`, a place still loading) is asked
+ * again at a later look, {@link CONNECT_POLL_MS} after its last answer at the soonest, whichever
+ * project asks, until the wait (`deadline`) runs out: a slow start is waited for, the wait bounding
+ * the asking. One whose answers cannot be read is asked {@link UNREADABLE_ASKS} times at most. Each
+ * question is given {@link ASK_TIMEOUT_MS}, or what is left of the wait when that is less, so the
+ * questions of one look never outlast it; nor does a question another project has in flight, which
+ * is not waited for: its answer is there at this project's next look.
+ */
+export async function askWindow(
+	client: StudioClient,
+	id: string,
+	io: Io,
+	deadline: number,
+	settled: (answer: WindowIdentity) => boolean,
+): Promise<AskRecord> {
+	const asked = (io.memo.asked ??= new Map<string, AskRecord>());
+	let record = asked.get(id);
+	if (record === undefined) {
+		record = { attempts: 0, unreadable: 0 };
+		asked.set(id, record);
+	}
+	if (record.pending !== undefined) return record;
+	if (record.answer !== undefined && settled(record.answer)) return record;
+	if (record.unreadable >= UNREADABLE_ASKS) return record;
+	const now = io.now().getTime();
+	if (record.lastAt !== undefined && now - record.lastAt < CONNECT_POLL_MS) return record;
+	const left = deadline - now;
+	if (left <= 0) return record;
+	const current = record;
+	current.attempts += 1;
+	current.pending = (async () => {
+		try {
+			const text = await client.call(
+				"execute_luau",
+				{ studio_id: id, datamodel_type: "Edit", code: ASK_WINDOW_LUAU },
+				Math.min(ASK_TIMEOUT_MS, left),
+			);
+			const answer = parseIdentity(text);
+			if (answer === undefined) {
+				current.unreadable += 1;
+				current.why = `it answered ${JSON.stringify(text.trim().slice(0, 120))}`;
+			} else {
+				current.answer = answer;
+				delete current.why;
+			}
+		} catch (error) {
+			rethrowInterrupted(error);
+			current.why = luauErrorMessage(error);
+		} finally {
+			current.lastAt = io.now().getTime();
+			delete current.pending;
+		}
+	})();
+	await current.pending;
+	return current;
+}
+
+/**
+ * What the run made of a window it asked, as the error names it: its answer, and whether that
+ * makes it this launch's (`judged`, of its last answer that could be read); or, while none has
+ * said which place it has open, the last thing it said.
+ */
+function describeAnswer(record: AskRecord, judged: ReturnType<typeof judgeAnswer> | undefined): string {
+	const times = record.attempts === 1 ? "once" : `${record.attempts} times`;
+	if (record.answer !== undefined && (judged === "ours" || judged === "theirs")) {
+		const { name, launch } = record.answer;
+		return `asked: game.Name ${JSON.stringify(name)}, launch id ${launch ?? "none"}; ${judged === "ours" ? "this launch's" : "not this launch's"}`;
+	}
+	if (record.attempts === 0) return "not asked: the wait ran out first";
+	if (record.pending !== undefined && record.answer === undefined && record.why === undefined) {
+		return `asked ${times}, its answer still to come`;
+	}
+	const last = record.why ?? (typeof judged === "object" ? judged.unsettled : "no answer");
+	if (record.unreadable >= UNREADABLE_ASKS) {
+		return `asked ${times}, and its answers could not be read (the last: ${last}), so it was asked no more`;
+	}
+	return `asked ${times}, and none of its answers said which place it has open (the last: ${last})`;
+}
+
+/**
+ * Whether a name the proxy lists a window under names a place: a local file's (`place.rbxl`, by
+ * its file name) or a cloud place's (`Name (placeId: 123)`). One that does not (`Game`, nothing)
+ * says nothing of the window.
+ */
+function namesAPlace(name: string): boolean {
+	return /\.rbxlx?$/i.test(name.trim()) || /\(placeId: \d+\)\s*$/.test(name);
+}
+
+/**
+ * The windows flamework-test has claimed, by MCP id, and whose: those the Studio lock's record
+ * names (this command's other projects', or another project's that holds it) and those closed for
+ * another project lately. None of them is ever asked who it is.
+ */
+async function claimedWindows(io: Io): Promise<Map<string, string>> {
+	const claimed = new Map<string, string>();
+	const record = await io.studioLock.read();
+	if (record.kind === "held") {
+		for (const window of record.owner.windows) {
+			if (window.mcpId !== undefined) {
+				claimed.set(window.mcpId, `flamework-test's window of ${window.place} for ${record.owner.project}`);
+			}
+		}
+	}
+	for (const note of await io.studioLock.closedWindows()) {
+		for (const window of note.windows) {
+			if (window.mcpId !== undefined && !claimed.has(window.mcpId)) {
+				claimed.set(
+					window.mcpId,
+					`flamework-test's window of ${window.place} for ${note.owner.project}, closed`,
+				);
+			}
+		}
+	}
+	return claimed;
+}
+
+/** The window a launch opened, as the wait for it ended. */
+interface LaunchedWindow {
+	studio: StudioEntry | undefined;
+	/**
+	 * How it was told: by the name the proxy lists it under (`name`), or by asking it, for its
+	 * launch id (`launch id`) or, when the run made no launch id for its place, its `game.Name`.
+	 */
+	how?: "name" | "launch id" | "game.Name";
+	unaccounted: boolean;
+	others: StudioWindow[];
+	/** Every window that registered with the proxy meanwhile and was not taken, with what was made of it. */
+	seen: SeenWindow[];
+}
+
 /**
  * Waits for the window a launch opened to show up on the proxy, and returns its entry. The proxy
  * says nothing of the process behind an entry, so an entry listed before the launch (`before`) is
- * never taken for it, even under the same name.
+ * never taken for it, even under the same name, and never asked anything.
  *
  * A local file's window is listed by the file's name alone, so a new entry of that name is this
  * launch's only when every other window showing a file of that name is accounted for by an entry
  * listed before the launch. One that has not registered yet could own the new entry, so it is
  * waited for (`unaccounted`, when the wait ends that way); two new entries cannot be told apart,
  * so they are refused. A cloud place's window is listed with its place id: one new entry with it.
+ *
+ * The proxy may also list a window under a name that is not its place's, and never correct it: a
+ * window that registered as "Game" stayed so, while `game.Name` inside it was right (seen
+ * 2026-10-07, Studio 0.741, on the hidden desktop). So a new entry listed under a name that names
+ * no place ({@link namesAPlace}: "Game", "Place1"; nothing at all, past {@link UNNAMED_GRACE_MS}),
+ * that no flamework-test project has claimed ({@link claimedWindows}), is asked who it is,
+ * read-only ({@link askWindow}), and judged by its answer ({@link judgeAnswer}): it is this
+ * launch's when it carries `launch`, the id the place made for this launch carries, which no other
+ * window can; a place made without one (a plain run's build, `studio open`'s file) is told by its
+ * `game.Name`, under the same rule as the listed name: every other window showing a file of that
+ * name is accounted for by an entry listed under that name before the launch. A window listed
+ * under another place's name is never asked: it is not this launch's.
  */
 async function findLaunchedWindow(
 	client: StudioClient,
 	target: { file: string } | { placeId: string },
 	pid: number | undefined,
 	before: Set<string>,
-	flags: Flags,
+	timeoutMs: number,
 	io: Io,
-): Promise<{ studio: StudioEntry | undefined; unaccounted: boolean; others: StudioWindow[] }> {
+	launch?: string,
+): Promise<LaunchedWindow> {
 	if ("placeId" in target) {
 		const studio = await waitForStudio(
 			client,
@@ -2976,34 +3330,148 @@ async function findLaunchedWindow(
 				}
 				return fresh[0];
 			},
-			flags,
+			timeoutMs,
 			io,
 		);
-		return { studio, unaccounted: false, others: [] };
+		return { studio, how: "name", unaccounted: false, others: [], seen: [] };
 	}
 
 	const name = basename(target.file);
+	const lower = name.toLowerCase();
 	let others: StudioWindow[] = [];
 	let unaccounted = false;
+	let how: LaunchedWindow["how"];
+	const seen = new Map<string, SeenWindow>();
+	const othersNow = async () =>
+		(await io.studioWindows()).filter((window) => window.pid !== pid && titleShowsFile(window.title, name));
+
 	const studio = await waitForStudio(
 		client,
-		async (studios) => {
+		async (studios, deadline) => {
+			const now = io.now().getTime();
+			for (const window of seen.values()) window.gone = !studios.some((entry) => entry.id === window.id);
+			for (const entry of studios) {
+				if (before.has(entry.id)) continue;
+				const known = seen.get(entry.id);
+				if (known === undefined) {
+					seen.set(entry.id, { id: entry.id, name: entry.name, since: now, verdict: "not asked" });
+				} else {
+					known.name = entry.name;
+				}
+			}
+
+			// By the name the proxy lists it under, as ever.
 			const named = studios.filter((entry) => entry.name === name || placeNameOf(entry.name) === name);
 			const fresh = named.filter((entry) => !before.has(entry.id));
-			if (fresh.length === 0) return undefined;
-			others = (await io.studioWindows()).filter(
-				(window) => window.pid !== pid && titleShowsFile(window.title, name),
-			);
-			if (fresh.length > 1) {
-				throw cannotTell(name, "another window of that name registered with it at the same time", others);
+			if (fresh.length > 0) {
+				others = await othersNow();
+				if (fresh.length > 1) {
+					throw cannotTell(name, "another window of that name registered with it at the same time", others);
+				}
+				unaccounted = named.length < others.length + (pid !== undefined ? 1 : 0);
+				if (!unaccounted) {
+					how = "name";
+					return fresh[0];
+				}
+				seen.get(fresh[0]!.id)!.verdict =
+					"listed under this file's name, but another window showing a file of that name has not registered yet";
 			}
-			unaccounted = named.length < others.length + (pid !== undefined ? 1 : 0);
-			return unaccounted ? undefined : fresh[0];
+
+			// By asking it: a new window listed under no place's name, that no project has claimed.
+			const unnamed: StudioEntry[] = [];
+			for (const entry of studios) {
+				if (before.has(entry.id) || fresh.includes(entry)) continue;
+				const record = seen.get(entry.id)!;
+				if (namesAPlace(entry.name)) {
+					record.verdict = "listed under another place's name, so not this launch's; not asked";
+				} else if (entry.name.trim() === "" && now - record.since < UNNAMED_GRACE_MS) {
+					record.verdict = "listed with no name yet, as a window still loading its place is; not asked yet";
+				} else {
+					unnamed.push(entry);
+				}
+			}
+			if (unnamed.length === 0) return undefined;
+			const claimed = await claimedWindows(io);
+			const mine: StudioEntry[] = [];
+			for (const entry of unnamed) {
+				const window = seen.get(entry.id)!;
+				const owner = claimed.get(entry.id);
+				if (owner !== undefined) {
+					window.verdict = `${owner}; not asked`;
+					continue;
+				}
+				const asked = await askWindow(
+					client,
+					entry.id,
+					io,
+					deadline,
+					(answer) => typeof judgeAnswer(answer, lower, launch) === "string",
+				);
+				const judged = asked.answer !== undefined ? judgeAnswer(asked.answer, lower, launch) : undefined;
+				window.verdict = describeAnswer(asked, judged);
+				if (judged === "ours") mine.push(entry);
+				// A launch id settles it: the windows after this one need not be asked.
+				if (judged === "ours" && launch !== undefined) break;
+			}
+			if (mine.length === 0) return undefined;
+			// A launch id is this launch's alone: its place was made for it.
+			if (launch !== undefined) {
+				how = "launch id";
+				return mine[0];
+			}
+			// game.Name names the file alone, as the listed name does, and is held to the same rule:
+			// every other window showing a file of that name must be accounted for by an entry listed
+			// under that name before the launch, which cannot be this launch's; one that is not could
+			// be the window that answered.
+			others = await othersNow();
+			if (mine.length > 1) {
+				throw cannotTell(
+					name,
+					"several windows the proxy lists under no place's name have a file of that name open",
+					others,
+				);
+			}
+			const listedBefore = named.filter((entry) => before.has(entry.id)).length;
+			if (listedBefore + 1 < others.length + (pid !== undefined ? 1 : 0)) {
+				unaccounted = true;
+				seen.get(mine[0]!.id)!.verdict += ", but another window showing a file of that name could be it";
+				return undefined;
+			}
+			how = "game.Name";
+			return mine[0];
 		},
-		flags,
+		timeoutMs,
 		io,
 	);
-	return { studio, unaccounted, others };
+	return {
+		studio,
+		...(how !== undefined ? { how } : {}),
+		unaccounted: studio === undefined && unaccounted,
+		others,
+		seen: [...seen.values()].filter((window) => window.id !== studio?.id),
+	};
+}
+
+/**
+ * What a run says once its window is on the proxy, and the entry it drives it by: listed under its
+ * file's name, as the proxy lists it; told by asking it, under that name, saying what the proxy
+ * lists it as and how it was told. `listedAs` is that listed name, for the lock's record.
+ */
+function connectedWindow(
+	found: LaunchedWindow & { studio: StudioEntry },
+	name: string,
+): { studio: StudioEntry; line: string; listedAs?: string } {
+	const { studio, how } = found;
+	if (how === "name" || how === undefined) return { studio, line: `connected: ${studio.name} (${studio.id})` };
+	const told =
+		how === "launch id"
+			? "told by the launch id its place carries"
+			: "told by its game.Name, as this run made no launch id for its place";
+	return {
+		studio: { id: studio.id, name },
+		line: `connected: ${name} (${studio.id}), which the MCP proxy lists as ${JSON.stringify(studio.name)}: ${told}`,
+		listedAs: studio.name,
+	};
 }
 
 /** The line `studio open` and `test --keep` print for the window they leave open, made to be parsed. */
@@ -3026,6 +3494,7 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 	const json = flags.json === true;
 	const say = (line: string) => (json ? io.error(line) : io.log(line));
 	const holdMinutes = holdOf(flags, io);
+	const connectTimeout = connectTimeoutOf(flags, io, "studio open");
 
 	let launch: { file: string } | { placeId: string; universeId: string };
 	let place: LockPlace;
@@ -3059,6 +3528,8 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 			let release: (() => void) | undefined;
 			let pid: number | undefined;
 			let studio: StudioEntry;
+			let listedAs: string | undefined;
+			let connectedLine: string;
 			try {
 				if (name !== undefined) {
 					release = await io.claimWindowName(name, (holder) =>
@@ -3091,14 +3562,14 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 						return false;
 					}
 				};
-				let found: Awaited<ReturnType<typeof findLaunchedWindow>>;
+				let found: LaunchedWindow;
 				try {
 					found = await findLaunchedWindow(
 						client,
 						"file" in launch ? { file: launch.file } : { placeId: launch.placeId },
 						pid,
 						before,
-						flags,
+						connectTimeout.ms,
 						io,
 					);
 				} catch (error) {
@@ -3114,14 +3585,20 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 								"another Studio window showing a file of that name has not registered with it",
 								found.others,
 							)
-						: neverConnected(what, closed ? "closed" : "unstated", pid);
+						: neverConnected(what, closed ? "closed" : "unstated", pid, false, {
+								...connectTimeout,
+								seen: found.seen,
+							});
 				}
-				studio = found.studio;
+				const connected = connectedWindow({ ...found, studio: found.studio }, name ?? found.studio.name);
+				studio = connected.studio;
+				listedAs = connected.listedAs;
+				connectedLine = connected.line;
 			} finally {
 				release?.();
 			}
 
-			await slot.connected(studio.id);
+			await slot.connected(studio.id, listedAs);
 			if (json) {
 				io.log(
 					JSON.stringify(
@@ -3129,6 +3606,8 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 							studio_id: studio.id,
 							pid: pid ?? null,
 							name: studio.name,
+							// The name the proxy lists it under, when that is not its place's ("Game").
+							...(listedAs !== undefined ? { listedAs } : {}),
 							place: place.place,
 							project: lock.owner.project,
 							holdMinutes,
@@ -3139,7 +3618,7 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 					),
 				);
 			} else {
-				io.log(`connected: ${studio.name} (${studio.id})`);
+				io.log(connectedLine);
 				io.log(windowLine(studio.id, pid));
 				io.log(
 					`it holds the Studio lock until \`flamework-test studio close\`, or until it has sat unused for ${holdMinutes} min (--hold)`,
@@ -4287,6 +4766,9 @@ async function cmdTest(flags: Flags, io: Io): Promise<number> {
 			`--${flags.hold !== undefined ? "hold" : "lock-timeout"} is for Studio runs: a cloud run opens no Studio window and takes no lock`,
 		);
 	}
+	if (flags.cloud && flags["connect-timeout"] !== undefined) {
+		throw new UsageError("--connect-timeout is for Studio runs: a cloud run opens no Studio window to wait for");
+	}
 	if (flags.cloud && flags.parallel !== undefined) {
 		throw new UsageError(
 			"--parallel is for Studio runs: the cloud runs of several projects publish to the one testing place, so they run one after another",
@@ -4316,6 +4798,7 @@ async function cmdTest(flags: Flags, io: Io): Promise<number> {
 	// Misspelt settings are refused before anything is patched or opened; FLAMEWORK_TEST_SHOW and
 	// testing.showWindows are read into the flag here, as the cloud run leaves them alone.
 	lockTimeoutOf(flags, io);
+	connectTimeoutOf(flags, io, "test");
 	flags = { ...flags, show: showOf(flags, io) };
 	const parallel = parallelOf(flags, io, projects.length);
 	const lock = new LazyStudioLock(io, flags, {
@@ -4650,14 +5133,15 @@ async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice, l
 	// Listed in the lock from here when another project holds it already: its place is being made.
 	let slot = await lock.begin({ place: planned, placeFile: planned });
 	try {
-		const { absolute: file, label } = await placeToRun(flags, io, "test", project);
+		// The id of this one launch, which a patched place carries for its window to be told by.
+		const { absolute: file, label, launch } = await placeToRun(flags, io, "test", project, io.launchId());
 		const name = basename(file);
 		const exe = requireStudioExe(io);
 		const keep = flags.keep === true;
 		slot = await lock.take(slot, { place: file, placeFile: file }, io);
 		const held = slot;
 		const hidden = hiddenOf(flags, io);
-		return await studioTestWindow(flags, io, { file, label, name, exe, keep, realms, hidden }, held);
+		return await studioTestWindow(flags, io, { file, label, name, exe, keep, realms, hidden, launch }, held);
 	} finally {
 		await slot?.settle();
 		// A window that would not close is still open, and keeps its place among the run's windows.
@@ -4686,10 +5170,12 @@ async function studioTestWindow(
 		realms: Array<"Server" | "Client">;
 		/** Opened on the hidden desktop. */
 		hidden: boolean;
+		/** The launch id the place carries, when it was patched (see {@link findLaunchedWindow}). */
+		launch?: string | undefined;
 	},
 	slot: LockSlot,
 ): Promise<number> {
-	const { file, label, name, exe, keep, realms, hidden } = run;
+	const { file, label, name, exe, keep, realms, hidden, launch } = run;
 	const client = await io.connectStudio();
 	try {
 		const staleLabel = `the window left from an earlier build of ${name}`;
@@ -4754,9 +5240,9 @@ async function studioTestWindow(
 			);
 			io.progress(`opening ${name} in Studio (PID ${pid ?? "unknown"}${hidden ? ", hidden" : ""})`);
 
-			const found = await findLaunchedWindow(client, { file }, pid, before, flags, io);
-			studio = found.studio;
-			if (studio === undefined) {
+			const connectTimeout = connectTimeoutOf(flags, io, "test");
+			const found = await findLaunchedWindow(client, { file }, pid, before, connectTimeout.ms, io, launch);
+			if (found.studio === undefined) {
 				const closed = await giveUp();
 				throw found.unaccounted
 					? cannotTell(
@@ -4764,13 +5250,19 @@ async function studioTestWindow(
 							"another Studio window showing a file of that name has not registered with it",
 							found.others,
 						)
-					: neverConnected(label, keep ? "open" : closed ? "closed" : "unstated", pid, hidden);
+					: neverConnected(label, keep ? "open" : closed ? "closed" : "unstated", pid, hidden, {
+							...connectTimeout,
+							seen: found.seen,
+						});
 			}
 			release();
 			release = undefined;
-			io.log(`connected: ${studio.name} (${studio.id})`);
-			io.progress(`connected: ${studio.name} (${studio.id})`);
-			await slot.connected(studio.id);
+			// From here the window is driven by its MCP id, whatever name the proxy lists it under.
+			const connected = connectedWindow({ ...found, studio: found.studio }, name);
+			studio = connected.studio;
+			io.log(connected.line);
+			io.progress(connected.line);
+			await slot.connected(studio.id, connected.listedAs);
 
 			code = await runRealms(client, studio, realms, flags, io, releaseWindow, () => slot.lock.renew());
 		} catch (error) {
