@@ -3,6 +3,15 @@
 Notable changes to the `@flamework-experimental` packages. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Docs
+
+- Guide 05, "What takes a component down again", and `docs/ai/components.md`: hiding a tagged child
+  of a component's instance. Moved into storage that stays in the DataModel, a child that has its
+  component keeps it; `Parent = nil` removes it and builds a new one when it comes back; a container
+  whose link names that child's component is removed with it.
+
 ## 2026-10-06: every package 2.0.0-alpha.8
 
 From this release on, every package shares one version: components (2.0.0-alpha.5 until now) and

@@ -6,7 +6,7 @@ import {
 	ComponentStreamingMode,
 	Components,
 } from "@flamework-experimental/components";
-import { Flamework, OnInit, OnStart, Provider } from "@flamework-experimental/core";
+import { Flamework, OnInit, OnStart, OnTick, Provider } from "@flamework-experimental/core";
 import { ReplicatedStorage, RunService } from "@rbxts/services";
 import {
 	expectArrayEqual,
@@ -586,6 +586,133 @@ class Chassis extends BaseComponent<ChassisAttributes, Model & { Core: Bolt }> {
 	}
 }
 
+/**
+ * What the hiding cases record, in order: each build of `HideableItem` -- constructed, started,
+ * destroyed, announced as added and as removed -- and each container's `onStart`.
+ */
+const hidingLog = new Array<string>();
+
+/**
+ * A model that a container shows and hides, tagged on its own. It requires a `Mesh` under the
+ * default streaming mode, so its own tree is followed on a client and read once on a server. Each
+ * build is numbered, so the log says which one started and which one went, and counts the frames
+ * it was ticked, so one that went can be seen to have left the module's lifecycle too.
+ */
+@Component({ tag: "HideableItem", warningTimeout: 0 })
+class HideableItem extends BaseComponent<{}, Folder & { Mesh: Folder }> implements OnStart, OnTick {
+	public static builds = 0;
+	public readonly build: number;
+	public ticks = 0;
+
+	constructor(metadata: ComponentMetadata) {
+		super(metadata);
+		HideableItem.builds += 1;
+		this.build = HideableItem.builds;
+		hidingLog.push(`item:new:${this.build}`);
+	}
+
+	public onStart() {
+		hidingLog.push(`item:start:${this.build}`);
+	}
+
+	public onTick() {
+		this.ticks += 1;
+	}
+
+	public destroy() {
+		hidingLog.push(`item:destroy:${this.build}`);
+		super.destroy();
+	}
+}
+
+/**
+ * In charge of whether its `Item` shows, the way a visibility component is: it hides the item from
+ * its own `onStart` by unparenting it, and `show` and `hide` move it back in and out again.
+ */
+@Component({ tag: "UnparentingContainer", warningTimeout: 0 })
+class UnparentingContainer extends BaseComponent<{}, Folder> implements OnStart {
+	public item?: Instance;
+
+	public onStart() {
+		hidingLog.push("container:start");
+		this.item = this.instance.FindFirstChild("Item");
+		this.hide();
+		hidingLog.push("container:hid");
+	}
+
+	public hide() {
+		this.item!.Parent = undefined;
+	}
+
+	public show() {
+		this.item!.Parent = this.instance;
+	}
+}
+
+/** The same, hiding its `Item` in `storage`, a folder that stays in the DataModel, rather than unparenting it. */
+@Component({ tag: "StoringContainer", warningTimeout: 0 })
+class StoringContainer extends BaseComponent<{}, Folder> implements OnStart {
+	public static storage?: Instance;
+	public item?: Instance;
+
+	public onStart() {
+		hidingLog.push("container:start");
+		this.item = this.instance.FindFirstChild("Item");
+		this.hide();
+		hidingLog.push("container:hid");
+	}
+
+	public hide() {
+		this.item!.Parent = StoringContainer.storage;
+	}
+
+	public show() {
+		this.item!.Parent = this.instance;
+	}
+}
+
+/** Names its `Item`'s component through a child link, and hides the item when asked: unparented, or moved into `into`. */
+@Component({ tag: "LinkedContainer", warningTimeout: 0 })
+class LinkedContainer extends BaseComponent<{}, Folder & { Item: HideableItem }> {
+	public readonly item: Instance = this.instance.Item;
+
+	public hide(into?: Instance) {
+		this.item.Parent = into;
+	}
+
+	public show() {
+		this.item.Parent = this.instance;
+	}
+}
+
+/** Names its `Item`'s component through a link attribute instead. */
+@Component({ tag: "PointingContainer", warningTimeout: 0, attributeWarningTimeout: 0 })
+class PointingContainer extends BaseComponent<{ Item: HideableItem }, Folder> {
+	public readonly item: Instance = this.attributes.Item;
+
+	public hide(into?: Instance) {
+		this.item.Parent = into;
+	}
+
+	public show() {
+		this.item.Parent = this.instance;
+	}
+}
+
+/** Requires its `Item` as a plain child of its instance tree, under the default streaming mode. */
+@Component({ tag: "ShapedContainer", warningTimeout: 0 })
+class ShapedContainer extends BaseComponent<{}, Folder & { Item: Folder }> {
+	public readonly item: Instance = this.instance.Item;
+
+	public hide(into?: Instance) {
+		this.item.Parent = into;
+	}
+
+	public show() {
+		this.item.Parent = this.instance;
+	}
+}
+
 /** The instance a missing link attribute falls back to. */
 const DEFAULT_LINK_TARGET = new Instance("Folder");
 DEFAULT_LINK_TARGET.Name = "DefaultLinkTarget";
@@ -763,6 +890,12 @@ function createComponentPlugin() {
 		.registerComponent(StarterOwner)
 		.registerComponent(Bolt)
 		.registerComponent(Chassis)
+		.registerComponent(HideableItem)
+		.registerComponent(UnparentingContainer)
+		.registerComponent(StoringContainer)
+		.registerComponent(LinkedContainer)
+		.registerComponent(PointingContainer)
+		.registerComponent(ShapedContainer)
 		.build();
 }
 
@@ -836,6 +969,351 @@ function trackedCount(components: Components, component: object) {
 		.trackers;
 
 	return trackers.get(component)?.instances.size() ?? 0;
+}
+
+/**
+ * Runs `callback` as one resumption of a place and lets what it left queued run. Under immediate
+ * signal behaviour (`deferred` false), which the harness runs by default, every handler runs
+ * inside the write that raised it; under deferred behaviour every signal and `task.defer` raised in
+ * the callback is delivered once it returns. Either way the removal the tag path weighs again a
+ * resumption after the announcement has run by the time this returns.
+ */
+function resumption(deferred: boolean, callback: () => void) {
+	if (deferred) {
+		__harness.deferTags(callback);
+	} else {
+		callback();
+	}
+
+	__harness.flush();
+	__harness.flush();
+}
+
+/** A container holding an `Item` with the `Mesh` the item requires, untagged, in `parent` or detached. */
+function hidingTree(name: string, parent: Instance | undefined) {
+	const container = new Instance("Folder");
+	container.Name = name;
+
+	const item = new Instance("Folder");
+	item.Name = "Item";
+	item.Parent = container;
+
+	const mesh = new Instance("Folder");
+	mesh.Name = "Mesh";
+	mesh.Parent = item;
+
+	container.Parent = parent;
+
+	return [container, item] as const;
+}
+
+/** Tags the item and its container in one go, the item first or the container first. */
+function tagHidingTree(container: Instance, item: Instance, containerTag: string, itemFirst: boolean) {
+	if (itemFirst) collectionService().AddTag(item, "HideableItem");
+	collectionService().AddTag(container, containerTag);
+	if (!itemFirst) collectionService().AddTag(item, "HideableItem");
+}
+
+/**
+ * Every `HideableItem` announced as removed, by build, held weakly: whatever else still holds one is
+ * what keeps it here.
+ */
+const removedItems = setmetatable(new Map<number, HideableItem>(), { __mode: "v" });
+
+/** The tags of the hiding cases: the item's, then each container's. */
+const HIDING_TAGS = [
+	"HideableItem",
+	"UnparentingContainer",
+	"StoringContainer",
+	"LinkedContainer",
+	"PointingContainer",
+	"ShapedContainer",
+];
+
+/**
+ * Starts `hidingLog` and `removedItems` afresh, and records in them every `HideableItem` announced as
+ * added and as removed.
+ */
+function recordHiding(components: Components) {
+	hidingLog.clear();
+	removedItems.clear();
+	HideableItem.builds = 0;
+	__harness.clearWarnings();
+
+	components.onComponentAdded<HideableItem>((component) => hidingLog.push(`item:added:${component.build}`));
+	components.onComponentRemoved<HideableItem>((component) => {
+		hidingLog.push(`item:removed:${component.build}`);
+		removedItems.set(component.build, component);
+	});
+}
+
+/**
+ * One resumption of a stress loop, with no more waiting than it takes: under deferred behaviour the
+ * batch is delivered as the callback returns, and under immediate behaviour one frame lets the
+ * removal the tag path weighs a resumption late run.
+ */
+function step(deferred: boolean, callback: () => void) {
+	if (deferred) {
+		__harness.deferTags(callback);
+	} else {
+		callback();
+		__harness.flush();
+	}
+}
+
+/**
+ * Checks what `hidingLog` says about every build of `HideableItem` so far: each was constructed,
+ * started and announced as added once; each that went was destroyed and announced as removed once,
+ * after it started and never started again; and `standing` of them are still attached.
+ */
+function checkItemBuilds(what: string, standing: number) {
+	const log = hidingLog.join(", ");
+	const count = (line: string) => hidingLog.filter((entry) => entry === line).size();
+
+	let gone = 0;
+	for (let build = 1; build <= HideableItem.builds; build++) {
+		expectEqual(count(`item:new:${build}`), 1, `${what}: build ${build} constructed (${log})`);
+		expectEqual(count(`item:start:${build}`), 1, `${what}: build ${build} started (${log})`);
+		expectEqual(count(`item:added:${build}`), 1, `${what}: build ${build} announced as added (${log})`);
+
+		const destroyed = count(`item:destroy:${build}`);
+		expectTrue(destroyed <= 1, `${what}: build ${build} destroyed at most once (${log})`);
+		expectEqual(count(`item:removed:${build}`), destroyed, `${what}: build ${build} announced as removed (${log})`);
+
+		if (destroyed === 1) {
+			gone += 1;
+			expectTrue(
+				hidingLog.indexOf(`item:start:${build}`) < hidingLog.indexOf(`item:destroy:${build}`),
+				`${what}: build ${build} started before it was destroyed (${log})`,
+			);
+		}
+	}
+
+	expectEqual(HideableItem.builds - gone, standing, `${what}: builds still attached (${log})`);
+	expectEqual(__harness.warnings().size(), 0, `${what}: warnings: ${__harness.warnings().join(" | ")}`);
+}
+
+/** One tracker entry, as far as a leak shows in it: what it holds and what it keeps running. */
+interface TrackerEntry {
+	listeners: Set<unknown>;
+	owners?: Set<unknown>;
+	waiting?: Set<unknown>;
+	holders?: Map<unknown, { instance: Instance }>;
+	dependencyListeners?: Map<unknown, unknown>;
+	unmetCriteria?: Set<unknown>;
+	invalidAttributes?: Set<unknown>;
+	cleanup?: Set<unknown>;
+	timeoutWarningThread?: thread;
+	typeGuardWatcher?: object;
+	linkWatcher?: object;
+}
+
+/**
+ * What `Components` keeps per instance and per component, which is where a leak would grow: its
+ * lookups, the construction and removal windows, the waiters, the maids holding each component's
+ * attribute connections, every tracker's entries, which own the tree watchers, the link watchers,
+ * the attribute watch and the warning thread of an instance, and the signals its announcements go
+ * through, which a link connects to. The fields are private; a roblox-ts private field is a plain
+ * table field.
+ */
+interface Registry {
+	activeComponents: Map<Instance, Map<unknown, BaseComponent>>;
+	reverseComponentsMapping: Map<string, Set<BaseComponent>>;
+	constructing: Map<Instance, Set<unknown>>;
+	cancelled: Map<Instance, Set<unknown>>;
+	unannounced: Set<BaseComponent>;
+	removing: Map<Instance, Set<unknown>>;
+	checkingLinks: Map<Instance, Set<unknown>>;
+	invalid: Map<Instance, Map<unknown, string>>;
+	pendingStarts?: Array<[BaseComponent, unknown, Instance]>;
+	trackers: Map<object, { instances: Map<Instance, TrackerEntry> }>;
+	componentWaiters: Map<Instance, Map<unknown, Set<unknown>>>;
+	componentCleanup: Map<BaseComponent, { _tasks: Map<unknown, unknown> }>;
+	componentAddedListeners: Map<string, { Bindable: Instance }>;
+	componentRemovedListeners: Map<string, { Bindable: Instance }>;
+	componentInvalidatedListeners: Map<string, { Bindable: Instance }>;
+	connections: RBXScriptConnection[];
+}
+
+/**
+ * Everything `Components` keeps, counted by kind, with the connections on its announcement signals.
+ * A count that is higher after a stretch of hiding and showing than before it, with the same
+ * instances standing, is a leak.
+ */
+function registryCounts(components: Components) {
+	const registry = components as unknown as Registry;
+	const counts = new Map<string, number>();
+	const add = (key: string, amount: number) => counts.set(key, (counts.get(key) ?? 0) + amount);
+	const sizeOf = (collection?: object) => {
+		let size = 0;
+		if (collection !== undefined) {
+			for (const [_] of pairs(collection as Map<unknown, unknown>)) size += 1;
+		}
+
+		return size;
+	};
+
+	add("instances with components", registry.activeComponents.size());
+	for (const [, active] of registry.activeComponents) add("components", active.size());
+	for (const [, set] of registry.reverseComponentsMapping) add("components by id", set.size());
+	add("constructing", registry.constructing.size());
+	add("cancelled", registry.cancelled.size());
+	add("unannounced", registry.unannounced.size());
+	add("removing", registry.removing.size());
+	add("checking links", registry.checkingLinks.size());
+	add("invalid", registry.invalid.size());
+	add("pending starts", sizeOf(registry.pendingStarts));
+	add("waiters", registry.componentWaiters.size());
+	add("maids", registry.componentCleanup.size());
+	for (const [, maid] of registry.componentCleanup) add("maid tasks", maid._tasks.size());
+	add("tag connections", registry.connections.size());
+
+	for (const [, signal] of registry.componentAddedListeners) {
+		add("added signal connections", __harness.connectionCount(signal.Bindable));
+	}
+	for (const [, signal] of registry.componentRemovedListeners) {
+		add("removed signal connections", __harness.connectionCount(signal.Bindable));
+	}
+	for (const [, signal] of registry.componentInvalidatedListeners) {
+		add("invalidated signal connections", __harness.connectionCount(signal.Bindable));
+	}
+
+	for (const [ctor, tracker] of registry.trackers) {
+		const name = tostring(ctor);
+		add(`${name}: entries`, tracker.instances.size());
+
+		for (const [, entry] of tracker.instances) {
+			add(`${name}: listeners`, entry.listeners.size());
+			add(`${name}: owners`, sizeOf(entry.owners));
+			add(`${name}: waiting`, sizeOf(entry.waiting));
+			add(`${name}: holders`, sizeOf(entry.holders));
+			add(`${name}: dependency listeners`, sizeOf(entry.dependencyListeners));
+			add(`${name}: unmet criteria`, sizeOf(entry.unmetCriteria));
+			add(`${name}: cleanups`, sizeOf(entry.cleanup));
+			add(`${name}: warning threads`, entry.timeoutWarningThread !== undefined ? 1 : 0);
+			add(`${name}: tree watchers`, entry.typeGuardWatcher !== undefined ? 1 : 0);
+			add(`${name}: link watchers`, entry.linkWatcher !== undefined ? 1 : 0);
+		}
+	}
+
+	return counts;
+}
+
+/** Every handler connected to each of `instances`, by name: a watcher left behind shows up here. */
+function connectionsOn(instances: Instance[]) {
+	const counts = new Map<string, number>();
+	for (const instance of instances) counts.set(instance.Name, __harness.connectionCount(instance));
+
+	return counts;
+}
+
+/** Checks two readings of counts agree, naming every count that moved. */
+function expectSameCounts(before: Map<string, number>, after: Map<string, number>, what: string) {
+	const moved = new Array<string>();
+	for (const [key, value] of after) {
+		if ((before.get(key) ?? 0) !== value) moved.push(`${key}: ${before.get(key) ?? 0} -> ${value}`);
+	}
+	for (const [key, value] of before) {
+		if (!after.has(key) && value !== 0) moved.push(`${key}: ${value} -> 0`);
+	}
+
+	expectEqual(moved.join(", "), "", `${what}: counts that moved`);
+}
+
+/**
+ * Where `Components` still holds one of `instances`, or a component attached to one of them: a key
+ * of any of its per-instance lookups or tracker entries, an entry held open from one of them, or a
+ * component in its lookups, maids and windows.
+ */
+function registryHolds(components: Components, instances: Instance[]) {
+	const registry = components as unknown as Registry;
+	const watched = new Set(instances);
+	const found = new Array<string>();
+	const keyed = (what: string, map: Map<Instance, unknown>) => {
+		for (const [instance] of map) {
+			if (watched.has(instance)) found.push(`${what}[${instance.Name}]`);
+		}
+	};
+	const attached = (what: string, component: BaseComponent) => {
+		if (watched.has(component.instance)) found.push(`${what}: a component of ${component.instance.Name}`);
+	};
+
+	keyed("activeComponents", registry.activeComponents);
+	keyed("constructing", registry.constructing);
+	keyed("cancelled", registry.cancelled);
+	keyed("removing", registry.removing);
+	keyed("checkingLinks", registry.checkingLinks);
+	keyed("invalid", registry.invalid);
+	keyed("componentWaiters", registry.componentWaiters);
+
+	for (const [, set] of registry.reverseComponentsMapping) {
+		for (const component of set) attached("reverseComponentsMapping", component);
+	}
+	for (const [component] of registry.componentCleanup) attached("componentCleanup", component);
+	for (const component of registry.unannounced) attached("unannounced", component);
+	for (const [component] of registry.pendingStarts ?? []) attached("pendingStarts", component);
+
+	for (const [ctor, tracker] of registry.trackers) {
+		keyed(`${ctor} entries`, tracker.instances);
+
+		for (const [instance, entry] of tracker.instances) {
+			for (const [, holder] of entry.holders ?? new Map<unknown, { instance: Instance }>()) {
+				if (watched.has(holder.instance)) {
+					found.push(`${ctor} entry of ${instance.Name}, held by ${holder.instance.Name}`);
+				}
+			}
+		}
+	}
+
+	return found;
+}
+
+/**
+ * Ends a hiding case: destroys `instances` (the container, the item and the storage), lets every
+ * removal land, and checks that the registry holds nothing of them and is back to `baseline`, the
+ * counts taken before the case made anything. The harness's CollectionService keeps a destroyed
+ * instance's tags, as the engine keeps them on the instance; they are taken off afterwards, so that
+ * nothing but Flamework could still hold the instance for `collectUntilReleased`.
+ */
+function expectReleased(components: Components, baseline: Map<string, number>, instances: Instance[], what: string) {
+	const everything = new Array<Instance>();
+	for (const instance of instances) {
+		everything.push(instance);
+		for (const descendant of instance.GetDescendants()) everything.push(descendant);
+	}
+
+	for (const instance of instances) instance.Destroy();
+	__harness.flush();
+	__harness.flush();
+
+	expectEqual(registryHolds(components, everything).join(", "), "", `${what}: what the registry still holds`);
+	expectSameCounts(baseline, registryCounts(components), `${what}: the registry once the case was destroyed`);
+
+	for (const instance of everything) {
+		for (const tag of collectionService().GetTags(instance)) collectionService().RemoveTag(instance, tag);
+	}
+}
+
+/**
+ * Lets the collector run until `probe`, a weak-valued table, lets go of everything in it, or the
+ * rounds run out, and returns what it still holds. Lune refuses `collectgarbage("collect")`, as
+ * Roblox does, so a collection is brought on by allocating, as the lifecycle specs do.
+ */
+function collectUntilReleased(probe: Map<number, object>) {
+	for (let round = 0; round < 50 && !probe.isEmpty(); round++) {
+		const junk = new Array<object>();
+		for (let i = 0; i < 20000; i++) junk.push({ i });
+	}
+
+	const left = new Array<string>();
+	for (const [key, value] of probe) left.push(`${key}: ${tostring(value)}`);
+
+	return left;
+}
+
+/** A table holding its values weakly: what is in it is held by nothing but whoever else still has it. */
+function weakProbe() {
+	return setmetatable(new Map<number, object>(), { __mode: "v" });
 }
 
 export = suite("components", [
@@ -1468,6 +1946,806 @@ export = suite("components", [
 			expectEqual(components.getComponents<Owner>(owner).size(), 0, "components left on the owner");
 
 			module.extinguish();
+		},
+	],
+	[
+		"removes the component of a tagged child its container unparents from onStart when the child is announced first",
+		() => {
+			for (const deferred of [false, true]) {
+				const mode = deferred ? "deferred" : "immediate";
+				const module = createComponentModule();
+				const components = module.resolveDependency<Components>();
+				recordHiding(components);
+				const baseline = registryCounts(components);
+
+				// Both tagged in one resumption, the item first, so its component is built and started
+				// before the container's `onStart` unparents it. Leaving the DataModel announces its tag
+				// as gone, and the component goes with it -- once, after the container's `onStart` has
+				// finished, and without starting again.
+				const [container, item] = hidingTree("HideItemFirst", game.Workspace);
+				resumption(deferred, () => tagHidingTree(container, item, "UnparentingContainer", true));
+
+				expectEqual(item.Parent, undefined, `${mode}: the hidden item's parent`);
+				const hider = expectDefined(
+					components.getComponent<UnparentingContainer>(container),
+					`${mode}: the container's component`,
+				);
+				expectEqual(
+					components.getComponent<HideableItem>(item),
+					undefined,
+					`${mode}: the hidden item's component`,
+				);
+				expectEqual(
+					components.getComponents<HideableItem>(item).size(),
+					0,
+					`${mode}: components on the hidden item`,
+				);
+				expectEqual(trackedCount(components, HideableItem), 0, `${mode}: entries kept for the hidden item`);
+				checkItemBuilds(mode, 0);
+
+				// Immediate behaviour announces the tag as gone inside the container's `onStart`, before
+				// the move, and the tag path weighs it a resumption later; deferred behaviour delivers it
+				// after the resumption. Either way the removal lands after `onStart` has returned.
+				expectArrayEqual(
+					hidingLog,
+					deferred
+						? [
+								"item:new:1",
+								"item:start:1",
+								"container:start",
+								"container:hid",
+								"item:added:1",
+								"item:destroy:1",
+								"item:removed:1",
+							]
+						: [
+								"item:new:1",
+								"item:start:1",
+								"item:added:1",
+								"container:start",
+								"container:hid",
+								"item:removed:1",
+								"item:destroy:1",
+							],
+					`${mode}: what happened, in order`,
+				);
+
+				// Shown again, it enters the DataModel again and its tag is announced again: a new
+				// component, its state started afresh.
+				resumption(deferred, () => hider.show());
+				const shown = expectDefined(
+					components.getComponent<HideableItem>(item),
+					`${mode}: the shown item's component`,
+				);
+				expectEqual(shown.build, 2, `${mode}: the build the shown item has`);
+				checkItemBuilds(mode, 1);
+
+				expectReleased(components, baseline, [container, item], mode);
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"builds no component for a tagged child its container unparents from onStart when the container is announced first",
+		() => {
+			for (const deferred of [false, true]) {
+				const mode = deferred ? "deferred" : "immediate";
+				const module = createComponentModule();
+				const components = module.resolveDependency<Components>();
+				recordHiding(components);
+				const baseline = registryCounts(components);
+
+				// The container first: its `onStart` unparents the item before the item's tag is
+				// announced, or, under immediate behaviour, before it is even tagged. The tag of an
+				// instance the DataModel no longer holds builds nothing.
+				const [container, item] = hidingTree("HideContainerFirst", game.Workspace);
+				resumption(deferred, () => tagHidingTree(container, item, "UnparentingContainer", false));
+
+				expectEqual(item.Parent, undefined, `${mode}: the hidden item's parent`);
+				const hider = expectDefined(
+					components.getComponent<UnparentingContainer>(container),
+					`${mode}: the container's component`,
+				);
+				expectEqual(
+					components.getComponent<HideableItem>(item),
+					undefined,
+					`${mode}: the hidden item's component`,
+				);
+				expectEqual(trackedCount(components, HideableItem), 0, `${mode}: entries kept for the hidden item`);
+				expectArrayEqual(hidingLog, ["container:start", "container:hid"], `${mode}: what happened, in order`);
+
+				// Shown, its tag is announced for the first time, and it gets its first component.
+				resumption(deferred, () => hider.show());
+				const shown = expectDefined(
+					components.getComponent<HideableItem>(item),
+					`${mode}: the shown item's component`,
+				);
+				expectEqual(shown.build, 1, `${mode}: the build the shown item has`);
+				checkItemBuilds(mode, 1);
+
+				expectReleased(components, baseline, [container, item], mode);
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"builds no component for a tagged child its container unparents from onStart while their tree enters the DataModel",
+		() => {
+			for (const deferred of [false, true]) {
+				for (const itemFirst of [true, false]) {
+					const what = `${deferred ? "deferred" : "immediate"}, ${itemFirst ? "item" : "container"} tagged first`;
+					const module = createComponentModule();
+					const components = module.resolveDependency<Components>();
+					recordHiding(components);
+					const baseline = registryCounts(components);
+
+					// Tagged while detached, the way a template is, then parented in: the tags of the
+					// whole tree are announced as it enters, the container's ahead of its descendant's
+					// whatever order they were added in. The container's `onStart` unparents the item
+					// before the item's announcement is weighed, which finds it out of the DataModel.
+					const [container, item] = hidingTree("HideEntering", undefined);
+					tagHidingTree(container, item, "UnparentingContainer", itemFirst);
+					resumption(deferred, () => (container.Parent = game.Workspace));
+
+					expectEqual(item.Parent, undefined, `${what}: the hidden item's parent`);
+					const hider = expectDefined(
+						components.getComponent<UnparentingContainer>(container),
+						`${what}: the container's component`,
+					);
+					expectEqual(
+						components.getComponent<HideableItem>(item),
+						undefined,
+						`${what}: the hidden item's component`,
+					);
+					expectEqual(trackedCount(components, HideableItem), 0, `${what}: entries kept for the hidden item`);
+					expectArrayEqual(
+						hidingLog,
+						["container:start", "container:hid"],
+						`${what}: what happened, in order`,
+					);
+
+					resumption(deferred, () => hider.show());
+					expectDefined(components.getComponent<HideableItem>(item), `${what}: the shown item's component`);
+					checkItemBuilds(what, 1);
+
+					expectReleased(components, baseline, [container, item], what);
+					module.extinguish();
+				}
+			}
+		},
+	],
+	[
+		"ends with one component for a tagged child its container hides and shows again and again",
+		() => {
+			for (const deferred of [false, true]) {
+				const mode = deferred ? "deferred" : "immediate";
+				const module = createComponentModule();
+				const components = module.resolveDependency<Components>();
+				recordHiding(components);
+				const baseline = registryCounts(components);
+
+				const [container, item] = hidingTree("HideToggled", game.Workspace);
+				resumption(deferred, () => tagHidingTree(container, item, "UnparentingContainer", true));
+				const hider = expectDefined(
+					components.getComponent<UnparentingContainer>(container),
+					`${mode}: container`,
+				);
+
+				// Shown and hidden a resumption apart: a component per showing, each gone with its hiding.
+				for (const round of [1, 2, 3]) {
+					resumption(deferred, () => hider.show());
+					expectDefined(components.getComponent<HideableItem>(item), `${mode}: component, showing ${round}`);
+
+					resumption(deferred, () => hider.hide());
+					expectEqual(
+						components.getComponents<HideableItem>(item).size(),
+						0,
+						`${mode}: components, hiding ${round}`,
+					);
+				}
+				expectEqual(HideableItem.builds, 4, `${mode}: builds after three rounds`);
+
+				// Hidden and shown again inside one resumption: the removal is weighed against an instance
+				// that is back in the DataModel and still tagged, so the component that was there stays.
+				resumption(deferred, () => hider.show());
+				const before = expectDefined(components.getComponent<HideableItem>(item), `${mode}: component before`);
+				resumption(deferred, () => {
+					hider.hide();
+					hider.show();
+				});
+				expectEqual(
+					components.getComponent<HideableItem>(item),
+					before,
+					`${mode}: component after hiding and showing at once`,
+				);
+
+				// Shown and hidden again inside one resumption: under immediate behaviour the showing
+				// builds a component and the hiding takes it away; under deferred behaviour the
+				// announcement that it arrived finds it gone and builds nothing.
+				resumption(deferred, () => hider.hide());
+				const builds = HideableItem.builds;
+				resumption(deferred, () => {
+					hider.show();
+					hider.hide();
+				});
+				expectEqual(
+					components.getComponents<HideableItem>(item).size(),
+					0,
+					`${mode}: components after showing and hiding at once`,
+				);
+				expectEqual(
+					HideableItem.builds,
+					deferred ? builds : builds + 1,
+					`${mode}: builds showing and hiding at once made`,
+				);
+
+				// And it ends shown, with one component: nothing built twice, nothing left behind.
+				resumption(deferred, () => hider.show());
+				expectEqual(
+					components.getComponents<HideableItem>(item).size(),
+					1,
+					`${mode}: components on the shown item`,
+				);
+				expectEqual(components.getAllComponents<HideableItem>().size(), 1, `${mode}: item components anywhere`);
+				checkItemBuilds(mode, 1);
+
+				expectReleased(components, baseline, [container, item], mode);
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"keeps the component of a tagged child its container hides in storage that stays in the DataModel",
+		() => {
+			for (const deferred of [false, true]) {
+				const mode = deferred ? "deferred" : "immediate";
+				const module = createComponentModule();
+				const components = module.resolveDependency<Components>();
+				recordHiding(components);
+				const baseline = registryCounts(components);
+
+				const storage = folderIn(ReplicatedStorage, "HideStorage");
+				StoringContainer.storage = storage;
+
+				// The item first, so its component is there before the container's `onStart` moves it
+				// into storage. Moving within the DataModel announces nothing, and the ancestor lists only
+				// gate construction, so the component stays, under a blocked ancestor, and stays the same
+				// one however often it moves.
+				const [container, item] = hidingTree("HideStored", game.Workspace);
+				resumption(deferred, () => tagHidingTree(container, item, "StoringContainer", true));
+
+				expectEqual(item.Parent, storage, `${mode}: the stored item's parent`);
+				const stored = expectDefined(
+					components.getComponent<HideableItem>(item),
+					`${mode}: the stored item's component`,
+				);
+				const hider = expectDefined(components.getComponent<StoringContainer>(container), `${mode}: container`);
+
+				resumption(deferred, () => hider.show());
+				expectEqual(components.getComponent<HideableItem>(item), stored, `${mode}: component once shown`);
+				resumption(deferred, () => hider.hide());
+				expectEqual(
+					components.getComponent<HideableItem>(item),
+					stored,
+					`${mode}: component once hidden again`,
+				);
+				resumption(deferred, () => {
+					hider.show();
+					hider.hide();
+					hider.show();
+				});
+				expectEqual(
+					components.getComponent<HideableItem>(item),
+					stored,
+					`${mode}: component after moving at once`,
+				);
+
+				// Its own tree moved with it, so the streaming mode has nothing to react to: its `Mesh` is
+				// still there, followed on a client and read once on a server, wherever it is.
+				checkItemBuilds(mode, 1);
+				expectEqual(HideableItem.builds, 1, `${mode}: builds`);
+
+				expectReleased(components, baseline, [container, item, storage], mode);
+				StoringContainer.storage = undefined;
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"removes a container whose child link names the child it unparents until the child is back",
+		() => {
+			for (const deferred of [false, true]) {
+				const mode = deferred ? "deferred" : "immediate";
+				const module = createComponentModule();
+				const components = module.resolveDependency<Components>();
+				recordHiding(components);
+				const baseline = registryCounts(components);
+
+				const [container, item] = hidingTree("HideLinked", game.Workspace);
+				resumption(deferred, () => tagHidingTree(container, item, "LinkedContainer", true));
+				const hider = expectDefined(components.getComponent<LinkedContainer>(container), `${mode}: container`);
+
+				// Unparenting the item takes its component away, and the container's link names that
+				// component: the container goes too, whatever the streaming mode, and stays down while
+				// the item is hidden. Nothing it would have done to show the item again is left to do it.
+				resumption(deferred, () => hider.hide());
+				expectEqual(
+					components.getComponent<HideableItem>(item),
+					undefined,
+					`${mode}: the hidden item's component`,
+				);
+				expectEqual(
+					components.getComponent<LinkedContainer>(container),
+					undefined,
+					`${mode}: the container's component`,
+				);
+
+				// Put back from outside, the item gets a new component, and the container a new one around it.
+				resumption(deferred, () => hider.show());
+				const shown = expectDefined(
+					components.getComponent<HideableItem>(item),
+					`${mode}: the item's component`,
+				);
+				const rebuilt = expectDefined(
+					components.getComponent<LinkedContainer>(container),
+					`${mode}: the container's component`,
+				);
+				expectTrue(rebuilt !== hider, `${mode}: the container's component is a new one`);
+				expectEqual(rebuilt.childComponents.Item, shown, `${mode}: the component the new container links to`);
+				checkItemBuilds(mode, 1);
+
+				expectReleased(components, baseline, [container, item], mode);
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"removes a container whose child link names the child it moves into storage only where its tree is followed",
+		() => {
+			for (const deferred of [false, true]) {
+				const mode = deferred ? "deferred" : "immediate";
+				const module = createComponentModule();
+				const components = module.resolveDependency<Components>();
+				recordHiding(components);
+				const baseline = registryCounts(components);
+
+				const storage = folderIn(ReplicatedStorage, "HideLinkedStorage");
+				const [container, item] = hidingTree("HideLinkedStored", game.Workspace);
+				resumption(deferred, () => tagHidingTree(container, item, "LinkedContainer", true));
+				const hider = expectDefined(components.getComponent<LinkedContainer>(container), `${mode}: container`);
+				const original = expectDefined(components.getComponent<HideableItem>(item), `${mode}: item`);
+
+				// The item keeps its component in storage. The container's link is part of its tree,
+				// and the default streaming mode follows that tree on a client, where the child leaving
+				// takes the container down, and reads it once on a server, where it keeps the child it
+				// was built with.
+				resumption(deferred, () => hider.hide(storage));
+				expectEqual(
+					components.getComponent<HideableItem>(item),
+					original,
+					`${mode}: the stored item's component`,
+				);
+
+				if (RunService.IsClient()) {
+					expectEqual(
+						components.getComponent<LinkedContainer>(container),
+						undefined,
+						`${mode}: the container's component`,
+					);
+
+					resumption(deferred, () => hider.show());
+					const rebuilt = expectDefined(
+						components.getComponent<LinkedContainer>(container),
+						`${mode}: container once shown`,
+					);
+					expectTrue(rebuilt !== hider, `${mode}: the container's component is a new one`);
+					expectEqual(
+						rebuilt.childComponents.Item,
+						original,
+						`${mode}: the component the new container links to`,
+					);
+				} else {
+					expectEqual(
+						components.getComponent<LinkedContainer>(container),
+						hider,
+						`${mode}: the container's component`,
+					);
+					expectEqual(hider.childComponents.Item, original, `${mode}: the component it links to`);
+
+					resumption(deferred, () => hider.show());
+					expectEqual(
+						components.getComponent<LinkedContainer>(container),
+						hider,
+						`${mode}: container once shown`,
+					);
+				}
+
+				checkItemBuilds(mode, 1);
+
+				expectReleased(components, baseline, [container, item, storage], mode);
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"removes a container whose link attribute names the child it unparents but keeps it when the child moves into storage",
+		() => {
+			for (const deferred of [false, true]) {
+				const mode = deferred ? "deferred" : "immediate";
+				const module = createComponentModule();
+				const components = module.resolveDependency<Components>();
+				recordHiding(components);
+				const baseline = registryCounts(components);
+
+				const storage = folderIn(ReplicatedStorage, "HidePointedStorage");
+				const [container, item] = hidingTree("HidePointed", game.Workspace);
+				container.SetAttribute("Item", new InstanceHandle(item));
+				resumption(deferred, () => tagHidingTree(container, item, "PointingContainer", true));
+				const hider = expectDefined(
+					components.getComponent<PointingContainer>(container),
+					`${mode}: container`,
+				);
+				const original = expectDefined(components.getComponent<HideableItem>(item), `${mode}: item`);
+
+				// An attribute is not part of the tree: storage is somewhere the item keeps its
+				// component, and the link names that component, so the container stays.
+				resumption(deferred, () => hider.hide(storage));
+				expectEqual(
+					components.getComponent<PointingContainer>(container),
+					hider,
+					`${mode}: container, item stored`,
+				);
+				resumption(deferred, () => hider.show());
+				expectEqual(
+					components.getComponent<PointingContainer>(container),
+					hider,
+					`${mode}: container, item shown`,
+				);
+
+				// Unparented, the item loses its component and the container its link.
+				resumption(deferred, () => hider.hide());
+				expectEqual(
+					components.getComponent<PointingContainer>(container),
+					undefined,
+					`${mode}: container, item unparented`,
+				);
+
+				resumption(deferred, () => hider.show());
+				const shown = expectDefined(
+					components.getComponent<HideableItem>(item),
+					`${mode}: the item's component`,
+				);
+				const rebuilt = expectDefined(
+					components.getComponent<PointingContainer>(container),
+					`${mode}: container, item back`,
+				);
+				expectTrue(rebuilt !== hider, `${mode}: the container's component is a new one`);
+				expectTrue(shown !== original, `${mode}: the item's component is a new one`);
+				expectEqual(
+					rebuilt.attributeComponents.Item,
+					shown,
+					`${mode}: the component the new container links to`,
+				);
+				checkItemBuilds(mode, 1);
+
+				expectReleased(components, baseline, [container, item, storage], mode);
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"removes a container whose tree requires the child it hides only where its tree is followed",
+		() => {
+			for (const deferred of [false, true]) {
+				for (const unparent of [true, false]) {
+					const what = `${deferred ? "deferred" : "immediate"}, ${unparent ? "unparented" : "stored"}`;
+					const module = createComponentModule();
+					const components = module.resolveDependency<Components>();
+					recordHiding(components);
+					const baseline = registryCounts(components);
+
+					const storage = folderIn(ReplicatedStorage, "HideShapedStorage");
+					const [container, item] = hidingTree("HideShaped", game.Workspace);
+					resumption(deferred, () => tagHidingTree(container, item, "ShapedContainer", true));
+					const hider = expectDefined(
+						components.getComponent<ShapedContainer>(container),
+						`${what}: container`,
+					);
+
+					// A plain required child: under the default streaming mode, a client follows the tree
+					// and drops the container while the child is away; a server read it once and keeps it.
+					resumption(deferred, () => hider.hide(unparent ? undefined : storage));
+
+					if (RunService.IsClient()) {
+						expectEqual(
+							components.getComponent<ShapedContainer>(container),
+							undefined,
+							`${what}: container, hidden`,
+						);
+
+						resumption(deferred, () => hider.show());
+						const rebuilt = expectDefined(
+							components.getComponent<ShapedContainer>(container),
+							`${what}: shown`,
+						);
+						expectTrue(rebuilt !== hider, `${what}: the container's component is a new one`);
+					} else {
+						expectEqual(
+							components.getComponent<ShapedContainer>(container),
+							hider,
+							`${what}: container, hidden`,
+						);
+
+						resumption(deferred, () => hider.show());
+						expectEqual(
+							components.getComponent<ShapedContainer>(container),
+							hider,
+							`${what}: container, shown`,
+						);
+					}
+
+					checkItemBuilds(what, 1);
+					expectEqual(HideableItem.builds, unparent ? 2 : 1, `${what}: item builds`);
+
+					expectReleased(components, baseline, [container, item, storage], what);
+					module.extinguish();
+				}
+			}
+		},
+	],
+	[
+		"keeps the registry level over a hundred hide-and-show cycles of a child its container unparents",
+		() => {
+			for (const deferred of [false, true]) {
+				const mode = deferred ? "deferred" : "immediate";
+				const module = createComponentModule();
+				const components = module.resolveDependency<Components>();
+				recordHiding(components);
+				const baseline = registryCounts(components);
+
+				const [container, item] = hidingTree("HideStressUnparented", game.Workspace);
+				const mesh = item.FindFirstChild("Mesh")!;
+				resumption(deferred, () => tagHidingTree(container, item, "UnparentingContainer", true));
+				const hider = expectDefined(
+					components.getComponent<UnparentingContainer>(container),
+					`${mode}: container`,
+				);
+				checkItemBuilds(mode, 0);
+				const counts = registryCounts(components);
+				const connections = connectionsOn([container, item, mesh]);
+
+				for (let cycle = 0; cycle < 100; cycle++) {
+					step(deferred, () => hider.show());
+					step(deferred, () => hider.hide());
+				}
+				__harness.flush();
+
+				// Every showing built a component and every hiding took it away, and the registry, the
+				// signals and the instances hold exactly what they held before the first: nothing of
+				// the hidden item, nothing connected to it, and none of the hundred components it had.
+				checkItemBuilds(`${mode}: a hundred cycles`, 0);
+				expectEqual(HideableItem.builds, 101, `${mode}: builds`);
+				expectEqual(
+					registryHolds(components, [item, mesh]).join(", "),
+					"",
+					`${mode}: what the registry holds of the item`,
+				);
+				expectSameCounts(counts, registryCounts(components), `${mode}: the registry after a hundred cycles`);
+				expectSameCounts(
+					connections,
+					connectionsOn([container, item, mesh]),
+					`${mode}: connections after a hundred cycles`,
+				);
+				expectEqual(
+					__harness.connectionCount(item) + __harness.connectionCount(mesh),
+					0,
+					`${mode}: connections on the hidden item`,
+				);
+				expectArrayEqual(collectUntilReleased(removedItems), [], `${mode}: removed components still held`);
+
+				expectReleased(components, baseline, [container, item], `${mode}: destroyed`);
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"keeps the registry level over a hundred hide-and-show cycles of a child its container stores",
+		() => {
+			for (const deferred of [false, true]) {
+				const mode = deferred ? "deferred" : "immediate";
+				const module = createComponentModule();
+				const components = module.resolveDependency<Components>();
+				recordHiding(components);
+				const baseline = registryCounts(components);
+
+				const storage = folderIn(ReplicatedStorage, "HideStressStorage");
+				StoringContainer.storage = storage;
+				const [container, item] = hidingTree("HideStressStored", game.Workspace);
+				const mesh = item.FindFirstChild("Mesh")!;
+				resumption(deferred, () => tagHidingTree(container, item, "StoringContainer", true));
+				const hider = expectDefined(components.getComponent<StoringContainer>(container), `${mode}: container`);
+				const stored = expectDefined(
+					components.getComponent<HideableItem>(item),
+					`${mode}: the stored item's component`,
+				);
+				const counts = registryCounts(components);
+				const connections = connectionsOn([container, item, mesh, storage]);
+
+				for (let cycle = 0; cycle < 100; cycle++) {
+					step(deferred, () => hider.show());
+					step(deferred, () => hider.hide());
+				}
+				__harness.flush();
+
+				// One component throughout, and nothing more watching anything than before the first move.
+				expectEqual(
+					components.getComponent<HideableItem>(item),
+					stored,
+					`${mode}: the component after a hundred cycles`,
+				);
+				checkItemBuilds(`${mode}: a hundred cycles`, 1);
+				expectSameCounts(counts, registryCounts(components), `${mode}: the registry after a hundred cycles`);
+				expectSameCounts(
+					connections,
+					connectionsOn([container, item, mesh, storage]),
+					`${mode}: connections after a hundred cycles`,
+				);
+
+				expectReleased(components, baseline, [container, item, storage], `${mode}: destroyed`);
+				StoringContainer.storage = undefined;
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"keeps the registry level over a hundred hide-and-show cycles of a child its container links to",
+		() => {
+			for (const deferred of [false, true]) {
+				const mode = deferred ? "deferred" : "immediate";
+				const module = createComponentModule();
+				const components = module.resolveDependency<Components>();
+				recordHiding(components);
+				const baseline = registryCounts(components);
+
+				const removedContainers = weakProbe();
+				let removedCount = 0;
+				const removals = components.onComponentRemoved<LinkedContainer>((component) => {
+					removedCount += 1;
+					removedContainers.set(removedCount, component);
+				});
+
+				const storage = folderIn(ReplicatedStorage, "HideStressLinkedStorage");
+				const [container, item] = hidingTree("HideStressLinked", game.Workspace);
+				const mesh = item.FindFirstChild("Mesh")!;
+				resumption(deferred, () => tagHidingTree(container, item, "LinkedContainer", true));
+				expectDefined(components.getComponent<LinkedContainer>(container), `${mode}: container`);
+				const counts = registryCounts(components);
+				const connections = connectionsOn([container, item, mesh, storage]);
+
+				// Unparented on even cycles, stored on odd ones, and put back from outside: the container
+				// goes and comes back with the item's component, and on a client with its tree as well.
+				for (let cycle = 0; cycle < 100; cycle++) {
+					step(deferred, () => {
+						item.Parent = cycle % 2 === 0 ? undefined : storage;
+					});
+					step(deferred, () => {
+						item.Parent = container;
+					});
+				}
+				__harness.flush();
+
+				expectDefined(
+					components.getComponent<LinkedContainer>(container),
+					`${mode}: container after a hundred cycles`,
+				);
+				checkItemBuilds(`${mode}: a hundred cycles`, 1);
+				expectEqual(HideableItem.builds, 51, `${mode}: item builds, one and one per unparenting`);
+				expectEqual(removedCount, RunService.IsClient() ? 100 : 50, `${mode}: container removals`);
+				expectSameCounts(counts, registryCounts(components), `${mode}: the registry after a hundred cycles`);
+				expectSameCounts(
+					connections,
+					connectionsOn([container, item, mesh, storage]),
+					`${mode}: connections after a hundred cycles`,
+				);
+				expectArrayEqual(collectUntilReleased(removedItems), [], `${mode}: removed item components still held`);
+				expectArrayEqual(collectUntilReleased(removedContainers), [], `${mode}: removed containers still held`);
+
+				removals.Disconnect();
+				expectReleased(components, baseline, [container, item, storage], `${mode}: destroyed`);
+				module.extinguish();
+			}
+		},
+	],
+	[
+		"releases everything a container and its child held once they are destroyed a hundred times over",
+		() => {
+			for (const deferred of [false, true]) {
+				const mode = deferred ? "deferred" : "immediate";
+				const module = createComponentModule();
+				const components = module.resolveDependency<Components>();
+				recordHiding(components);
+
+				const storage = folderIn(ReplicatedStorage, "HideStressDestroyedStorage");
+				StoringContainer.storage = storage;
+				const baseline = registryCounts(components);
+				const storageConnections = __harness.connectionCount(storage);
+				const workspaceConnections = __harness.connectionCount(game.Workspace);
+
+				// Everything each round made, and every component built on it, held weakly from here on.
+				const probe = weakProbe();
+				let probed = 0;
+				const keep = (value: object) => {
+					probed += 1;
+					probe.set(probed, value);
+				};
+				const added = [
+					components.onComponentAdded<HideableItem>(keep),
+					components.onComponentAdded<UnparentingContainer>(keep),
+					components.onComponentAdded<StoringContainer>(keep),
+					components.onComponentAdded<LinkedContainer>(keep),
+					components.onComponentAdded<PointingContainer>(keep),
+					components.onComponentAdded<ShapedContainer>(keep),
+				];
+
+				// Every kind of container in turn, each built with its item, made to hide it -- from its
+				// own `onStart`, or here -- and destroyed with it. Run in a function of its own, so that
+				// nothing of the last round is left on this one's stack.
+				const rounds = () => {
+					for (let round = 0; round < 100; round++) {
+						const kind = HIDING_TAGS[1 + (round % 5)];
+						const [container, item] = hidingTree(`HideStressDestroyed${round}`, game.Workspace);
+						const mesh = item.FindFirstChild("Mesh")!;
+						keep(container);
+						keep(item);
+						keep(mesh);
+						if (kind === "PointingContainer") container.SetAttribute("Item", new InstanceHandle(item));
+
+						step(deferred, () => tagHidingTree(container, item, kind, true));
+						if (kind === "LinkedContainer" || kind === "PointingContainer" || kind === "ShapedContainer") {
+							step(deferred, () => {
+								item.Parent = round % 2 === 0 ? undefined : storage;
+							});
+						}
+						step(deferred, () => {
+							container.Destroy();
+							item.Destroy();
+						});
+
+						expectEqual(
+							registryHolds(components, [container, item, mesh]).join(", "),
+							"",
+							`${mode}: what the registry holds of round ${round} (${kind})`,
+						);
+
+						for (const instance of [container, item, mesh]) {
+							for (const tag of collectionService().GetTags(instance))
+								collectionService().RemoveTag(instance, tag);
+						}
+					}
+				};
+				rounds();
+				__harness.flush();
+
+				expectTrue(HideableItem.builds >= 100, `${mode}: item builds: ${HideableItem.builds}`);
+				checkItemBuilds(`${mode}: a hundred rounds`, 0);
+				for (const connection of added) connection.Disconnect();
+				expectSameCounts(baseline, registryCounts(components), `${mode}: the registry after a hundred rounds`);
+				expectEqual(
+					__harness.connectionCount(storage),
+					storageConnections,
+					`${mode}: connections on the storage`,
+				);
+				expectEqual(
+					__harness.connectionCount(game.Workspace),
+					workspaceConnections,
+					`${mode}: connections on the workspace`,
+				);
+				expectArrayEqual(collectUntilReleased(probe), [], `${mode}: instances and components still held`);
+
+				storage.Destroy();
+				StoringContainer.storage = undefined;
+				module.extinguish();
+			}
 		},
 	],
 	[

@@ -67,6 +67,10 @@ export class Boat
 - **Where:** by default no component is built under ServerStorage, ReplicatedStorage, StarterPack,
   StarterGui or StarterPlayer, so a tagged template there gets none until it is cloned into the
   world (`ancestorWhitelist`/`ancestorBlacklist` change this).
+- **Hiding a tagged child:** moving it into storage that stays in the DataModel (a folder in
+  ReplicatedStorage) keeps the component it has; `Parent = nil` removes it and builds a new one when
+  it comes back, so its state is lost. A container whose link names that child's component is
+  removed when it unparents the child.
 - **Timing:** tagged instances get their components once the module has ignited, after every
   provider's `onStart` has run to its first yield. `onInit` runs right after construction; `onStart`
   and the per-frame events (`OnTick`, `OnPhysics`, `OnRender`) work as on providers.

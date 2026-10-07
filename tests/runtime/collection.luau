@@ -82,6 +82,12 @@ function collection.create()
 			table.remove(list, index)
 		end
 
+		-- An instance with no tag left is not kept: an empty list held it for as long as the realm
+		-- lived, which a spec checking that a destroyed instance is collected read as a leak.
+		if list and #list == 0 then
+			tagsOf[instance] = nil
+		end
+
 		-- Nothing was announced when it was tagged outside the DataModel, so nothing is announced
 		-- when the tag goes either.
 		if instances.isInDataModel(instance) then

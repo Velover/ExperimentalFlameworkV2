@@ -517,6 +517,21 @@ component. So if a linked child is destroyed and replaced by another that carrie
 component comes back around the new one. This happens under `Disabled`, and under `Contextual` on a
 server.
 
+**Hiding a tagged child.** A component often decides whether a tagged child of its instance shows:
+a model it hides and shows again. How it hides the child decides what happens to the child's own
+component:
+
+- Moved into storage that stays in the DataModel, a folder in ReplicatedStorage say, a child that
+  has its component keeps it, the same one however often it moves: moving within the DataModel
+  announces nothing, and the ancestor lists only gate construction.
+- `Parent = nil` takes the child out of the DataModel, so its component is removed, and a new one is
+  built when it is parented back. Whatever state the old one held is lost.
+- A container whose link names the child's component loses the link when the child is unparented,
+  and is removed with it: nothing it would do to show the child again runs, until something else
+  puts the child back, which builds both again. Moved into storage, a link attribute still holds; a
+  child link, like a required child of the tree, is lost wherever the container follows its tree (on
+  a client, under the default streaming mode).
+
 ### Waiting and warnings
 
 | Option | Effect |
