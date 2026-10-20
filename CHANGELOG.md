@@ -113,6 +113,21 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   name it was listed under, and what it answered when asked (`asked: game.Name "...", launch id
   ...; not this launch's`) or why it was not asked; the window the run launched is closed again, as
   before (`--keep` leaves it).
+- **`flamework-test test --parallel` no longer signs Studio out by launching its windows at once.**
+  Two Studios started in the same second both sign in to Roblox at start-up, and when the sign-in
+  is due a refresh (Studio closed for a while), one of them can fail (401 from
+  `oauth/v1/userinfo`) and log out the session every Studio of the user shares. Every later window
+  then showed its login dialog on the hidden desktop, never opened its file, and was waited for
+  for the whole `--connect-timeout` (3 minutes), which read as "only the first window registers
+  with the MCP proxy" (seen 2026-10-20, Studio 0.743). The windows of a run now launch one at a
+  time, each once the Studio before it has signed in, read from Studio's own log (3 to 5 seconds),
+  or has registered with the proxy, or has had 30 seconds.
+- **A hidden window whose Studio is signed out fails at once, saying so.** While it waits for a
+  window, `test` reads that Studio's log (`%LOCALAPPDATA%\Roblox\logs`, the one naming its
+  process), and a window showing its login dialog on the hidden desktop ends the wait with `Studio
+  started (PID n) but is not signed in to Roblox, so <file> never opened ...`, which says to sign
+  in to Studio, instead of `never showed up on the MCP proxy` 3 minutes later. A shown window
+  (`--show`, `studio open`) says it once and is waited for, since the dialog can be answered there.
 
 ### transformer
 

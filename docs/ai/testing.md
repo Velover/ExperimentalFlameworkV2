@@ -141,5 +141,8 @@ export class ShopTests implements OnStart {
   yours, or found it closed.
 - `"MCP server" setting is probably off`: ask the user to turn it on in Studio's Assistant settings,
   then retry.
+- `... is not signed in to Roblox ...`: Studio is signed out (its login dialog showed on the hidden
+  desktop). Ask the user to open Roblox Studio and sign in, then retry; until then every launch
+  shows the dialog.
 - Studio may run `execute_luau` sandboxed (it did from 2026-10-01): then no `require` of the
   place's modules, no `_G`, `shared` or DataStore; the CLI says so under such a refusal.

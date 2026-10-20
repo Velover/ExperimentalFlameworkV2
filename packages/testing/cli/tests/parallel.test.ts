@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { basename, join, resolve } from "node:path";
 
-import { parseArgs, PARALLEL_MOST } from "../src/cli.ts";
+import { CONNECT_POLL_MS, parseArgs, PARALLEL_MOST, SIGN_IN_TURN_MS } from "../src/cli.ts";
 import type { CloudSettings } from "../src/config.ts";
 import type { CloseTarget, StudioEntry } from "../src/studio.ts";
+import type { SignInReading } from "../src/studioLog.ts";
 import {
 	FIXTURE_CWD,
 	fakeCtrlC,
@@ -121,6 +122,7 @@ async function runSideBySide(
 		ctrlC?: ReturnType<typeof fakeCtrlC>;
 		closeOutcome?: (target: CloseTarget) => "closed" | "open";
 		spawnCode?: (command: string[]) => number | Promise<number>;
+		signIn?: (pid: number, since: number) => SignInReading | undefined;
 	} = {},
 ) {
 	const machine = setup.machine ?? fakeMachine();
@@ -138,6 +140,7 @@ async function runSideBySide(
 		...(setup.settings !== undefined ? { settings: setup.settings } : {}),
 		...(setup.ctrlC !== undefined ? { ctrlC: setup.ctrlC } : {}),
 		...(setup.spawnCode !== undefined ? { spawnCode: setup.spawnCode } : {}),
+		...(setup.signIn !== undefined ? { signIn: setup.signIn } : {}),
 	};
 	options.onClose = (target) => {
 		studio.onClose(target);
@@ -888,5 +891,96 @@ describe("Ctrl+C belongs to the work that is cleaning up (interrupt.ts)", () => 
 		// The cleanup's own waits are seen through.
 		releaseCleanup();
 		expect(await cleaning).toBe("stopped");
+	});
+});
+
+describe("--parallel: one launch at a time, each once the Studio before it has signed in", () => {
+	/**
+	 * Each window signs in `signInMs` after its launch (none given: its log says nothing) and
+	 * registers with the proxy only once it has, as a real one does (`register` overrides that);
+	 * `launchedAt` records each launch's time by its PID, as each look at the proxy or a log sees it.
+	 */
+	function signing(machine: FakeMachine, signInMs: Record<string, number>) {
+		const launchedAt = new Map<number, number>();
+		const note = () => {
+			for (const window of machine.windows) {
+				if (window.startedAt !== undefined) launchedAt.set(window.pid, window.startedAt);
+			}
+		};
+		const fileOf = (pid: number) => {
+			const window = machine.windows.find((candidate) => candidate.pid === pid);
+			return window?.startedWith === undefined ? undefined : basename(window.startedWith);
+		};
+		const signedIn = (pid: number) => {
+			const file = fileOf(pid);
+			const at = launchedAt.get(pid);
+			const after = file === undefined ? undefined : signInMs[file];
+			return at !== undefined && after !== undefined && machine.time.now >= at + after;
+		};
+		return {
+			launchedAt,
+			note,
+			register: (file: string) => {
+				note();
+				return machine.windows.some((window) => fileOf(window.pid) === file && signedIn(window.pid));
+			},
+			signIn: (pid: number, since: number): SignInReading | undefined => {
+				note();
+				// The run hands over when it launched the process, as the machine started it.
+				expect(since).toBe(launchedAt.get(pid)!);
+				const file = fileOf(pid);
+				if (file === undefined || signInMs[file] === undefined) return undefined;
+				return { state: signedIn(pid) ? "signed-in" : "signing-in", log: "x_Studio_1_last.log" };
+			},
+		};
+	}
+
+	test("the next window launches once the one before has signed in, not at once", async () => {
+		const machine = fakeMachine();
+		const log = signing(machine, { "place.a.rbxl": 4_000, "place.b.rbxl": 4_000 });
+		const { run } = await runSideBySide(["a", "b"], ["--parallel", "2"], {
+			machine,
+			register: log.register,
+			signIn: log.signIn,
+		});
+		expect(run.code).toBe(0);
+		// a signed in 4 s after its launch, seen at the next look, one poll (5 s) on.
+		expect(log.launchedAt.get(4002)! - log.launchedAt.get(4001)!).toBe(CONNECT_POLL_MS);
+		expect(run.out).toContain("projects: a passed, b passed");
+	});
+
+	test("a window whose log says nothing holds the next back until it registers, or SIGN_IN_TURN_MS at most", async () => {
+		const machine = fakeMachine();
+		const log = signing(machine, {});
+		const { run } = await runSideBySide(["a", "b"], ["--parallel", "2", "--connect-timeout", "60"], {
+			machine,
+			// a never registers; b at once.
+			register: (file) => {
+				log.note();
+				return file !== "place.a.rbxl";
+			},
+			signIn: log.signIn,
+		});
+		expect(run.code).toBe(1);
+		// Let go at the look SIGN_IN_TURN_MS on; the fake clock has moved on by a's next sleep when b goes.
+		const apart = log.launchedAt.get(4002)! - log.launchedAt.get(4001)!;
+		expect(apart).toBeGreaterThanOrEqual(SIGN_IN_TURN_MS);
+		expect(apart).toBeLessThanOrEqual(SIGN_IN_TURN_MS + CONNECT_POLL_MS);
+		expect(run.all).toContain("place.a.rbxl never showed up on the MCP proxy within 1 min (--connect-timeout)");
+		expect(run.all).toContain("projects: a FAILED, b passed");
+
+		// One that registers at once lets the next go at once.
+		const quick = fakeMachine();
+		const quickLog = signing(quick, {});
+		const second = await runSideBySide(["a", "b"], ["--parallel", "2"], {
+			machine: quick,
+			register: () => {
+				quickLog.note();
+				return true;
+			},
+			signIn: quickLog.signIn,
+		});
+		expect(second.run.code).toBe(0);
+		expect(quickLog.launchedAt.get(4002)).toBe(quickLog.launchedAt.get(4001));
 	});
 });

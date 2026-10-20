@@ -137,7 +137,8 @@ Anywhere but Windows nothing is hidden, and the flag changes nothing.
 - **A window that never connects** may be showing a dialog nobody can see there (a login, an
   update, a crash report). The error says so: run again with `--show` to see it. It also names
   every window that registered with the MCP proxy during the wait, with what the run made of each
-  (see the next list).
+  (see the next list). A Studio signed out of Roblox shows its login dialog there: the run reads
+  that from Studio's own log and stops at once, saying so (`... is not signed in to Roblox ...`).
 - **`--keep` leaves the window hidden.** Windows moves no window from one desktop to another, and a
   window is kept mostly to be driven: `studio exec`, `run`, `call screen_capture` and the rest
   reach it there, and `studio close` closes it. To look at a kept window, run with `--show --keep`.
@@ -556,6 +557,9 @@ a window's focus.
 project order, the next as soon as a project's window has closed. A framework tested under several
 configurations then costs about what the slowest windows do, not the sum: this repository's four
 projects took 7 min 20 s one after another and about 5 min with `--parallel 2` (2026-10-05).
+The windows launch one at a time, each once the Studio before it has signed in to Roblox (a few
+seconds, read from Studio's log; until it registers, or 30 seconds at most, when its log says
+nothing): two Studios signing in at once can sign every Studio out (seen 2026-10-20).
 
 It is the preferred way to run several projects: `--parallel 2`, or more when memory allows (about
 3 GB a window). Leave it out (or pass `--parallel 1` over a configured number) when the run measures
@@ -623,6 +627,7 @@ A run uses one task.
 |---|---|
 | `RobloxStudioBeta.exe was not found` / `StudioMCP.exe, Roblox Studio's MCP proxy, was not found` | Studio is not installed here; set `ROBLOX_STUDIO_EXE` / `STUDIO_MCP_EXE`, or run in the cloud with `--cloud`. |
 | `... never showed up on the MCP proxy within 3 min (--connect-timeout)` | The window opened but "MCP server" is disabled in Studio's Assistant settings, or, on the hidden desktop, it is showing a dialog nobody can see there (a login, an update, a crash report): run again with `--show` to see which. `studio open` and `test` close it again (`test --keep` leaves it). The error names every window that registered with the proxy meanwhile, with its id, the name it was listed under and what it answered when asked (`asked: game.Name "...", launch id ...; not this launch's`), or why it was not asked (listed under another place's name, claimed by a flamework-test project). A slow start (a cold Studio, many plugins) may need a longer `--connect-timeout`. |
+| `Studio started (PID n) but is not signed in to Roblox, so <file> never opened` | Studio is signed out of Roblox: the window showed its login dialog on the hidden desktop, where nobody can answer it. Ask the user to open Roblox Studio and sign in (one sign-in serves every Studio of theirs), then run again. The run reads this from Studio's own log (`%LOCALAPPDATA%\Roblox\logs`) and stops at the first look that shows it instead of waiting out `--connect-timeout`; with `--show` it says so once and waits, since the dialog can be answered there. |
 | `could not start ... on the hidden desktop flamework-test (CreateProcessW: error N)` / `could not make the hidden desktop` | Windows refused the hidden launch; `--show` opens Studio on your desktop instead. |
 | `Roblox Studio is running (...), but the MCP proxy reaches none of them` | The same setting, off in every running Studio: turn it on, then retry. |
 | `waiting for the Studio lock, held by flamework-test for <project> ...` | Another project's flamework-test window is open; the command waits for it (see [The Studio lock](#the-studio-lock)). |

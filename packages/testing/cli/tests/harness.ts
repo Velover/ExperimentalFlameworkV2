@@ -22,6 +22,7 @@ import {
 	type ToolInfo,
 	type ToolResult,
 } from "../src/studio.ts";
+import type { SignInReading } from "../src/studioLog.ts";
 
 export const SECRET = "secret-key-that-must-never-be-printed";
 export const UNIVERSE = "10765968722";
@@ -393,6 +394,11 @@ export async function runCli(
 		launchId?: () => string;
 		/** Runs when the CLI writes a text file (a patch's plan), with its path (forward slashes) and text. */
 		onWrite?: (path: string, text: string) => void;
+		/**
+		 * What Studio's log says of a launched process's sign-in (its PID, when it was launched); by
+		 * default nothing, as when no log is found, so no real log is ever read.
+		 */
+		signIn?: (pid: number, since: number) => SignInReading | undefined;
 	} = {},
 ): Promise<Harness> {
 	const out: string[] = [];
@@ -616,6 +622,7 @@ export async function runCli(
 			binaries[path.replaceAll("\\", "/")] = data;
 		},
 		...(options.launchId !== undefined ? { launchId: options.launchId } : {}),
+		studioSignIn: async (pid, since) => options.signIn?.(pid, since),
 	};
 
 	if (options.proxy === false) delete deps.connectStudio;

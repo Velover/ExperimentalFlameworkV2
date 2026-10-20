@@ -457,6 +457,9 @@ place's services are set to, not what Rojo synced; a project with a different tr
 project starting as one's window closes. Each project's lines are still printed together, in
 project order, and short lines on stderr say how the ones waiting to print are getting on. Each
 window takes about 3 GB; `FLAMEWORK_TEST_PARALLEL` or `"testing": { "parallel": 2 }` set it too.
+The windows launch one at a time, each once the Studio before it has signed in to Roblox (a few
+seconds, read from Studio's log; until it registers, or 30 seconds at most, when its log says
+nothing): two Studios signing in at once can sign every Studio out (seen 2026-10-20).
 See the package's [README](../../packages/testing/README.md#side-by-side).
 
 It is the preferred way to run several projects: `--parallel 2`, or more when memory allows. Leave
@@ -501,6 +504,7 @@ without running it, `place.deferred.rbxl`, to open in Studio and look at.
 |---|---|
 | `RobloxStudioBeta.exe was not found` | Studio is not installed here; set `ROBLOX_STUDIO_EXE`, or run with `--cloud`. |
 | `... never showed up on the MCP proxy within 3 min (--connect-timeout)` | The window opened but "MCP server" is disabled in Studio's Assistant settings, or, on the hidden desktop, it is showing a dialog nobody can see there (a login, an update): run again with `--show` to see which. The error names every window that registered with the proxy during the wait and what each answered when asked; a new window listed under a name that names no place (`Game`, `Place1`, or none for over 30 seconds) is asked, again every 5 seconds while it cannot say yet, and taken when it carries this launch's id. |
+| `Studio started (PID n) but is not signed in to Roblox, so <file> never opened` | Studio is signed out of Roblox: the window showed its login dialog on the hidden desktop, where nobody can answer it. Ask the user to open Roblox Studio and sign in (one sign-in serves every Studio of theirs), then run again. The run reads this from Studio's own log (`%LOCALAPPDATA%\Roblox\logs`) and stops at the first look that shows it instead of waiting out `--connect-timeout`; with `--show` it says so once and waits, since the dialog can be answered there. |
 | `the server's run failed: Workspace.FlameworkTests did not appear` | The build was made without the `testing` scope active (`FLAMEWORK_SCOPES=testing` for that build), so the plugin stayed inert. The client's run follows, and says the same. |
 | `the server's run failed: The current thread cannot invoke 'FlameworkTests' since 'FlameworkTests' has additional values for the Capabilities property: ...` | Studio ran MCP code sandboxed, as it may, and the place was built with `@flamework-experimental/testing` 2.0.0-alpha.5 or earlier, whose host does not make its bindable Sandboxed (see [In Studio](#in-studio-on-this-machine)). A later CLI marks it before the invoke while Studio allows that; this error means it could not, or the CLI is that old too. Update the package and rebuild the place. A later CLI says so under the error. |
 | `MISS matched nothing in any realm: ...` | A `--sections` entry named no section or test in any realm that ran. |

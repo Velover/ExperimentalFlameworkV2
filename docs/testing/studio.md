@@ -172,6 +172,22 @@ anyone.
   some of the session's desktop heap, one desktop's worth, however many windows it holds.
 - **A window that never connects** may be held up by a dialog on the hidden desktop (a login, an
   update, a crash report), which the error names, with `--show` to see it.
+- **Signed out (2026-10-20, Studio 0.743).** A `--parallel 2` run launched two hidden windows in
+  the same second, after Studio had sat closed for two hours. Both signed in by themselves at
+  start-up (Studio's log, `%LOCALAPPDATA%\Roblox\logs\*_Studio_*_last.log`: `login (automatic)`);
+  one succeeded, the other got 401 from `apis.roblox.com/oauth/v1/userinfo`, logged
+  `Login error: 'Failed to fetch user info'` and `Deleting and logging out security cookies`, and
+  never registered. That sign-in is shared: every Studio started after it (five, over ten
+  minutes, in the retries) showed its login dialog on the hidden desktop (`show login dialog`) and
+  never opened its file, so nothing registered with the MCP proxy and each waited out
+  `--connect-timeout`. It looked like "only the first window registers"; the proxy (one hub, the
+  first `StudioMCP.exe`, on 127.0.0.1:13469, every Studio and proxy connected to it) was fine. The
+  user opened Studio 16 minutes later and signed in through the browser (its log: `Successfully
+  received external login code`); every window since, hidden ones included, signed in by itself
+  and registered within seconds. Since then a run launches one window at a time, each once the one before has
+  signed in (3 to 5 seconds), and reads each launched window's log while it waits: a signed-out one
+  ends the wait with `... is not signed in to Roblox ...` at the first look that shows it. Each log
+  names its process (`UIThreadNotifier for process '<pid>'`) within its first second.
 - **A window listed under another name.** On 2026-10-07 hidden windows of `tests/place` (6 of 7 in
   two `--parallel 2` runs, and two of another project's) registered with the MCP proxy as `Game`
   and stayed so, while `game.Name` inside was the file's name; `--show` runs connected by name.

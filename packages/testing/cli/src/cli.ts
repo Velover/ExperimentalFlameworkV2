@@ -114,6 +114,7 @@ import {
 	type ToolInfo,
 	type ToolResult,
 } from "./studio.ts";
+import { signInReader, type SignInReading } from "./studioLog.ts";
 
 /** Where `cloud publish` records the version it made, for `cloud run` to pin. */
 export const VERSION_FILE = "build/version.json";
@@ -134,6 +135,13 @@ export const CONNECT_TIMEOUT_SECONDS = 180;
  * many projects of a `--parallel` run wait (see {@link askWindow}).
  */
 export const CONNECT_POLL_MS = 5000;
+/**
+ * How long, at most, a launch of `test --parallel` holds the next one back while its Studio signs in
+ * to Roblox (see {@link takeLaunchTurn}): until its log says it has (3 to 5 seconds after the launch,
+ * measured 2026-10-20, Studio 0.743), it registers with the proxy, or this much time has passed, when
+ * its log says nothing (not found, or written elsewhere).
+ */
+export const SIGN_IN_TURN_MS = 30_000;
 /**
  * How long one window is given to answer who it is ({@link askWindow}), or less, what is left of
  * the wait: measured 0.3 to 7.5 seconds, the longer while it was still loading its place.
@@ -804,6 +812,12 @@ export interface CliDeps {
 	 * on Workspace) and its window is asked for; a random UUID by default.
 	 */
 	launchId?: () => string;
+	/**
+	 * How a Studio process this run launched (`pid`, at `since`) is getting on signing in
+	 * to Roblox, read from Studio's own log (see studioLog.ts); undefined while its log says nothing of
+	 * it, or when there is no log to read.
+	 */
+	studioSignIn?: (pid: number, since: number) => Promise<SignInReading | undefined>;
 }
 
 /** How a program is launched: `hidden` on the hidden desktop (Windows), or where the user sees it. */
@@ -832,7 +846,13 @@ interface Io extends Required<Omit<CliDeps, "fetch">> {
 	 * window asked who it is answered, by MCP id, so the projects of a `test --parallel` share
 	 * every answer and ask a window no more often than one project would (see {@link askWindow}).
 	 */
-	memo: { settings?: CloudSettings; project?: string; asked?: Map<string, AskRecord> };
+	memo: {
+		settings?: CloudSettings;
+		project?: string;
+		asked?: Map<string, AskRecord>;
+		/** Resolves once every launch so far has let the next one go: see {@link takeLaunchTurn}. */
+		launchTurn?: Promise<void>;
+	};
 	/** How many tests the results printed through this view skipped: one project's, for its line at the end. */
 	tally: { skipped: number };
 	/**
@@ -1107,6 +1127,7 @@ function resolveDeps(deps: CliDeps, interruption: Interruption): Io {
 				await Bun.write(path, data);
 			}),
 		launchId: deps.launchId ?? (() => randomUUID()),
+		studioSignIn: deps.studioSignIn ?? signInReader(env),
 		interruption,
 		progress: () => {},
 		memo: {},
@@ -2992,18 +3013,21 @@ function requireStudioExe(io: Io): string {
 
 /**
  * Polls the proxy until a window matches, or the wait (`timeoutMs`) runs out; `find` is told when
- * that is (`deadline`, by `io.now()`), to ask nothing that would outlast it.
+ * that is (`deadline`, by `io.now()`), to ask nothing that would outlast it. `watch`, after each
+ * look that found nothing, may end the wait early by answering true (a window that cannot come).
  */
 async function waitForStudio(
 	client: StudioClient,
 	find: (studios: StudioEntry[], deadline: number) => StudioEntry | undefined | Promise<StudioEntry | undefined>,
 	timeoutMs: number,
 	io: Io,
+	watch?: () => Promise<boolean>,
 ): Promise<StudioEntry | undefined> {
 	const deadline = io.now().getTime() + timeoutMs;
 	while (io.now().getTime() < deadline) {
 		const studio = await find(await client.studios(), deadline);
 		if (studio !== undefined) return studio;
+		if ((await watch?.()) === true) return undefined;
 		await io.sleep(CONNECT_POLL_MS);
 	}
 	return undefined;
@@ -3080,6 +3104,82 @@ function neverConnected(
 				? `${advice}; the window this run opened is closed again`
 				: advice,
 	);
+}
+
+/**
+ * A window flamework-test launched on the hidden desktop whose Studio is not signed in to Roblox: it
+ * shows its login dialog there, where nobody can answer it, and never opens the file, so it never
+ * registers with the proxy (see studioLog.ts). `window` as for {@link neverConnected}.
+ */
+function signedOut(what: string, window: "open" | "closed" | "unstated", pid: number, log: string): CliError {
+	const advice =
+		"ask the user to open Roblox Studio and sign in (one sign-in serves every Studio of theirs), then run this again. A Studio that fails to sign in at start-up signs every Studio out: seen when two started in the same second while the sign-in was due a refresh, which flamework-test no longer does";
+	return new CliError(
+		`Studio started (PID ${pid}) but is not signed in to Roblox, so ${what} never opened: it showed its login dialog on the hidden desktop, where nobody can answer it (Studio's log: ${log})`,
+		window === "open"
+			? `${advice}; the window is open, and holds the Studio lock until it closes (\`flamework-test studio close\` closes it)`
+			: window === "closed"
+				? `${advice}; the window this run opened is closed again`
+				: advice,
+	);
+}
+
+/** A project's turn to launch Studio: `wait` resolves once the launches before it let go, `done` lets the next one go. */
+interface LaunchTurn {
+	wait: Promise<void>;
+	done: () => void;
+}
+
+/**
+ * Takes the next turn to launch Studio in this invocation. The projects of a `test --parallel` run
+ * launch one at a time, each once the Studio launched before it has signed in to Roblox: two
+ * Studios that start at once both sign in at once, and when the sign-in was due a refresh, one of
+ * them can fail and sign every Studio of the user out (seen 2026-10-20, see studioLog.ts). That
+ * costs a few seconds per window, not a window's run: the next launch goes as soon as the one before
+ * has signed in, registered with the proxy, failed, or had {@link SIGN_IN_TURN_MS}.
+ */
+function takeLaunchTurn(io: Io): LaunchTurn {
+	const wait = io.memo.launchTurn ?? Promise.resolve();
+	let done!: () => void;
+	const mine = new Promise<void>((resolveTurn) => (done = resolveTurn));
+	// After every launch before this one, even one that let go before the one before it did.
+	io.memo.launchTurn = wait.then(() => mine);
+	return { wait, done };
+}
+
+/**
+ * What a run watches while it waits for a window it launched to register: Studio's sign-in, from
+ * its log. Once it has signed in, failed or had {@link SIGN_IN_TURN_MS}, the next launch may go
+ * (`letGo`). A Studio showing its login dialog on the hidden desktop ends the wait (`signedOut`
+ * says why); one the user sees is said once, and waited for, since they can sign in there.
+ */
+function signInWatch(
+	io: Io,
+	launch: { pid: number | undefined; at: number; hidden: boolean; what: string; say: (line: string) => void },
+	letGo: () => void = () => {},
+): { watch: () => Promise<boolean>; signedOut: () => SignInReading | undefined } {
+	let out: SignInReading | undefined;
+	let said = false;
+	const watch = async (): Promise<boolean> => {
+		const reading = launch.pid !== undefined ? await io.studioSignIn(launch.pid, launch.at) : undefined;
+		if (reading?.state === "signed-in") letGo();
+		if (reading?.state === "signed-out") {
+			letGo();
+			if (launch.hidden) {
+				out = reading;
+				return true;
+			}
+			if (!said) {
+				said = true;
+				launch.say(
+					`Studio (PID ${launch.pid}) is showing its login dialog: it is not signed in to Roblox, and opens ${launch.what} once someone signs in there`,
+				);
+			}
+		}
+		if (io.now().getTime() - launch.at >= SIGN_IN_TURN_MS) letGo();
+		return false;
+	};
+	return { watch, signedOut: () => out };
 }
 
 /** What a window says when asked who it is: its DataModel's name, and the launch id its place carries, if any. */
@@ -3314,6 +3414,7 @@ async function findLaunchedWindow(
 	timeoutMs: number,
 	io: Io,
 	launch?: string,
+	watch?: () => Promise<boolean>,
 ): Promise<LaunchedWindow> {
 	if ("placeId" in target) {
 		const studio = await waitForStudio(
@@ -3332,6 +3433,7 @@ async function findLaunchedWindow(
 			},
 			timeoutMs,
 			io,
+			watch,
 		);
 		return { studio, how: "name", unaccounted: false, others: [], seen: [] };
 	}
@@ -3442,6 +3544,7 @@ async function findLaunchedWindow(
 		},
 		timeoutMs,
 		io,
+		watch,
 	);
 	return {
 		studio,
@@ -3541,6 +3644,7 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 				// Whatever the proxy lists now is not this command's window, even when it has the same name.
 				const before = new Set((await client.studios()).map((entry) => entry.id));
 				await lock.check();
+				const launchedAt = io.now().getTime();
 				// Where it can be seen: looking at it is what `studio open` is for.
 				pid = await io.launch([exe, ...studioOpenArguments(launch)], { hidden: false });
 				await slot.launched(pid);
@@ -3571,6 +3675,9 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 						before,
 						connectTimeout.ms,
 						io,
+						undefined,
+						// Shown, so its login dialog, if it shows one, is said and waited on.
+						signInWatch(io, { pid, at: launchedAt, hidden: false, what, say }).watch,
 					);
 				} catch (error) {
 					// Ctrl+C leaves the window, which is what was asked for.
@@ -5208,17 +5315,23 @@ async function studioTestWindow(
 		// The name is held from before the proxy is looked at until this run's window is listed, or
 		// until the window it gave up on is closed: another run of a same-named file waits meanwhile.
 		let release: (() => void) | undefined;
+		let turn: LaunchTurn | undefined;
 		try {
 			release = await io.claimWindowName(name, (holder) =>
 				io.log(
 					`waiting for another flamework-test run (PID ${holder}) to finish opening its ${name} window...`,
 				),
 			);
+			// One launch at a time, each once the Studio before it has signed in: two signing in at
+			// once can sign every Studio out (see takeLaunchTurn).
+			const myTurn = takeLaunchTurn(io);
+			turn = myTurn;
+			await io.interruption.run(() => myTurn.wait);
 			// Whatever the proxy lists now is not this run's window, even when it has the same name.
-			// Two projects' launches a moment apart are not staggered: Studio opened and connected
-			// both every time (2026-10-05), and each run takes only an entry of its own file's name.
+			// Each run takes only an entry of its own file's name.
 			const before = new Set((await client.studios()).map((entry) => entry.id));
 			await slot.lock.check();
+			const launchedAt = io.now().getTime();
 			try {
 				pid = await io.launch([exe, ...studioOpenArguments({ file })], { hidden });
 			} catch (error) {
@@ -5241,7 +5354,23 @@ async function studioTestWindow(
 			io.progress(`opening ${name} in Studio (PID ${pid ?? "unknown"}${hidden ? ", hidden" : ""})`);
 
 			const connectTimeout = connectTimeoutOf(flags, io, "test");
-			const found = await findLaunchedWindow(client, { file }, pid, before, connectTimeout.ms, io, launch);
+			const signIn = signInWatch(io, { pid, at: launchedAt, hidden, what: label, say: io.log }, myTurn.done);
+			const found = await findLaunchedWindow(
+				client,
+				{ file },
+				pid,
+				before,
+				connectTimeout.ms,
+				io,
+				launch,
+				signIn.watch,
+			);
+			myTurn.done();
+			const out = signIn.signedOut();
+			if (found.studio === undefined && out !== undefined && pid !== undefined) {
+				const closed = await giveUp();
+				throw signedOut(label, keep ? "open" : closed ? "closed" : "unstated", pid, out.log);
+			}
 			if (found.studio === undefined) {
 				const closed = await giveUp();
 				throw found.unaccounted
@@ -5269,6 +5398,7 @@ async function studioTestWindow(
 			if (launched && !gaveUp) await giveUp();
 			throw error;
 		} finally {
+			turn?.done();
 			release?.();
 		}
 
