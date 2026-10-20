@@ -26,6 +26,14 @@ type Brand16 = number & { readonly kind: "u16" };
 /** An optional brand of one's own counts as implicit. */
 type LooseByte = number & { readonly mine?: "u8" };
 
+/** The 64-bit widths in a struct, strict and implicit, next to a narrower one. */
+interface Stamp {
+	userId: Serialization.u64;
+	at: Serialization.Implicit.u64;
+	delta: Serialization.i64;
+	level: Serialization.Implicit.u8;
+}
+
 interface Point {
 	x: number;
 	y: number;
@@ -243,6 +251,30 @@ function countingBuffer(count: number): buffer {
 	return result;
 }
 
+/**
+ * A 64-bit width's samples, labelled by hand: `tostring` prints 2^53 as `9.007199254740992e+15`.
+ * The edges of a u32 and an i32 and one past them, and the edges of what a double holds exactly.
+ */
+const U64_SAMPLES: Array<[string, number]> = [
+	["0", 0],
+	["1", 1],
+	["2^32 - 1", 2 ** 32 - 1],
+	["2^32", 2 ** 32],
+	["2^40 + 5", 2 ** 40 + 5],
+	["2^53", 2 ** 53],
+];
+const I64_SAMPLES: Array<[string, number]> = [
+	["0", 0],
+	["1", 1],
+	["-1", -1],
+	["-2", -2],
+	["-2^31", -(2 ** 31)],
+	["-2^32", -(2 ** 32)],
+	["2^32", 2 ** 32],
+	["-2^53", -(2 ** 53)],
+	["2^53", 2 ** 53],
+];
+
 /** Whole numbers, each labelled as itself. */
 function whole<T extends number>(...values: number[]): Array<[string, T]> {
 	return values.map((value): [string, T] => [tostring(value), value as T]);
@@ -331,6 +363,18 @@ function numberCases(): SerializerCase[] {
 			whole(-2147483648, -1, 0, 2147483647),
 		),
 		golden(
+			"Serialization.u64",
+			Flamework.createSerializer<Serialization.u64>(),
+			Flamework.createSerializer<Serialization.u64>({ version: 1 }),
+			U64_SAMPLES as Array<[string, Serialization.u64]>,
+		),
+		golden(
+			"Serialization.i64",
+			Flamework.createSerializer<Serialization.i64>(),
+			Flamework.createSerializer<Serialization.i64>({ version: 1 }),
+			I64_SAMPLES as Array<[string, Serialization.i64]>,
+		),
+		golden(
 			"Serialization.f32",
 			Flamework.createSerializer<Serialization.f32>(),
 			Flamework.createSerializer<Serialization.f32>({ version: 1 }),
@@ -413,6 +457,18 @@ function numberCases(): SerializerCase[] {
 			whole(-2147483648, 2147483647),
 		),
 		golden(
+			"Serialization.Implicit.u64",
+			Flamework.createSerializer<Serialization.Implicit.u64>(),
+			Flamework.createSerializer<Serialization.Implicit.u64>({ version: 1 }),
+			U64_SAMPLES as Array<[string, Serialization.Implicit.u64]>,
+		),
+		golden(
+			"Serialization.Implicit.i64",
+			Flamework.createSerializer<Serialization.Implicit.i64>(),
+			Flamework.createSerializer<Serialization.Implicit.i64>({ version: 1 }),
+			I64_SAMPLES as Array<[string, Serialization.Implicit.i64]>,
+		),
+		golden(
 			"Serialization.Implicit.f32",
 			Flamework.createSerializer<Serialization.Implicit.f32>(),
 			Flamework.createSerializer<Serialization.Implicit.f32>({ version: 1 }),
@@ -446,6 +502,29 @@ function numberCases(): SerializerCase[] {
 			Flamework.createSerializer<LooseByte>(),
 			Flamework.createSerializer<LooseByte>({ version: 1 }),
 			whole(0, 255),
+		),
+		golden("Stamp", Flamework.createSerializer<Stamp>(), Flamework.createSerializer<Stamp>({ version: 1 }), [
+			["small", { userId: 1 as Serialization.u64, at: 0, delta: -1 as Serialization.i64, level: 3 }],
+			[
+				"large",
+				{
+					userId: (2 ** 40 + 5) as Serialization.u64,
+					at: 2 ** 53,
+					delta: -(2 ** 53) as Serialization.i64,
+					level: 255,
+				},
+			],
+		]),
+		golden(
+			"Serialization.u32 | Serialization.i64 | string",
+			Flamework.createSerializer<Serialization.u32 | Serialization.i64 | string>(),
+			Flamework.createSerializer<Serialization.u32 | Serialization.i64 | string>({ version: 1 }),
+			[
+				["5 (the u32)", 5 as Serialization.u32],
+				["2^32 (the i64)", (2 ** 32) as Serialization.i64],
+				["-1 (the i64)", -1 as Serialization.i64],
+				["text", "text"],
+			],
 		),
 	];
 }

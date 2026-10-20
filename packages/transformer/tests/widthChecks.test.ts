@@ -15,6 +15,9 @@ const WRITES: Record<string, RegExp> = {
 	I16: /buffer\.writei16\(buf\w*, 0, v\w*\)/,
 	U32: /buffer\.writeu32\(buf\w*, 0, v\w*\)/,
 	I32: /buffer\.writei32\(buf\w*, 0, v\w*\)/,
+	// Two 32-bit halves, little-endian: the low one, then the high one (signed for an i64).
+	U64: /buffer\.writeu32\(buf\w*, 0, v\w* % 4294967296\)\s*buffer\.writeu32\(buf\w*, 4, math\.floor\(v\w* \/ 4294967296\)\)/,
+	I64: /buffer\.writeu32\(buf\w*, 0, v\w* % 4294967296\)\s*buffer\.writei32\(buf\w*, 4, math\.floor\(v\w* \/ 4294967296\)\)/,
 	F32: /buffer\.writef32\(buf\w*, 0, v\w*\)/,
 	F64: /buffer\.writef64\(buf\w*, 0, v\w*\)/,
 	Varint: /o\w* = vwrite\(buf\w*, o\w*, v\w*\)/,
@@ -26,7 +29,21 @@ const WRITES: Record<string, RegExp> = {
 };
 
 /** The widths that can refuse a value, and so get a check. */
-const CHECKED = ["U8", "I8", "U16", "I16", "U32", "I32", "F32", "Varint", "String8", "String16", "Buffer16"];
+const CHECKED = [
+	"U8",
+	"I8",
+	"U16",
+	"I16",
+	"U32",
+	"I32",
+	"U64",
+	"I64",
+	"F32",
+	"Varint",
+	"String8",
+	"String16",
+	"Buffer16",
+];
 
 const variants: Record<"allWarnServer" | "none" | "clientObfuscated", Map<string, string>> = {} as never;
 
@@ -367,6 +384,91 @@ describe("the check code", () => {
 	});
 });
 
+describe("the 64-bit widths", () => {
+	test("are checked against the whole numbers a double holds exactly, 2^53 in size", () => {
+		expect(serializer(source(), "implicitU64")).toMatch(
+			/if not \(v\w* >= 0 and v\w* <= 9007199254740992 and v\w* % 1 == 0\) then\s*codec\.checkWidth\("u64", v\w*, "value"\)\s*end\s*buffer\.writeu32\(buf\w*, 0, v\w* % 4294967296\)\s*buffer\.writeu32\(buf\w*, 4, math\.floor\(v\w* \/ 4294967296\)\)/,
+		);
+		expect(serializer(source(), "implicitI64")).toMatch(
+			/if not \(v\w* >= -9007199254740992 and v\w* <= 9007199254740992 and v\w* % 1 == 0\) then\s*codec\.checkWidth\("i64", v\w*, "value"\)\s*end\s*buffer\.writeu32\(buf\w*, 0, v\w* % 4294967296\)\s*buffer\.writei32\(buf\w*, 4, math\.floor\(v\w* \/ 4294967296\)\)/,
+		);
+		expect(serializer(source(), "strictU64")).not.toContain("checkWidth");
+	});
+
+	test("are read back as the high half times 2^32 plus the low half, in a buffer of eight bytes", () => {
+		for (const [name, high] of [
+			["U64", "readu32"],
+			["I64", "readi32"],
+		]) {
+			for (const width of [`implicit${name}`, `strict${name}`]) {
+				const emit = serializer(source(), width);
+				expect(emit).toMatch(/local buf\w* = buffer\.create\(8\)/);
+				expect(emit).toMatch(
+					new RegExp(`buffer\\.${high}\\(buf\\w*, 4\\) \\* 4294967296 \\+ buffer\\.readu32\\(buf\\w*, 0\\)`),
+				);
+				expect(emit).toMatch(/if buffer\.len\(buf\w*\) ~= 8 then/);
+				expect(emit).not.toMatch(/(read|write)[ui]64/);
+			}
+		}
+	});
+
+	test("split a literal when the project builds, and check one past 2^53 as it is", () => {
+		const literals = functionBody(source(), "sendStampLiterals");
+		// 2^40 + 5 is 5 and 256, and needs no check. (A call site reads `-2` into a local first, as it does
+		// for every width, so that one is split where it runs.)
+		expect(literals).toMatch(/buffer\.writeu32\(buf\w*, 0, 5\)\s*buffer\.writeu32\(buf\w*, 4, 256\)/);
+		expect(literals).not.toMatch(/codec\.checkWidth\("u64", 1099511627781/);
+		// 2^54 is 0 and 2^22, after a check that cannot pass; 0 is 0 and 0.
+		expect(literals).toMatch(
+			/codec\.checkWidth\("u64", 18014398509481984, "'stamp' \[0\]"\)\s*buffer\.writeu32\(buf\w*, 0, 0\)\s*buffer\.writeu32\(buf\w*, 4, 4194304\)\s*buffer\.writeu32\(buf\w*, 8, 0\)\s*buffer\.writei32\(buf\w*, 12, 0\)/,
+		);
+		expect(literals.match(/codec\.checkWidth\("u64"/g)).toHaveLength(1);
+	});
+
+	test("take a plain number, a narrower implicit width and a strict one at a call site, each checked", () => {
+		const send = functionBody(source(), "sendStamp");
+		expect(send).toMatch(/codec\.checkWidth\("u64", at, "'stamp' \[0\]"\)/);
+		expect(send).toMatch(/codec\.checkWidth\("i64", delta, "'stamp' \[1\]"\)/);
+		expect(send).toMatch(/codec\.checkWidth\("u64", small, "'stamp' \[0\]"\)/);
+		// A field is read once, into the argument's local, which both halves use.
+		expect(functionBody(source(), "sendStampField")).toMatch(
+			/\n\tlocal (arg\w*) = clock\.now\n[\s\S]*\n\tif not \(\1 >= 0 and \1 <= 9007199254740992 and \1 % 1 == 0\) then\n\t\tcodec\.checkWidth\("u64", \1, "'stamp' \[0\]"\)\n\tend\n\tbuffer\.writeu32\(buf\w*, 0, \1 % 4294967296\)\n\tbuffer\.writeu32\(buf\w*, 4, math\.floor\(\1 \/ 4294967296\)\)\n/,
+		);
+	});
+
+	test("in a struct: the implicit fields checked, an unchecked strict one read once into a local all the same", () => {
+		// A fixed size, 8 + 8 + 8 + 1, so it is written inline at literal offsets.
+		const write = serializer(source(), "accountSerializer");
+		expect(write).toMatch(/buffer\.create\(25\)/);
+		expect(write).toMatch(/codec\.checkWidth\("u64", n\w*, "Account\.userId"\)/);
+		expect(write).toMatch(/codec\.checkWidth\("i64", n\w*, "Account\.balance"\)/);
+		expect(write).toMatch(/codec\.checkWidth\("u8", n\w*, "Account\.level"\)/);
+		expect(write.match(/codec\.checkWidth\(/g)).toHaveLength(3);
+		expect(write).toMatch(
+			/\n\t\tdo\n\t\t\tlocal (n\w*) = v\w*\.created\n\t\t\tbuffer\.writeu32\(buf\w*, 16, \1 % 4294967296\)\n\t\t\tbuffer\.writeu32\(buf\w*, 20, math\.floor\(\1 \/ 4294967296\)\)\n\t\tend\n/,
+		);
+		expect(write).toMatch(
+			/created = buffer\.readu32\(buf\w*, 20\) \* 4294967296 \+ buffer\.readu32\(buf\w*, 16\),/,
+		);
+	});
+
+	test("in a union with a 32-bit width: each takes what it holds, and the fallback names both", () => {
+		const write = hoisted(source(), "w", "Wide");
+		expect(write).toMatch(
+			/if type\(v\w*\) == "number" and \(v\w* >= 0 and v\w* <= 4294967295 and v\w* % 1 == 0\) then\s*buffer\.writeu8\(buf\w*, o\w*, 0\)\s*buffer\.writeu32\(buf\w*, o\w* \+ 1, v\w*\)/,
+		);
+		expect(write).toMatch(
+			/elseif type\(v\w*\) == "number" and \(v\w* >= -9007199254740992 and v\w* <= 9007199254740992 and v\w* % 1 == 0\) then\s*buffer\.writeu8\(buf\w*, o\w*, 1\)\s*buffer\.writeu32\(buf\w*, o\w* \+ 1, v\w* % 4294967296\)\s*buffer\.writei32\(buf\w*, o\w* \+ 5, math\.floor\(v\w* \/ 4294967296\)\)/,
+		);
+		expect(write).toMatch(
+			/elseif type\(v\w*\) == "number" and codec\.checkWidth\("u32 \| i64", v\w*, where\w*\) then/,
+		);
+		expect(hoisted(source(), "r", "Wide")).toMatch(
+			/elseif tag\w* == 1 then\s*value\w* = buffer\.readi32\(buf\w*, o\w* \+ 4\) \* 4294967296 \+ buffer\.readu32\(buf\w*, o\w*\)\s*o\w* \+= 8/,
+		);
+	});
+});
+
 describe("serialization.checks", () => {
 	test("category all checks strict widths too", () => {
 		const all = variant("allWarnServer");
@@ -374,6 +476,12 @@ describe("serialization.checks", () => {
 			expect(`${width}: ${serializer(all, `strict${width}`).includes("checkWidth(")}`).toBe(`${width}: true`);
 		}
 		expect(serializer(all, "strictU16")).toMatch(/codec\.checkWidth\("u16", v\w*, "value"\)/);
+		expect(serializer(all, "strictU64")).toMatch(
+			/if not \(v\w* >= 0 and v\w* <= 9007199254740992 and v\w* % 1 == 0\) then\s*codec\.checkWidth\("u64", v\w*, "value"\)/,
+		);
+		// The strict field of a struct is checked too, under `all`.
+		expect(serializer(all, "accountSerializer").match(/codec\.checkWidth\(/g)).toHaveLength(4);
+		expect(serializer(all, "accountSerializer")).toMatch(/codec\.checkWidth\("u64", n\w*, "Account\.created"\)/);
 		expect(hoisted(all, "w", "Entity").match(/codec\.checkWidth\(/g)).toHaveLength(7);
 	});
 

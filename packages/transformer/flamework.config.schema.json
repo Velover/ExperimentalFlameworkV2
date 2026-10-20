@@ -80,7 +80,7 @@
 				"checks": {
 					"type": "object",
 					"additionalProperties": false,
-					"description": "Checks on a value as it is written, for the widths that can refuse one: u8, i8, u16, i16, u32 and i32 take whole numbers in their range, varint a whole number from 0 to 2^35 - 1, f32 any number but a finite one past its range, string8 and string16 at most 255 and 65535 bytes, buffer16 at most 65535 bytes. f64, string32 and buffer32 hold every value. Reading needs no check: a decoded value always fits its width. With types, every value's type is tested as well. Default: checks on values typed with Serialization.Implicit.*, raising, in both realms, and no type tests.",
+					"description": "Checks on a value as it is written, for the widths that can refuse one: u8, i8, u16, i16, u32 and i32 take whole numbers in their range, u64 and i64 whole numbers from 0 or -2^53 to 2^53 (the ones a number holds exactly), varint a whole number from 0 to 2^35 - 1, f32 any number but a finite one past its range, string8 and string16 at most 255 and 65535 bytes, buffer16 at most 65535 bytes. f64, string32 and buffer32 hold every value. Reading needs no check: a decoded value always fits its width. With types, every value's type is tested as well. Default: checks on values typed with Serialization.Implicit.*, raising, in both realms, and no type tests.",
 					"properties": {
 						"category": {
 							"type": "string",

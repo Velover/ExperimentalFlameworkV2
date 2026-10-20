@@ -30,7 +30,9 @@ import { isArrayType, isTupleType } from "./isTupleType";
  * missing or invalid value never shifts the others.
  *
  * Wire format, in bytes:
- * - numbers: 8 (f64) unless branded (`u8` .. `f64`, or `varint` for a LEB128 unsigned integer); booleans 1
+ * - numbers: 8 (f64) unless branded (`u8` .. `f64`, or `varint` for a LEB128 unsigned integer); booleans 1.
+ *   A `u64` or `i64` is 8, little-endian: the low 32 bits as a u32, then the high 32 bits (a u32, an i32
+ *   for `i64`), exact for the whole numbers up to 2^53 in size
  * - strings and buffers: varint length + bytes (a fixed 1 / 2 / 4 with the `u8_string` .. `u32_buffer` brands)
  * - literal unions: a 1-byte index (2 past 255 members) into the values in canonical order (see
  *   `sortLiterals`: `false`, `true`, `""`, `0` and the names `typeof` returns first, then sorted, a
@@ -92,12 +94,28 @@ import { isArrayType, isTupleType } from "./isTupleType";
  * values inside it are tested again. Off, nothing is generated.
  */
 
-type Width = "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "f32" | "f64";
+type Width = "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "u64" | "i64" | "f32" | "f64";
+/** The 64-bit integer widths, which `buffer` has no call for: each is written as two 32-bit halves. */
+type WideWidth = Extract<Width, "u64" | "i64">;
 /** A length prefix: a varint (`v`) by default, or the fixed width a brand asks for. */
 type LengthWidth = "v" | "u8" | "u16" | "u32";
 type FixedLengthWidth = Exclude<LengthWidth, "v">;
 
-const WIDTH_SIZE: Record<Width, number> = { u8: 1, i8: 1, u16: 2, i16: 2, u32: 4, i32: 4, f32: 4, f64: 8 };
+const WIDTH_SIZE: Record<Width, number> = {
+	u8: 1,
+	i8: 1,
+	u16: 2,
+	i16: 2,
+	u32: 4,
+	i32: 4,
+	u64: 8,
+	i64: 8,
+	f32: 4,
+	f64: 8,
+};
+const isWide = (width: Width): width is WideWidth => width === "u64" || width === "i64";
+/** What one 32-bit half of a 64-bit width counts for: the high half is the value divided by it. */
+const HALF = 2 ** 32;
 const LENGTH_MAX: Record<FixedLengthWidth, number> = { u8: 0xff, u16: 0xffff, u32: 0xffffffff };
 const lengthMin = (width: LengthWidth) => (width === "v" ? 1 : WIDTH_SIZE[width]);
 
@@ -344,6 +362,9 @@ const WIDTH_RANGE: Partial<Record<Width, [number, number]>> = {
 	i16: [-0x8000, 0x7fff],
 	u32: [0, 0xffffffff],
 	i32: [-0x80000000, 0x7fffffff],
+	// The whole numbers a double holds exactly; past them a value would come back as another one.
+	u64: [0, 2 ** 53],
+	i64: [-(2 ** 53), 2 ** 53],
 };
 const F32_MAX = 3.4028234663852886e38;
 
@@ -4149,6 +4170,53 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return n;
 	}
 
+	/**
+	 * A `u64` or `i64`, which `buffer` has no call for: eight bytes, little-endian, the low 32 bits as a
+	 * u32 and then the high 32 bits, a u32 for `u64` and an i32 for `i64` (two's complement, so a
+	 * negative value is the standard layout too). `math.floor(n / 2^32)` is the high half and
+	 * `n % 2^32` the low one, which Luau defines as `n - math.floor(n / 2^32) * 2^32`: exact for every
+	 * whole number up to 2^53 in size, the range the checks hold a value to. A literal is split here. A
+	 * value that is more than a name is read once, into a local in a block of its own, as
+	 * {@link writeNumber} reads a checked one.
+	 */
+	function writeWide(ctx: Ctx, width: WideWidth, value: ts.Expression) {
+		const high = width === "u64" ? "writeu32" : "writei32";
+		const known = literalNumber(skipCasts(value));
+		if (known !== undefined && Number.isFinite(known)) {
+			const upper = Math.floor(known / HALF);
+			ctx.out.push(f.statement(bufferCall("writeu32", [ctx.buf, at(ctx), num(known - upper * HALF)])));
+			ctx.out.push(f.statement(bufferCall(high, [ctx.buf, at(ctx, 4), num(upper)])));
+			ctx.cursor.offset += WIDTH_SIZE[width];
+			return;
+		}
+
+		const block: Ctx = { ...ctx, out: [] };
+		const n = f.is.identifier(skipCasts(value)) ? value : bind(block.out, value, "n");
+		const target = block.out.length > 0 ? block : ctx;
+		const number = cast(n, T.number());
+		target.out.push(
+			f.statement(
+				bufferCall("writeu32", [
+					target.buf,
+					at(target),
+					f.binary(number, ts.SyntaxKind.PercentToken, num(HALF)),
+				]),
+			),
+		);
+		const upper = f.call(prop(globalRef("math"), "floor"), [f.binary(number, ts.SyntaxKind.SlashToken, num(HALF))]);
+		target.out.push(f.statement(bufferCall(high, [target.buf, at(target, 4), upper])));
+		target.cursor.offset += WIDTH_SIZE[width];
+		if (target === block) ctx.out.push(f.block(block.out));
+	}
+
+	/** `buffer.readu32(buf, o + 4) * 2^32 + buffer.readu32(buf, o)`, with `readi32` for an `i64`'s high half. */
+	function readWide(ctx: Ctx, width: WideWidth): ts.Expression {
+		const high = bufferCall(width === "u64" ? "readu32" : "readi32", [ctx.buf, at(ctx, 4)]);
+		const low = bufferCall("readu32", [ctx.buf, at(ctx)]);
+		ctx.cursor.offset += WIDTH_SIZE[width];
+		return f.binary(f.binary(high, ts.SyntaxKind.AsteriskToken, num(HALF)), ts.SyntaxKind.PlusToken, low);
+	}
+
 	/** `<prefix> + length`: a constant prefix for a branded width, `vsize(length)` otherwise. */
 	function sizeWithLength(out: ts.Statement[], width: LengthWidth, length: ts.Expression): ts.Expression {
 		if (width !== "v") return add(length, WIDTH_SIZE[width]);
@@ -5132,6 +5200,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		switch (kind.kind) {
 			case "number":
 				return writeNumber(kind, value, ctx, (n, target) => {
+					if (isWide(kind.width)) return writeWide(target, kind.width, n);
 					target.out.push(
 						f.statement(bufferCall(`write${kind.width}`, [target.buf, at(target), cast(n, T.number())])),
 					);
@@ -5579,6 +5648,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const kind = describe(shape);
 		switch (kind.kind) {
 			case "number": {
+				if (isWide(kind.width)) return readWide(ctx, kind.width);
 				const read = bufferCall(`read${kind.width}`, [ctx.buf, at(ctx)]);
 				ctx.cursor.offset += WIDTH_SIZE[kind.width];
 				return read;

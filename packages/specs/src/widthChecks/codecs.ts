@@ -19,6 +19,9 @@ export interface Tagged {
 
 export const u16 = Flamework.createSerializer<Serialization.Implicit.u16>();
 export const strictU16 = Flamework.createSerializer<Serialization.u16>();
+export const u64 = Flamework.createSerializer<Serialization.Implicit.u64>();
+export const strictU64 = Flamework.createSerializer<Serialization.u64>();
+export const i64 = Flamework.createSerializer<Serialization.Implicit.i64>();
 export const i8 = Flamework.createSerializer<Serialization.Implicit.i8>();
 export const f32 = Flamework.createSerializer<Serialization.Implicit.f32>();
 export const varint = Flamework.createSerializer<Serialization.Implicit.varint>();

@@ -319,9 +319,16 @@ Sizes follow the types:
 - Counts and lengths (of arrays, sets, maps, strings and buffers) are varints: one byte below 128,
   two below 16384, up to five.
 
-To pick a number's width, use a brand. `Serialization.u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `f32`,
-`f64` and `varint` from `@flamework-experimental/core` are `number & { __brand: "u8" }`-style types.
-Any brand with one of those literal names counts, so branded types you already have keep working.
+To pick a number's width, use a brand. `Serialization.u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `u64`,
+`i64`, `f32`, `f64` and `varint` from `@flamework-experimental/core` are `number & { __brand: "u8" }`-style
+types. Any brand with one of those literal names counts, so branded types you already have keep
+working.
+
+`u64` and `i64` are for whole numbers past 32 bits, such as a UserId, a time in milliseconds or a
+large counter. They are eight bytes in the standard layout, little-endian: the low 32 bits, then the
+high 32 bits (in two's complement for `i64`), so other systems can read them. A Luau number holds
+whole numbers exactly only up to 2^53, so that is their range: 0 to 2^53 for `u64`, -2^53 to 2^53
+for `i64`. The checks below refuse a value past it, or a fraction.
 `Serialization.string8` / `string16` / `string32` (and `buffer16` / `buffer32`) give a string or
 buffer a fixed-width length instead.
 
@@ -429,8 +436,8 @@ either side, and the remote fires with no arguments at all. An array rest parame
 ### Implicit widths and checks
 
 `Serialization.Implicit` has a twin of every brand: `Implicit.u8`, `i8`, `u16`, `i16`, `u32`,
-`i32`, `f32`, `f64`, `varint`, `string8`, `string16`, `string32`, `buffer16` and `buffer32`. An
-implicit width takes a plain value, so no cast is needed:
+`i32`, `u64`, `i64`, `f32`, `f64`, `varint`, `string8`, `string16`, `string32`, `buffer16` and
+`buffer32`. An implicit width takes a plain value, so no cast is needed:
 
 ```ts
 interface Tile {
@@ -501,6 +508,7 @@ What each width checks:
 | Width | Check |
 |---|---|
 | `u8`, `i8`, `u16`, `i16`, `u32`, `i32` | A whole number in range. |
+| `u64`, `i64` | A whole number from 0 (`u64`) or -2^53 (`i64`) to 2^53, the ones a number holds exactly. |
 | `varint` | A whole number from 0 to 2^35 - 1. |
 | `f32` | Not a finite number past its range. NaN and the infinities are written as they are. |
 | `string8`, `string16` | At most 255 or 65535 bytes. |

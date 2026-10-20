@@ -59,6 +59,19 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   which moved by 3 to 5 µs from one run to the next); a tagged descendant that leaves meanwhile adds
   a copy of its tag's `GetTagged` list for each component using the tag. Since v1.
 
+### core
+
+#### Added
+
+- **`Serialization.u64` and `Serialization.i64`,** with `Serialization.Implicit.u64` and
+  `Implicit.i64`, for whole numbers past 32 bits: a UserId, a time in milliseconds, a large counter.
+  The value is a plain number, as with every other width. On the wire it is eight bytes in the
+  standard little-endian layout, the low 32 bits then the high 32 bits (two's complement for
+  `i64`), so other systems read it as a 64-bit integer. A number holds whole numbers exactly up to
+  2^53, so that is the range: 0 to 2^53 for `u64`, -2^53 to 2^53 for `i64`. A value past it, or a
+  fraction, fails `serialization.checks` as a value too big for any width does. Needs the
+  transformer of the same release.
+
 ### testing
 
 #### Added
@@ -100,6 +113,19 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   name it was listed under, and what it answered when asked (`asked: game.Name "...", launch id
   ...; not this launch's`) or why it was not asked; the window the run launched is closed again, as
   before (`--keep` leaves it).
+
+### transformer
+
+#### Added
+
+- **The `u64` and `i64` widths** (see core), with their implicit twins. `buffer` has no 64-bit call,
+  so each is two 32-bit writes: `buffer.writeu32(buf, o, n % 2^32)`, then
+  `buffer.writeu32(buf, o + 4, math.floor(n / 2^32))` (`writei32` for an `i64`), and read back as
+  `buffer.readu32(buf, o + 4) * 2^32 + buffer.readu32(buf, o)` (`readi32`). A literal is split when
+  the project builds. The checks test `n >= 0 and n <= 2^53 and n % 1 == 0` (`-2^53` for `i64`),
+  in every mode and on every side as for the other widths, and they mix with the other implicit
+  widths and go in unions and structs as those do. The layouts of the existing widths, and so their
+  goldens and layout hashes, are unchanged.
 
 ### Docs
 

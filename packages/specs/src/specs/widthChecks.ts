@@ -88,6 +88,9 @@ interface WidthEvents {
 		) => void
 	>;
 	widthUnion: Networking.SerializedReliable<(pick: Serialization.Implicit.u16 | string) => void>;
+	widthWide: Networking.SerializedReliable<
+		(at: Serialization.Implicit.u64, delta: Serialization.Implicit.i64, id: Serialization.u64) => void
+	>;
 }
 
 interface WidthFunctions {
@@ -215,6 +218,8 @@ const implicit = {
 	i16: Flamework.createSerializer<Serialization.Implicit.i16>(),
 	u32: Flamework.createSerializer<Serialization.Implicit.u32>(),
 	i32: Flamework.createSerializer<Serialization.Implicit.i32>(),
+	u64: Flamework.createSerializer<Serialization.Implicit.u64>(),
+	i64: Flamework.createSerializer<Serialization.Implicit.i64>(),
 	f32: Flamework.createSerializer<Serialization.Implicit.f32>(),
 	f64: Flamework.createSerializer<Serialization.Implicit.f64>(),
 	varint: Flamework.createSerializer<Serialization.Implicit.varint>(),
@@ -232,6 +237,8 @@ const strict = {
 	i16: Flamework.createSerializer<Serialization.i16>(),
 	u32: Flamework.createSerializer<Serialization.u32>(),
 	i32: Flamework.createSerializer<Serialization.i32>(),
+	u64: Flamework.createSerializer<Serialization.u64>(),
+	i64: Flamework.createSerializer<Serialization.i64>(),
 	f32: Flamework.createSerializer<Serialization.f32>(),
 	f64: Flamework.createSerializer<Serialization.f64>(),
 	varint: Flamework.createSerializer<Serialization.varint>(),
@@ -246,6 +253,33 @@ const everything = Flamework.createSerializer<Everything>();
 
 /** Two implicit widths in one union: both stay members, as written. */
 const mixed = Flamework.createSerializer<Array<Serialization.Implicit.u8 | Serialization.Implicit.u16>>();
+
+/** The 64-bit widths in a struct: alone, in an array, in a union with a 32-bit width, optional. */
+interface Account {
+	userId: Serialization.Implicit.u64;
+	balance: Serialization.Implicit.i64;
+	created: Serialization.u64;
+	history: Serialization.Implicit.i64[];
+	pick: Serialization.Implicit.u32 | Serialization.Implicit.i64 | string;
+	maybe?: Serialization.Implicit.u64;
+}
+
+const account = Flamework.createSerializer<Account>();
+
+/** 2^53, the largest whole number a 64-bit width takes: past it a double no longer holds every one. */
+const EXACT = 2 ** 53;
+
+/** `[low, high]`: the two 32-bit halves of an 8-byte payload, read as the standard layout has them. */
+function halves(payload: buffer, signed: boolean): [number, number] {
+	return [buffer.readu32(payload, 0), signed ? buffer.readi32(payload, 4) : buffer.readu32(payload, 4)];
+}
+
+/** A payload as hex, byte by byte in buffer order. */
+function hex(payload: buffer): string {
+	let text = "";
+	for (const index of $range(0, buffer.len(payload) - 1)) text += "%02x".format(buffer.readu8(payload, index));
+	return text;
+}
 
 /** An `Everything` at the edges of its widths. */
 function edges(): Everything {
@@ -286,6 +320,8 @@ const INTEGER_EDGES: Array<[keyof typeof implicit, number[], number[]]> = [
 	["i16", [-32768, 32767], [-32769, 32768, 2.5]],
 	["u32", [0, 4294967295], [-1, 4294967296, 2.5]],
 	["i32", [-2147483648, 2147483647], [-2147483649, 2147483648, 2.5]],
+	["u64", [0, 4294967296, EXACT], [-1, EXACT + 2, 2.5, math.huge, -math.huge]],
+	["i64", [-EXACT, -4294967296, EXACT], [-EXACT - 2, EXACT + 2, -2.5, math.huge]],
 	["varint", [0, 34359738367], [-1, 34359738368, 2.5]],
 ];
 
@@ -306,6 +342,8 @@ export = suite("width checks", [
 			same("i16", implicit.i16, strict.i16, -32768);
 			same("u32", implicit.u32, strict.u32, 4294967295);
 			same("i32", implicit.i32, strict.i32, -2147483648);
+			same("u64", implicit.u64, strict.u64, EXACT);
+			same("i64", implicit.i64, strict.i64, -EXACT);
 			same("f32", implicit.f32, strict.f32, 1.5);
 			same("f64", implicit.f64, strict.f64, 0.1);
 			same("varint", implicit.varint, strict.varint, 34359738367);
@@ -401,6 +439,86 @@ export = suite("width checks", [
 					`${name} NaN: ${nan}`,
 				);
 			}
+		},
+	],
+	[
+		"round-trips a u64 and an i64 over their range, as eight bytes in the standard little-endian layout",
+		() => {
+			const u64Values = [0, 1, 4294967295, 4294967296, 2 ** 40 + 5, EXACT];
+			const i64Values = [0, 1, -1, -2, -2147483648, -4294967296, 4294967295, 4294967296, -EXACT, EXACT];
+			for (const n of u64Values) {
+				const [payload] = implicit.u64.serialize(n);
+				expectEqual(buffer.len(payload), 8, `u64 ${n}: bytes`);
+				expectEqual(implicit.u64.deserialize(payload), n, `u64 ${n}`);
+				const [low, high] = halves(payload, false);
+				expectEqual(high * 4294967296 + low, n, `u64 ${n}: the halves`);
+				expectEqual(roundTrip(strict.u64, n as Serialization.u64), n, `strict u64 ${n}`);
+			}
+			for (const n of i64Values) {
+				const [payload] = implicit.i64.serialize(n);
+				expectEqual(buffer.len(payload), 8, `i64 ${n}: bytes`);
+				expectEqual(implicit.i64.deserialize(payload), n, `i64 ${n}`);
+				const [low, high] = halves(payload, true);
+				expectEqual(high * 4294967296 + low, n, `i64 ${n}: the halves`);
+				expectEqual(roundTrip(strict.i64, n as Serialization.i64), n, `strict i64 ${n}`);
+			}
+
+			// The standard layout, byte for byte: 2^40 + 5 is 05 00 00 00 00 01 00 00, -2 is fe then seven ff.
+			expectEqual(hex(implicit.u64.serialize(2 ** 40 + 5)[0]), "0500000000010000", "u64 2^40 + 5");
+			expectEqual(hex(implicit.i64.serialize(2 ** 40 + 5)[0]), "0500000000010000", "i64 2^40 + 5");
+			expectEqual(hex(implicit.i64.serialize(-2)[0]), "feffffffffffffff", "i64 -2");
+			expectEqual(hex(implicit.u64.serialize(EXACT)[0]), "0000000000002000", "u64 2^53");
+			expectEqual(hex(implicit.i64.serialize(-EXACT)[0]), "000000000000e0ff", "i64 -2^53");
+			expectEqual(hex(implicit.u64.serialize(4294967295)[0]), "ffffffff00000000", "u64 2^32 - 1");
+
+			// And read from bytes another system wrote: the high half of an i64 is signed, of a u64 not.
+			const written = buffer.create(8);
+			buffer.writeu32(written, 0, 7);
+			buffer.writeu32(written, 4, 0xffffffff);
+			expectEqual(implicit.i64.deserialize(written), -(2 ** 32) + 7, "i64 with every high bit set");
+			expectEqual(implicit.u64.deserialize(written), 0xffffffff * 4294967296 + 7, "u64 with every high bit set");
+		},
+	],
+	[
+		"round-trips the 64-bit widths in a struct, an array, a union and an optional, and names the one that does not fit",
+		() => {
+			const value: Account = {
+				userId: 2 ** 40 + 5,
+				balance: -EXACT,
+				created: EXACT as Serialization.u64,
+				history: [0, -1, EXACT, -(2 ** 32)],
+				pick: 2 ** 40,
+				maybe: 4294967296,
+			};
+			expectTrue(deepEquals(roundTrip(account, value), value), "every field");
+			const other: Account = { ...value, pick: "text", maybe: undefined };
+			expectTrue(deepEquals(roundTrip(account, other), other), "a string member, no optional");
+
+			// The union: a number a u32 holds is the u32, one past it the i64, one past both fails.
+			const pickBytes = (pick: Account["pick"]) => buffer.len(account.serialize({ ...value, pick })[0]);
+			expectEqual(pickBytes(2 ** 40) - pickBytes(5), 4, "2^40 goes as the eight-byte i64, 5 as the u32");
+			expectEqual(roundTrip(account, { ...value, pick: -5 }).pick, -5, "a negative number is the i64");
+			expectRaises(
+				() => account.serialize({ ...value, pick: EXACT * 2 }),
+				`[Flamework] u32 | i64 cannot hold ${tostring(EXACT * 2)}, at Account.pick`,
+				"a number neither member holds",
+			);
+
+			const bad = (patch: Partial<Account>) => () => account.serialize({ ...value, ...patch });
+			expectRaises(bad({ userId: -1 }), "u64 cannot hold -1, at Account.userId", "field");
+			expectRaises(bad({ balance: 0.5 }), "i64 cannot hold 0.5, at Account.balance", "a fraction");
+			expectRaises(
+				bad({ history: [1, -EXACT - 2] }),
+				`i64 cannot hold ${tostring(-EXACT - 2)}, at Account.history[]`,
+				"array element",
+			);
+			expectRaises(
+				bad({ maybe: EXACT + 2 }),
+				`u64 cannot hold ${tostring(EXACT + 2)}, at Account.maybe`,
+				"optional",
+			);
+			// A strict width is not checked by default: past 2^53 it is written as it is.
+			expectWrites(bad({ created: (EXACT * 4) as Serialization.u64 }), "a strict u64 past 2^53");
 		},
 	],
 	[
@@ -670,6 +788,55 @@ export = suite("width checks", [
 		},
 	],
 	[
+		"round-trips 64-bit arguments, and checks one where the call packs it",
+		() => {
+			const { events } = handlers();
+			const channel = remote("widthWide");
+			__harness.clearSent(channel);
+			const received = new Array<unknown[]>();
+			if (events.server !== undefined)
+				events.server.widthWide.connect((_player, ...values) => received.push(values));
+			else events.client!.widthWide.connect((...values) => received.push(values));
+			__harness.flush();
+
+			const fire = (at: number, delta: number, id: number) => () => {
+				if (events.server !== undefined)
+					events.server.widthWide.fire(requester, at, delta, id as Serialization.u64);
+				else events.client!.widthWide.fire(at, delta, id as Serialization.u64);
+			};
+			expectRaises(fire(-1, 0, 0), "[Flamework] u64 cannot hold -1, at 'widthWide' [0]", "first argument");
+			expectRaises(
+				fire(0, EXACT * 2, 0),
+				`[Flamework] i64 cannot hold ${tostring(EXACT * 2)}, at 'widthWide' [1]`,
+				"second argument",
+			);
+			// A literal is split when the call is built, and one past 2^53 calls the check as it is.
+			expectRaises(
+				() => {
+					if (events.server !== undefined)
+						events.server.widthWide.fire(requester, 18014398509481984, 0, 0 as Serialization.u64);
+					else events.client!.widthWide.fire(18014398509481984, 0, 0 as Serialization.u64);
+				},
+				`[Flamework] u64 cannot hold ${tostring(EXACT * 2)}, at 'widthWide' [0]`,
+				"a literal argument",
+			);
+			expectEqual(__harness.sent(channel).size(), 0, "nothing sent");
+
+			expectWrites(fire(EXACT, -EXACT, 2 ** 40 + 5), "values at their edges");
+			expectWrites(() => {
+				if (events.server !== undefined)
+					events.server.widthWide.fire(requester, 1099511627781, -2, 4294967296 as Serialization.u64);
+				else events.client!.widthWide.fire(1099511627781, -2, 4294967296 as Serialization.u64);
+			}, "literals");
+			const sent = __harness.sent(channel);
+			expectEqual(sent.size(), 2, "messages");
+			for (const message of sent) deliver(channel, ...message.args);
+			expectEqual(received.size(), 2, "delivered past the decoder and the guards");
+			expectTrue(deepEquals(received[0], [EXACT, -EXACT, 2 ** 40 + 5]), "the edges");
+			expectTrue(deepEquals(received[1], [1099511627781, -2, 4294967296]), "the literals");
+		},
+	],
+	[
 		"checks a request where it is invoked and a result where the callback's value is packed",
 		() => {
 			const { functions } = handlers();
@@ -737,6 +904,16 @@ export = suite("width checks", [
 			expectEqual(__harness.warnings().size(), 6, `one warning each (${__harness.warnings().join(" | ")})`);
 			__harness.clearWarnings();
 
+			// A 64-bit width writes a value past 2^53 as it is, and a fraction's low half drops the fraction.
+			expectEqual(roundTrip(v.u64, EXACT * 2), EXACT * 2, "2^54 as a u64");
+			expectWarned(`[Flamework] u64 cannot hold ${tostring(EXACT * 2)}, at value`, "u64 past 2^53");
+			__harness.clearWarnings();
+			expectEqual(roundTrip(v.u64, 2.5), 2, "2.5 as a u64");
+			expectEqual(roundTrip(v.i64, -1.5), -2, "-1.5 as an i64: the high half floors it");
+			expectEqual(roundTrip(v.strictU64, -1 as Serialization.u64), 2 ** 64 - 1, "-1 as a strict u64");
+			expectEqual(__harness.warnings().size(), 3, `one warning each (${__harness.warnings().join(" | ")})`);
+			__harness.clearWarnings();
+
 			const tagged = roundTrip(v.tagged, { id: 65536, label: "t" });
 			expectEqual(tagged.id, 0, "65536 in a field");
 			expectWarned("[Flamework] u16 cannot hold 65536, at Tagged.id", "the field's path");
@@ -777,6 +954,8 @@ export = suite("width checks", [
 			expectEqual(roundTrip(v.i8, 200), -56, "200 as an i8");
 			expectEqual(roundTrip(v.tagged, { id: 65536, label: "t" }).id, 0, "65536 in a field");
 			expectEqual(roundTrip(v.f32, 1e39), math.huge, "1e39 as an f32");
+			expectEqual(roundTrip(v.u64, EXACT * 2), EXACT * 2, "2^54 as a u64");
+			expectEqual(roundTrip(v.i64, -1.5), -2, "-1.5 as an i64");
 			expectRaises(() => v.either.serialize(70000), "value matches none of the union's members", "the union");
 			expectRaises(
 				() => v.string8.serialize("a".rep(256)),

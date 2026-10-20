@@ -14,6 +14,10 @@ export const implicitU32 = Flamework.createSerializer<Serialization.Implicit.u32
 export const strictU32 = Flamework.createSerializer<Serialization.u32>();
 export const implicitI32 = Flamework.createSerializer<Serialization.Implicit.i32>();
 export const strictI32 = Flamework.createSerializer<Serialization.i32>();
+export const implicitU64 = Flamework.createSerializer<Serialization.Implicit.u64>();
+export const strictU64 = Flamework.createSerializer<Serialization.u64>();
+export const implicitI64 = Flamework.createSerializer<Serialization.Implicit.i64>();
+export const strictI64 = Flamework.createSerializer<Serialization.i64>();
 export const implicitF32 = Flamework.createSerializer<Serialization.Implicit.f32>();
 export const strictF32 = Flamework.createSerializer<Serialization.f32>();
 export const implicitF64 = Flamework.createSerializer<Serialization.Implicit.f64>();
@@ -129,4 +133,41 @@ export function inferredTogether(strict: Serialization.u8, held: Serialization.I
 	const [list] = Flamework.createSerializer<typeof both>().serialize(both);
 	const [one] = Flamework.createSerializer<typeof either>().serialize(either);
 	return [list, one];
+}
+
+/** The 64-bit widths in a struct, next to a strict one and a narrower implicit width. */
+interface Account {
+	userId: Serialization.Implicit.u64;
+	balance: Serialization.Implicit.i64;
+	created: Serialization.u64;
+	level: Serialization.Implicit.u8;
+}
+
+export const accountSerializer = Flamework.createSerializer<Account>();
+
+/** A union of a 32-bit and a 64-bit width: a number past the u32 is the i64, one past both fails the check. */
+type Wide = Serialization.Implicit.u32 | Serialization.Implicit.i64 | string;
+export const wideSerializer = Flamework.createSerializer<Wide>();
+
+interface WideServerEvents {
+	stamp(at: Serialization.Implicit.u64, delta: Serialization.Implicit.i64): void;
+}
+
+export const wideClient = Networking.createEvent<WideServerEvents, {}>().createClient({});
+
+/** An implicit u64 takes a plain number, an implicit u32 and a strict u64 alike. */
+export function sendStamp(at: number, small: Serialization.Implicit.u32, delta: Serialization.i64) {
+	wideClient.stamp.fire(at, delta);
+	wideClient.stamp.fire(small, -small);
+}
+
+/** Literals are split when the project builds: 2^40 + 5 and -2, then 2^54, which no u64 here holds. */
+export function sendStampLiterals() {
+	wideClient.stamp.fire(1099511627781, -2);
+	wideClient.stamp.fire(18014398509481984, 0);
+}
+
+/** A value that is more than a name is read once, into a local in a block of its own. */
+export function sendStampField(clock: { now: Serialization.u64 }) {
+	wideClient.stamp.fire(clock.now, 0);
 }

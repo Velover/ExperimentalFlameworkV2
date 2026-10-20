@@ -1150,7 +1150,11 @@ along -- which is what a union whose members all carry nothing (`true | None`, t
 into, unless that name means something globally: `readonly CFrame: CFrame` would otherwise emit
 `const CFrame = new CFrame(...)`, correct once lowered to Luau but rejected by the check the emit
 goes through first. Counts and lengths are
-LEB128 varints through three helpers (`vsize`, `vwrite`, `vread`) hoisted once per file. Blobs are
+LEB128 varints through three helpers (`vsize`, `vwrite`, `vread`) hoisted once per file. `buffer`
+has no 64-bit call, so a `u64` or `i64` is two (`writeWide`, `readWide`): the low half `n % 2^32` as a
+u32, then the high half `math.floor(n / 2^32)` as a u32 or an i32, the standard little-endian layout,
+exact up to 2^53 in size, which is the range their checks hold a value to; a literal is split at
+build time. Blobs are
 addressed by a u32 index written into the buffer, never by their position in the list; what counts
 as a blob is decided structurally (declared by `@rbxts/types`, a `_nominal_` marker, `unknown`,
 `object`, a class, an empty object type), not by a list of names. Union members are numbered in

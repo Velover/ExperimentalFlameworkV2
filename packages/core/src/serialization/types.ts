@@ -90,6 +90,17 @@ export namespace Serialization {
 	export type u32 = number & { readonly __brand: "u32"; readonly _flamework_u32?: "u32" };
 	/** A signed 32-bit integer. */
 	export type i32 = number & { readonly __brand: "i32"; readonly _flamework_i32?: "i32" };
+	/**
+	 * An unsigned 64-bit integer, for a UserId, a time in milliseconds or a large counter: eight bytes,
+	 * little-endian, the low 32 bits then the high 32 bits, so other systems read it as a standard
+	 * u64. A number holds the whole numbers exactly only up to 2^53, so that is its range: 0 to 2^53.
+	 */
+	export type u64 = number & { readonly __brand: "u64"; readonly _flamework_u64?: "u64" };
+	/**
+	 * A signed 64-bit integer: eight bytes, little-endian, the high 32 bits in two's complement, as
+	 * other systems write one. Exact from -2^53 to 2^53, which is its range.
+	 */
+	export type i64 = number & { readonly __brand: "i64"; readonly _flamework_i64?: "i64" };
 	/** A single-precision float: four bytes, about seven significant digits. */
 	export type f32 = number & { readonly __brand: "f32"; readonly _flamework_f32?: "f32" };
 	/** A double-precision float, which is what a plain `number` is written as. */
@@ -142,6 +153,10 @@ export namespace Serialization {
 		export type u32 = number & { readonly _flamework_u32?: "u32" };
 		/** A signed 32-bit integer, checked where it is written. */
 		export type i32 = number & { readonly _flamework_i32?: "i32" };
+		/** An unsigned 64-bit integer, a whole number from 0 to 2^53, checked where it is written. */
+		export type u64 = number & { readonly _flamework_u64?: "u64" };
+		/** A signed 64-bit integer, a whole number from -2^53 to 2^53, checked where it is written. */
+		export type i64 = number & { readonly _flamework_i64?: "i64" };
 		/** A single-precision float; a finite value past its range is refused where it is written. */
 		export type f32 = number & { readonly _flamework_f32?: "f32" };
 		/** A double-precision float, which holds every number: nothing to check. */

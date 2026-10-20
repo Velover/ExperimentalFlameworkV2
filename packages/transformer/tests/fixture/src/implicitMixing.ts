@@ -34,6 +34,8 @@ type ImplicitNumber =
 	| Serialization.Implicit.i16
 	| Serialization.Implicit.u32
 	| Serialization.Implicit.i32
+	| Serialization.Implicit.u64
+	| Serialization.Implicit.i64
 	| Serialization.Implicit.f32
 	| Serialization.Implicit.f64
 	| Serialization.Implicit.varint;
@@ -45,6 +47,8 @@ type StrictNumber =
 	| Serialization.i16
 	| Serialization.u32
 	| Serialization.i32
+	| Serialization.u64
+	| Serialization.i64
 	| Serialization.f32
 	| Serialization.f64
 	| Serialization.varint;
@@ -70,6 +74,8 @@ interface Twins {
 	i16: [Serialization.i16, Serialization.Implicit.i16];
 	u32: [Serialization.u32, Serialization.Implicit.u32];
 	i32: [Serialization.i32, Serialization.Implicit.i32];
+	u64: [Serialization.u64, Serialization.Implicit.u64];
+	i64: [Serialization.i64, Serialization.Implicit.i64];
 	f32: [Serialization.f32, Serialization.Implicit.f32];
 	f64: [Serialization.f64, Serialization.Implicit.f64];
 	varint: [Serialization.varint, Serialization.Implicit.varint];
@@ -111,6 +117,7 @@ export type Mixing = [
 	Refused<Into<StrictString, ImplicitString | string>>,
 	Refused<Into<StrictBuffer, ImplicitBuffer | buffer>>,
 	Refused<Into<Serialization.u16, Serialization.Implicit.u16>>,
+	Refused<Into<Serialization.u64, Serialization.Implicit.u64 | Serialization.Implicit.u32>>,
 
 	// Kinds never mix.
 	Refused<Into<ImplicitNumber, ImplicitString | StrictString | string | ImplicitBuffer | StrictBuffer | buffer>>,
@@ -125,6 +132,8 @@ export type Mixing = [
 	// Strict widths are as they were: each goes into itself and its implicit twin, and into no other strict width.
 	Expect<Into<Serialization.u16, Serialization.u16>>,
 	Refused<Into<Serialization.u16, Exclude<StrictNumber, Serialization.u16>>>,
+	Refused<Into<Serialization.u64, Exclude<StrictNumber, Serialization.u64>>>,
+	Refused<Into<Serialization.i64, Exclude<StrictNumber, Serialization.i64>>>,
 	Refused<Into<Serialization.string8, Serialization.string16 | Serialization.string32>>,
 	Refused<Into<Serialization.buffer16, Serialization.buffer32>>,
 
