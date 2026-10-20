@@ -675,17 +675,17 @@ Edge cases found and deliberately left alone, because the fix would cost more th
   - A discriminant is tested before collections, so a map that happens to hold the discriminant key
     is taken for the object.
   - A class-instance blob next to an all-optional object is sent as `{}`.
-  - A recursive interface as a guard-checked union member overflows the stack in
-    `buildGuardFromType`.
-  - So does a recursive interface as an event or function argument of its own
-    (`tree(v: Tree): void` with `kids: Tree[]`): the handler that receives it (`createServer`, for a
-    server event) builds its incoming guard, and the build stops with "Maximum call stack size
-    exceeded", as it did in 2.0.0-alpha.7.
   - A payload nested about 20,000 levels deep raises "stack overflow" (caught) instead of
     "malformed payload".
-  - Two Luau limits, neither reported by rbxtsc:
+  - Luau limits, none reported by rbxtsc:
     - about 100 hoisted-type fields in one object's read function run out of Luau's registers;
-    - about 100 distinct literal unions or guards in one file pass its 200 locals.
+    - about 100 distinct literal unions or guards in one file pass its 200 locals;
+    - a recursive type with about 20 or more nested object levels between the places it reaches
+      itself overflows the stack before the guard's 1,000-level limit: the check raises "stack
+      overflow" rather than refusing the value (it does not hang);
+    - more than 197 self-recursive types in one guard (198 when the guard's own type is one of
+      them) pass the 200 locals of the function the guard is wrapped in, and the file fails to
+      load.
   - Width checks and generated names (2026-10-01):
     - A file with checks but no hoisted type gets its `codec` table, one more main-chunk local, so
       under `category: "all"` a strict file already at 200 locals stops loading. A `catch (math)`

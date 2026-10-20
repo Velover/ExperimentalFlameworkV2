@@ -239,6 +239,22 @@ An instance type intersected with an object type is read as required children:
 `Model & { Humanoid: Humanoid }` becomes
 `t.intersection(t.instanceIsA("Model"), t.children({ Humanoid: t.instanceIsA("Humanoid") }))`.
 
+**Recursive types.** The generator keeps a stack of the types being built; a type reached again
+inside its own guard gets a local, and that place calls it through a function that counts depth
+(`GUARD_RECURSION_LIMIT`, 1000; past it the value is refused, which is also how a cyclic value
+ends) and looks the table up in a memo kept per local, so each recursive guard checks each table
+once per check. Without the memo a union whose members go into the same children checks them once
+per member it tries, 2^n times for n levels. A guard with such locals is wrapped in a function
+called once that declares them, the count and the memo, and returns the check: it gives each call a
+memo of its own and runs the guard under `pcall`, putting the count and the memo back afterwards,
+so a check that raised leaves nothing behind (the error is raised again as it was) and a check
+started inside another, by a metatable, goes on from its count. A deduplicated guard is built in a
+scope of its own; one that calls a type still being built outside it stays in place, its locals
+merged into the outer scope. When a deduplicated guard is recursive, all of them are declared inside
+the guard's function, after the count and the memo: one count for the guard, and no locals added
+around it. The dedup heuristic gives up on a type nested over 500 types deep (nothing is
+deduplicated), and the builder then refuses it with an error that says where.
+
 **Keys.** A property roblox-ts keys by a number (`{ 10: v }`, `{ [-1]: v }`, `{ [Level.High]: v }`,
 read as `v[10]`) is keyed by that number in generated code too: `t.interface({ [10] = ... })`, the
 serializer's `v[10]` and decoded `{ [10] = ... }`, a user macro's `Modding.Emit` table. TypeScript

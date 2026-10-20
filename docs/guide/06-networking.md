@@ -887,6 +887,16 @@ other code right away. The handler is a boundary, not a place for game rules.
 **Trust nothing from the client.** The guards check *shapes*, not values: `buy(itemId: string)`
 guarantees a string, not that the player can afford it.
 
+**Recursive types are fine as arguments.** A tree, a linked list, a nested menu or a JSON-like value
+(`interface Tree { value: number; kids: Tree[] }`) gets a guard that calls itself and checks the
+whole value. It follows a value about 1,000 levels deep at most, and refuses a value it would have
+to follow further as a `BadRequest`, a table that contains itself included (a table it has already
+checked is not followed again). It checks each table once, however many
+members of a union try it, so the check takes time in proportion to what the client sent. Keep the
+objects between the places a type reaches itself few: with about 20 or more levels of them, a
+deep enough value runs the check out of Luau's stack before the 1,000 levels, and the check raises
+a stack overflow error instead of refusing the value.
+
 **Use middleware only for concerns that cut across many events**: rate limits, admin checks,
 logging. Game rules belong in the handler, where you can test them.
 

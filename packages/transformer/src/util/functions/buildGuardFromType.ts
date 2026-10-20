@@ -75,8 +75,32 @@ const DEDUP_HEURISTIC_LIMIT = 5;
 const DEDUP_HEURISTIC_FLAGS = ts.TypeFlags.Object | ts.TypeFlags.UnionOrIntersection;
 
 /**
+ * How many times one check may go round a recursive type into a value before it refuses the value.
+ * A hostile client can send a table nested as deep as it likes, and a value can contain itself;
+ * without a limit, either would run the check until Luau's stack overflows (about 20,000 calls, and
+ * a level costs a guard four or five). A thousand levels is far deeper than a tree, a menu or a
+ * JSON-like value a game sends, and keeps the deepest check well inside the stack. The count is the
+ * guard's: the deduplicated guards it is built from share it, and so does a check of the same guard
+ * started inside it (by a metatable of the value).
+ */
+export const GUARD_RECURSION_LIMIT = 1000;
+
+/**
+ * How many types deep a guard's type may nest before the build gives up on it. Only a type that
+ * keeps making new types as it nests (`interface Box<T> { inner?: Box<Box<T>> }`) gets anywhere near
+ * this: a recursive type that comes back to itself is checked through a function that calls itself.
+ */
+const TYPE_NESTING_LIMIT = 500;
+
+/** Stops the whole of {@link getTypesRequiringDedupHeuristic}'s walk at once. */
+class NestingLimitReached {}
+
+/**
  * Finds the object and union types that appear at least `dedupLimit` times within `type`, which are
  * worth emitting once as a local and referencing, rather than inlining at every occurrence.
+ *
+ * None, for a type nested over {@link TYPE_NESTING_LIMIT} types deep, whose guard the builder then
+ * refuses, saying where.
  */
 function getTypesRequiringDedupHeuristic(type: ts.Type, dedupLimit = DEDUP_HEURISTIC_LIMIT) {
 	const seenCount = new Map<ts.Type, number>();
@@ -93,6 +117,13 @@ function getTypesRequiringDedupHeuristic(type: ts.Type, dedupLimit = DEDUP_HEURI
 
 		if (visiting.has(type)) {
 			return;
+		}
+
+		// A type that keeps making new types as it nests never comes back to one being walked, and may
+		// make several at each level (`Box<T> { a?: Box<Box<T>>; b?: Box<[T]> }`). Turning back here
+		// would only go on across them, through 2^n types, so the walk stops altogether.
+		if (visiting.size >= TYPE_NESTING_LIMIT) {
+			throw new NestingLimitReached();
 		}
 
 		visiting.add(type);
@@ -120,17 +151,25 @@ function getTypesRequiringDedupHeuristic(type: ts.Type, dedupLimit = DEDUP_HEURI
 		}
 	}
 
-	recurse(type);
-
 	const requiresDedup = new Set<ts.Type>();
 
-	for (const [type, count] of seenCount) {
-		if (count >= dedupLimit) {
-			requiresDedup.add(type);
+	try {
+		recurse(type);
 
-			// We subtract all the children, as deduplicating the parent effectively removes `count - 1` of any children from the emit.
-			recurse(type, -(count - 1));
+		for (const [type, count] of seenCount) {
+			if (count >= dedupLimit) {
+				requiresDedup.add(type);
+
+				// We subtract all the children, as deduplicating the parent effectively removes `count - 1` of any children from the emit.
+				recurse(type, -(count - 1));
+			}
 		}
+	} catch (error) {
+		if (error instanceof NestingLimitReached) {
+			return new Set<ts.Type>();
+		}
+
+		throw error;
 	}
 
 	return requiresDedup;
@@ -157,7 +196,9 @@ export function buildGuardFromType(
  * Convert a type into a type guard, deduplicating large guards when the
  * `optimizations.guardGenerationDedupLimit` transformer option is set.
  *
- * The returned statements declare the shared guards and must be emitted ahead of the expression.
+ * The returned statements declare the shared guards and must be emitted ahead of the expression. When
+ * one of them is recursive, there are none: they are declared inside the guard (see
+ * {@link createGuardGenerator}).
  * @param state The TransformState
  * @param file The file that this type belongs to
  * @param type The type to convert
@@ -180,14 +221,118 @@ export function buildGuardFromTypeWithDedup(
 	};
 }
 
+/** A type whose guard is being built, with the types it is being built inside of below it. */
+interface GuardFrame {
+	type: ts.Type;
+	/** Its place among the frames being built, counted from the outermost. */
+	index: number;
+	/** The local its guard is kept in, given once something inside it reaches the type again. */
+	self?: ts.Identifier;
+}
+
+/**
+ * Where the guards of recursive types are kept: one function, called once, whose locals hold them.
+ * A guard is built in one scope, and each guard the dedup heuristic hoists in a scope of its own.
+ */
+interface GuardScope {
+	/** How many frames were open when the scope began: a frame below this is outside it. */
+	base: number;
+	locals: ts.Identifier[];
+	/** The assignments of `locals`, in the order their guards were finished. */
+	statements: ts.Statement[];
+	/** The recursive types finished in this scope, by the local that holds each one's guard. */
+	finished: Map<ts.Type, ts.Identifier>;
+	/** Whether a guard built in it calls one still being built outside it. */
+	escapes: boolean;
+}
+
+/**
+ * What the recursive guards of one generator share while a check runs: how deep it has gone, and
+ * what each recursive guard said of each table it has checked.
+ */
+interface CheckState {
+	depth: ts.Identifier;
+	memo: ts.Identifier;
+}
+
 /**
  * Creates a stateful guard generator.
+ *
+ * A recursive type (`interface Tree { kids: Tree[] }`) reaches itself, so its guard cannot be written
+ * out in place. Its guard is kept in a local of a function the guard is wrapped in, and the place
+ * that reaches the type again calls that local through a function, which counts how deeply it has
+ * gone ({@link GUARD_RECURSION_LIMIT}) and remembers what the local said of each table:
+ *
+ * ```lua
+ * (function()
+ * 	local depth = 0
+ * 	local memo
+ * 	local Tree
+ * 	Tree = t.interface({ kids = t.array(function(value)
+ * 		if depth >= 1000 then return false end
+ * 		local results
+ * 		if type(value) == "table" then
+ * 			results = memo[Tree]
+ * 			if results == nil then
+ * 				results = {}
+ * 				memo[Tree] = results
+ * 			else
+ * 				local known = results[value]
+ * 				if known ~= nil then return known end
+ * 			end
+ * 		end
+ * 		depth += 1
+ * 		local result = Tree(value)
+ * 		depth -= 1
+ * 		if results ~= nil then results[value] = result end
+ * 		return result
+ * 	end) })
+ * 	return function(value)
+ * 		local outerDepth = depth
+ * 		local outerMemo = memo
+ * 		memo = {}
+ * 		local ok, result = pcall(Tree, value)
+ * 		depth = outerDepth
+ * 		memo = outerMemo
+ * 		if not ok then error(result, 0) end
+ * 		return result
+ * 	end
+ * end)()
+ * ```
+ *
+ * The memo keeps a check linear in the value. Without it, a union whose members go into the same
+ * children (`{ kind: "a"; kids: Node[] } | { kind: "b"; kids: Node[] }`), or an intersection, checks
+ * them once for each member it tries, and so each level twice or more: a client could send a few
+ * hundred bytes nested 30 levels deep and hold the server for minutes. With it, each recursive guard
+ * checks each table once per check, whichever member or place reaches it; a table reached again
+ * below the limit gets what it got where it was first reached, which only a value that holds the
+ * same table in two places can tell.
+ *
+ * The function the guard is called through gives each check a memo of its own and puts back what it
+ * found, under `pcall`, so a check that raised halfway (a value whose metatable raises) leaves
+ * neither the count nor the memo, nor the tables it holds, behind for the next one; the error is
+ * raised again as it was. A check started inside another (by a metatable of the value) goes on from
+ * the count of the one around it, so the limit holds across both.
+ *
+ * The guards the dedup heuristic declares once share the guard's count and memo. When one of them is
+ * recursive, they are all declared inside the function the guard is wrapped in, after the count and
+ * the memo, rather than ahead of the guard: that keeps them out of the locals of the code around the
+ * guard, which Luau caps at 200, and only the guard is called through such a function.
  */
 export function createGuardGenerator(state: TransformState, file: ts.SourceFile, diagnosticNode: ts.Node) {
 	const tracking = new Array<[ts.Node, ts.Type]>();
 	const dedupStatements = new Array<ts.Statement>();
 	const dedupIds = new Map<ts.Type, ts.Identifier>();
 	let requiresDedup = new Set<ts.Type>();
+
+	const frames = new Array<GuardFrame>();
+	const openFrames = new Map<ts.Type, GuardFrame>();
+	const scopes = new Array<GuardScope>();
+
+	// One count and one memo for every recursive guard the generator builds, declared in the function
+	// the guard is wrapped in, with the deduplicated guards when one of those is recursive.
+	let checkState: CheckState | undefined;
+	let dedupIsRecursive = false;
 
 	return { buildGuard, buildGuardsFromType, calculateDedup, dedupStatements };
 
@@ -217,13 +362,114 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 	}
 
 	function buildGuard(type: ts.Type): ts.Expression {
+		// A guard of its own, not one inside another: it gets the outermost scope, which declares what
+		// the guard needs, the deduplicated guards too when one of them is recursive.
+		if (scopes.length === 0) {
+			const root = openScope();
+			return closeScope(root, buildGuard(type), true);
+		}
+
+		// The type is reached again inside its own guard.
+		const open = openFrames.get(type);
+		if (open) {
+			return callRecursive(open);
+		}
+
+		const finished = scopes[scopes.length - 1].finished.get(type);
+		if (finished) {
+			return finished;
+		}
+
 		if (requiresDedup.has(type)) {
 			const existingId = dedupIds.get(type);
 			if (existingId) {
 				return existingId;
 			}
+
+			return buildDedupGuard(type);
 		}
 
+		return buildFrame(type);
+	}
+
+	/**
+	 * A guard the dedup heuristic picked, declared once ahead of the guard (inside the guard's function
+	 * when one of them is recursive; see `closeScope`) and referenced. It is built in a scope of its
+	 * own, since the declaration lands outside the guard; a guard that calls a type
+	 * still being built around it cannot leave it, so it stays in place, its scope merged into the one
+	 * around it.
+	 */
+	function buildDedupGuard(type: ts.Type): ts.Expression {
+		const scope = openScope();
+		const guard = buildFrame(type);
+		scopes.pop();
+
+		if (scope.escapes) {
+			const outer = scopes[scopes.length - 1];
+			assert(outer, "A guard escaped the outermost scope");
+			outer.locals.push(...scope.locals);
+			outer.statements.push(...scope.statements);
+			scope.finished.forEach((id, finishedType) => outer.finished.set(finishedType, id));
+			return guard;
+		}
+
+		// Named after the type, as a local can be named: `const class = ...` or `const Map = ...` would
+		// not compile, or would hide the global from the code after it.
+		const typeName = type.aliasSymbol?.name ?? type.symbol?.name ?? "dedup";
+		const dedupId = f.identifier(localName(state.typeChecker, typeName), true);
+		dedupIds.set(type, dedupId);
+		dedupStatements.push(f.variableStatement(dedupId, closeScope(scope, guard, false)));
+
+		return dedupId;
+	}
+
+	function openScope(): GuardScope {
+		const scope: GuardScope = {
+			base: frames.length,
+			locals: [],
+			statements: [],
+			finished: new Map(),
+			escapes: false,
+		};
+		scopes.push(scope);
+		return scope;
+	}
+
+	/** The guard of a type, as a frame other guards built inside it can come back to. */
+	function buildFrame(type: ts.Type): ts.Expression {
+		if (frames.length >= TYPE_NESTING_LIMIT) {
+			fail(
+				`Flamework cannot generate a guard for a type nested over ${TYPE_NESTING_LIMIT} types deep. A type that makes a new type of itself as it nests (\`Box<Box<T>>\`) never ends.`,
+			);
+		}
+
+		const scope = scopes[scopes.length - 1];
+		assert(scope, "A guard frame was built outside a scope");
+
+		const frame: GuardFrame = { type, index: frames.length };
+		frames.push(frame);
+		openFrames.set(type, frame);
+
+		let guard: ts.Expression;
+		try {
+			guard = buildTrackedGuard(type);
+		} finally {
+			frames.pop();
+			openFrames.delete(type);
+		}
+
+		if (!frame.self) {
+			return guard;
+		}
+
+		// Kept in its local, assigned before anything after it in the scope can use it.
+		scope.locals.push(frame.self);
+		scope.statements.push(f.statement(f.binary(frame.self, ts.SyntaxKind.EqualsToken, guard)));
+		scope.finished.set(type, frame.self);
+		return frame.self;
+	}
+
+	function buildTrackedGuard(type: ts.Type): ts.Expression {
 		const declaration = getDeclarationOfType(type);
 		if (declaration) {
 			tracking.push([declaration, type]);
@@ -235,19 +481,214 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 			assert(tracking.pop()?.[0] === declaration, "Popped value was not expected");
 		}
 
-		if (requiresDedup.has(type)) {
-			// Named after the type, as a local can be named: `const class = ...` or `const Map = ...` would
-			// not compile, or would hide the global from the code after it.
-			const typeName = type.aliasSymbol?.name ?? type.symbol?.name ?? "dedup";
-			const dedupId = f.identifier(localName(state.typeChecker, typeName), true);
-			dedupIds.set(type, dedupId);
+		return guard;
+	}
 
-			dedupStatements.push(f.variableStatement(dedupId, guard));
+	/**
+	 * A type reached inside its own guard: a call of the local its guard will be kept in, through a
+	 * function that refuses the value once the check has gone {@link GUARD_RECURSION_LIMIT} deep, so a
+	 * value nested without end, or one that contains itself, is refused rather than overflowing, and
+	 * that remembers what the local said of each table (see {@link createGuardGenerator}).
+	 */
+	function callRecursive(frame: GuardFrame): ts.Expression {
+		const self = (frame.self ??= f.identifier(
+			localName(state.typeChecker, guardName(frame.type, "recursive")),
+			true,
+		));
 
-			return dedupId;
+		// A scope that began above the frame cannot leave the scope the frame is in.
+		for (const scope of scopes) {
+			if (scope.base > frame.index) {
+				scope.escapes = true;
+			}
 		}
 
-		return guard;
+		const { depth, memo } = getCheckState();
+		const value = f.identifier("value", true);
+		const results = f.identifier("results", true);
+		const known = f.identifier("known", true);
+		const result = f.identifier("result", true);
+		const assign = (target: ts.Identifier, expression: ts.Expression) =>
+			f.statement(f.binary(target, ts.SyntaxKind.EqualsToken, expression));
+
+		return checkFunction(value, [
+			ts.factory.createIfStatement(
+				f.binary(depth, ts.SyntaxKind.GreaterThanEqualsToken, f.number(GUARD_RECURSION_LIMIT)),
+				f.block([f.returnStatement(f.bool(false))]),
+			),
+			// Only a table is remembered: a check of anything else goes no deeper.
+			f.variableStatement(results, undefined, f.unionType([resultsType(), undefinedType()]), true),
+			ts.factory.createIfStatement(
+				f.call("typeIs", [value, f.string("table")]),
+				f.block([
+					assign(results, f.call(f.field(f.bang(memo), "get"), [self])),
+					ts.factory.createIfStatement(
+						f.binary(results, ts.SyntaxKind.EqualsEqualsEqualsToken, f.nil()),
+						f.block([
+							assign(results, f.as(f.object([], false), resultsType())),
+							f.statement(f.call(f.field(f.bang(memo), "set"), [self, results])),
+						]),
+						f.block([
+							f.variableStatement(known, f.call(f.field(results, "get"), [value])),
+							ts.factory.createIfStatement(
+								f.binary(known, ts.SyntaxKind.ExclamationEqualsEqualsToken, f.nil()),
+								f.block([f.returnStatement(known)]),
+							),
+						]),
+					),
+				]),
+			),
+			f.statement(f.binary(depth, ts.SyntaxKind.PlusEqualsToken, f.number(1))),
+			f.variableStatement(result, f.call(self, [value])),
+			f.statement(f.binary(depth, ts.SyntaxKind.MinusEqualsToken, f.number(1))),
+			ts.factory.createIfStatement(
+				f.binary(results, ts.SyntaxKind.ExclamationEqualsEqualsToken, f.nil()),
+				f.block([f.statement(f.call(f.field(results, "set"), [value, result]))]),
+			),
+			f.returnStatement(result),
+		]);
+	}
+
+	/**
+	 * A guard built in `scope`. One that holds recursive types is wrapped in a function called once,
+	 * which declares their locals and assigns them. A deduplicated guard's (not `root`) returns the
+	 * guard. The guard's own declares the count and the memo first, then the deduplicated guards when
+	 * one of them is recursive, and returns the function the guard is called through.
+	 */
+	function closeScope(scope: GuardScope, guard: ts.Expression, root: boolean): ts.Expression {
+		if (scopes[scopes.length - 1] === scope) {
+			scopes.pop();
+		}
+
+		const locals = scope.locals.map((local) => f.variableStatement(local, undefined, checkType(), true));
+		if (!root) {
+			if (locals.length === 0) {
+				return guard;
+			}
+
+			dedupIsRecursive = true;
+			return calledOnce([...locals, ...scope.statements, f.returnStatement(guard)]);
+		}
+
+		// The deduplicated guards are only ever called from this one.
+		const deduplicated = dedupIsRecursive ? dedupStatements.splice(0) : [];
+		if (locals.length === 0 && deduplicated.length === 0) {
+			return guard;
+		}
+
+		const body = [...checkStateDeclarations(), ...deduplicated, ...locals, ...scope.statements];
+		let entry = guard;
+		if (!f.is.identifier(entry)) {
+			entry = f.identifier("guard", true);
+			body.push(f.variableStatement(entry as ts.Identifier, guard));
+		}
+
+		body.push(f.returnStatement(checkThrough(entry as ts.Identifier)));
+		return calledOnce(body);
+	}
+
+	/**
+	 * The function a guard with recursive types is called through: a memo of its own for the check,
+	 * and the count and the memo put back as they were, even when the check raised, which is then
+	 * raised again as it was.
+	 */
+	function checkThrough(guard: ts.Identifier): ts.Expression {
+		const { depth, memo } = getCheckState();
+		const value = f.identifier("value", true);
+		const outerDepth = f.identifier("outerDepth", true);
+		const outerMemo = f.identifier("outerMemo", true);
+		const ok = f.identifier("ok", true);
+		const result = f.identifier("result", true);
+
+		return checkFunction(value, [
+			f.variableStatement(outerDepth, depth),
+			f.variableStatement(outerMemo, memo),
+			f.statement(f.binary(memo, ts.SyntaxKind.EqualsToken, f.as(f.object([], false), memoType()))),
+			f.variableStatement(f.arrayBindingDeclaration([ok, result]), f.call("pcall", [guard, value])),
+			f.statement(f.binary(depth, ts.SyntaxKind.EqualsToken, outerDepth)),
+			f.statement(f.binary(memo, ts.SyntaxKind.EqualsToken, outerMemo)),
+			ts.factory.createIfStatement(
+				ts.factory.createLogicalNot(ok),
+				f.block([f.statement(f.call("error", [result, f.number(0)]))]),
+			),
+			f.returnStatement(f.as(result, f.keywordType(ts.SyntaxKind.BooleanKeyword))),
+		]);
+	}
+
+	function getCheckState(): CheckState {
+		return (checkState ??= { depth: f.identifier("depth", true), memo: f.identifier("memo", true) });
+	}
+
+	/** `let depth = 0; let memo: ...;`, outside any check. */
+	function checkStateDeclarations(): ts.Statement[] {
+		const { depth, memo } = getCheckState();
+		return [
+			f.variableStatement(depth, f.number(0), undefined, true),
+			f.variableStatement(memo, undefined, f.unionType([memoType(), undefinedType()]), true),
+		];
+	}
+
+	/** `(() => { ... })()` */
+	function calledOnce(body: ts.Statement[]): ts.Expression {
+		return f.call(ts.factory.createParenthesizedExpression(f.arrowFunction(f.block(body))), []);
+	}
+
+	/** `Map<unknown, boolean>`: what one recursive guard said of each table. */
+	function resultsType(): ts.TypeNode {
+		return f.referenceType("Map", [
+			f.keywordType(ts.SyntaxKind.UnknownKeyword),
+			f.keywordType(ts.SyntaxKind.BooleanKeyword),
+		]);
+	}
+
+	/** `Map<unknown, Map<unknown, boolean>>`: the results of each recursive guard, by the guard. */
+	function memoType(): ts.TypeNode {
+		return f.referenceType("Map", [f.keywordType(ts.SyntaxKind.UnknownKeyword), resultsType()]);
+	}
+
+	function undefinedType(): ts.TypeNode {
+		return f.keywordType(ts.SyntaxKind.UndefinedKeyword);
+	}
+
+	/** `(value: unknown) => value is unknown`, the type `t.check<unknown>` spells out. */
+	function checkType(): ts.TypeNode {
+		const value = f.identifier("value");
+		return f.functionType(
+			[f.parameterDeclaration(value, f.keywordType(ts.SyntaxKind.UnknownKeyword))],
+			ts.factory.createTypePredicateNode(undefined, value, f.keywordType(ts.SyntaxKind.UnknownKeyword)),
+		);
+	}
+
+	/** `(value: unknown): value is unknown => { ... }`, which `t` takes as a check. */
+	function checkFunction(value: ts.Identifier, body: ts.Statement[]): ts.Expression {
+		return f.arrowFunction(
+			f.block(body),
+			[f.parameterDeclaration(value, f.keywordType(ts.SyntaxKind.UnknownKeyword))],
+			undefined,
+			ts.factory.createTypePredicateNode(undefined, value, f.keywordType(ts.SyntaxKind.UnknownKeyword)),
+		);
+	}
+
+	/**
+	 * A name for the local of a recursive type's guard: the type's, `TreeArray` for `Tree[]`,
+	 * `TreeOptional` for an optional property's `Tree | undefined`.
+	 */
+	function guardName(type: ts.Type, fallback: string): string {
+		if (!type.aliasSymbol && state.typeChecker.isArrayType(type)) {
+			const element = (type as ts.TypeReference).typeArguments?.[0];
+			return `${element ? guardName(element, fallback) : fallback}Array`;
+		}
+
+		if (!type.aliasSymbol && type.isUnion()) {
+			const [isOptional, members] = extractTypes(state.typeChecker, type.types);
+			if (isOptional && members.length === 1) {
+				const name = guardName(members[0], fallback);
+				return name === fallback ? fallback : `${name}Optional`;
+			}
+		}
+
+		const name = type.aliasSymbol?.name ?? type.symbol?.name;
+		return name === undefined || name === "__type" || name === "__object" ? fallback : name;
 	}
 
 	function buildGuardInner(type: ts.Type): ts.Expression {

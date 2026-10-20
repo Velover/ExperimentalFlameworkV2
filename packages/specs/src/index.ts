@@ -13,6 +13,7 @@ import networking = require("./specs/networking");
 import paths = require("./specs/paths");
 import plugins = require("./specs/plugins");
 import providers = require("./specs/providers");
+import recursiveGuards = require("./specs/recursiveGuards");
 import regressions = require("./specs/regressions");
 import scopes = require("./specs/scopes");
 import serialization = require("./specs/serialization");
@@ -39,6 +40,7 @@ export const suites: TestSuite[] = [
 	middleware,
 	serializedMembers,
 	regressions,
+	recursiveGuards,
 	serialization,
 	widthChecks,
 	typeChecks,

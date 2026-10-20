@@ -273,6 +273,55 @@ describe("guards of tuples with a rest element", () => {
 });
 
 /*
+ * A recursive type as an argument or a result (`plantTree(tree: Tree)` with `kids: Tree[]`): the
+ * handler that receives it builds its guard, which stopped the build with "Maximum call stack size
+ * exceeded" in 2.0.0-alpha.7 and alpha.8, packed or not.
+ */
+describe("recursive argument and result types", () => {
+	/**
+	 * A recursive guard of `Tree`, wrapped in the function that declares its local, the count and the
+	 * memo, and returns the function it is called through (spelled out in macros.test.ts).
+	 */
+	const TREE_GUARD =
+		String.raw`\{ \{ \(function\(\) local (depth\w*) = 0 local (memo\w*) local (Tree_\d+) \3 = t\.interface\(\{ value = t\.number, kids = t\.array\(function\((value_\d+)\) if \1 >= 1000 then return false end local (results\w*) .*? \1 \+= 1 local (result\w*) = \3\(\4\) \1 -= 1 if \5 ~= nil then .*? end return \6 end\), \}\) ` +
+		String.raw`return function\((value_\d+)\) local (outerDepth\w*) = \1 local (outerMemo\w*) = \2 \2 = \{\} local (ok\w*), (result\w*) = pcall\(\3, \7\) \1 = \8 \2 = \9 if not \10 then error\(\11, 0\) end return \11 end end\)\(\) \}, nil \}`;
+
+	const CHAIN_GUARD = String.raw`\(function\(\) local (depth\w*) = 0 local (memo\w*) local (Chain_\d+) \3 = t\.interface\(\{ value = t\.number, next = t\.optional\(function\((value_\d+)\) if \1 >= 1000 then return false end`;
+
+	for (const [mode, source] of [
+		["on", () => normalize(emitted("recursiveGuards"))],
+		["off", () => normalize(offSource("recursiveGuards"))],
+	] as const) {
+		test(`guard a recursive event argument, plain, raw or serialized, with the switch ${mode}`, () => {
+			const text = source();
+			for (const member of ["plantTree", "rawTree", "serializedTree"]) {
+				expect(text).toMatch(new RegExp(`${member} = ${TREE_GUARD}`));
+			}
+		});
+
+		test(`guard a recursive function argument and result, with the switch ${mode}`, () => {
+			const text = source();
+			expect(text).toMatch(new RegExp(String.raw`incoming = \{ nextOf = \{ \{ ` + CHAIN_GUARD));
+			expect(text).toMatch(new RegExp(String.raw`outgoing = \{ nextOf = ` + CHAIN_GUARD));
+		});
+	}
+
+	test("decode a packed recursive argument with the serializer's recursive functions", () => {
+		const text = normalize(emitted("recursiveGuards"));
+		expect(text).toMatch(/plantTree = \(function\(buf\w*\) local o\w* = 0 local value\w*, o\w* = codec\.r_Tree\(/);
+		// Raw: no decoder, so the guard checks the table as it arrived.
+		expect(text).not.toMatch(/rawTree = \(function\(buf/);
+	});
+
+	test("check a recursive union member the serializer tells apart by a guard", () => {
+		// `Tree | Map<string, number>`: neither has a key of its own, so `Tree` is told apart by its guard.
+		expect(normalize(emitted("recursiveGuards"))).toMatch(
+			/local guard\w* = \(function\(\) local depth\w* = 0 local memo\w* local (Tree_\d+) \1 = t\.interface\(\{ value = t\.number, kids = t\.array\(function/,
+		);
+	});
+});
+
+/*
  * A call whose target may be one of several members: a helper that returns a member by name, or a
  * conditional. TypeScript keeps each member apart in the union when they are packed differently
  * (`_flamework_packing`), and the transformer packs the call only when every one of them is packed,

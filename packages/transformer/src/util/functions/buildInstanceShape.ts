@@ -20,8 +20,9 @@ interface Shape {
  * class.
  *
  * Nothing when the type says more than classes and children -- a union whose members declare
- * children of their own, a member that is not an instance -- and the caller falls back to a `t`
- * guard, which can say anything but has to read the whole tree to say it.
+ * children of their own, a member that is not an instance, a type that is its own descendant
+ * (`interface Branch extends Folder { Twig?: Branch }`), which no tree of data can spell out -- and
+ * the caller falls back to a `t` guard, which can say anything but has to read the whole tree to say it.
  */
 export function buildInstanceShape(
 	state: TransformState,
@@ -41,6 +42,7 @@ function readShape(
 	allowOptional: boolean,
 	descend: boolean,
 	componentChildren?: ReadonlySet<string>,
+	visiting = new Set<ts.Type>(),
 ): Shape | undefined {
 	const checker = state.typeChecker;
 	let members: readonly ts.Type[] = [type];
@@ -69,6 +71,7 @@ function readShape(
 		if (!isA.includes(className)) isA.push(className);
 
 		if (!descend) continue;
+		if (visiting.has(member)) return undefined;
 
 		const declared = new Map<string, Shape>();
 		for (const property of member.getProperties()) {
@@ -77,7 +80,17 @@ function readShape(
 			const propertyType = checker.getTypeOfPropertyOfType(member, property.name);
 			if (!propertyType) return undefined;
 
-			const child = readShape(state, node, propertyType, true, !componentChildren?.has(property.name));
+			visiting.add(member);
+			const child = readShape(
+				state,
+				node,
+				propertyType,
+				true,
+				!componentChildren?.has(property.name),
+				undefined,
+				visiting,
+			);
+			visiting.delete(member);
 			if (child === undefined) return undefined;
 
 			declared.set(property.name, child);

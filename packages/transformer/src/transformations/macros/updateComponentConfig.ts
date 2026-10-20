@@ -299,7 +299,7 @@ function updateLinks(state: TransformState, node: ts.ClassDeclaration, propertie
 				// has to name the component that must exist on it.
 				links.push(createLink(state, node, "child", property.name, false, targetType));
 			} else if (isInstanceType(targetType)) {
-				assertInstanceTree(state, node, targetType, property.name);
+				assertInstanceTree(state, node, targetType, property.name, new Set([instanceType]));
 			}
 		}
 	}
@@ -345,9 +345,27 @@ function assertChildIsRequired(node: ts.ClassDeclaration, property: ts.Symbol, p
  * A component deeper in the tree cannot be linked: `this.instance` only resolves components it
  * holds directly, and the guard builder would meet the class itself. Saying so here beats the
  * "Flamework does not support generating guards for classes" that would follow. An optional child
- * is refused at every depth, for the same reason it is refused at the top.
+ * is refused at every depth, for the same reason it is refused at the top. So is a child typed as
+ * the tree around it (`interface Branch extends Folder { Twig: Branch }`): it would have to hold
+ * itself again below, without end, so no instance has that tree.
  */
-function assertInstanceTree(state: TransformState, node: ts.ClassDeclaration, type: ts.Type, path: string): void {
+function assertInstanceTree(
+	state: TransformState,
+	node: ts.ClassDeclaration,
+	type: ts.Type,
+	path: string,
+	ancestors: Set<ts.Type>,
+): void {
+	if (ancestors.has(type)) {
+		const component = node.name ? ` of '${node.name.text}'` : "";
+		Diagnostics.error(
+			node.name ?? node,
+			`Child '${path}' of the instance tree${component} has the type of the tree around it, '${state.typeChecker.typeToString(type)}', so it would hold that tree again below it, without end. No instance has that tree.`,
+			"Declare the child with a type that stops, or leave it out of the tree and reach for it with FindFirstChild.",
+		);
+	}
+
+	ancestors.add(type);
 	for (const [property, declaredType] of getDeclaredChildren(state, node, type)) {
 		const targetType = state.typeChecker.getNonNullableType(declaredType);
 		const childPath = `${path}.${property.name}`;
@@ -365,9 +383,10 @@ function assertInstanceTree(state: TransformState, node: ts.ClassDeclaration, ty
 				assertChildIsRequired(node, property, childPath);
 			}
 
-			assertInstanceTree(state, node, targetType, childPath);
+			assertInstanceTree(state, node, targetType, childPath, ancestors);
 		}
 	}
+	ancestors.delete(type);
 }
 
 export function updateComponentConfig(

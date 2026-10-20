@@ -160,6 +160,31 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   written (its parse tree node). A packed networking call in rewritten code keeps its packing in a
   function of its own, as one behind a condition does. Guide 01, its errors table, guide 10 and
   `docs/ai/flamework.md` no longer ask for Flamework's transformer first.
+- **Guards of recursive types build.** A type that reaches itself (`interface Tree { value: number;
+  kids: Tree[] }`, a linked list's `next?: Node`, `Map<string, Menu>` in `Menu`, a JSON-like union,
+  two interfaces that point at each other) stopped the build with "Maximum call stack size exceeded"
+  wherever a guard was generated for it: `Flamework.createGuard`, `Modding.Target.Guard`, the guards
+  `createServer` and `createClient` build for an event's or a function's arguments and results
+  (packed, raw or serialized alike), a member of a serialized union told apart by its guard, and an
+  instance link whose type may hold itself as a child. Such a type's guard is now kept in a local of
+  a function called once, and the place that reaches the type again calls that local, so the whole
+  value is checked. A check follows a value about 1,000 levels deep at most, and refuses a value it
+  would have to follow further (a table it has already checked is not followed again): a hostile
+  client's table nested without end, or a value that contains itself, is refused (a
+  `BadRequest` on a remote). It checks each table once, however many members of a union try it or
+  however many places hold it, so it takes time in proportion to the value: a union whose members
+  go into the same children (`{ kind: "a"; kids: Node[] } | { kind: "b"; kids: Node[] }`) would
+  otherwise check them twice at every level. The 1,000 levels are the whole guard's, the types it
+  declares once included, and a check that raised leaves nothing behind for the next one. A type
+  with about 20 or more levels of objects between the places it reaches itself can still run out
+  of Luau's stack first; the check then raises instead of refusing. Guards of types that do not
+  recurse are emitted exactly as before.
+- **A component whose instance tree holds itself again as a required child** (`interface Branch
+  extends Folder { Twig: Branch }`) is refused with a build error that says so, instead of
+  overflowing the stack; no instance has such a tree.
+- **A type that makes a new type of itself as it nests**
+  (`interface Box<T> { inner?: Box<Box<T>> }`) is refused with a build error once its guard is 500
+  types deep, instead of overflowing the stack.
 
 ### Docs
 
@@ -175,6 +200,8 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   The `predicate` example under "Where components may attach" no longer refuses every clone that
   keeps the template's name. `docs/reference/internals.md`: how a refusal waits for its move, how
   a skipped child is recovered, and what each costs.
+- Guide 06, "Good practices", and guide 07, "Macros": recursive types get guards that call
+  themselves, check each table once, and refuse a value nested deeper than about 1,000 levels.
 
 ## 2026-10-06: every package 2.0.0-alpha.8
 

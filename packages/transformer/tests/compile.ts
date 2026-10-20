@@ -129,13 +129,25 @@ function readEmitted() {
  *
  * A file that must not compile cannot live in the fixture itself, which every other test needs to
  * build. The cached result is left alone, so this does not disturb the emit they read.
+ *
+ * `limits` bounds the compile, for a probe that once ran rbxtsc out of memory: `heapMb` caps node's
+ * heap, and `timeoutMs` kills the compile, which then reports a null status (taken as 1).
  */
-export function compileProbe(name: string, source: string): CompileResult {
+export function compileProbe(
+	name: string,
+	source: string,
+	limits: { heapMb?: number; timeoutMs?: number } = {},
+): CompileResult {
 	const file = path.join(FIXTURE, "src", `${name}.ts`);
 	fs.writeFileSync(file, source);
 
 	try {
-		const result = spawnSync("node", [RBXTSC], { cwd: FIXTURE, encoding: "utf8" });
+		const heap = limits.heapMb === undefined ? [] : [`--max-old-space-size=${limits.heapMb}`];
+		const result = spawnSync("node", [...heap, RBXTSC], {
+			cwd: FIXTURE,
+			encoding: "utf8",
+			timeout: limits.timeoutMs,
+		});
 
 		return {
 			files: new Map(),

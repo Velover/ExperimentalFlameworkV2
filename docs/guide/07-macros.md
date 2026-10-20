@@ -115,6 +115,14 @@ if (validate<{ x: number }>(payload)) {
 }
 ```
 
+A guard of a recursive type (`interface Tree { value: number; kids: Tree[] }`, a linked list, a
+JSON-like union) calls itself and checks the whole value, each table in it once. It refuses a value
+it would have to follow more than 1,000 levels deep, a level being each time the check comes round
+to a recursive type again, which is also how a value that contains itself is refused rather than
+checked forever. The 1,000 levels are the whole guard's: the types it declares once
+(`guardGenerationDedupLimit`) count toward them, and so does a check of the same guard that a
+metatable of the value starts while it runs.
+
 ### Emitting a type as a value
 
 `Modding.Emit<T>` turns a type into runtime data. Objects become tables, tuples become arrays, and
