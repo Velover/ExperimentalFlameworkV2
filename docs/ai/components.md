@@ -65,12 +65,25 @@ export class Boat
 - **Both realms:** one class in a shared folder registered from both entry points, or one class
   per realm with the same tag. The two realms' components never see each other.
 - **Where:** by default no component is built under ServerStorage, ReplicatedStorage, StarterPack,
-  StarterGui or StarterPlayer, so a tagged template there gets none until it is cloned into the
-  world (`ancestorWhitelist`/`ancestorBlacklist` change this).
+  StarterGui or StarterPlayer, so a tagged template there gets none until it is cloned or moved into
+  the world (`ancestorWhitelist`/`ancestorBlacklist` change this). Moving a tagged instance out of a
+  blocked ancestor, or into a whitelisted one, builds its component; moving it in keeps the one it
+  has. A `predicate` that refuses a stored instance where it is stored
+  (`(instance) => !instance.IsDescendantOf(ServerStorage)`) keeps it from getting one when it moves
+  out: a predicate's refusal when the tag is announced is final.
 - **Hiding a tagged child:** moving it into storage that stays in the DataModel (a folder in
-  ReplicatedStorage) keeps the component it has; `Parent = nil` removes it and builds a new one when
-  it comes back, so its state is lost. A container whose link names that child's component is
-  removed when it unparents the child.
+  ReplicatedStorage) keeps the component it has, and one stored before its tag was announced gets
+  its component when it is shown. Under immediate signal behaviour the engine never announces a
+  child hidden from the container's constructor, `onInit` or `onStart` as their tree enters the
+  DataModel; Flamework weighs it itself a resumption later, so it still gets its component (taken
+  down when it leaves the DataModel), but `GetTagged` and your own tag listeners never see it, and
+  removing its tag is not announced either. A tagged child that leaves the DataModel and comes back
+  hidden that way in one resumption (moved into a container then parented in) keeps the component it
+  had, also taken down when it leaves. A hide made by other code or another module during that
+  announcement (a container in one module, the child's component in another) is not recovered:
+  `task.defer` it, or tag the tree after parenting it. `Parent = nil` removes the child's component
+  and builds a new one when it comes back, so its state is lost. A container whose link names that
+  child's component is removed when it unparents the child.
 - **Timing:** tagged instances get their components once the module has ignited, after every
   provider's `onStart` has run to its first yield. `onInit` runs right after construction; `onStart`
   and the per-frame events (`OnTick`, `OnPhysics`, `OnRender`) work as on providers.

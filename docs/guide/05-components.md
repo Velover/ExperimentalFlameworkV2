@@ -472,7 +472,7 @@ that instance is tagged.
 | Change | Effect |
 |---|---|
 | The tag is removed | Removed. |
-| The instance leaves the DataModel (unparented, destroyed, or an **ancestor** of it unparented) | Removed. CollectionService announces the tag as gone for the whole subtree that left, and announces it again when it is parented back in, so the components come back with it. Moving an instance *within* the DataModel announces nothing and changes nothing. |
+| The instance leaves the DataModel (unparented, destroyed, or an **ancestor** of it unparented) | Removed. CollectionService announces the tag as gone for the whole subtree that left, and announces it again when it is parented back in, so the components come back with it. Moving an instance *within* the DataModel announces nothing and takes nothing down. It can only build: a tagged instance the ancestor lists refused gets its component once it moves out of a blocked ancestor, or into a whitelisted one (see [Where components may attach](#where-components-may-attach)). |
 | The component a link names is destroyed | Removed, whatever the streaming mode: that is a lifecycle event, not the tree moving. |
 | Some **other** component on a linked instance is destroyed | **Kept**, including a subclass of the one the link names. |
 | A link attribute is re-pointed at something that fails its guard | Removed, and built again if it is pointed back at something valid. |
@@ -523,7 +523,30 @@ component:
 
 - Moved into storage that stays in the DataModel, a folder in ReplicatedStorage say, a child that
   has its component keeps it, the same one however often it moves: moving within the DataModel
-  announces nothing, and the ancestor lists only gate construction.
+  announces nothing, and the ancestor lists only gate construction. A child that was stored before
+  its tag was announced (the container's tag came first, or the tree was parented in whole) has no
+  component in storage, and gets one when it is shown.
+- Under immediate signal behaviour, that last case has an exception the engine makes. When the
+  container and the child enter the DataModel together and the container's `onStart` moves the child
+  elsewhere in it, the engine never announces the child's tag, nor those of its tagged descendants.
+  Flamework recovers them: a tagged instance that leaves a component's instance while that component
+  is being built from its tag's announcement (its constructor, `onInit`, `onStart` up to its first
+  yield, an `onComponentAdded` listener) is weighed a resumption later the way its announcement
+  would have been, and so is each tagged descendant it takes along. In storage it waits and is built
+  when shown; anywhere else in the workspace it is built at once. When it leaves the DataModel its
+  component goes, as it would for any other instance. A tagged child that leaves the DataModel and
+  comes back in the same resumption, hidden this way (moved into a container that is then parented
+  in, say), keeps what it had, its component or its wait in storage, as a move within the DataModel
+  would, and that component too goes when it leaves. The engine still leaves such a child out of
+  `GetTagged` and announces nothing for it until it enters the DataModel again and is not hidden
+  this way, so your own code that reads `GetTagged` or listens for the tag does not see it, and
+  removing its tag in the meantime announces nothing either, so the component stays until it leaves.
+  A move made by other code or another module while the tree is announced, another handler of the
+  tag, a `DescendantAdded` handler, or a container in one module hiding a child whose component is
+  another module's, is not recovered. For that, tag the tree after parenting it, container first,
+  and the child is announced in storage and built when shown; or hide it a resumption later
+  (`task.defer`), and the child is announced and built in the container before it is hidden, keeping
+  that component in storage.
 - `Parent = nil` takes the child out of the DataModel, so its component is removed, and a new one is
   built when it is parented back. Whatever state the old one held is lost.
 - A container whose link names the child's component loses the link when the child is unparented,
@@ -583,11 +606,32 @@ never came up, with the reason.
 | `ancestorBlacklist` | Never construct under these. Defaults to ServerStorage, ReplicatedStorage, StarterPack, StarterGui and StarterPlayer. |
 
 ```ts
-@Component({ tag: "Prop", predicate: (instance) => instance.Name !== "Template" })
+@Component({ tag: "Prop", predicate: (instance) => !instance.IsDescendantOf(ServerStorage) })
 ```
+
+That refuses the props kept in ServerStorage for good, while a copy cloned into Workspace passes. A
+predicate that reads the name, such as `instance.Name !== "Template"`, would refuse the copies too,
+because a clone keeps its name.
 
 The default blocklist is why a tagged template in ReplicatedStorage gets no component, while a
 tagged instance cloned into Workspace does.
+
+The lists are about where an instance is, so they are read again when a refused instance moves.
+Moving within the DataModel announces nothing, but a tagged instance the lists refused gets its
+component once it moves out of the blocked ancestor, or into a whitelisted one: a template moved
+from ReplicatedStorage into Workspace, or a map kept in ServerStorage and moved in when the round
+starts. The move is weighed the way the tag's announcement would be: the predicate first, then the
+lists, then the instance guard, the attributes and the links. Moving the other way keeps the
+component: the lists gate construction, not removal. And Flamework never builds under a blocked
+ancestor itself. A component taken down while its instance sits in storage (its tree broke there,
+an attribute went bad) is not rebuilt there when the criterion comes back, but once the instance
+leaves.
+
+To keep a tagged instance in storage without its component when it moves out, give the component a
+`predicate` that refuses it there, `(instance) => !instance.IsDescendantOf(ServerStorage)`, or keep
+an untagged copy and tag the one you move. A predicate's refusal when the tag is announced is final:
+nothing waits for the instance to move, so it stays without its component wherever it goes, until
+its tag is announced again. A copy cloned into Workspace is announced there, and gets its component.
 
 The ancestor lists only gate construction that Flamework drives: a tag, or a link to the component.
 So you can still attach a component by hand to something in ReplicatedStorage. The `predicate` also

@@ -854,6 +854,160 @@ return. That is what keeps a link watching an instance under a blocked ancestor 
 component built on a blocked instance by a `getComponent` of your own satisfies the link that the
 lists refused to build one for.
 
+The ancestor lists are about where an instance is, and an instance moves within the DataModel
+without its tag being announced again, so a refusal is recorded rather than final (`refuse`, in
+`refusals`, per component): the instance is weighed again once it moves out of the blocked
+ancestor or into a whitelisted one (`Refusals.reconsider`), by the path its announcement takes --
+`instanceAdded` itself for an instance the announcement refused, which reads the DataModel, the
+tag, the predicate and the lists again before it tracks. Both paths that build on their own record
+one. The announcement refuses before it tracks anything, as it always did. The tag path's listener
+refuses too: an entry let through where it was announced can qualify again after its instance
+moved under a blocked ancestor -- a tree broken and repaired in storage, which a client follows,
+rebuilt the component there -- so the listener reads the lists before it builds, and leaves the
+entry tracked. Its reconsider builds it, once out, if `checkInstance` says it qualifies (the gate
+the listener is answered through, which reads the predicate as well), as the listener would have.
+Recording only the first of the two left the second for good: the entry stays qualified, and
+nothing tells the listener again. A refusal is let go of when the instance leaves the DataModel or
+its tag goes (`removeFor`), when the entry stops qualifying, when a predicate refuses the instance
+outright, and in `stopCollectionService`; an entry that never comes up again holds nothing.
+
+What hears the move is the cheap side of each list. A blocked ancestor is storage: it holds
+templates by the thousand, on both realms, since ReplicatedStorage replicates, and loses an instance
+seldom. So one `DescendantRemoving` connection per blocked ancestor that holds a refused instance
+(`leavingWatches`), counted per component and shared by all of them, hears every departure and
+looks the departing instance up; it is connected with the first refusal under that ancestor and let
+go of with the last, and a refusal counts only on the ancestor the instance sits under, so templates
+in ReplicatedStorage cost nothing when a map leaves ServerStorage. `DescendantRemoving` fires before
+the move, so the instance is weighed on a deferred task; one that moved to another blocked ancestor
+is counted there instead. A whitelisted ancestor is the opposite, where instances live and arrive
+all the time, so a `DescendantAdded` there would run for every arrival in the place: a refusal under
+a whitelist is heard by the instance's own `AncestryChanged` instead, one connection per refused
+instance, deferred the same way.
+
+The other way round -- an `AncestryChanged` per refused instance under the blocklist too -- was
+measured against this on 2026-10-07 (Studio, one server, immediate signal behaviour). A thousand
+tagged templates in ReplicatedStorage: one connection rather than a thousand; announcing them cost
+about 3.1 to 3.4 us a template over the same `AddTag` loop with no module, against 2.7 to 3.4 before
+the fix and 6.0 to 7.7 with a connection each, and the Luau heap grew by about the same as before
+the fix (35 to 53 bytes a template, against 48 to 50; the connection, 259 to 276, plus the engine's
+own). A 1000-part tagged model moved out of ServerStorage built all 1000 components in 29.5 ms
+(38.5 ms with a connection each; tagging the same model in the workspace took 20 to 23 ms). The
+price is the lookup: an untagged 1000-part model moved out of ServerStorage while a refused instance
+sits there costs about 1.2 us per instance leaving (1000 parts, 20 round trips: 249 ms against 225
+to 235 ms), and nothing at all while the refused instances are elsewhere. The Lune harness agrees on
+the connections, exactly: one on ReplicatedStorage while the templates wait there and none on the
+templates, against a thousand on the templates with a connection each, and none left once they are
+let go of. It does not agree on the timings, which is why the ones above are Studio's: it measured
+the model move at 39.3 ms with this design against 33.7 ms with a connection each, the opposite of
+Studio, and a departure at 2.13 us an instance against Studio's 1.18.
+
+Under immediate signal behaviour the engine announces a tree entering the DataModel as it walks it,
+live, each instance before its descendants, and runs every handler as its instance is reached. A
+descendant that a handler moves out of the tree before the walk reaches it is never reached: no
+`DescendantAdded` on the ancestors it was joining and no tag announcement, for it or for anything it
+took along. `GetTagged` leaves its tags out while `HasTag` says yes; moving it back changes nothing,
+and leaving the DataModel announces nothing either. A tag added to it later is announced and listed,
+removing a tag and adding it back announces that one, and entering the DataModel again announces
+them all, unless that walk skips it too. One moved out and straight back before its turn is reached
+as usual. It is the same whichever handler moved it, a tag handler or a `DescendantAdded` handler,
+and wherever it went, storage or elsewhere in the workspace (measured 2026-10-07 with
+CollectionService alone). Under deferred behaviour no handler runs during the walk, and the child is
+announced where it went. Flamework acts on an announcement inside its handler, so a container hiding
+its child from `onStart`, built from its own tag's announcement as their tree entered, hit exactly
+this, and the child never got its component.
+
+So under immediate behaviour the tag path's handler is `announceWatching` around `instanceAdded`.
+For an instance with children it connects `DescendantRemoving` on that instance for as long as
+`instanceAdded` runs (`announcing`, with a depth, so that an announcement of the same instance
+inside another shares it). That covers everything that runs inside the announcement: the
+construction and what it builds on the way through links and dependencies, `onInit`, `onStart` up to
+its first yield (`safeCall` resumes it at once), the attribute defaults written back and their
+handlers, a waiter's handler, the `onComponentAdded` listeners and the dependents built on the same
+instance. A descendant that leaves meanwhile carrying a tag some component uses (one `GetTags`
+against `skippedChecks`) is weighed on a deferred task, once the move and the walk are over, for
+each of its tags and each component using it, against a copy of the tag's `GetTagged` list: the
+engine lists what it announced and leaves out what it skipped. One an announcement reached before --
+the tracker has an owner entry for it, or the lists refused it -- is not weighed again. Listed, that
+announcement stands. Left out, it left the DataModel and came back within one resumption, and the
+walk skipped it: the removal its leaving announced runs while it still reads as parented, in the
+DataModel and tagged, and read again a resumption later it is back and reads as stale (measured
+2026-10-07: a tagged folder announced in the workspace, moved into a detached tagged container that
+is then parented in, whose tag handler moves the folder elsewhere); or a skipped instance's watch,
+or the deferred removal after its own build, found it back. It keeps what it had, as after a move
+within the DataModel, and is watched like a skipped one (below), since the engine announces its next
+leaving no more than its return. One with neither is weighed by the component's own `instanceAdded`,
+on a thread of its own as a handler's would be, unless it is listed: an announcement the predicate
+refused, or one whose tracking raised after the entry was made, leaves neither and is final until
+the tag is announced again, a raise's entry included once a link that read it has let go of it.
+Every weighing asks `GetTagged` for that reason: an owner entry or a refusal says an announcement
+reached the instance, not that it is still the last word. A component there without an owner entry
+does not say an announcement reached it at all: one a link or a `getComponent` built inside the
+window is no announcement's, so the instance is weighed, tracked from then on, and the component's
+own criteria (its instance tree, its guards) follow it, as they would have where signals are
+deferred. So it is built where it went, refused and left to wait for its move, or refused by the
+predicate, as its announcement would have had it. One left with an entry (a raise's included), a
+refusal or the component is then watched for leaving the DataModel (`watchSkipped`, in
+`skippedInstances`, one `AncestryChanged` each): the engine announces its leaving no more than its
+arrival, so without this the component built on it outlived it, attached to a destroyed instance,
+which the Lune harness showed as soon as it modelled the skip. Leaving is weighed a resumption
+later, as the removal handler weighs one, and runs the tag path's `removeFor` for each component it
+was weighed for, unless the instance is back by then -- announced as anything entering the DataModel
+is, and known to the engine from then on, or skipped again, and then weighed again as it leaves the
+instance that hid it, and watched again -- and either way the watch goes. One already out of the
+DataModel when it is weighed has no ancestry change left to hear, so it gets the same at once:
+`removeFor` a resumption later, unless it is back by then. What weighing it built took it out -- an
+`onStart` or an `onComponentAdded` listener that destroys or unparents it -- or, back and skipped
+with what an earlier announcement left, it left again before its weighing ran (a `Destroy` queued in
+between). The window is `instanceAdded` itself, so a construction that yields (a constructor or an
+`onInit` waiting on something) holds it open, and the connection with it, until it resumes, while
+the walk goes on: a descendant leaving in the meantime is weighed too, and one the walk has
+announced by then is recognised as announced. The connection is let go of after a `pcall` whatever
+`instanceAdded` did, a raise included (passed on as it was), and `stopCollectionService` lets go of
+any still open: a construction still yielding, or a module extinguished from inside an announcement,
+leaves one behind. A module extinguished inside a weighing stops it there: nothing after it is
+weighed or watched. Where signals are deferred the handler is `instanceAdded` itself: the behaviour
+is measured once per `startCollectionService` through a BindableEvent fired and disconnected at once
+(`deliversSignalsImmediately`), since `Workspace.SignalBehavior` is not scriptable.
+
+What this does not reach: a move made by other code or another module, not inside this module's
+handler for that instance (another handler of the same announcement, a `DescendantAdded` handler, a
+container in one module hiding a child whose component is another module's), or one made inside it
+of something that is not that instance's descendant. And `GetTagged` stays as the engine left it,
+for everything else that reads it: a module ignited later does not see the child either. Nor is
+removing a skipped instance's tag announced, so its component stays until it leaves the DataModel.
+And one order is contrived enough to be left: an announced instance that leaves the DataModel and
+comes back skipped in one resumption, and loses its tag after the removal its leaving announced has
+been read again as stale but before it is weighed, is not weighed for that tag, so nothing watches
+it: its component, unless its own criteria take it down, and the tag path's entry stay until the
+module stops, its leaving the DataModel included.
+
+One redundancy is left in. A skipped instance whose own build re-tags it -- removes the tag and adds
+it back, which the engine announces as it would for any instance -- is still watched as a skipped
+one, though the engine knows it from then on, so its leaving runs `removeFor` twice, from the
+engine's removal and from the watch, and the second finds nothing left to take down. Telling which
+of its tags the engine has announced since would take a `GetTagged` per tag, to save one connection
+held until it leaves.
+
+What it costs was measured on 2026-10-07 in Studio, on one server, in two sessions: the same module
+with the watch switched on and off in one session, interleaved, the medians of 7 runs of 1500
+folders, and then, in a second measurement, the medians of 5 and of 9 runs of 1000 folders. Acting
+on one announcement costs about 18 to 30 us with or without the watch. A leaf pays one
+`FindFirstChildWhichIsA("Instance")`, lost in the noise (-3.0 to +2.5 us across the runs);
+`GetChildren` would have cost as much empty and 28 to 37 us for a thousand children, where
+`FindFirstChildWhichIsA` stays at 0.2. An instance with children pays the connection: +2.5 to +6.6
+us in the first session (+6.6 for `AddTag` with one child and +5.2 with ten, +3.4 and +2.5 for a
+tree entering), +1.9 to +11.4 us in the second (one child: +7.5 to +11.4 for `AddTag`, +6.7 to +9.4
+entering; ten: +1.9 and +6.8), and a median moved by 3 to 5 us from one run to the next. So a few
+us, about 3 to 10 us, per announcement of an instance with children, under immediate behaviour, is
+as close as these runs get. The connect and disconnect alone cost 2.0 to 2.6 us, about the same on
+an instance that never had a connection (2.2 to 2.6) as on one that had (2.0 to 2.2), so the rest is
+the `pcall` (0.08 us), the lookups and the garbage of a tight loop. Where signals are deferred
+nothing changes: there the handler is `instanceAdded` itself, and the same interleaved comparison,
+with nothing to switch, spread from -1.0 to +1.6 us, which is the noise. A descendant leaving while
+the watch is open costs a `GetTags` (0.2 us), and one carrying a tag a component uses a deferred
+task and its weighing, which copies the tag's `GetTagged` list once for each component using the
+tag, so it grows with how many instances carry the tag.
+
 Polymorphic lookup starts from the ids a class answers to. They come from `getPolymorphicIds`, which
 walks the class's parents plus its `flamework:implements` list, so a component answers to its own
 id, every superclass id and every interface it implements; they are worked out once, as the class is
@@ -1529,12 +1683,12 @@ its component in a real place, so two link specs asserted the opposite of what a
 `instance.luau` now tells each realm's CollectionService which instances crossed the boundary -- the
 whole subtree, not only the instance that moved -- and `collection.luau` fires the added or removed
 signal for every tag they carry. The order is the engine's: the tag is announced as gone before the
-old parent's `ChildRemoved` and as arriving before the new parent's `ChildAdded`, with the move
-already applied, so every handler reads the tree as it now stands. A service is the root that marks
-the DataModel, which is what tells "parented into Workspace" apart from "parented into a folder
-nothing holds"; moving within the DataModel announces nothing, and neither does tagging something
-that is not in it. The tag itself never moves -- an instance keeps it through all of this -- so
-parenting it back in builds the component again.
+move, while the instance still reads as parented, in the DataModel and tagged (only `GetTagged`
+already leaves it out), and as arriving after it, before the new parent's `ChildAdded`. A service is
+the root that marks the DataModel, which is what tells "parented into Workspace" apart from
+"parented into a folder nothing holds"; moving within the DataModel announces nothing, and neither
+does tagging something that is not in it. The tag itself never moves -- an instance keeps it through
+all of this -- so parenting it back in builds the component again.
 
 **Tags belong to the DataModel, not to the runtime's filters.** `AddTag` and `RemoveTag` announce
 nothing for an instance the DataModel does not hold, and `GetTagged` does not list one, which is what
@@ -1552,6 +1706,23 @@ harness disconnected before the children moved, on the belief that the engine di
 and the registry has to cope with a component's tree handlers running mid-destroy, which the
 `components` suite now asserts. `InstanceHandle.new(nil):Wait(timeout)` answers at once rather
 than after the timeout, as the engine's does.
+
+**A walk skips what a handler moved away.** Entering the DataModel, the engine walks the subtree as
+it stands as it goes, and under immediate behaviour runs every handler an instance's signals call
+before it reaches the next; a descendant one of them moved out of the subtree is never reached
+(measured 2026-10-07; see the components section above). `instance.luau` models it for an entering
+move: a descendant no longer under the moved instance when its turn comes gets no `DescendantAdded`
+and no tag announcement, and `collection.luau` keeps its tags out of `GetTagged` and announces
+nothing for them, removed or left, until it enters the DataModel again and the walk reaches it; a
+tag added since is announced as usual. Under deferred behaviour nothing runs during the walk, so
+nothing is skipped. A move within the DataModel, or outside it, was not measured, and still reaches
+every descendant. The harness used to announce the whole subtree whatever a handler did, which is
+what kept the `components` suite from seeing the child that a container hid as their tree entered go
+without its component, and then, once Flamework built it anyway, that component outlive the child.
+The suite's deferred variants do not run Flamework without its watch, though: a module ignites
+outside `runDeferred`, where the harness delivers signals immediately, so
+`deliversSignalsImmediately` answers yes and the watch is on in them too. They show the watch does
+no harm where signals are deferred; the place's deferred project is what runs Flamework without it.
 
 **Clean up a tag that can never qualify.** Specs leave their instances in the world on purpose, which
 is harmless for anything that qualifies. An instance tagged for a component it can never satisfy is

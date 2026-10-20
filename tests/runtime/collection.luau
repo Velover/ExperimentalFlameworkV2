@@ -8,6 +8,13 @@
 	the DataModel that announces the tag, whether that happens to the instance itself or to an
 	ancestor of it.
 
+	An instance the engine's walk skipped as it entered the DataModel (see `instance.luau`, the
+	Parent write: under immediate behaviour, a handler moved it out of the subtree that was entering
+	before the walk reached it) keeps its tags, and `HasTag` says so, but nothing announced them:
+	`GetTagged` leaves them out, removing one announces nothing, and neither does leaving the
+	DataModel, until it enters again and every tag is announced as usual. A tag added to it since is
+	announced, and listed, as any other (measured in Studio, 2026-10-07).
+
 	`runDeferred(callback)` switches to Roblox's deferred behaviour for the duration of `callback`:
 	every fire joins the harness's one deferred queue, alongside the tree signals and BindableEvent
 	dispatch, and the batch is delivered in raise order once the outermost control returns. That
@@ -28,6 +35,9 @@ function collection.create()
 	--- in and announces them in when the instance enters or leaves the DataModel (measured in
 	--- Studio, 2026-09-25); a tag removed and added again goes to the back.
 	local tagsOf: { [any]: { string } } = {}
+	--- The tags of an instance the walk skipped, which nothing has announced (see above); cleared as
+	--- it leaves the DataModel, and a tag at a time as one is removed.
+	local skippedOf: { [any]: { [string]: boolean } } = {}
 	local addedSignals: { [string]: any } = {}
 	local removedSignals: { [string]: any } = {}
 
@@ -88,9 +98,19 @@ function collection.create()
 			tagsOf[instance] = nil
 		end
 
+		-- One the walk skipped was never announced, so its going is not either.
+		local skipped = skippedOf[instance]
+		local wasSkipped = skipped ~= nil and skipped[tag] == true
+		if wasSkipped then
+			skipped[tag] = nil
+			if next(skipped) == nil then
+				skippedOf[instance] = nil
+			end
+		end
+
 		-- Nothing was announced when it was tagged outside the DataModel, so nothing is announced
 		-- when the tag goes either.
-		if instances.isInDataModel(instance) then
+		if instances.isInDataModel(instance) and not wasSkipped then
 			fire(removedSignals[tag], instance)
 		end
 	end
@@ -100,11 +120,12 @@ function collection.create()
 		return set ~= nil and set[instance] == true
 	end
 
-	--- Only what the DataModel holds, which is what the engine lists.
+	--- Only what the DataModel holds, which is what the engine lists, short of what the walk skipped.
 	function CollectionService:GetTagged(tag: string): { any }
 		local result = {}
 		for instance in tagged[tag] or {} do
-			if instances.isInDataModel(instance) then
+			local skipped = skippedOf[instance]
+			if instances.isInDataModel(instance) and not (skipped and skipped[tag]) then
 				table.insert(result, instance)
 			end
 		end
@@ -118,10 +139,28 @@ function collection.create()
 		drives -- so a tagged instance parented out and back in is reported as removed and then
 		added again, which is what takes a component down with its instance and brings it back.
 	]]
-	function CollectionService.announceAncestry(instance: any, entered: boolean)
+	function CollectionService.announceAncestry(instance: any, entered: boolean, skipped: boolean?)
+		-- Entered, but never reached by the walk: its tags are on it, and announced nowhere. One the
+		-- handler took out of the DataModel altogether has nothing to keep out of `GetTagged`.
+		if skipped then
+			local list = tagsOf[instance]
+			if list and #list > 0 and instances.isInDataModel(instance) then
+				local marks = {}
+				for _, tag in list do
+					marks[tag] = true
+				end
+				skippedOf[instance] = marks
+			end
+			return
+		end
+
+		-- Leaving, a skipped tag goes unannounced as it came; entering again, every tag is announced.
+		local wasSkipped = skippedOf[instance]
+		skippedOf[instance] = nil
+
 		for _, tag in table.clone(tagsOf[instance] or {}) do
 			-- One an earlier handler removed has already announced itself.
-			if tagged[tag][instance] then
+			if tagged[tag][instance] and not (wasSkipped and wasSkipped[tag]) then
 				fire(if entered then addedSignals[tag] else removedSignals[tag], instance)
 			end
 		end
@@ -162,6 +201,7 @@ function collection.create()
 	function CollectionService.reset()
 		table.clear(tagged)
 		table.clear(tagsOf)
+		table.clear(skippedOf)
 	end
 
 	return CollectionService

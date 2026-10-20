@@ -20,6 +20,7 @@ import {
 	expectThrows,
 	expectTrue,
 	scratch,
+	skip,
 	test,
 } from "@flamework-experimental/testing";
 import { CollectionService, LogService, ReplicatedStorage, RunService } from "@rbxts/services";
@@ -89,7 +90,7 @@ class Tagged extends BaseComponent<TaggedAttributes, Folder> implements OnStart 
 class Defaulted extends BaseComponent<{ speed: number }, Folder> {}
 
 @Component({ tag: "PartOnly" })
-class PartOnly extends BaseComponent<{}, Part> {}
+export class PartOnly extends BaseComponent<{}, Part> {}
 
 @Component()
 class Manual extends BaseComponent<{}, Folder> {}
@@ -677,6 +678,28 @@ class ShapedContainer extends BaseComponent<{}, Folder & { Item: Folder }> {
 	}
 }
 
+/**
+ * Tagged on its own inside a `HideableItem`: a tagged descendant that goes wherever the item is
+ * hidden.
+ */
+@Component({ tag: "HideableGem", warningTimeout: 0 })
+class HideableGem extends BaseComponent<{}, Folder> {}
+
+/**
+ * Stores its `Item` in `storage` from its constructor and then raises, so it is never built: a
+ * construction that fails after it has hidden the child.
+ */
+@Component({ tag: "StashingRaiser", warningTimeout: 0 })
+class StashingRaiser extends BaseComponent<{}, Folder> {
+	public static storage?: Instance;
+
+	constructor(metadata: ComponentMetadata) {
+		super(metadata);
+		this.instance.FindFirstChild("Item")!.Parent = StashingRaiser.storage;
+		throw "StashingRaiser raised after storing its item";
+	}
+}
+
 /** The instance a missing link attribute falls back to. */
 const DEFAULT_LINK_TARGET = new Instance("Folder");
 DEFAULT_LINK_TARGET.Name = "DefaultLinkTarget";
@@ -854,6 +877,8 @@ const SPEC_PLUGIN = ComponentPlugin.createPlugin()
 	.registerComponent(LinkedContainer)
 	.registerComponent(PointingContainer)
 	.registerComponent(ShapedContainer)
+	.registerComponent(HideableGem)
+	.registerComponent(StashingRaiser)
 	.build();
 
 /** A module of the spec's components, ignited now and left to the case to extinguish. */
@@ -1084,6 +1109,20 @@ function hidingTree(name: string, detached = false) {
 	return [container, item] as const;
 }
 
+/**
+ * A detached container tagged `StoringContainer` with no item of its own, whose tag is announced as
+ * it enters the DataModel: whatever is parented into it before that is the `Item` it hides. It is
+ * destroyed once the case is over.
+ */
+function enteringContainer(name: string) {
+	const container = new Instance("Folder");
+	container.Name = name;
+	defer(() => container.Destroy());
+	CollectionService.AddTag(container, "StoringContainer");
+
+	return container;
+}
+
 /** Tags the item and its container in one go, the item first or the container first. */
 function tagHidingTree(container: Instance, item: Instance, containerTag: string, itemFirst: boolean) {
 	if (itemFirst) CollectionService.AddTag(item, "HideableItem");
@@ -1145,17 +1184,23 @@ const HIDING_TAGS = [
 	"LinkedContainer",
 	"PointingContainer",
 	"ShapedContainer",
+	"StashingRaiser",
+	"HideableGem",
 ];
 
 /**
  * The module a hiding case works against, with `recordHiding` started on it and the registry's
- * counts before the case made anything. Made once the DataModel holds nothing with the hiding tags:
- * the server's cases destroy their trees as they end, and a client's first case can start before
- * that has replicated, when a module igniting builds components for the server's trees as well.
+ * counts before the case made anything. Made once the DataModel holds nothing with the hiding tags,
+ * or `alsoTags`: the server's cases destroy their trees as they end, and a client's first case can
+ * start before that has replicated, when a module igniting builds components for the server's trees
+ * as well. And made a couple of frames after the case before it ended: where signals are deferred,
+ * the removals its teardown made (its module extinguished, its trees destroyed) are announced a
+ * resumption late, and would land in this case's log.
  */
-function createHidingModule() {
+function createHidingModule(alsoTags: string[] = []) {
+	settle();
 	eventually(
-		() => HIDING_TAGS.every((tag) => CollectionService.GetTagged(tag).isEmpty()),
+		() => [...HIDING_TAGS, ...alsoTags].every((tag) => CollectionService.GetTagged(tag).isEmpty()),
 		"no instance with a hiding tag left in the DataModel",
 	);
 
@@ -1163,6 +1208,43 @@ function createHidingModule() {
 	const quiet = recordHiding(components);
 
 	return { components, quiet, baseline: registryCounts(components) };
+}
+
+/**
+ * The module an ancestor-list case works against, with the registry's counts before the case made
+ * anything. Made once the DataModel holds nothing with `tags`, for the reason `createHidingModule`
+ * waits.
+ */
+export function createRefusalModule(tags: string[]) {
+	eventually(
+		() => tags.every((tag) => CollectionService.GetTagged(tag).isEmpty()),
+		`no instance tagged ${tags.join(", ")} left in the DataModel`,
+	);
+
+	const components = createComponentModule();
+	return { components, baseline: registryCounts(components) };
+}
+
+/**
+ * How many tagged instances the ancestor lists kept a component off and wait to be weighed again
+ * once they move, which is what a leaked refusal shows up in.
+ */
+export function refusedCount(components: Components, component: object) {
+	return (components as unknown as Registry).refusals.get(component)?.instances.size() ?? 0;
+}
+
+/**
+ * An item on its own, the way a template is kept: a folder with the `Mesh` `HideableItem` requires,
+ * untagged, in `parent`. It is destroyed once the case is over, wherever it has gone.
+ */
+function itemIn(parent: Instance, name: string) {
+	const item = new Instance("Folder");
+	item.Name = name;
+	defer(() => item.Destroy());
+	folderIn(item, "Mesh");
+	item.Parent = parent;
+
+	return item;
 }
 
 /** How often a line is in `hidingLog`. */
@@ -1242,9 +1324,14 @@ interface TrackerEntry {
 /**
  * What `Components` keeps per instance and per component, which is where a leak would grow: its
  * lookups, the construction and removal windows, the waiters, the maids holding each component's
- * attribute connections, and every tracker's entries, which own the tree watchers, the link
- * watchers, the attribute watch and the warning thread of an instance. The fields are private; a
- * roblox-ts private field is a plain table field.
+ * attribute connections, every tracker's entries, which own the tree watchers, the link watchers,
+ * the attribute watch and the warning thread of an instance, and the instances the ancestor lists
+ * refused, each waiting to be weighed again once it moves, with what hears it move: a connection of
+ * its own, or its count on the blocked ancestor it sits under, whose one connection every refusal
+ * there shares; and, under immediate signal behaviour, the instances whose announcement is being
+ * acted on, each watched for a descendant leaving it, and the instances whose announcement the
+ * engine skipped, each watched for leaving the DataModel. The fields are private; a roblox-ts
+ * private field is a plain table field.
  */
 interface Registry {
 	activeComponents: Map<Instance, Map<unknown, BaseComponent>>;
@@ -1260,6 +1347,10 @@ interface Registry {
 	componentWaiters: Map<Instance, Map<unknown, Set<unknown>>>;
 	componentCleanup: Map<BaseComponent, { _tasks: Map<unknown, unknown> }>;
 	connections: RBXScriptConnection[];
+	refusals: Map<object, { instances: Map<Instance, Instance | RBXScriptConnection> }>;
+	leavingWatches: Map<Instance, { counts: Map<unknown, number> }>;
+	announcing: Map<Instance, { depth: number }>;
+	skippedInstances: Map<Instance, { removals: unknown[] }>;
 }
 
 /**
@@ -1293,6 +1384,20 @@ function registryCounts(components: Components) {
 	add("maids", registry.componentCleanup.size());
 	for (const [, maid] of registry.componentCleanup) add("maid tasks", maid._tasks.size());
 	add("tag connections", registry.connections.size());
+
+	add("leaving watches", registry.leavingWatches.size());
+	add("announcement watches", sizeOf(registry.announcing));
+	add("skipped watches", sizeOf(registry.skippedInstances));
+	for (const [, watch] of registry.leavingWatches) {
+		for (const [, count] of watch.counts) add("refusals counted on leaving watches", count);
+	}
+	for (const [ctor, refusals] of registry.refusals) {
+		const name = tostring(ctor);
+		add(`${name}: refused`, refusals.instances.size());
+		for (const [, watched] of refusals.instances) {
+			if (!typeIs(watched, "Instance")) add(`${name}: refusal connections`, 1);
+		}
+	}
 
 	for (const [ctor, tracker] of registry.trackers) {
 		const name = tostring(ctor);
@@ -1372,6 +1477,11 @@ function registryHolds(components: Components, instances: Instance[]) {
 		}
 	}
 
+	for (const [ctor, refusals] of registry.refusals) keyed(`${ctor} refusals`, refusals.instances);
+	keyed("leavingWatches", registry.leavingWatches);
+	keyed("announcing", registry.announcing);
+	keyed("skippedInstances", registry.skippedInstances);
+
 	return found;
 }
 
@@ -1380,7 +1490,12 @@ function registryHolds(components: Components, instances: Instance[]) {
  * removal land, and checks that the registry holds nothing of them and is back to `baseline`, the
  * counts taken before the case made anything.
  */
-function expectReleased(components: Components, baseline: Map<string, number>, instances: Instance[], what: string) {
+export function expectReleased(
+	components: Components,
+	baseline: Map<string, number>,
+	instances: Instance[],
+	what: string,
+) {
 	const everything = new Array<Instance>();
 	for (const instance of instances) {
 		everything.push(instance);
@@ -1412,6 +1527,66 @@ function expectRemovedUnticked(what: string) {
 	removed.forEach((component, index) =>
 		expectEqual(component.ticks, ticks[index], `${what}: frames removed build ${component.build} was ticked`),
 	);
+}
+
+/**
+ * A hiding case whose child's component is built inside the container's announcement, ahead of the
+ * child's own: by the container's link attribute naming it, after which a listener hides the child,
+ * or by a `getComponent` from a listener, after the container's `onStart` has hidden it. Where
+ * signals are immediate the walk skips the child, which then has a component no announcement built;
+ * weighed where it went, it is tracked as its announcement would have it, as it is where signals
+ * are deferred and the child is announced there. Then its tree breaks: a client follows the tree
+ * and takes the component down, as it would for any tagged instance; a server read the tree once
+ * and keeps it.
+ */
+function expectEagerBuildFollowed(builder: "link" | "getComponent") {
+	const { components, quiet } = createHidingModule();
+	const elsewhere = folder("HideEagerElsewhere");
+	StoringContainer.storage = elsewhere;
+	defer(() => {
+		StoringContainer.storage = undefined;
+	});
+
+	const [container, item] = hidingTree("HideEager", true);
+	const mesh = item.FindFirstChild("Mesh")!;
+	let connection: { Disconnect(): void };
+	if (builder === "link") {
+		container.SetAttribute("Item", new InstanceHandle(item));
+		connection = components.onComponentAdded<PointingContainer>((component) => {
+			if (component.instance === container) component.hide(elsewhere);
+		});
+	} else {
+		connection = components.onComponentAdded<StoringContainer>((component) => {
+			if (component.instance === container) components.getComponent<HideableItem>(item);
+		});
+	}
+	defer(() => connection.Disconnect());
+	const baseline = registryCounts(components);
+
+	tagHidingTree(container, item, builder === "link" ? "PointingContainer" : "StoringContainer", false);
+	container.Parent = scratch();
+
+	eventually(() => item.Parent === elsewhere, "the container to hide the item");
+	untilFound(() => components.getComponents<HideableItem>(item)[0], "the item's component where it went");
+	settle();
+	expectEqual(
+		registryCounts(components).get(`${tostring(HideableItem)}: owners`),
+		1,
+		"the tag path's hold on the item",
+	);
+	checkItemBuilds("hidden", 1);
+
+	mesh.Parent = undefined;
+	if (RunService.IsClient()) {
+		untilGone(() => components.getComponents<HideableItem>(item)[0], "the item's component, its tree broken");
+	} else {
+		settle();
+		expectEqual(components.getComponents<HideableItem>(item).size(), 1, "components, tree broken");
+	}
+	checkItemBuilds("tree broken", RunService.IsClient() ? 0 : 1);
+
+	quiet(`a hidden child whose component ${builder === "link" ? "a link" : "getComponent"} built`);
+	expectReleased(components, baseline, [container, item, mesh, elsewhere], "destroyed");
 }
 
 @Provider({ activeIn: ["testing"] })
@@ -2620,6 +2795,1201 @@ export class ComponentSpecs implements OnStart {
 				expectRemovedUnticked("a hundred rounds");
 
 				quiet("a hundred rounds");
+			});
+
+			test("builds the component of a tagged child its container stored before the child was announced once it is shown", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const storage = storageFolder("HideStoredFirst");
+				StoringContainer.storage = storage;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// The container's tag first, so its `onStart` stores the item
+				// before the item's tag is announced: the announcement finds it under ReplicatedStorage,
+				// which the default ancestor blocklist keeps components out of.
+				const [container, item] = hidingTree("HideStoredBeforeBuilt", false);
+				tagHidingTree(container, item, "StoringContainer", false);
+
+				const hider = untilFound(
+					() => components.getComponents<StoringContainer>(container)[0],
+					"the container's component",
+				);
+				eventually(() => item.Parent === storage, "the container to store its item");
+				settle();
+				expectEqual(components.getComponents<HideableItem>(item).size(), 0, "components in storage");
+
+				// Shown, it leaves ReplicatedStorage, and the lists that refused it are read again: it gets
+				// its component, though moving within the DataModel announces nothing.
+				hider.show();
+				untilFound(
+					() => components.getComponents<HideableItem>(item)[0],
+					"the item's component once it is shown in the workspace",
+				);
+				checkItemBuilds("shown", 1);
+
+				quiet("storing first and showing");
+				expectReleased(components, baseline, [container, item, storage], "destroyed");
+			});
+
+			test("builds the component of a tagged child its container stored before the child was announced once it is shown after their tree entered the DataModel", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const storage = storageFolder("HideStoredFirst");
+				StoringContainer.storage = storage;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// The container's tag first (both tagged while detached, then parented in, which announces
+				// the container ahead of its descendant), so its `onStart` stores the item before the item's
+				// tag is announced: the announcement finds it under ReplicatedStorage, which the default
+				// ancestor blocklist keeps components out of.
+				const [container, item] = hidingTree("HideStoredBeforeBuilt", true);
+				tagHidingTree(container, item, "StoringContainer", false);
+				container.Parent = scratch();
+
+				const hider = untilFound(
+					() => components.getComponents<StoringContainer>(container)[0],
+					"the container's component",
+				);
+				eventually(() => item.Parent === storage, "the container to store its item");
+				settle();
+				expectEqual(components.getComponents<HideableItem>(item).size(), 0, "components in storage");
+				expectEqual(refusedCount(components, HideableItem), 1, "refusals in storage");
+
+				// Where signals are deferred, the engine has announced the whole tree before any handler
+				// runs, so the item's announcement finds it in storage. Where they are immediate, the
+				// container's `onStart` runs inside the announcement of its tree, and moving the item out
+				// of that tree before the engine has got to it makes the engine skip it: its tag is never
+				// announced, and `GetTagged` leaves it out for as long as it stays in the DataModel
+				// (measured 2026-10-07). Flamework weighs the item itself once that announcement is over,
+				// and refuses it in storage, as the announcement would have. Either way it is built once
+				// shown; the engine's `GetTagged` stays as it was.
+				const skipped = !signalsAreDeferred();
+				if (skipped) {
+					expectFalse(
+						CollectionService.GetTagged("HideableItem").includes(item),
+						"the item among the tagged instances, its announcement skipped",
+					);
+				}
+
+				hider.show();
+				untilFound(
+					() => components.getComponents<HideableItem>(item)[0],
+					"the item's component once it is shown in the workspace",
+				);
+				if (skipped) {
+					expectFalse(
+						CollectionService.GetTagged("HideableItem").includes(item),
+						"the item among the tagged instances once built",
+					);
+				}
+				checkItemBuilds("shown", 1);
+
+				quiet("storing first and showing");
+				expectReleased(components, baseline, [container, item, storage], "destroyed");
+			});
+
+			test("builds the components of a stored child and of its own tagged descendant once it is shown after their tree entered the DataModel", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const storage = storageFolder("HideGemStorage");
+				StoringContainer.storage = storage;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// The item's own tagged descendant goes into storage with it. Where signals are immediate
+				// the engine announces neither, and Flamework weighs both once the announcement of their
+				// tree is over: each refused in storage, each built once shown.
+				const [container, item] = hidingTree("HideGemTree", true);
+				const gem = folderIn(item, "Gem");
+				tagHidingTree(container, item, "StoringContainer", false);
+				CollectionService.AddTag(gem, "HideableGem");
+				container.Parent = scratch();
+
+				const hider = untilFound(
+					() => components.getComponents<StoringContainer>(container)[0],
+					"the container's component",
+				);
+				eventually(() => item.Parent === storage, "the container to store its item");
+				settle();
+				if (!signalsAreDeferred()) {
+					expectFalse(
+						CollectionService.GetTagged("HideableItem").includes(item),
+						"the item among the tagged instances, its announcement skipped",
+					);
+					expectFalse(
+						CollectionService.GetTagged("HideableGem").includes(gem),
+						"the gem among the tagged instances, its announcement skipped",
+					);
+				}
+				expectEqual(components.getComponents<HideableItem>(item).size(), 0, "item components in storage");
+				expectEqual(components.getComponents<HideableGem>(gem).size(), 0, "gem components in storage");
+				expectEqual(refusedCount(components, HideableItem), 1, "items refused in storage");
+				expectEqual(refusedCount(components, HideableGem), 1, "gems refused in storage");
+				// Each skipped one is watched for leaving the DataModel, which the engine does not announce
+				// for it either.
+				expectEqual(
+					registryCounts(components).get("skipped watches"),
+					signalsAreDeferred() ? 0 : 2,
+					"skipped instances watched",
+				);
+
+				hider.show();
+				untilFound(() => components.getComponents<HideableItem>(item)[0], "the item's component once shown");
+				untilFound(() => components.getComponents<HideableGem>(gem)[0], "the gem's component once shown");
+				expectEqual(refusedCount(components, HideableItem), 0, "items refused once shown");
+				expectEqual(refusedCount(components, HideableGem), 0, "gems refused once shown");
+				checkItemBuilds("shown", 1);
+
+				quiet("storing a tree with a tagged descendant and showing it");
+				expectReleased(components, baseline, [container, item, storage], "destroyed");
+			});
+
+			test("builds the component of a tagged child its container moves elsewhere in the workspace as their tree enters the DataModel", () => {
+				const { components, quiet, baseline } = createHidingModule();
+
+				// Not storage: a folder elsewhere in the workspace, where the lists refuse nothing.
+				const elsewhere = folder("HideElsewhere");
+				StoringContainer.storage = elsewhere;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// Where signals are immediate the engine skips the item's announcement here too, and
+				// Flamework builds it where it went, a resumption after the announcement, without its
+				// being shown.
+				const [container, item] = hidingTree("HideMovedAway", true);
+				tagHidingTree(container, item, "StoringContainer", false);
+				container.Parent = scratch();
+
+				untilFound(() => components.getComponents<StoringContainer>(container)[0], "the container's component");
+				eventually(() => item.Parent === elsewhere, "the container to move its item");
+				untilFound(() => components.getComponents<HideableItem>(item)[0], "the item's component where it went");
+				if (!signalsAreDeferred()) {
+					expectFalse(
+						CollectionService.GetTagged("HideableItem").includes(item),
+						"the item among the tagged instances, its announcement skipped",
+					);
+				}
+				expectEqual(refusedCount(components, HideableItem), 0, "refusals");
+				checkItemBuilds("moved away", 1);
+
+				// Out of the DataModel its component goes, though the engine announces nothing for a
+				// skipped instance; back in, it is announced afresh, and built again.
+				item.Parent = undefined;
+				untilGone(
+					() => components.getComponents<HideableItem>(item)[0],
+					"the item's component out of the DataModel",
+				);
+				settle();
+				expectEqual(registryCounts(components).get("skipped watches"), 0, "skipped instances watched");
+				item.Parent = elsewhere;
+				untilFound(() => components.getComponents<HideableItem>(item)[0], "the item's component back in");
+				expectEqual(HideableItem.builds, 2, "builds");
+				checkItemBuilds("back in", 1);
+
+				quiet("moving the item elsewhere in the workspace");
+				expectReleased(components, baseline, [container, item, elsewhere], "destroyed");
+			});
+
+			test("holds nothing of a tagged child its container moves elsewhere as their tree enters the DataModel once its own build destroys it", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const elsewhere = folder("HideSelfDestroyedElsewhere");
+				StoringContainer.storage = elsewhere;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// The item's build destroys it, as an `onStart` that finds it unwanted would.
+				const [container, item] = hidingTree("HideSelfDestroyed", true);
+				const mesh = item.FindFirstChild("Mesh")!;
+				const connection = components.onComponentAdded<HideableItem>((component) => {
+					if (component.instance === item) item.Destroy();
+				});
+				defer(() => connection.Disconnect());
+
+				// Where signals are immediate the engine skips the item, and Flamework builds it where it
+				// went, a resumption after the announcement. That build takes it out of the DataModel
+				// before Flamework watches it for leaving, which the engine announces no more than its
+				// arrival: its component goes all the same.
+				tagHidingTree(container, item, "StoringContainer", false);
+				container.Parent = scratch();
+
+				untilFound(() => components.getComponents<StoringContainer>(container)[0], "the container's component");
+				eventually(() => logged("item:destroy:1") === 1, "the item's component to go with the item");
+				settle();
+				expectEqual(item.Parent, undefined, "the destroyed item's parent");
+				expectEqual(HideableItem.builds, 1, "builds");
+				expectEqual(components.getComponents<HideableItem>(item).size(), 0, "components on the destroyed item");
+				expectEqual(
+					registryHolds(components, [item, mesh]).join(", "),
+					"",
+					"what the registry holds of the destroyed item",
+				);
+				expectEqual(registryCounts(components).get("skipped watches"), 0, "skipped instances watched");
+				checkItemBuilds("destroyed by its own build", 0);
+
+				quiet("a child its own build destroys");
+				expectReleased(components, baseline, [container, item, mesh, elsewhere], "destroyed");
+			});
+
+			test("builds a tagged child its container moves elsewhere as their tree enters the DataModel afresh once its own build has unparented it and it is back", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const elsewhere = folder("HideSelfUnparentedElsewhere");
+				StoringContainer.storage = elsewhere;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// The item's first build unparents it.
+				const [container, item] = hidingTree("HideSelfUnparented", true);
+				const connection = components.onComponentAdded<HideableItem>((component) => {
+					if (component.instance === item && component.build === 1) item.Parent = undefined;
+				});
+				defer(() => connection.Disconnect());
+				tagHidingTree(container, item, "StoringContainer", false);
+				container.Parent = scratch();
+
+				// Out of the DataModel the first build goes, though the engine announces nothing for a
+				// skipped instance, and nothing is left watching it.
+				untilFound(() => components.getComponents<StoringContainer>(container)[0], "the container's component");
+				eventually(() => logged("item:destroy:1") === 1, "the first build to go out of the DataModel");
+				settle();
+				expectEqual(item.Parent, undefined, "the unparented item's parent");
+				expectEqual(components.getComponents<HideableItem>(item).size(), 0, "components out of the DataModel");
+				expectEqual(
+					registryCounts(components).get("skipped watches"),
+					0,
+					"skipped instances watched out of the DataModel",
+				);
+				checkItemBuilds("out of the DataModel", 0);
+
+				// Back in, it is announced as anything entering the DataModel is: built again, and left to
+				// the engine's own announcements from then on.
+				item.Parent = elsewhere;
+				untilFound(() => components.getComponents<HideableItem>(item)[0], "the item's component back in");
+				settle();
+				expectEqual(HideableItem.builds, 2, "builds");
+				expectEqual(registryCounts(components).get("skipped watches"), 0, "skipped instances watched back in");
+				checkItemBuilds("back in", 1);
+
+				item.Parent = undefined;
+				untilGone(() => components.getComponents<HideableItem>(item)[0], "the item's component out again");
+				checkItemBuilds("out again", 0);
+
+				quiet("a child its own build unparents, put back later");
+				expectReleased(components, baseline, [container, item, elsewhere], "destroyed");
+			});
+
+			test("ends with one component for a tagged child its container moves elsewhere as their tree enters the DataModel when its own build unparents it and puts it straight back", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const elsewhere = folder("HideSelfReturnedElsewhere");
+				StoringContainer.storage = elsewhere;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// The item's first build unparents it and puts it back on a deferred task: back before the
+				// removal its leaving queued has run.
+				const [container, item] = hidingTree("HideSelfReturned", true);
+				const connection = components.onComponentAdded<HideableItem>((component) => {
+					if (component.instance !== item || component.build !== 1) return;
+
+					item.Parent = undefined;
+					task.defer(() => {
+						item.Parent = elsewhere;
+					});
+				});
+				defer(() => connection.Disconnect());
+				tagHidingTree(container, item, "StoringContainer", false);
+				container.Parent = scratch();
+
+				// Back in, it is announced as anything entering the DataModel is, and the removal finds it
+				// back: it ends with one component, left to the engine's own announcements.
+				untilFound(() => components.getComponents<StoringContainer>(container)[0], "the container's component");
+				eventually(() => HideableItem.builds >= 1, "the item's first build");
+				untilFound(() => components.getComponents<HideableItem>(item)[0], "the item's component back in");
+				settle();
+				expectEqual(item.Parent, elsewhere, "the item's parent back in");
+				expectEqual(components.getComponents<HideableItem>(item).size(), 1, "components back in");
+				expectEqual(registryCounts(components).get("skipped watches"), 0, "skipped instances watched back in");
+				checkItemBuilds("back at once", 1);
+
+				item.Parent = undefined;
+				untilGone(() => components.getComponents<HideableItem>(item)[0], "the item's component out again");
+				checkItemBuilds("out again", 0);
+
+				quiet("a child its own build unparents and puts straight back");
+				expectReleased(components, baseline, [container, item, elsewhere], "destroyed");
+			});
+
+			test("builds nothing for a tagged child its predicate refused when its tag was announced once a container announced later moves it out and it would pass", () => {
+				const { components, quiet, baseline } = createHidingModule(["Picky"]);
+				const elsewhere = folder("RefusedChildElsewhere");
+				StoringContainer.storage = elsewhere;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// Announced where it is, and refused for good: `Picky` is built only on an instance named
+				// `Chosen`.
+				const container = folder("RefusedChildContainer");
+				const item = folderIn(container, "Item");
+				CollectionService.AddTag(item, "Picky");
+				settle();
+				expectEqual(components.getComponents<Picky>(item).size(), 0, "components once announced");
+				expectTrue(
+					CollectionService.GetTagged("Picky").includes(item),
+					"the item among the tagged instances, announced",
+				);
+
+				// Once the container's component has stored the item, the item is renamed to pass: still
+				// inside the container's announcement, where signals are immediate.
+				const connection = components.onComponentAdded<StoringContainer>((component) => {
+					if (component.instance === container) item.Name = "Chosen";
+				});
+				defer(() => connection.Disconnect());
+
+				// The container is tagged in the DataModel, so its announcement is its own. Its `onStart`
+				// moves the item out while that announcement is acted on, and the item comes to pass
+				// before anything weighs it. Its own announcement reached it, and the refusal stands:
+				// nothing weighs it again.
+				CollectionService.AddTag(container, "StoringContainer");
+				eventually(() => item.Parent === elsewhere && item.Name === "Chosen", "the item moved out and renamed");
+				settle();
+				expectEqual(components.getComponents<Picky>(item).size(), 0, "components once it would pass");
+				expectEqual(registryCounts(components).get("skipped watches"), 0, "skipped instances watched");
+
+				quiet("a refused child moved out by a container announced later");
+				expectReleased(components, baseline, [container, item, elsewhere], "destroyed");
+			});
+
+			test("takes down the component of an announced child that leaves and comes back in one resumption in a tree whose container hides it once it leaves the DataModel", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const elsewhere = folder("HideReturnedElsewhere");
+				StoringContainer.storage = elsewhere;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				const item = itemIn(scratch(), "Item");
+				const mesh = item.FindFirstChild("Mesh")!;
+				const container = enteringContainer("HideReturned");
+				CollectionService.AddTag(item, "HideableItem");
+				untilFound(() => components.getComponents<HideableItem>(item)[0], "the item's component announced");
+				settle();
+
+				// Out of the DataModel and back in, in one resumption, in a tree whose container hides it
+				// as the tree enters. Where signals are immediate its leaving is announced while it still
+				// reads as in the DataModel, so the removal is weighed a resumption later, by when it is
+				// back: it reads as stale. The walk skipped it, though, so the engine announces its next
+				// leaving no more than its return. It keeps its component, as a move within the DataModel
+				// would, and is watched. Where signals are deferred the removal reads as stale too, and
+				// the item is announced where it went.
+				item.Parent = container;
+				container.Parent = scratch();
+
+				untilFound(() => components.getComponents<StoringContainer>(container)[0], "the container's component");
+				eventually(() => item.Parent === elsewhere, "the container to hide the item");
+				settle();
+				if (!signalsAreDeferred()) {
+					expectFalse(
+						CollectionService.GetTagged("HideableItem").includes(item),
+						"the item among the tagged instances, its return skipped",
+					);
+					expectEqual(registryCounts(components).get("skipped watches"), 1, "skipped instances watched");
+				}
+				expectEqual(components.getComponents<HideableItem>(item).size(), 1, "components once back");
+				expectEqual(HideableItem.builds, 1, "builds");
+				checkItemBuilds("back", 1);
+
+				item.Destroy();
+				untilGone(() => components.getComponents<HideableItem>(item)[0], "the item's component once destroyed");
+				checkItemBuilds("destroyed", 0);
+
+				quiet("an announced child back in a tree that hides it");
+				expectReleased(components, baseline, [container, item, mesh, elsewhere], "destroyed");
+			});
+
+			test("takes down the component of a skipped child its own build unparents and puts into a second entering tree that hides it again once it leaves the DataModel", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const elsewhere = folder("HideRehiddenByBuildElsewhere");
+				StoringContainer.storage = elsewhere;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// The item's first build unparents it and, before the removal its leaving queued has run,
+				// puts it into a second container that enters the DataModel and hides it again.
+				const [container, item] = hidingTree("HideRehiddenByBuild", true);
+				const mesh = item.FindFirstChild("Mesh")!;
+				const second = enteringContainer("HideRehiddenByBuildSecond");
+				const connection = components.onComponentAdded<HideableItem>((component) => {
+					if (component.instance !== item || component.build !== 1) return;
+
+					item.Parent = undefined;
+					task.defer(() => {
+						item.Parent = second;
+						second.Parent = scratch();
+					});
+				});
+				defer(() => connection.Disconnect());
+				tagHidingTree(container, item, "StoringContainer", false);
+				container.Parent = scratch();
+
+				// Where signals are immediate it is back by the time that removal runs, but skipped
+				// again: it keeps its first build, and is watched for leaving. Where they are deferred
+				// the removal finds it gone, and it is announced and built again where it went.
+				untilFound(
+					() => components.getComponents<StoringContainer>(second)[0],
+					"the second container's component",
+				);
+				eventually(() => item.Parent === elsewhere, "the second container to hide the item");
+				untilFound(() => components.getComponents<HideableItem>(item)[0], "the item's component hidden again");
+				settle();
+				if (!signalsAreDeferred()) {
+					expectFalse(
+						CollectionService.GetTagged("HideableItem").includes(item),
+						"the item among the tagged instances, skipped again",
+					);
+					expectEqual(HideableItem.builds, 1, "builds");
+					expectEqual(registryCounts(components).get("skipped watches"), 1, "skipped instances watched");
+				}
+				expectEqual(components.getComponents<HideableItem>(item).size(), 1, "components hidden again");
+				checkItemBuilds("hidden again", 1);
+
+				item.Destroy();
+				untilGone(() => components.getComponents<HideableItem>(item)[0], "the item's component once destroyed");
+				checkItemBuilds("destroyed", 0);
+
+				quiet("a skipped child its own build puts into a second tree that hides it");
+				expectReleased(components, baseline, [container, second, item, mesh, elsewhere], "destroyed");
+			});
+
+			test("takes down the component of a watched skipped child moved in one resumption into a second entering tree that hides it again once it leaves the DataModel", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const elsewhere = folder("HideRehiddenElsewhere");
+				StoringContainer.storage = elsewhere;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// Where signals are immediate the walk skips the item, which is built where it went and
+				// watched for leaving.
+				const [container, item] = hidingTree("HideRehidden", true);
+				const mesh = item.FindFirstChild("Mesh")!;
+				const second = enteringContainer("HideRehiddenSecond");
+				tagHidingTree(container, item, "StoringContainer", false);
+				container.Parent = scratch();
+
+				untilFound(() => components.getComponents<StoringContainer>(container)[0], "the container's component");
+				eventually(() => item.Parent === elsewhere, "the container to hide the item");
+				untilFound(() => components.getComponents<HideableItem>(item)[0], "the item's component where it went");
+				settle();
+				if (!signalsAreDeferred()) {
+					expectEqual(registryCounts(components).get("skipped watches"), 1, "skipped instances watched");
+				}
+
+				// Into a second container that enters the DataModel and hides it again, in one
+				// resumption: the watch, or the removal where signals are deferred, finds it back, and
+				// where signals are immediate the walk skipped it again. It keeps its component, and is
+				// watched again.
+				item.Parent = second;
+				second.Parent = scratch();
+
+				untilFound(
+					() => components.getComponents<StoringContainer>(second)[0],
+					"the second container's component",
+				);
+				eventually(() => item.Parent === elsewhere, "the second container to hide the item");
+				settle();
+				if (!signalsAreDeferred()) {
+					expectFalse(
+						CollectionService.GetTagged("HideableItem").includes(item),
+						"the item among the tagged instances, skipped again",
+					);
+					expectEqual(
+						registryCounts(components).get("skipped watches"),
+						1,
+						"skipped instances watched again",
+					);
+				}
+				expectEqual(components.getComponents<HideableItem>(item).size(), 1, "components hidden again");
+				expectEqual(HideableItem.builds, 1, "builds");
+				checkItemBuilds("hidden again", 1);
+
+				item.Destroy();
+				untilGone(() => components.getComponents<HideableItem>(item)[0], "the item's component once destroyed");
+				checkItemBuilds("destroyed", 0);
+
+				quiet("a watched skipped child moved into a second tree that hides it");
+				expectReleased(components, baseline, [container, second, item, mesh, elsewhere], "destroyed");
+			});
+
+			test("takes down the component of a refused child that leaves and comes back in one resumption in a tree whose container stores it again once it is shown and leaves the DataModel", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const storage = storageFolder("HideRefusedReturnedStorage");
+				StoringContainer.storage = storage;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				const item = itemIn(storage, "Item");
+				const mesh = item.FindFirstChild("Mesh")!;
+				const container = enteringContainer("HideRefusedReturned");
+				CollectionService.AddTag(item, "HideableItem");
+				eventually(() => refusedCount(components, HideableItem) === 1, "the item refused in storage");
+				settle();
+
+				// Out of the DataModel and back in, in one resumption, in a tree whose container stores
+				// it again as the tree enters: the removal reads as stale, and it is still refused in
+				// storage. Where signals are immediate the walk skipped it, and it is watched all the
+				// same, for what showing it builds.
+				item.Parent = container;
+				container.Parent = scratch();
+
+				const hider = untilFound(
+					() => components.getComponents<StoringContainer>(container)[0],
+					"the container's component",
+				);
+				eventually(() => item.Parent === storage, "the container to store the item");
+				settle();
+				expectEqual(components.getComponents<HideableItem>(item).size(), 0, "components in storage");
+				expectEqual(refusedCount(components, HideableItem), 1, "refusals in storage");
+				if (!signalsAreDeferred()) {
+					expectFalse(
+						CollectionService.GetTagged("HideableItem").includes(item),
+						"the item among the tagged instances, its return skipped",
+					);
+					expectEqual(registryCounts(components).get("skipped watches"), 1, "skipped instances watched");
+				}
+
+				hider.show();
+				untilFound(() => components.getComponents<HideableItem>(item)[0], "the item's component once shown");
+				checkItemBuilds("shown", 1);
+
+				item.Destroy();
+				untilGone(() => components.getComponents<HideableItem>(item)[0], "the item's component once destroyed");
+				checkItemBuilds("destroyed", 0);
+
+				quiet("a refused child back in a tree that stores it");
+				expectReleased(components, baseline, [container, item, mesh, storage], "destroyed");
+			});
+
+			test("holds nothing of an announced child that leaves and comes back in one resumption in a tree whose container hides it when a destroy queued in between runs before it is weighed", () => {
+				// The order this needs -- the removal read again, the destroy, then the weighing -- is
+				// that of immediate signals. Where they are deferred the destroy runs ahead of the
+				// container's announcement, and the container has no item to hide.
+				if (signalsAreDeferred()) skip("the order it needs is that of immediate signals");
+
+				const { components, quiet, baseline } = createHidingModule();
+				const elsewhere = folder("HideReturnedDestroyedElsewhere");
+				StoringContainer.storage = elsewhere;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				const item = itemIn(scratch(), "Item");
+				const mesh = item.FindFirstChild("Mesh")!;
+				const container = enteringContainer("HideReturnedDestroyed");
+				CollectionService.AddTag(item, "HideableItem");
+				untilFound(() => components.getComponents<HideableItem>(item)[0], "the item's component announced");
+				settle();
+
+				// Out of the DataModel and back in, in one resumption, in a tree whose container hides
+				// it: the removal its leaving announced reads as stale a resumption later, and the walk
+				// skipped it. A destroy queued in between runs after that read and before the item is
+				// weighed, which finds it reached, left out of `GetTagged` and out of the DataModel
+				// again. The engine announces that leaving no more than its return: its component goes
+				// all the same.
+				item.Parent = container;
+				task.defer(() => item.Destroy());
+				container.Parent = scratch();
+
+				untilFound(() => components.getComponents<StoringContainer>(container)[0], "the container's component");
+				untilGone(() => components.getComponents<HideableItem>(item)[0], "the item's component once destroyed");
+				settle();
+				expectFalse(item.IsDescendantOf(game), "the destroyed item in the DataModel");
+				expectEqual(
+					registryHolds(components, [item, mesh]).join(", "),
+					"",
+					"what the registry holds of the destroyed item",
+				);
+				expectEqual(registryCounts(components).get("skipped watches"), 0, "skipped instances watched");
+				checkItemBuilds("destroyed", 0);
+
+				quiet("an announced child back in a tree that hides it, destroyed before it is weighed");
+				expectReleased(components, baseline, [container, item, mesh, elsewhere], "destroyed");
+			});
+
+			test("holds nothing of a watched skipped child moved in one resumption into a second entering tree that hides it again when a destroy queued in between runs before it is weighed", () => {
+				// Immediate signals only, as in the case before.
+				if (signalsAreDeferred()) skip("the order it needs is that of immediate signals");
+
+				const { components, quiet, baseline } = createHidingModule();
+				const elsewhere = folder("HideRehiddenDestroyedElsewhere");
+				StoringContainer.storage = elsewhere;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// The walk skips the item, which is built where it went and watched for leaving.
+				const [container, item] = hidingTree("HideRehiddenDestroyed", true);
+				const mesh = item.FindFirstChild("Mesh")!;
+				const second = enteringContainer("HideRehiddenDestroyedSecond");
+				tagHidingTree(container, item, "StoringContainer", false);
+				container.Parent = scratch();
+
+				untilFound(() => components.getComponents<StoringContainer>(container)[0], "the container's component");
+				eventually(() => item.Parent === elsewhere, "the container to hide the item");
+				untilFound(() => components.getComponents<HideableItem>(item)[0], "the item's component where it went");
+				settle();
+				expectEqual(registryCounts(components).get("skipped watches"), 1, "skipped instances watched");
+
+				// Into a second container that enters the DataModel and hides it again, in one
+				// resumption: the watch finds it back, and the walk skipped it again. A destroy queued in
+				// between runs after the watch's read and before the item is weighed, which finds it
+				// reached, left out of `GetTagged` and out of the DataModel again: its component goes.
+				item.Parent = second;
+				task.defer(() => item.Destroy());
+				second.Parent = scratch();
+
+				untilFound(
+					() => components.getComponents<StoringContainer>(second)[0],
+					"the second container's component",
+				);
+				untilGone(() => components.getComponents<HideableItem>(item)[0], "the item's component once destroyed");
+				settle();
+				expectFalse(item.IsDescendantOf(game), "the destroyed item in the DataModel");
+				expectEqual(
+					registryHolds(components, [item, mesh]).join(", "),
+					"",
+					"what the registry holds of the destroyed item",
+				);
+				expectEqual(registryCounts(components).get("skipped watches"), 0, "skipped instances watched");
+				checkItemBuilds("destroyed", 0);
+
+				quiet("a watched skipped child hidden again, destroyed before it is weighed");
+				expectReleased(components, baseline, [container, second, item, mesh, elsewhere], "destroyed");
+			});
+
+			test("takes down the component a link built on a child its container hides as their tree enters once the child's tree breaks where it is followed", () => {
+				expectEagerBuildFollowed("link");
+			});
+
+			test("takes down the component a getComponent built on a child its container hides as their tree enters once the child's tree breaks where it is followed", () => {
+				expectEagerBuildFollowed("getComponent");
+			});
+
+			test("holds nothing of a tagged child whose instance guard raised once its container has hidden it as their tree entered and it is destroyed", () => {
+				const { components, baseline } = createHidingModule(["Throwy"]);
+				const warnings = recordWarnings();
+				const errors = recordErrors();
+				const elsewhere = folder("RaisedHiddenElsewhere");
+				StoringContainer.storage = elsewhere;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				const container = new Instance("Folder");
+				container.Name = "RaisedHidden";
+				defer(() => container.Destroy());
+				const item = folderIn(container, "Item");
+				defer(() => item.Destroy());
+
+				// `Throwy`'s instance guard raises on an instance with no `X`, after the tag path made
+				// its entry. Weighed where it went, as its announcement would have weighed it, the raise
+				// leaves that entry, which the item's leaving the DataModel takes down. The raise is
+				// reported, so the case does not ask for quiet.
+				CollectionService.AddTag(container, "StoringContainer");
+				CollectionService.AddTag(item, "Throwy");
+				container.Parent = scratch();
+
+				untilFound(() => components.getComponents<StoringContainer>(container)[0], "the container's component");
+				eventually(() => item.Parent === elsewhere, "the container to hide the item");
+				eventually(
+					() => warnings.mentions("attempt to index nil") || errors.mentions("attempt to index nil"),
+					"the guard's raise to be reported",
+				);
+				settle();
+				expectEqual(components.getComponents<Throwy>(item).size(), 0, "components hidden");
+				expectEqual(trackedCount(components, Throwy), 1, "entries hidden");
+
+				item.Destroy();
+				eventually(() => trackedCount(components, Throwy) === 0, "the item's entry to go once it is destroyed");
+				expectEqual(
+					registryHolds(components, [item]).join(", "),
+					"",
+					"what the registry holds of the destroyed item",
+				);
+
+				expectReleased(components, baseline, [container, item, elsewhere], "destroyed");
+			});
+
+			test("arms nothing for a skipped child once its module is extinguished while the child is weighed", () => {
+				// Made as `createHidingModule` makes one, keeping the module: the case extinguishes it.
+				settle();
+				eventually(
+					() => HIDING_TAGS.every((tag) => CollectionService.GetTagged(tag).isEmpty()),
+					"no instance with a hiding tag left in the DataModel",
+				);
+				const module = buildModule();
+				defer(() => {
+					if (!module.isExtinguished()) module.extinguish();
+				});
+				const components = module.resolveDependency<Components>();
+				const quiet = recordHiding(components);
+
+				const elsewhere = folder("HideStoppedElsewhere");
+				StoringContainer.storage = elsewhere;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// Where signals are immediate the walk skips the item, which is weighed for each of its
+				// tags; the listener told of its `HideableItem` build extinguishes the module. Where they
+				// are deferred it is announced where it went, and the same listener does the same.
+				const [container, item] = hidingTree("HideStopped", true);
+				const mesh = item.FindFirstChild("Mesh")!;
+				const connection = components.onComponentAdded<HideableItem>((component) => {
+					if (component.instance === item) module.extinguish();
+				});
+				defer(() => connection.Disconnect());
+				CollectionService.AddTag(container, "StoringContainer");
+				CollectionService.AddTag(item, "HideableGem");
+				CollectionService.AddTag(item, "HideableItem");
+				container.Parent = scratch();
+
+				// The module let go of everything as it went, and the weighing it went inside of leaves
+				// nothing behind: no watch on the item, which nothing would let go of.
+				eventually(() => module.isExtinguished(), "the item's listener to extinguish the module");
+				settle();
+				expectEqual(item.Parent, elsewhere, "the hidden item's parent");
+				expectEqual(
+					registryHolds(components, [item, mesh]).join(", "),
+					"",
+					"what the extinguished module holds of the item",
+				);
+				expectEqual(registryCounts(components).get("skipped watches"), 0, "skipped instances watched");
+				quiet("a module extinguished while a skipped child is weighed");
+			});
+
+			test("builds the stored child once and holds nothing when its container's construction raises after storing it", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const errors = recordErrors();
+				const storage = storageFolder("StashStorage");
+				StashingRaiser.storage = storage;
+				defer(() => {
+					StashingRaiser.storage = undefined;
+				});
+
+				// The container's constructor stores the item and raises, out of the announcement:
+				// nothing of the container is built, the watch on it is let go of all the same, and the
+				// item is weighed, refused in storage.
+				const [container, item] = hidingTree("StashTree", true);
+				CollectionService.AddTag(container, "StashingRaiser");
+				CollectionService.AddTag(item, "HideableItem");
+				container.Parent = scratch();
+
+				eventually(() => item.Parent === storage, "the container's construction to store its item");
+				eventually(() => errors.mentions("raised after storing its item"), "the raise to be reported");
+				settle();
+				expectEqual(
+					components.getComponents<StashingRaiser>(container).size(),
+					0,
+					"the container's components",
+				);
+				expectEqual(components.getComponents<HideableItem>(item).size(), 0, "item components in storage");
+				expectEqual(refusedCount(components, HideableItem), 1, "refusals in storage");
+				expectEqual(registryCounts(components).get("announcement watches"), 0, "announcement watches");
+
+				// Shown by hand: built once.
+				item.Parent = container;
+				untilFound(() => components.getComponents<HideableItem>(item)[0], "the item's component once shown");
+				checkItemBuilds("shown", 1);
+				expectEqual(HideableItem.builds, 1, "builds");
+
+				quiet("a raising construction that stored its item");
+				expectReleased(components, baseline, [container, item, storage], "destroyed");
+			});
+
+			test("keeps the registry level over a hundred trees whose container stores the child as they enter the DataModel", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const storage = storageFolder("HideEnterStressStorage");
+				StoringContainer.storage = storage;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// Each cycle: a tree tagged while detached enters the workspace, its container stores the
+				// item, which is refused in storage, and shows it, which builds it; then both go.
+				for (let cycle = 0; cycle < 100; cycle++) {
+					const [container, item] = hidingTree(`HideEnterStress${cycle}`, true);
+					tagHidingTree(container, item, "StoringContainer", false);
+					container.Parent = scratch();
+
+					const hider = untilFound(
+						() => components.getComponents<StoringContainer>(container)[0],
+						`the container's component (${cycle})`,
+					);
+					eventually(
+						() => refusedCount(components, HideableItem) === 1,
+						`the item refused in storage (${cycle})`,
+					);
+					hider.show();
+					untilFound(
+						() => components.getComponents<HideableItem>(item)[0],
+						`the item's component (${cycle})`,
+					);
+
+					container.Destroy();
+					item.Destroy();
+				}
+
+				checkItemBuilds("a hundred trees", 0);
+				expectEqual(HideableItem.builds, 100, "builds");
+				expectSameCounts(baseline, registryCounts(components), "a hundred trees");
+				expectRemovedUnticked("a hundred trees");
+
+				quiet("a hundred trees");
+				expectReleased(components, baseline, [storage], "destroyed");
+			});
+
+			test("builds nothing under a blocked ancestor for a stored child whose tree is repaired there", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const storage = storageFolder("HideRepairStorage");
+				StoringContainer.storage = storage;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				// The item first, so its component is built in the workspace and kept in storage (which is
+				// right: the ancestor lists gate construction only).
+				const [container, item] = hidingTree("HideRepaired");
+				tagHidingTree(container, item, "StoringContainer", true);
+				untilFound(() => components.getComponents<StoringContainer>(container)[0], "the container's component");
+				eventually(() => item.Parent === storage, "the container to store its item");
+				const stored = untilFound(
+					() => components.getComponents<HideableItem>(item)[0],
+					"the stored item's component",
+				);
+
+				// Its tree broken in storage: a client follows it and takes the component down; a server
+				// read it once and keeps it.
+				const mesh = item.FindFirstChild("Mesh")!;
+				mesh.Parent = undefined;
+				if (RunService.IsClient()) {
+					untilGone(
+						() => components.getComponents<HideableItem>(item)[0],
+						"the stored item's component, tree broken",
+					);
+				} else {
+					settle();
+				}
+
+				// Repaired in storage: nothing is built under ReplicatedStorage, which the default blocklist
+				// says components are never built under. A client's entry qualifies again there, and waits
+				// for the item to leave.
+				mesh.Parent = item;
+				settle();
+				settle();
+				const now = components.getComponents<HideableItem>(item)[0];
+				expectTrue(
+					now === undefined || now === stored,
+					`a component built under ReplicatedStorage (build ${now?.build}, ${RunService.IsClient() ? "client" : "server"})`,
+				);
+
+				quiet("repairing in storage");
+				expectReleased(components, baseline, [container, item, storage], "destroyed");
+			});
+
+			test("builds the component of a stored child whose tree was repaired in storage once it leaves storage", () => {
+				const { components, quiet, baseline } = createHidingModule();
+				const storage = storageFolder("HideRepairedOutStorage");
+				StoringContainer.storage = storage;
+				defer(() => {
+					StoringContainer.storage = undefined;
+				});
+
+				const [container, item] = hidingTree("HideRepairedOut");
+				tagHidingTree(container, item, "StoringContainer", true);
+				const hider = untilFound(
+					() => components.getComponents<StoringContainer>(container)[0],
+					"the container's component",
+				);
+				eventually(() => item.Parent === storage, "the container to store its item");
+
+				// Read with `getComponents` throughout, which builds nothing: `getComponent` builds by hand,
+				// past the ancestor lists.
+				const stored = untilFound(
+					() => components.getComponents<HideableItem>(item)[0],
+					"the stored item's component",
+				);
+
+				// Its tree broken and repaired in storage. A client follows the tree: it takes the
+				// component down, and the entry qualifying again builds nothing under ReplicatedStorage,
+				// where it waits, still tracked. A server read the tree once and keeps the component.
+				const mesh = item.FindFirstChild("Mesh")!;
+				mesh.Parent = undefined;
+				if (RunService.IsClient()) {
+					untilGone(
+						() => components.getComponents<HideableItem>(item)[0],
+						"the stored item's component, tree broken",
+					);
+				} else {
+					settle();
+				}
+				mesh.Parent = item;
+				settle();
+				settle();
+
+				if (RunService.IsClient()) {
+					expectEqual(
+						components.getComponents<HideableItem>(item).size(),
+						0,
+						"components in storage, tree repaired",
+					);
+					expectEqual(refusedCount(components, HideableItem), 1, "refusals, tree repaired");
+				} else {
+					expectEqual(
+						components.getComponents<HideableItem>(item)[0],
+						stored,
+						"the stored item's component, tree repaired",
+					);
+				}
+
+				// Shown: out of storage, a client builds the entry that qualified all along, once.
+				hider.show();
+				const shown = untilFound(
+					() => components.getComponents<HideableItem>(item)[0],
+					"the shown item's component",
+				);
+				if (RunService.IsClient()) {
+					expectEqual(shown.build, 2, "the build the shown item has");
+				} else {
+					expectEqual(shown, stored, "the shown item's component");
+				}
+				expectEqual(refusedCount(components, HideableItem), 0, "refusals once shown");
+				checkItemBuilds("shown", 1);
+
+				quiet("repairing in storage and showing");
+				expectReleased(components, baseline, [container, item, storage], "destroyed");
+			});
+
+			test("builds a tagged template announced in ReplicatedStorage once it is moved to the workspace and keeps it when it is moved back", () => {
+				const { components, quiet, baseline } = createHidingModule();
+
+				// Tagged where templates are kept: the default blocklist refuses it there, and it waits.
+				const storage = storageFolder("TemplateStorage");
+				const template = itemIn(storage, "Template");
+				CollectionService.AddTag(template, "HideableItem");
+				settle();
+				expectEqual(components.getComponents<HideableItem>(template).size(), 0, "components in storage");
+				expectEqual(refusedCount(components, HideableItem), 1, "refusals in storage");
+
+				// Moved within ReplicatedStorage: still refused, and still waiting.
+				const shelf = folderIn(storage, "Shelf");
+				template.Parent = shelf;
+				settle();
+				expectEqual(components.getComponents<HideableItem>(template).size(), 0, "components on the shelf");
+				expectEqual(refusedCount(components, HideableItem), 1, "refusals on the shelf");
+
+				// Moved to the workspace: built once, as its tag's announcement there would have built it.
+				const place = folder("TemplatePlace");
+				template.Parent = place;
+				const built = untilFound(
+					() => components.getComponents<HideableItem>(template)[0],
+					"the component in the workspace",
+				);
+				expectEqual(refusedCount(components, HideableItem), 0, "refusals in the workspace");
+
+				// Back in storage, and out again: the lists gate construction, not removal, so it keeps
+				// the one it has.
+				template.Parent = storage;
+				settle();
+				expectEqual(
+					components.getComponents<HideableItem>(template)[0],
+					built,
+					"the component back in storage",
+				);
+				template.Parent = place;
+				settle();
+				expectEqual(components.getComponents<HideableItem>(template)[0], built, "the component out again");
+				expectEqual(refusedCount(components, HideableItem), 0, "refusals at the end");
+				checkItemBuilds("moved", 1);
+
+				quiet("moving a template");
+				expectReleased(components, baseline, [template, storage, place], "destroyed");
+			});
+
+			test("builds the component of a tagged instance once it enters an ancestor its whitelist allows", () => {
+				const { components, baseline } = createRefusalModule(["Allowed"]);
+
+				// `Allowed` is only built under ReplicatedStorage: tagged in the workspace, it waits,
+				// watched on its own.
+				const outside = folder("WhitelistOutside");
+				const instance = folderIn(outside, "WhitelistCandidate");
+				CollectionService.AddTag(instance, "Allowed");
+				settle();
+				expectEqual(components.getComponents<Allowed>(instance).size(), 0, "components outside");
+				expectEqual(refusedCount(components, Allowed), 1, "refusals outside");
+				expectEqual(registryCounts(components).get("Allowed: refusal connections"), 1, "watches outside");
+
+				// Moved about outside the whitelist: still refused, and still watched once.
+				const elsewhere = folder("WhitelistElsewhere");
+				instance.Parent = elsewhere;
+				settle();
+				expectEqual(components.getComponents<Allowed>(instance).size(), 0, "components elsewhere");
+				expectEqual(registryCounts(components).get("Allowed: refusal connections"), 1, "watches elsewhere");
+
+				// Into the whitelist: built, and the watch let go of.
+				const inside = storageFolder("WhitelistInside");
+				instance.Parent = inside;
+				const built = untilFound(() => components.getComponents<Allowed>(instance)[0], "the component inside");
+				expectEqual(refusedCount(components, Allowed), 0, "refusals inside");
+				expectEqual(registryCounts(components).get("Allowed: refusal connections") ?? 0, 0, "watches inside");
+
+				// And out of it again: the lists gate construction, so it keeps the one it has.
+				instance.Parent = outside;
+				settle();
+				expectEqual(components.getComponents<Allowed>(instance)[0], built, "the component outside again");
+
+				expectReleased(components, baseline, [outside, elsewhere, inside], "destroyed");
+			});
+
+			test("builds nothing for a tagged instance its predicate refuses once it leaves storage", () => {
+				const { components, baseline } = createRefusalModule(["Picky"]);
+
+				// `Picky` is built only on an instance named `Chosen`. The predicate refuses one named
+				// otherwise outright, so nothing waits for it to move; the other two pass it and are
+				// refused by the lists, so they wait.
+				const storage = storageFolder("PickyStorage");
+				const unchosen = folderIn(storage, "Unchosen");
+				const renamed = folderIn(storage, "Chosen");
+				const control = folderIn(storage, "Chosen");
+				for (const instance of [unchosen, renamed, control]) CollectionService.AddTag(instance, "Picky");
+				settle();
+				expectEqual(components.getAllComponents<Picky>().size(), 0, "components in storage");
+				expectEqual(refusedCount(components, Picky), 2, "refusals in storage");
+
+				// One of them stops passing the predicate while it waits, and all three leave storage: the
+				// move is weighed the way an announcement would be, the predicate first.
+				renamed.Name = "Renamed";
+				const place = folder("PickyPlace");
+				for (const instance of [unchosen, renamed, control]) instance.Parent = place;
+				untilFound(() => components.getComponents<Picky>(control)[0], "the component chosen throughout");
+				settle();
+				expectEqual(components.getComponents<Picky>(unchosen).size(), 0, "components, never chosen");
+				expectEqual(components.getComponents<Picky>(renamed).size(), 0, "components, renamed in storage");
+				expectEqual(refusedCount(components, Picky), 0, "refusals once out");
+
+				expectReleased(components, baseline, [storage, place], "destroyed");
+			});
+
+			test("holds nothing of a refused instance destroyed while it waits", () => {
+				const { components, quiet, baseline } = createHidingModule(["Allowed"]);
+
+				// Both kinds of wait: a template under a blocked ancestor, and an instance outside the
+				// whitelist.
+				const storage = storageFolder("DoomedStorage");
+				const outside = folder("DoomedOutside");
+				const template = itemIn(storage, "DoomedTemplate");
+				const candidate = folderIn(outside, "DoomedCandidate");
+				CollectionService.AddTag(template, "HideableItem");
+				CollectionService.AddTag(candidate, "Allowed");
+				settle();
+				expectEqual(refusedCount(components, HideableItem), 1, "refused templates");
+				expectEqual(refusedCount(components, Allowed), 1, "refused candidates");
+
+				const doomed = [template, template.FindFirstChild("Mesh")!, candidate];
+				template.Destroy();
+				candidate.Destroy();
+				eventually(
+					() => registryHolds(components, doomed).isEmpty(),
+					"the registry to let go of the destroyed instances",
+				);
+				settle();
+
+				expectEqual(registryHolds(components, doomed).join(", "), "", "what the registry holds");
+				expectSameCounts(baseline, registryCounts(components), "the registry");
+				expectEqual(HideableItem.builds, 0, "builds");
+
+				quiet("destroying refused instances");
+				expectReleased(components, baseline, [storage, outside], "destroyed");
+			});
+
+			test("lets go of a refused instance whose tag is removed while it waits", () => {
+				const { components, quiet, baseline } = createHidingModule(["Allowed"]);
+
+				// Both kinds of wait: a template under a blocked ancestor, and an instance outside the
+				// whitelist.
+				const storage = storageFolder("UntaggedStorage");
+				const outside = folder("UntaggedOutside");
+				const place = folder("UntaggedPlace");
+				const template = itemIn(storage, "UntaggedTemplate");
+				const candidate = folderIn(outside, "UntaggedCandidate");
+				CollectionService.AddTag(template, "HideableItem");
+				CollectionService.AddTag(candidate, "Allowed");
+				settle();
+				expectEqual(refusedCount(components, HideableItem), 1, "refused templates");
+				expectEqual(refusedCount(components, Allowed), 1, "refused candidates");
+
+				// Their tags removed while they wait: nothing waits for them any more, and what heard
+				// them move is let go of, the leaving watch on ReplicatedStorage and the candidate's own.
+				CollectionService.RemoveTag(template, "HideableItem");
+				CollectionService.RemoveTag(candidate, "Allowed");
+				settle();
+				const counts = registryCounts(components);
+				expectEqual(refusedCount(components, HideableItem), 0, "refused templates, untagged");
+				expectEqual(refusedCount(components, Allowed), 0, "refused candidates, untagged");
+				expectEqual(counts.get("leaving watches") ?? 0, 0, "leaving watches, untagged");
+				expectEqual(counts.get("Allowed: refusal connections") ?? 0, 0, "refusal connections, untagged");
+				expectSameCounts(baseline, counts, "the registry, untagged");
+
+				// Moved where the lists would let them through: untagged, neither is built.
+				template.Parent = place;
+				candidate.Parent = storage;
+				settle();
+				expectEqual(components.getComponents<HideableItem>(template).size(), 0, "components on the template");
+				expectEqual(components.getComponents<Allowed>(candidate).size(), 0, "components on the candidate");
+				expectEqual(HideableItem.builds, 0, "builds");
+
+				quiet("removing the tags of refused instances");
+				expectReleased(components, baseline, [storage, outside, place], "destroyed");
+			});
+
+			test("keeps the registry level over a hundred moves of a refused instance in and out of storage", () => {
+				const { components, quiet, baseline } = createHidingModule();
+
+				const storage = storageFolder("RefusedStressStorage");
+				const place = folder("RefusedStressPlace");
+				const item = itemIn(storage, "RefusedStressItem");
+				CollectionService.AddTag(item, "HideableItem");
+				settle();
+				expectEqual(refusedCount(components, HideableItem), 1, "refusals at the start");
+				const counts = registryCounts(components);
+
+				// Each cycle: out to the workspace, built; out of the DataModel, removed; and back into
+				// storage, refused again. A frame after each move is enough for it to be weighed, as it is
+				// for a tag's announcement.
+				for (let cycle = 0; cycle < 100; cycle++) {
+					item.Parent = place;
+					task.wait();
+					item.Parent = undefined;
+					task.wait();
+					item.Parent = storage;
+					task.wait();
+				}
+
+				checkItemBuilds("a hundred cycles", 0);
+				expectEqual(HideableItem.builds, 100, "builds");
+				eventually(() => refusedCount(components, HideableItem) === 1, "the item to be refused again");
+				expectSameCounts(counts, registryCounts(components), "a hundred cycles");
+				expectRemovedUnticked("a hundred cycles");
+
+				quiet("a hundred cycles");
+				expectReleased(components, baseline, [item, storage, place], "destroyed");
 			});
 
 			test("builds a component whose link names a component the same resumption would build", () => {

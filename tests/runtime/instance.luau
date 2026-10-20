@@ -634,10 +634,12 @@ function instances.markAsRoot(instance: Instance)
 	rawset(instance, "_isRoot", true)
 end
 
---- Tells every realm about one instance that crossed the boundary.
-local function announceAncestry(instance: Instance, entered: boolean)
+--- Tells every realm about one instance that crossed the boundary. `skipped`: it entered the
+--- DataModel, but the engine's walk of the subtree it entered with never reached it (see the Parent
+--- write).
+local function announceAncestry(instance: Instance, entered: boolean, skipped: boolean?)
 	for _, observer in ancestryObservers do
-		observer(instance, entered)
+		observer(instance, entered, skipped)
 	end
 end
 
@@ -778,6 +780,17 @@ instanceMeta.__newindex = function(instance: Instance, key: string, value: any)
 			   nearest first, then -- when it enters the DataModel -- its tags announced as added.
 			5. The new parent's `ChildAdded`.
 			6. `AncestryChanged` across the subtree, children first, then the `Parent` change.
+
+			Step 4, entering the DataModel, is the engine walking the subtree as it stands as it goes,
+			and under immediate behaviour every handler an instance's signals call runs before the walk
+			reaches the next. A descendant one of them has moved out of the subtree by then -- a
+			container's tag handler hiding its child, or a `DescendantAdded` handler -- is never
+			reached: no `DescendantAdded` and no tag announcement, for it or for anything it took
+			along, and its tags stay out of `GetTagged`, unannounced when it leaves the DataModel too,
+			until it enters again (measured in Studio, 2026-10-07; see `collection.luau`). One moved
+			out and back before its turn is reached as usual. Under deferred behaviour no handler runs
+			during the walk, so nothing is skipped. Only the entering move was measured, so a move
+			within the DataModel, or outside it, still reaches every descendant here.
 		]]
 		rawset(instance, "_settingParent", true)
 
@@ -810,6 +823,12 @@ instanceMeta.__newindex = function(instance: Instance, key: string, value: any)
 		end
 
 		for _, descendant in moved do
+			-- Moved out of the subtree by a handler of an instance the walk reached before it.
+			if enters and descendant ~= instance and not isDescendantOf(descendant, instance) then
+				announceAncestry(descendant, true, true)
+				continue
+			end
+
 			for _, ancestor in gained do
 				fireTree(rawget(ancestor, "DescendantAdded"), descendant)
 			end

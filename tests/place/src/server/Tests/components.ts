@@ -11,7 +11,7 @@ import {
 	scratch,
 	test,
 } from "@flamework-experimental/testing";
-import { CollectionService, Workspace } from "@rbxts/services";
+import { CollectionService, ServerStorage, Workspace } from "@rbxts/services";
 import { DiscoveryExportedComponent } from "server/Discovery/exported";
 import { discoveryIds } from "server/Discovery/hidden";
 import { deepIds } from "server/Discovery/nested/deep";
@@ -20,10 +20,14 @@ import { FW_TEST_TAG } from "shared/Features/Testing/FwTestConfig";
 import {
 	addCore,
 	createComponentModule,
+	createRefusalModule,
+	expectReleased,
 	ExplainedOwner,
 	folder,
 	folderIn,
+	PartOnly,
 	recordWarnings,
+	refusedCount,
 	Rig,
 	settle,
 	untilGone,
@@ -417,6 +421,57 @@ export class ComponentTests implements OnStart {
 					warnings.mentions("instance guard (child 'Core' is missing"),
 					`warnings: ${warnings.describe()}`,
 				);
+			});
+
+			// A client sees nothing of ServerStorage, so the case is the server's alone.
+			test("builds every tagged part of a model moved out of ServerStorage into the workspace", () => {
+				const { components, baseline } = createRefusalModule(["PartOnly"]);
+
+				// A map kept in ServerStorage until the round starts, its parts tagged there, some a level
+				// down.
+				const map = new Instance("Model");
+				map.Name = "StoredMap";
+				defer(() => map.Destroy());
+				const wing = new Instance("Model");
+				wing.Name = "Wing";
+				wing.Parent = map;
+
+				const parts = new Array<Part>();
+				for (let index = 0; index < 50; index++) {
+					const part = new Instance("Part");
+					part.Name = `MapPart${index}`;
+					part.Anchored = true;
+					part.Parent = index % 2 === 0 ? map : wing;
+					parts.push(part);
+				}
+
+				map.Parent = ServerStorage;
+				for (const part of parts) CollectionService.AddTag(part, "PartOnly");
+				settle();
+				expectEqual(components.getAllComponents<PartOnly>().size(), 0, "components in ServerStorage");
+				expectEqual(refusedCount(components, PartOnly), 50, "refusals in ServerStorage");
+
+				// The round starts: every part is built, once.
+				map.Parent = scratch();
+				eventually(() => components.getAllComponents<PartOnly>().size() === 50, "a component on every part");
+				const built = parts.map((part) => components.getComponents<PartOnly>(part)[0]);
+				expectEqual(
+					built.filter((component) => component !== undefined).size(),
+					50,
+					"parts with a component in the workspace",
+				);
+				expectEqual(refusedCount(components, PartOnly), 0, "refusals in the workspace");
+
+				// The round ends: back into ServerStorage, every part keeps the component it has.
+				map.Parent = ServerStorage;
+				settle();
+				expectEqual(
+					parts.filter((part, index) => components.getComponents<PartOnly>(part)[0] === built[index]).size(),
+					50,
+					"parts keeping their component in ServerStorage",
+				);
+
+				expectReleased(components, baseline, [map], "destroyed");
 			});
 		});
 	}

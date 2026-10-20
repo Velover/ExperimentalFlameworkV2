@@ -146,6 +146,90 @@ function cancelPendingLink(pending: PendingLink) {
 
 const DEFAULT_ANCESTOR_BLACKLIST = [ServerStorage, ReplicatedStorage, StarterPack, StarterGui, StarterPlayer];
 
+/**
+ * The tagged instances the ancestor lists kept one component off, each until it moves somewhere the
+ * lists let it through: see `refuse`.
+ */
+interface Refusals {
+	/**
+	 * Each refused instance, with what hears it move: the blocked ancestor it sits under, whose
+	 * `DescendantRemoving` is shared (`leavingWatches`), or, under a whitelist, its own
+	 * `AncestryChanged`.
+	 */
+	instances: Map<Instance, Instance | RBXScriptConnection>;
+
+	/**
+	 * Weighs a refused instance again once it has moved, the way its tag's announcement would: built
+	 * where the lists let it through now, refused again where they do not.
+	 */
+	reconsider: (instance: Instance) => void;
+}
+
+/** A blocked ancestor watched for the refused instances under it leaving it. */
+interface LeavingWatch {
+	connection: RBXScriptConnection;
+
+	/** The components with instances refused under this ancestor, and how many each. */
+	counts: Map<Refusals, number>;
+}
+
+/**
+ * An instance whose tag's announcement is being acted on under immediate signal behaviour, watched
+ * for descendants that leave it meanwhile: see `announceWatching`.
+ */
+interface AnnouncementWatch {
+	connection: RBXScriptConnection;
+
+	/**
+	 * How many of its announcements are being acted on, one inside another; the last lets go of it.
+	 */
+	depth: number;
+}
+
+/**
+ * What one tagged component does for a descendant whose announcement the engine skipped: see
+ * `announceWatching`.
+ */
+interface SkippedCheck {
+	/**
+	 * Weighs the descendant as its announcement would, unless an announcement reached it after all.
+	 * Whether its leaving the DataModel is to take something down: weighing it left an entry, a
+	 * refusal or the component, or it came back skipped with what an earlier announcement left.
+	 */
+	check: (instance: Instance) => boolean;
+
+	/** What the tag's removal announcement does: takes all of that down again. */
+	remove: (instance: Instance) => void;
+}
+
+/**
+ * An instance whose announcement the engine skipped and Flamework weighed itself, watched for
+ * leaving the DataModel, which the engine does not announce for it either: see `watchSkipped`.
+ */
+interface SkippedWatch {
+	connection: RBXScriptConnection;
+
+	/** The removals of the components it was weighed for. */
+	removals: Array<(instance: Instance) => void>;
+}
+
+/**
+ * Whether the place delivers a signal inside the write that raised it: immediate signal behaviour,
+ * which `Default` is too (measured 2026-09-13). Measured, through a BindableEvent fired once, since
+ * `Workspace.SignalBehavior` is not scriptable. Where signals are deferred the handler is
+ * disconnected before its turn, and a deferred delivery whose connection is gone is dropped.
+ */
+function deliversSignalsImmediately() {
+	const event = new Instance("BindableEvent");
+	let heard = false;
+	const connection = event.Event.Connect(() => (heard = true));
+	event.Fire();
+	connection.Disconnect();
+	event.Destroy();
+
+	return heard;
+}
+
 /** The project-wide default from flamework.config.json, falling back to Flamework's own. */
 function defaultStreamingMode(): ComponentStreamingMode {
 	switch (getRuntimeConfig().components?.streamingMode) {
@@ -259,6 +343,36 @@ export class Components {
 	private connections = new Array<RBXScriptConnection>();
 	private isStopped = false;
 
+	/** What the ancestor lists refused, per tagged component: see `refuse`. */
+	private refusals = new Map<Constructor, Refusals>();
+
+	/**
+	 * The blocked ancestors a refused instance sits under, each watched by one `DescendantRemoving`
+	 * shared by every component and instance, for as long as anything is refused under it.
+	 */
+	private leavingWatches = new Map<Instance, LeavingWatch>();
+
+	/**
+	 * Under immediate signal behaviour, the instances with children whose tag's announcement is being
+	 * acted on right now, each watched for descendants that leave it meanwhile (`announceWatching`).
+	 * Empty between announcements, and always where signals are deferred.
+	 */
+	private announcing = new Map<Instance, AnnouncementWatch>();
+
+	/**
+	 * Per tag a tagged component uses, what weighs a descendant whose announcement the engine skipped
+	 * (`announceWatching`): each such component's own announcement, unless it reached the descendant
+	 * after all. Filled by `startCollectionService` under immediate signal behaviour only.
+	 */
+	private skippedChecks = new Map<string, SkippedCheck[]>();
+
+	/**
+	 * The instances whose announcement the engine skipped and that Flamework weighed itself, each
+	 * watched for leaving the DataModel, which the engine does not announce for them either
+	 * (`watchSkipped`).
+	 */
+	private skippedInstances = new Map<Instance, SkippedWatch>();
+
 	private componentsIdMapping: Map<string, Constructor>;
 
 	/** Components the plugin registered but left out by scope, by identifier, with the reason. */
@@ -361,13 +475,280 @@ export class Components {
 	 * whole question and the blocklist is not consulted.
 	 */
 	private passesAncestorLists(componentInfo: ComponentInfo, instance: Instance) {
+		return this.refusingAncestor(componentInfo, instance) === undefined;
+	}
+
+	/**
+	 * What keeps Flamework from constructing this component on this instance: the first blocked
+	 * ancestor the instance sits under, `true` when a whitelist is configured and the instance is
+	 * under none of it, or nothing when the lists let it through.
+	 */
+	private refusingAncestor(componentInfo: ComponentInfo, instance: Instance): Instance | true | undefined {
 		const { config } = componentInfo;
 
-		const isWhitelisted = config.ancestorWhitelist?.some((ancestor) => instance.IsDescendantOf(ancestor));
-		if (isWhitelisted !== undefined) return isWhitelisted;
+		const whitelist = config.ancestorWhitelist;
+		if (whitelist !== undefined) {
+			for (const ancestor of whitelist) {
+				if (instance.IsDescendantOf(ancestor)) return undefined;
+			}
 
-		const ancestorBlacklist = config.ancestorBlacklist ?? DEFAULT_ANCESTOR_BLACKLIST;
-		return !ancestorBlacklist.some((ancestor) => instance.IsDescendantOf(ancestor));
+			return true;
+		}
+
+		for (const ancestor of config.ancestorBlacklist ?? DEFAULT_ANCESTOR_BLACKLIST) {
+			if (instance.IsDescendantOf(ancestor)) return ancestor;
+		}
+	}
+
+	/**
+	 * Records a tagged instance the ancestor lists kept this component off, so that it is weighed
+	 * again once it moves somewhere they let it through: out of the blocked ancestor it sits under,
+	 * or into a whitelisted one. Moving within the DataModel announces nothing, so without this a
+	 * template announced in ReplicatedStorage, or a map kept in ServerStorage, never got its
+	 * components once it was moved into the workspace.
+	 *
+	 * What hears the move depends on the list. Under the blocklist it is the blocked ancestor's
+	 * `DescendantRemoving`, one connection per ancestor shared by every component and instance
+	 * refused under it (`leavingWatches`): storage holds templates by the thousand and loses an
+	 * instance seldom, so a connection per template would cost far more than the lookup each
+	 * departure costs. A whitelist is the other way round: its ancestors are where instances live
+	 * and arrive all the time, so the instance's own `AncestryChanged` hears it instead, one
+	 * connection per refused instance.
+	 *
+	 * Either way the instance is weighed again on a deferred task (`Refusals.reconsider`), once the
+	 * move is over: `DescendantRemoving` fires before it. Refusing an instance that is already refused
+	 * under the same ancestor changes nothing, so it is watched once however often it is refused.
+	 */
+	private refuse(refusals: Refusals, instance: Instance, ancestor: Instance | true) {
+		const previous = refusals.instances.get(instance);
+		if (previous !== undefined) {
+			// Still under the ancestor it is watched under, or still watched on its own.
+			if (previous === ancestor || (ancestor === true && !typeIs(previous, "Instance"))) return;
+
+			this.releaseRefusal(refusals, previous);
+		}
+
+		if (ancestor === true) {
+			const reconsider = refusals.reconsider;
+			refusals.instances.set(
+				instance,
+				instance.AncestryChanged.Connect(() => task.defer(reconsider, instance)),
+			);
+			return;
+		}
+
+		refusals.instances.set(instance, ancestor);
+
+		let watch = this.leavingWatches.get(ancestor);
+		if (watch === undefined) {
+			const counts = new Map<Refusals, number>();
+			watch = {
+				counts,
+				connection: ancestor.DescendantRemoving.Connect((descendant) => {
+					for (const [watching] of counts) {
+						if (watching.instances.has(descendant)) task.defer(watching.reconsider, descendant);
+					}
+				}),
+			};
+			this.leavingWatches.set(ancestor, watch);
+		}
+
+		watch.counts.set(refusals, (watch.counts.get(refusals) ?? 0) + 1);
+	}
+
+	/**
+	 * Lets go of a refused instance: the move it was waiting for happened, or it no longer matters.
+	 */
+	private unrefuse(refusals: Refusals, instance: Instance) {
+		const watched = refusals.instances.get(instance);
+		if (watched === undefined) return;
+
+		refusals.instances.delete(instance);
+		this.releaseRefusal(refusals, watched);
+	}
+
+	/**
+	 * Releases what heard one refused instance move: its own connection, or its count on the
+	 * ancestor's.
+	 */
+	private releaseRefusal(refusals: Refusals, watched: Instance | RBXScriptConnection) {
+		if (!typeIs(watched, "Instance")) {
+			watched.Disconnect();
+			return;
+		}
+
+		const watch = this.leavingWatches.get(watched);
+		if (watch === undefined) return;
+
+		const count = (watch.counts.get(refusals) ?? 0) - 1;
+		if (count > 0) {
+			watch.counts.set(refusals, count);
+			return;
+		}
+
+		watch.counts.delete(refusals);
+		if (watch.counts.isEmpty()) {
+			watch.connection.Disconnect();
+			this.leavingWatches.delete(watched);
+		}
+	}
+
+	/**
+	 * Acts on a tag's announcement of an instance (`announce`, the tag path's `instanceAdded`) under
+	 * immediate signal behaviour, watching the instance meanwhile for descendants that leave it.
+	 *
+	 * The engine announces a tree entering the DataModel as it walks it, each instance before its
+	 * descendants, and under immediate signal behaviour every handler runs as its instance is
+	 * reached. Acting on an announcement runs inside it: the construction, `onInit`, `onStart` up to
+	 * its first yield, the attribute defaults written back and their handlers, a waiter's handler,
+	 * the `onComponentAdded` listeners, and whatever all of that builds on the way -- a component a
+	 * link or a dependency names, a dependent on the same instance. A tagged descendant moved out of
+	 * the tree in there before the walk reaches it -- a container hiding its child from `onStart` --
+	 * is never reached: neither it nor any tagged descendant it takes along is announced, `GetTagged`
+	 * leaves them out while `HasTag` says yes, moving them back changes nothing, and leaving the
+	 * DataModel announces nothing either. Only entering it again announces them, unless a walk skips
+	 * them again (measured 2026-10-07). Where signals are deferred nothing runs inside the walk, and
+	 * the child is announced where it went.
+	 *
+	 * So a descendant carrying a tag some component uses that leaves the instance meanwhile is weighed
+	 * again, for each of its tags, on a deferred task once the move and the walk are over: as its
+	 * announcement would weigh it, unless an announcement reached it after all (`skippedChecks`).
+	 * One that was skipped is then watched for leaving the DataModel, which takes down what weighing
+	 * it built (`watchSkipped`). So is one an earlier announcement reached that left the DataModel
+	 * and came back skipped within one resumption, still holding what that announcement left: the
+	 * removal its leaving announced read as stale, or its watch, or its own build, found it back. A
+	 * move made by other code or another module during the walk -- another handler of the same
+	 * announcement, a `DescendantAdded` handler, a container in one module hiding a child whose
+	 * component is another module's, or Flamework acting on another instance's announcement and
+	 * moving something that is not that instance's descendant -- is not heard, and `GetTagged` stays
+	 * wrong for whatever else reads it, as does the tag's removal: removing the tag of a skipped
+	 * instance is not announced either.
+	 *
+	 * A leaf has nothing to move out, and costs one lookup. An instance with children holds one
+	 * `DescendantRemoving` connection for as long as its announcement is acted on (`announcing`) -- a
+	 * construction that yields holds it until it resumes, while the walk goes on -- let go of however
+	 * that ends: by raising, by a construction cancelled from inside, or by the module being
+	 * extinguished meanwhile, which lets go of every watch at once.
+	 */
+	private announceWatching(instance: Instance, announce: (instance: Instance) => void) {
+		// The first child rather than all of them: an announced model can hold a thousand parts, which
+		// `GetChildren` copies.
+		if (instance.FindFirstChildWhichIsA("Instance") === undefined) {
+			announce(instance);
+			return;
+		}
+
+		let watch = this.announcing.get(instance);
+		if (watch === undefined) {
+			watch = { connection: instance.DescendantRemoving.Connect(this.descendantLeaving), depth: 0 };
+			this.announcing.set(instance, watch);
+		}
+		watch.depth += 1;
+
+		const [ok, err] = pcall(announce, instance);
+
+		// A module extinguished from inside has let go of it already.
+		if (this.announcing.get(instance) === watch) {
+			watch.depth -= 1;
+			if (watch.depth === 0) {
+				watch.connection.Disconnect();
+				this.announcing.delete(instance);
+			}
+		}
+
+		if (!ok) error(err, 0);
+	}
+
+	/**
+	 * A descendant leaving an instance whose announcement is being acted on (`announceWatching`):
+	 * weighed once the move and the walk are over, if it carries a tag some component uses.
+	 */
+	private descendantLeaving = (descendant: Instance) => {
+		for (const tag of CollectionService.GetTags(descendant)) {
+			if (this.skippedChecks.has(tag)) {
+				task.defer(this.checkSkipped, descendant);
+				return;
+			}
+		}
+	};
+
+	/**
+	 * Weighs a descendant that left an announced instance as its announcement would, for each of its
+	 * tags.
+	 */
+	private checkSkipped = (instance: Instance) => {
+		if (this.isStopped) return;
+
+		let removals: Array<(instance: Instance) => void> | undefined;
+		for (const tag of CollectionService.GetTags(instance)) {
+			const checks = this.skippedChecks.get(tag);
+			if (checks === undefined) continue;
+
+			for (const { check, remove } of checks) {
+				// A weighing can extinguish the module (an `onStart` or a listener that does), which has
+				// let go of everything: nothing is weighed or watched after that.
+				if (this.isStopped) return;
+				if (!check(instance)) continue;
+
+				if (removals === undefined) removals = [];
+				removals.push(remove);
+			}
+		}
+
+		if (removals === undefined || this.isStopped) return;
+
+		// Out of the DataModel already: what weighing it built took it out -- an `onStart` or a
+		// listener that destroys or unparents it -- or, back skipped with what an earlier
+		// announcement left, it left again before this ran. Either way there was no watch to hear it
+		// go, and the engine announces that no more than its arrival. Taken down a resumption later,
+		// as a leaving the watch heard would be, unless it is back by then: announced as anything
+		// entering is, or skipped again, and then weighed again as it leaves the instance that hid it.
+		if (!instance.IsDescendantOf(game)) {
+			const leftRemovals = removals;
+			task.defer(() => {
+				if (this.isStopped || instance.IsDescendantOf(game)) return;
+
+				for (const remove of leftRemovals) remove(instance);
+			});
+			return;
+		}
+
+		this.watchSkipped(instance, removals);
+	};
+
+	/**
+	 * Watches an instance whose announcement the engine skipped, and that Flamework weighed itself,
+	 * for leaving the DataModel. The engine announces its leaving no more than it announced its
+	 * arrival (measured 2026-10-07), so without this the component built on it outlived it, attached
+	 * to an instance that had been destroyed. Leaving is taken as the tag's removal would be -- a
+	 * resumption later, unless the instance is back by then -- and either way the watch is let go
+	 * of, as it is in `stopCollectionService`. Back, it was announced as anything entering the
+	 * DataModel is, and from then on so is everything else; or the walk skipped it again, and it is
+	 * weighed again as it leaves the instance that hid it, and watched again.
+	 */
+	private watchSkipped(instance: Instance, removals: Array<(instance: Instance) => void>) {
+		const existing = this.skippedInstances.get(instance);
+		if (existing !== undefined) {
+			for (const remove of removals) {
+				if (!existing.removals.includes(remove)) existing.removals.push(remove);
+			}
+			return;
+		}
+
+		const watch: SkippedWatch = { connection: undefined!, removals };
+		watch.connection = instance.AncestryChanged.Connect(() => {
+			if (instance.IsDescendantOf(game)) return;
+
+			watch.connection.Disconnect();
+			if (this.skippedInstances.get(instance) === watch) this.skippedInstances.delete(instance);
+
+			task.defer(() => {
+				if (this.isStopped || instance.IsDescendantOf(game)) return;
+
+				for (const remove of watch.removals) remove(instance);
+			});
+		});
+		this.skippedInstances.set(instance, watch);
 	}
 
 	/** @internal */
@@ -385,6 +766,12 @@ export class Components {
 			}
 		}
 
+		// Under immediate signal behaviour an announcement is acted on inside the engine's walk of the
+		// tree that entered the DataModel, and a descendant moved out of that tree meanwhile is one the
+		// engine never announces (`announceWatching`). Where signals are deferred nothing runs inside
+		// the walk, and each announcement is acted on as it comes, at no cost.
+		const watchesAnnouncements = deliversSignalsImmediately();
+
 		for (const [, componentInfo] of this.components) {
 			const { config, ctor } = componentInfo;
 
@@ -393,14 +780,34 @@ export class Components {
 				const tracker = this.getComponentTracker(ctor);
 				const predicate = this.getConfigValue(ctor, "predicate");
 
+				// `reconsider` is set below, once the paths it goes back through exist.
+				const refusals: Refusals = { instances: new Map(), reconsider: undefined! };
+				this.refusals.set(ctor, refusals);
+
 				const listener = (isQualified: boolean, instance: Instance) => {
 					if (isQualified) {
 						// Not while a construction by hand is under way, which attaches it: the entry
 						// can qualify under it -- a dependent whose dependency was removed by hand is
 						// told of the next one as that construction asks for it -- and building it
 						// here as well is the cyclic construction `addComponent` raises for.
-						if (!this.isConstructing(instance, ctor)) this.addComponent(instance, ctor, true);
+						if (this.isConstructing(instance, ctor)) return;
+
+						// The entry was let through where it was announced, and the instance may have
+						// moved under a blocked ancestor since, keeping the component it had. The lists
+						// gate this construction as they gate the first: a tree broken and repaired in
+						// ReplicatedStorage, which a client follows, rebuilt the component there. It
+						// stays tracked, and is built once it leaves.
+						const ancestor = this.refusingAncestor(componentInfo, instance);
+						if (ancestor !== undefined) {
+							this.refuse(refusals, instance, ancestor);
+							return;
+						}
+
+						this.addComponent(instance, ctor, true);
 					} else {
+						// Waiting for nothing now: the entry qualifying again weighs the lists again.
+						this.unrefuse(refusals, instance);
+
 						// A `destroy` that raises is reported rather than raised, as it is at extinguish.
 						// This runs inside whatever handed the loss round -- a dependency's tag going,
 						// ahead of that dependency's own removal -- and a raise here abandoned that
@@ -438,25 +845,121 @@ export class Components {
 					// tree, nothing ever will. Leaving it is what freezes an instance guard that
 					// failed while the tree was still filling in, and `getComponent` is then
 					// answered from it: a link watching an instance would change the answer.
+					// The predicate refuses outright, wherever the instance goes: nothing waits for a
+					// move, a refusal by the lists before included.
 					if (predicate !== undefined && !predicate(instance)) {
 						tracker.refreshInstance(instance);
+						this.unrefuse(refusals, instance);
 						return;
 					}
 
-					if (!this.passesAncestorLists(componentInfo, instance)) {
+					// Refused where it is, and weighed again once it moves (`refuse`): the lists are
+					// about where an instance is, and an instance moves within the DataModel without
+					// its tag being announced again.
+					const ancestor = this.refusingAncestor(componentInfo, instance);
+					if (ancestor !== undefined) {
 						tracker.refreshInstance(instance);
+						this.refuse(refusals, instance, ancestor);
 						return;
 					}
 
+					this.unrefuse(refusals, instance);
 					tracker.trackInstance(instance, listener);
 				};
 
-				this.connections.push(CollectionService.GetInstanceAddedSignal(tag).Connect(instanceAdded));
+				// A refused instance that has moved, read as its announcement would read it: still in the
+				// DataModel, tagged, past the predicate and the lists -- `instanceAdded` itself, for an
+				// instance the announcement refused. One the tag path's listener refused is still
+				// tracked, its entry kept current all along, so it is built if that entry qualifies now
+				// (`checkInstance`, the gate the listener is told through, which reads the predicate as
+				// well), as the listener would have built it.
+				refusals.reconsider = (instance: Instance) => {
+					if (this.isStopped || !refusals.instances.has(instance)) return;
+
+					if (instance.IsDescendantOf(game)) {
+						const ancestor = this.refusingAncestor(componentInfo, instance);
+						if (ancestor !== undefined) {
+							// Moved from one blocked ancestor to another, or still outside the whitelist.
+							this.refuse(refusals, instance, ancestor);
+							return;
+						}
+					}
+
+					this.unrefuse(refusals, instance);
+
+					// Out of the DataModel, the tag's removal takes it from here: announced, or heard by
+					// the watch on a skipped instance. Back in, it is announced afresh, or skipped and
+					// weighed as it leaves the instance that hid it.
+					if (!instance.IsDescendantOf(game)) return;
+
+					if (!tracker.hasOwner(instance)) {
+						instanceAdded(instance);
+					} else if (tracker.checkInstance(instance) && !this.isConstructing(instance, ctor)) {
+						this.addComponent(instance, ctor, true);
+					}
+				};
+
+				const describeFailure = (instance: Instance) => [
+					`[Flamework] Failed to instantiate '${ctor}' for`,
+					instance,
+					`[${instance.GetFullName()}]`,
+				];
+
+				this.connections.push(
+					CollectionService.GetInstanceAddedSignal(tag).Connect(
+						watchesAnnouncements
+							? (instance) => this.announceWatching(instance, instanceAdded)
+							: instanceAdded,
+					),
+				);
 				const removeFor = (instance: Instance) => {
+					this.unrefuse(refusals, instance);
 					tracker.untrackInstance(instance, listener);
 					tracker.setHasTag(instance, false);
 					this.removeComponent(instance, ctor);
 				};
+
+				if (watchesAnnouncements) {
+					// A descendant that left an instance while that instance's announcement was acted on,
+					// weighed as its own announcement would have weighed it -- unless an announcement did
+					// reach it. On a thread of its own, as a handler of the announcement would be. What it
+					// leaves -- an entry, a refusal, or the component -- is what the leaving it is not told
+					// of has to take down (`watchSkipped`).
+					let checks = this.skippedChecks.get(tag);
+					if (checks === undefined) this.skippedChecks.set(tag, (checks = []));
+					checks.push({
+						check: (instance) => {
+							// The engine lists what it announced and leaves out what it skipped.
+							const listed = CollectionService.GetTagged(tag).includes(instance);
+
+							// An announcement reached it before: the tag path has an owner entry for it, or the
+							// lists refused it. Listed, that stands. Left out, it left the DataModel and came
+							// back within one resumption, skipped (the removal its leaving announced read as
+							// stale, or a watch or its own build found it back), and the engine announces its
+							// next leaving no more than its return: not weighed again, but watched for that
+							// leaving, or taken down if it has left again already (`checkSkipped`).
+							if (tracker.hasOwner(instance) || refusals.instances.has(instance)) return !listed;
+
+							// An announcement that reached it and left neither -- the predicate refused it, or
+							// tracking it raised after making the entry, which a link may have let go of
+							// since -- stands until the tag is announced again.
+							if (listed) return false;
+
+							// Weighed as its announcement would weigh it. A component already there without an
+							// owner entry -- built by a link or a `getComponent` inside the window -- is no
+							// announcement's: weighed, it is tracked and follows its own criteria from then on.
+							// Whatever is left -- an entry, one a raise left included, a refusal, or the
+							// component -- is what its leaving the DataModel has to take down.
+							safeCall(describeFailure, instanceAdded, false, instance);
+							return (
+								tracker.isTracked(instance) ||
+								refusals.instances.has(instance) ||
+								this.activeComponents.get(instance)?.has(ctor) === true
+							);
+						},
+						remove: removeFor,
+					});
+				}
 
 				this.connections.push(
 					CollectionService.GetInstanceRemovedSignal(tag).Connect((instance) => {
@@ -471,7 +974,10 @@ export class Components {
 							// left, so the instance still reads as tagged and in the tree, and
 							// taking that for a stale removal left the component attached for good.
 							// Looked at again one resumption later, a genuine removal reads as one
-							// and a stale one still reads as stale.
+							// and a stale one still reads as stale. So does one whose instance came
+							// back in a tree whose walk skipped it, and that keeps its component, as a
+							// move within the DataModel would: `skippedChecks` watches it once it
+							// leaves the instance that hid it.
 							task.defer(() => {
 								if (instance.IsDescendantOf(game) && CollectionService.HasTag(instance, tag)) {
 									return;
@@ -485,12 +991,6 @@ export class Components {
 						removeFor(instance);
 					}),
 				);
-
-				const describeFailure = (instance: Instance) => [
-					`[Flamework] Failed to instantiate '${ctor}' for`,
-					instance,
-					`[${instance.GetFullName()}]`,
-				];
 
 				for (const instance of CollectionService.GetTagged(tag)) {
 					safeCall(describeFailure, instanceAdded, false, instance);
@@ -514,6 +1014,33 @@ export class Components {
 			connection.Disconnect();
 		}
 		this.connections.clear();
+
+		// Nothing refused waits for a move any more: a reconsider already queued finds the module
+		// stopped and the instance gone from its refusals.
+		for (const [, refusals] of this.refusals) {
+			for (const [, watched] of refusals.instances) {
+				if (!typeIs(watched, "Instance")) watched.Disconnect();
+			}
+			refusals.instances.clear();
+		}
+		for (const [, watch] of this.leavingWatches) {
+			watch.connection.Disconnect();
+		}
+		this.leavingWatches.clear();
+
+		// An announcement still being acted on -- the module was extinguished from inside it, or while
+		// a construction in it yields -- finds its watch let go of as it ends, and a skipped
+		// descendant's weighing already queued finds the module stopped. A skipped instance is not
+		// waited on to leave any more: its components are taken down below, with every other.
+		for (const [, watch] of this.announcing) {
+			watch.connection.Disconnect();
+		}
+		this.announcing.clear();
+		this.skippedChecks.clear();
+		for (const [, watch] of this.skippedInstances) {
+			watch.connection.Disconnect();
+		}
+		this.skippedInstances.clear();
 
 		// One component's teardown must not leave the rest of the module standing. A `destroy` that
 		// raises is reported and the next component comes down anyway, so the trackers below are

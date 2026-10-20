@@ -978,6 +978,15 @@ export class ComponentTracker {
 	}
 
 	/**
+	 * Whether the tag path has registered on this entry: it is read for the tag path's listener and
+	 * kept current by the entry's own deferred tasks, rather than held open by a link or a dependent.
+	 */
+	public hasOwner(instance: Instance) {
+		const tracker = this.getInstanceTracker(instance, false);
+		return tracker !== undefined && isOwned(tracker);
+	}
+
+	/**
 	 * Whether the tag path holds this entry and it no longer qualifies: whatever component is on the
 	 * instance is on its way out, taken down by the tag path's listener as the loss is handed round.
 	 *

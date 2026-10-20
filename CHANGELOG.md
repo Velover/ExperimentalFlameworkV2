@@ -5,6 +5,60 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ## Unreleased
 
+### Upgrade notes
+
+- **A tagged instance moved out of ReplicatedStorage or ServerStorage, or into a whitelisted
+  ancestor, now gets its component.** Every earlier release, v1 included, read the ancestor lists
+  only when the tag was announced, and moving within the DataModel announces nothing, so such an
+  instance was left without one for as long as it stayed in the DataModel. A game that relied on
+  that, parking tagged models in storage and moving them out without wanting their components,
+  gets components now. To keep the old effect, give the component a `predicate` that refuses them
+  where they are kept, such as `(instance) => !instance.IsDescendantOf(ServerStorage)`: a
+  predicate's refusal when the tag is announced is final, so the instance stays without its
+  component when it moves out, while a copy cloned into the workspace still gets one. Or keep an
+  untagged copy in storage and tag the one you move.
+
+### components
+
+#### Fixed
+
+- **A tagged instance the ancestor lists refused is built once it moves somewhere they allow.** The
+  lists were read only when the tag was announced: a template announced in ReplicatedStorage and
+  moved into the workspace, a map kept in ServerStorage and moved in at round start, or a tagged
+  child a container stored before the child's tag was announced, never got a component, whatever
+  the predicate, the instance guard or the links said; only leaving the DataModel and entering it
+  again helped. A refused instance is now weighed again once it leaves a blocked ancestor or enters
+  a whitelisted one, the way its tag's announcement would be. Under the blocklist one
+  `DescendantRemoving` connection per blocked ancestor holding a refused instance hears it leave,
+  shared by every component; under a whitelist the instance's own `AncestryChanged` hears it enter.
+  Since v1.
+- **No component is rebuilt under a blocked ancestor.** A component kept in storage (the lists gate
+  construction, not removal) and taken down there, by its tree breaking where the tree is followed
+  or an attribute going bad, was built again in storage as soon as the criterion came back, though
+  the blocklist means "never construct under these". The rebuild is now refused there too, and
+  happens once the instance leaves. Since v1.
+- **A tagged child its container hides while their tree enters the DataModel gets its component
+  under immediate signal behaviour.** There the engine announces an entering tree as it walks it,
+  running each handler as its instance is reached, and never announces a tagged descendant that a
+  handler moved out of the tree before the walk got to it, nor that descendant's own tagged
+  descendants. A container hiding its child from its constructor, `onInit` or `onStart`, which run
+  inside its tag's announcement, left the child without a component until it left the DataModel and
+  entered again, wherever it was moved. While Flamework acts on the announcement of an instance with
+  children, it now watches that instance for descendants leaving it, and weighs each one carrying a
+  tag a component uses a resumption later, as its announcement would have: built where it went, or
+  refused in storage and built once shown. Such a child is then watched for leaving the DataModel,
+  which the engine does not announce for it either, so its component goes with it. So is a tagged
+  child that leaves the DataModel and comes back hidden this way in the same resumption, which keeps
+  the component it had, or its wait in storage, as a move within the DataModel would. `GetTagged`
+  still leaves such a child out, removing its tag is still not announced (its component stays until
+  it leaves the DataModel), and a move made by other code or another module during the announcement
+  is still not seen. It costs a few µs, about 3 to 10 µs, per announcement of an instance with
+  children under immediate signal behaviour, and nothing for a leaf or where signals are deferred,
+  where the engine announces the child normally (measured in Studio, one server, the same module
+  with the watch on and off, interleaved: medians of 5 to 9 runs of 1000 to 1500 announcements each,
+  which moved by 3 to 5 µs from one run to the next); a tagged descendant that leaves meanwhile adds
+  a copy of its tag's `GetTagged` list for each component using the tag. Since v1.
+
 ### testing
 
 #### Added
@@ -53,6 +107,14 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   of a component's instance. Moved into storage that stays in the DataModel, a child that has its
   component keeps it; `Parent = nil` removes it and builds a new one when it comes back; a container
   whose link names that child's component is removed with it.
+- Guide 05, "Where components may attach" and "What takes a component down again", and
+  `docs/ai/components.md`: the ancestor lists are read again when a refused instance moves, and how
+  to keep a stored instance without its component; "Hiding a tagged child": a child stored before
+  its tag was announced gets its component when shown, and the engine's skipped announcement under
+  immediate signal behaviour, which Flamework recovers from when the container hides the child.
+  The `predicate` example under "Where components may attach" no longer refuses every clone that
+  keeps the template's name. `docs/reference/internals.md`: how a refusal waits for its move, how
+  a skipped child is recovered, and what each costs.
 
 ## 2026-10-06: every package 2.0.0-alpha.8
 
