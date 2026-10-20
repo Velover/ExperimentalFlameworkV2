@@ -240,7 +240,8 @@ function validateProviderParameters(state: TransformState, node: ts.ClassDeclara
  * or of a namespace in it, rather than inside a function, a block or another class.
  */
 function isModuleLevel(node: ts.ClassDeclaration) {
-	let parent: ts.Node | undefined = node.parent;
+	// Read from the class as parsed: one a transformer before Flamework's rewrote has no parent.
+	let parent: ts.Node | undefined = (ts.getParseTreeNode(node) ?? node).parent;
 	while (parent !== undefined) {
 		if (ts.isSourceFile(parent)) return true;
 		if (!ts.isModuleBlock(parent) && !ts.isModuleDeclaration(parent)) return false;

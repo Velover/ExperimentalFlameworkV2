@@ -100,8 +100,10 @@ export class NodeMetadata {
 		if (ts.isClassElement(node) && node.name) {
 			// Interfaces are able to request metadata for their own property/methods.
 			const name = ts.getNameFromPropertyName(node.name);
-			if (name && ts.isClassLike(node.parent)) {
-				const implementNodes = ts.getEffectiveImplementsTypeNodes(node.parent);
+			// The class as parsed: a member a transformer before Flamework's rewrote has no parent.
+			const owner = (ts.getParseTreeNode(node) ?? node).parent;
+			if (name && ts.isClassLike(owner)) {
+				const implementNodes = ts.getEffectiveImplementsTypeNodes(owner);
 				if (implementNodes) {
 					for (const implement of implementNodes) {
 						const symbol = state.getSymbol(implement.expression);

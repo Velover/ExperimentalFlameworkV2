@@ -1368,7 +1368,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 */
 	function typeText(type: ts.Type): string {
 		const node = writtenAs.get(type);
-		if (node) return node.getText().replace(/\s+/g, " ");
+		if (node) return (ts.getParseTreeNode(node) ?? node).getText().replace(/\s+/g, " ");
 
 		const text = typeChecker.typeToString(type);
 		if (text !== "never" || !type.isIntersection()) return text;
@@ -3167,7 +3167,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	/** Names a type after how it is written (`Patch<Tree>`), unless it is written out as an object literal. */
 	function nameAfter(node: ts.TypeNode, type: ts.Type) {
 		if (hints.has(type) || node.pos < 0) return;
-		const text = node.getText();
+		const text = (ts.getParseTreeNode(node) ?? node).getText();
 		if (!text.includes("{")) hints.set(type, text);
 	}
 

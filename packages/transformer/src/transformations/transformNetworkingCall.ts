@@ -435,7 +435,10 @@ function hoistsCleanly(node: ts.Node, hoisted: readonly ts.Expression[]): boolea
 		parent = parent.parent;
 	}
 
-	if (parent !== undefined && isRepeatedIn(parent, child)) return false;
+	// No statement above it: a transformer before Flamework's rewrote the code around the call
+	// (`factory.update*` leaves no parent), so where it runs is unknown and the function holds them.
+	if (parent === undefined) return false;
+	if (isRepeatedIn(parent, child)) return false;
 	if (!ahead.every(isPure)) return false;
 	return ahead.every(isConstant) || hoisted.every(isPure);
 }

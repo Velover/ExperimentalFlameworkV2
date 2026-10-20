@@ -180,7 +180,7 @@ function getComponentInstanceType(state: TransformState, type: ts.Type, node: ts
  * guard builder reads an intersection: as the children the instance must have.
  */
 function getDeclaredChildren(state: TransformState, node: ts.ClassDeclaration, type: ts.Type) {
-	const instanceType = getInstanceTypeFromType(node.getSourceFile(), type);
+	const instanceType = getInstanceTypeFromType(state.getSourceFile(node), type);
 	const children = new Array<[ts.Symbol, ts.Type]>();
 
 	for (const property of type.getProperties()) {

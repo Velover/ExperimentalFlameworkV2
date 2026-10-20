@@ -83,7 +83,9 @@ export function transformUserMacro(
 
 	const componentConfigs = nodeMetadata.getSymbol("intrinsic-component-config");
 	if (componentConfigs) {
-		const decoratorParent = ts.findAncestor(node, ts.isDecorator);
+		// Found through the call as parsed: a decorator a transformer before Flamework's rewrote has no
+		// parent, and its class would get no config.
+		const decoratorParent = ts.findAncestor(ts.getParseTreeNode(node) ?? node, ts.isDecorator);
 		if (decoratorParent && f.is.classDeclaration(decoratorParent.parent)) {
 			transformComponentConfig(state, decoratorParent.parent, signature, componentConfigs, args);
 		}
@@ -272,7 +274,8 @@ function buildUserMacro(state: TransformState, node: ts.Node, macro: UserMacro):
 			return result;
 		}
 
-		const line = ts.getLineOfLocalPosition(node.getSourceFile(), node.getStart());
+		const parsed = ts.getParseTreeNode(node) ?? node;
+		const line = ts.getLineOfLocalPosition(state.getSourceFile(node), parsed.getStart());
 		const uniqueName = f.identifier(
 			localName(state.typeChecker, `${getNodeDebugName(state, node)}_${line + 1}`),
 			true,
@@ -313,7 +316,10 @@ function buildUserMacro(state: TransformState, node: ts.Node, macro: UserMacro):
 	}
 
 	function getCallerMetadata(macro: UserMacro & { kind: "caller" }) {
-		const lineAndCharacter = ts.getLineAndCharacterOfPosition(node.getSourceFile(), node.getStart());
+		// Where the call is written: a call a transformer before Flamework's rewrote has no parent,
+		// so no file to measure it in.
+		const caller = ts.getParseTreeNode(node) ?? node;
+		const lineAndCharacter = ts.getLineAndCharacterOfPosition(state.getSourceFile(node), caller.getStart());
 
 		if (macro.metadata === "line") {
 			return f.number(lineAndCharacter.line + 1);
@@ -324,7 +330,7 @@ function buildUserMacro(state: TransformState, node: ts.Node, macro: UserMacro):
 		}
 
 		if (macro.metadata === "width") {
-			return f.number(node.getWidth());
+			return f.number(caller.getWidth());
 		}
 
 		if (macro.metadata === "uuid") {
@@ -332,7 +338,7 @@ function buildUserMacro(state: TransformState, node: ts.Node, macro: UserMacro):
 		}
 
 		if (macro.metadata === "text") {
-			return f.string(node.getText());
+			return f.string(caller.getText());
 		}
 	}
 }
@@ -720,7 +726,10 @@ const CALLSITE_UUID_NAMESPACE = "6f4c1d2e-8b3a-4e5f-9c7d-2a1b0e9f8d7c";
  * names of every remote -- change with every build. A cheat that mapped them once would otherwise
  * keep its map through every release.
  */
-function getCallsiteUuid(state: TransformState, node: ts.Node) {
+function getCallsiteUuid(state: TransformState, input: ts.Node) {
+	// The call as parsed, so that a transformer before Flamework's that rewrote the code around it
+	// changes neither its anchor nor its offset.
+	const node = ts.getParseTreeNode(input) ?? input;
 	const file = state.getSourceFile(node);
 	const declaration = ts.findAncestor(node, isCallsiteScope);
 	const declarationName = declaration?.name && f.is.identifier(declaration.name) ? declaration.name.text : "";

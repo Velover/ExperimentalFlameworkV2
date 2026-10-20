@@ -9,6 +9,8 @@ const FIXTURE = path.resolve(import.meta.dir, "fixture");
 // remove it when they finish; a run killed halfway leaves it behind, so it goes before anything compiles.
 for (const leftover of [
 	"tsconfig.entry-probe.json",
+	// transformerOrder.test.ts's tsconfig, which lists a transformer before Flamework's.
+	"tsconfig.rewrite-probe.json",
 	"probe-config",
 	// regressions.test.ts's incremental build.
 	"tsconfig.incremental-probe.json",
@@ -150,9 +152,14 @@ export function compileProbe(name: string, source: string): CompileResult {
  * Compiles the fixture with several extra source files, with extra environment variables for its
  * `flamework.config.json`, and returns what rbxtsc said and the Luau emitted for those files (none
  * when any file fails, since rbxtsc then emits nothing). The files are removed again afterwards; the
- * rest of `out` is left as this compilation wrote it, and the cached result is left alone.
+ * rest of `out` is left as this compilation wrote it, and the cached result is left alone. `args` go
+ * to rbxtsc, such as `-p` and a probe tsconfig.
  */
-export function compileProbes(sources: Record<string, string>, env: Record<string, string> = {}): CompileResult {
+export function compileProbes(
+	sources: Record<string, string>,
+	env: Record<string, string> = {},
+	args: string[] = [],
+): CompileResult {
 	const names = Object.keys(sources);
 	for (const name of names) {
 		fs.rmSync(path.join(FIXTURE, "out", `${name}.luau`), { force: true });
@@ -160,7 +167,7 @@ export function compileProbes(sources: Record<string, string>, env: Record<strin
 	}
 
 	try {
-		const result = spawnSync("node", [RBXTSC], {
+		const result = spawnSync("node", [RBXTSC, ...args], {
 			cwd: FIXTURE,
 			encoding: "utf8",
 			env: { ...process.env, ...env },

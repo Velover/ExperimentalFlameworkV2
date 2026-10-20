@@ -142,6 +142,25 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   widths and go in unions and structs as those do. The layouts of the existing widths, and so their
   goldens and layout hashes, are unchanged.
 
+#### Fixed
+
+- **Another transformer listed before Flamework's in `tsconfig.json`'s `plugins` no longer breaks
+  the build.** Such a transformer (one for `@rbxts/services`, for instance, which rewrites a class
+  that uses a service) hands Flamework the statements it rewrote with no `parent`. Flamework told a
+  top-level statement by its parent, and puts what the code in one needs at file level (the
+  serializer's `codec` table and varint helpers, guards, macro metadata) ahead of it. When the
+  rewritten statement was the file's last, that code was lost and the build failed with
+  `Cannot find name 'vsize'` (or `vwrite`, `vread`, `codec`); otherwise it went after the
+  statement. A top-level statement is now told by the file's own list, and code still waiting at
+  the end of a file stops the build as a bug in Flamework, naming the file, unless an error already
+  did. The same rewritten code also lost a class's `flamework:module` metadata, left out a
+  component's generated config (attribute guards, instance shape, links) when its decorator was
+  rewritten, and crashed the build at a caller-metadata macro (`Modding.Caller`), a callsite id, an
+  error reported in it, or the comments of a file's first statement. These now read the code as
+  written (its parse tree node). A packed networking call in rewritten code keeps its packing in a
+  function of its own, as one behind a condition does. Guide 01, its errors table, guide 10 and
+  `docs/ai/flamework.md` no longer ask for Flamework's transformer first.
+
 ### Docs
 
 - Guide 05, "What takes a component down again", and `docs/ai/components.md`: hiding a tagged child
@@ -156,11 +175,6 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   The `predicate` example under "Where components may attach" no longer refuses every clone that
   keeps the template's name. `docs/reference/internals.md`: how a refusal waits for its move, how
   a skipped child is recovered, and what each costs.
-- Guide 01 (setup and its errors table), guide 10 and `docs/ai/flamework.md`: Flamework's
-  transformer goes first in `tsconfig.json`'s `plugins`. Another transformer before it that rewrites
-  a statement can make the build lose the helpers Flamework puts at the top of a file, and fail with
-  `Cannot find name 'vsize'` (or `vwrite`, `vread`, `codec`). The fix is in
-  `docs/future-considerations.md`.
 
 ## 2026-10-06: every package 2.0.0-alpha.8
 

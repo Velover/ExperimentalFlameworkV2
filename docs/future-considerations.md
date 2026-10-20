@@ -64,37 +64,55 @@ to 09-19.
 - A transformer that fails to load is only a warning in roblox-ts: the build goes on untransformed
   and ends with "Found 0 errors".
 
-## Next: other transformers listed before Flamework's
+## Found and fixed: other transformers listed before Flamework's
 
-**What happens.** Found in a game on 2026-10-12, with another transformer listed before Flamework's
+**What it was.** Found in a game on 2026-10-12, with another transformer listed before Flamework's
 in `tsconfig.json`'s `plugins`. The code Flamework generates in a function (an event's send, a
 serializer) calls helpers it puts at the top of the file: the varint functions `vsize`, `vwrite`
-and `vread`, the `codec` table and the like. They are placed ahead of the top-level statement that
-first needed them, and `transformStatement` tells a top-level statement by its `parent` being the
-file. A transformer that ran first and rewrote that statement (`factory.update*`, as one for
-`@rbxts/services` does to a class that uses a service) hands Flamework a node with no `parent`, so
-the helpers wait for the next top-level statement that has one.
-- If there is none, they are lost, and the build fails with TS2304, `Cannot find name 'vsize'`.
-  The build-time self-check (see the section above) passes, since the helpers were handed out.
-- If there is one, they land after the statement that uses them. roblox-ts declares them at the top
-  of the module and assigns them where they land, so it works, as long as nothing calls them while the module
-  is still loading.
+and `vread`, the `codec` table, guards, macro metadata. They are placed ahead of the top-level
+statement that first needed them, and `transformStatement` told a top-level statement by its
+`parent` being the file. A transformer that ran first and rewrote that statement (`factory.update*`,
+as one for `@rbxts/services` does to a class that uses a service) handed Flamework a node with no
+`parent`, so the helpers waited for the next top-level statement that had one.
+- If there was none, they were lost, and the build failed with TS2304, `Cannot find name 'vsize'`.
+  The build-time self-check (see the section above) passed, since the helpers were handed out.
+- If there was one, they landed after the statement that used them, which worked as long as nothing
+  called them while the module was still loading.
 
-Reproduced with a transformer that only rebuilds class declarations, listed before Flamework's.
-Listed after it, the build passes.
+The rewritten nodes broke other reads of a node's parent or file too, found by a fixture
+transformer that rebuilds every node of every statement: a class lost its `flamework:module`
+metadata (the module-level check walks the parents); a component whose decorator was rewritten got
+no generated config (attribute guards, instance shape, links), silently; and a caller-metadata macro
+(`Modding.Caller`), a callsite id, an error reported at a rewritten node, or a rewritten first
+statement in a file that gets imports crashed the build.
 
-**For now:** the docs say to put Flamework's transformer first (guide 01 and its errors table,
-guide 10, `docs/ai/flamework.md`).
+**What changed** (transformer, 2026-10-20; see the changelog):
+- `transformFile` tells `transformStatement` which statements are the file's own; `parent` is not
+  read for that any more.
+- A top-level statement that succeeds takes everything waiting, so what is left at the end of a
+  file was hoisted for statements that failed, and stopped the build already: it is dropped. Left
+  without an error, it is a bug and stops the build, naming the file. Placing it at the end of the
+  file would compile, but a guard or helper used by code that runs while the module loads would
+  still be nil there.
+- Positions, text, the module-level check, a member's class and a decorator's class are read from
+  the node as parsed (`ts.getParseTreeNode`), which `factory.update*` records as the rewritten
+  node's original, so ids and caller metadata are the same as without the other transformer.
+- A packed networking call whose surrounding code was rewritten holds its packing statements in an
+  immediately invoked function, as a call behind a condition does: with no parents to read, where
+  it runs is unknown. That costs a closure per call in such code.
+- `packages/transformer/tests/transformerOrder.test.ts`, with `tests/fixture/rewriteFirstPlugin.cjs`
+  listed before Flamework's: class declarations rewritten, every top-level statement rewritten, and
+  every node rewritten. The fixture transformer loads roblox-ts's own `typescript`: another copy
+  numbers `SyntaxKind` differently and silently matches nothing.
+- The docs no longer ask for Flamework's transformer first.
 
-**The fix:**
-- Tell a top-level statement by the list `transformFile` hands over (a flag, or the list itself),
-  not by `parent`.
-- At the end of a file, place anything still waiting, or report it as a bug, rather than drop it.
-- Check the transformer's other uses of `parent` on the nodes it gets as input, which a transformer
-  before it may have rewritten too.
-- A regression test: a fixture transformer listed before Flamework's that rewrites class
-  declarations. It must use roblox-ts's own `typescript`: a different copy numbers `SyntaxKind`
-  differently and silently matches nothing.
+**Still open:**
+- A transformer that replaces a Flamework call with a node it builds from scratch, rather than
+  updating it, leaves no parsed node behind it, and Flamework does not see the call as a macro: it
+  is emitted untransformed (no caller metadata, no id), and fails at runtime.
+  Not seen in a real transformer.
+- Flamework reads positions, callsite ids and a component's class from the code as written: a
+  transformer that moves a Flamework call elsewhere keeps the id it had where it was written.
 
 ## Next: don't check again what a serialized member's decoder produced
 

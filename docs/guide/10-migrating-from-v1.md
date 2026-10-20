@@ -66,8 +66,7 @@ releases depend on each other. Then:
 
 - **Imports.** `@flamework/core` becomes `@flamework-experimental/core`, and so on for every import.
 - **`tsconfig.json`.** The transformer entry becomes
-  `{ "transform": "@flamework-experimental/transformer" }`, first in `plugins` if you list other
-  transformers ([Getting started](01-getting-started.md#install) says why), and `typeRoots` lists
+  `{ "transform": "@flamework-experimental/transformer" }`, and `typeRoots` lists
   `node_modules/@flamework-experimental` where it listed `node_modules/@flamework`. Move every
   transformer option on the entry, such as `obfuscation`, `hashPrefix` or `idGenerationMode`, to the
   `transformer` section of `flamework.config.json`. The build refuses them on the entry, and the

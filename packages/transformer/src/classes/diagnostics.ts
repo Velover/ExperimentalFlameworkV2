@@ -1,12 +1,21 @@
 import ts from "typescript";
 import { TRANSFORMER_PACKAGE } from "../util/packages";
 
+/**
+ * Where a diagnostic about `node` points: the node it was parsed as. One a transformer before
+ * Flamework's rewrote (`factory.update*`) has no parent, so no file to measure its start in.
+ */
+function locate(node: ts.Node) {
+	return ts.getParseTreeNode(node) ?? node;
+}
+
 function createDiagnosticAtLocation(
-	node: ts.Node,
+	input: ts.Node,
 	messageText: string,
 	category: ts.DiagnosticCategory,
-	file = ts.getSourceFileOfNode(node),
 ): ts.DiagnosticWithLocation {
+	const node = locate(input);
+	const file = ts.getSourceFileOfNode(node);
 	return {
 		category,
 		file,
@@ -52,7 +61,8 @@ export class Diagnostics {
 		return createDiagnosticAtLocation(node, messages.join("\n"), category);
 	}
 
-	static relocate(diagnostic: ts.DiagnosticWithLocation, node: ts.Node): never {
+	static relocate(diagnostic: ts.DiagnosticWithLocation, input: ts.Node): never {
+		const node = locate(input);
 		diagnostic.file = ts.getSourceFileOfNode(node);
 		diagnostic.start = node.getStart();
 		diagnostic.length = node.getWidth();

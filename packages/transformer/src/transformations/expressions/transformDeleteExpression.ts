@@ -16,7 +16,7 @@ export function transformDeleteExpression(state: TransformState, node: ts.Delete
 			Diagnostics.error(node.expression, "assignments not supported with direct access");
 
 		const attributeSetter = state.addFileImport(
-			node.getSourceFile(),
+			state.getSourceFile(node),
 			`${COMPONENTS_PACKAGE}/out/baseComponent`,
 			"SYMBOL_ATTRIBUTE_SETTER",
 		);

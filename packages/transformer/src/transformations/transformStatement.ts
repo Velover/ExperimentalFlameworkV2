@@ -4,13 +4,25 @@ import { catchDiagnostic } from "../util/diagnosticsUtils";
 import { getNodeList } from "../util/functions/getNodeList";
 import { transformClassDeclaration } from "./statements/transformClassDeclaration";
 import { transformNode } from "./transformNode";
-import { f } from "../util/factory";
 
 const TRANSFORMERS = new Map<ts.SyntaxKind, (state: TransformState, node: any) => ts.Statement | ts.Statement[]>([
 	[ts.SyntaxKind.ClassDeclaration, transformClassDeclaration],
 ]);
 
-export function transformStatement(state: TransformState, statement: ts.Statement): ts.Statement | ts.Statement[] {
+/**
+ * Transforms one statement. `root` says it is one of the file's own statements, which
+ * {@link transformFile} hands over: what the transform hoisted to file level
+ * (`state.nextRootStatements`) goes ahead of it. A nested statement leaves that for the root
+ * statement it is in.
+ *
+ * Root-ness is not read from `statement.parent`: a transformer listed before Flamework's that
+ * rewrote the statement (`factory.update*`) hands over one with no parent.
+ */
+export function transformStatement(
+	state: TransformState,
+	statement: ts.Statement,
+	root = false,
+): ts.Statement | ts.Statement[] {
 	return catchDiagnostic<ts.Statement | ts.Statement[]>(statement, () => {
 		const [node, prereqs] = state.capture(() => {
 			const transformer = TRANSFORMERS.get(statement.kind);
@@ -21,7 +33,7 @@ export function transformStatement(state: TransformState, statement: ts.Statemen
 			return ts.visitEachChild(statement, (newNode) => transformNode(state, newNode), state.context);
 		});
 
-		if (f.is.file(statement.parent)) {
+		if (root) {
 			const nextRootStatements = state.nextRootStatements;
 			state.nextRootStatements = [];
 
