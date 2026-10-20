@@ -64,6 +64,38 @@ to 09-19.
 - A transformer that fails to load is only a warning in roblox-ts: the build goes on untransformed
   and ends with "Found 0 errors".
 
+## Next: other transformers listed before Flamework's
+
+**What happens.** Found in a game on 2026-10-12, with another transformer listed before Flamework's
+in `tsconfig.json`'s `plugins`. The code Flamework generates in a function (an event's send, a
+serializer) calls helpers it puts at the top of the file: the varint functions `vsize`, `vwrite`
+and `vread`, the `codec` table and the like. They are placed ahead of the top-level statement that
+first needed them, and `transformStatement` tells a top-level statement by its `parent` being the
+file. A transformer that ran first and rewrote that statement (`factory.update*`, as one for
+`@rbxts/services` does to a class that uses a service) hands Flamework a node with no `parent`, so
+the helpers wait for the next top-level statement that has one.
+- If there is none, they are lost, and the build fails with TS2304, `Cannot find name 'vsize'`.
+  The build-time self-check (see the section above) passes, since the helpers were handed out.
+- If there is one, they land after the statement that uses them. roblox-ts declares them at the top
+  of the module and assigns them where they land, so it works, as long as nothing calls them while the module
+  is still loading.
+
+Reproduced with a transformer that only rebuilds class declarations, listed before Flamework's.
+Listed after it, the build passes.
+
+**For now:** the docs say to put Flamework's transformer first (guide 01 and its errors table,
+guide 10, `docs/ai/flamework.md`).
+
+**The fix:**
+- Tell a top-level statement by the list `transformFile` hands over (a flag, or the list itself),
+  not by `parent`.
+- At the end of a file, place anything still waiting, or report it as a bug, rather than drop it.
+- Check the transformer's other uses of `parent` on the nodes it gets as input, which a transformer
+  before it may have rewritten too.
+- A regression test: a fixture transformer listed before Flamework's that rewrites class
+  declarations. It must use roblox-ts's own `typescript`: a different copy numbers `SyntaxKind`
+  differently and silently matches nothing.
+
 ## Next: don't check again what a serialized member's decoder produced
 
 **The cost today.** An incoming member that travels packed is decoded from its buffer, and then its

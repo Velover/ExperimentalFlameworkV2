@@ -43,6 +43,12 @@ when you build. Without the transformer, those arguments are missing at runtime.
 }
 ```
 
+**If `plugins` lists other transformers, put Flamework's first.** A transformer that runs before it
+and rewrites a statement (as one for `@rbxts/services` does where a service is used) can make the
+build lose code Flamework adds at the top of the file. The build then fails with
+`Cannot find name 'vsize'` (or `vwrite`, `vread`, `codec`) where an event is sent. See
+[Future considerations](../future-considerations.md#next-other-transformers-listed-before-flameworks).
+
 Also add the `@flamework-experimental` npm scope to `typeRoots`, next to `@rbxts`. roblox-ts only
 accepts imports from the scopes listed there:
 
@@ -308,6 +314,7 @@ Or wrap it in a plugin that both include; see [Plugins](08-plugins.md).
 | Message | Cause |
 |---|---|
 | `Could not find Rojo data for 'src/...'` | The folder is not mapped in your Rojo project file. |
+| `Cannot find name 'vsize'` (or `vwrite`, `vread`, `codec`) where an event is sent or a value serialized | Another transformer comes before Flamework's in `tsconfig.json`'s `plugins`. Put Flamework's first; see [Install](#install). |
 | `Could not find Rojo data. There is no $path in your Rojo config that covers ...` (roblox-ts) | The file it names belongs to a package your code imports, and your Rojo project file does not map that package. See [Rojo](#rojo). |
 | `Path is invalid, expected string literal and got: string` | The path argument is not a literal. |
 | `class 'X' is missing the @Provider() decorator` | `registerClassProvider`/`registerProvider` was given an undecorated class. |

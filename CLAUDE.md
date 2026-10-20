@@ -26,3 +26,16 @@ small change never needs it.
   failure, rerun that one test.
 - Give subagents the same budget: name the tests they may run.
 - Say what you ran and what you skipped.
+
+## Waiting for long commands: don't poll
+
+- Run a long command (a test run, a full build, Studio) in the background and let its completion
+  notification wake you. Don't keep reading its log or sleeping and looking again.
+- No polling: it costs a lot of usage. Two health checks of your own are allowed if needed
+  (reading its log, a status command): one near the start (did it start properly) and one midway.
+  More only when the user asks for them. The user asking how it is going is not one of yours.
+- Next to a long command, start a watcher in the background that ends, and so wakes you, when
+  something goes wrong: the first failure line, the log silent for minutes (a hang), or the command
+  dying without finishing. Its own checking is not your polling.
+- Commands that finish in a minute or two need none of this: run them in the foreground, with a
+  timeout.

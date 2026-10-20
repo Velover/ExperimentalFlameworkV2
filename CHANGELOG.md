@@ -141,6 +141,11 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   The `predicate` example under "Where components may attach" no longer refuses every clone that
   keeps the template's name. `docs/reference/internals.md`: how a refusal waits for its move, how
   a skipped child is recovered, and what each costs.
+- Guide 01 (setup and its errors table), guide 10 and `docs/ai/flamework.md`: Flamework's
+  transformer goes first in `tsconfig.json`'s `plugins`. Another transformer before it that rewrites
+  a statement can make the build lose the helpers Flamework puts at the top of a file, and fail with
+  `Cannot find name 'vsize'` (or `vwrite`, `vread`, `codec`). The fix is in
+  `docs/future-considerations.md`.
 
 ## 2026-10-06: every package 2.0.0-alpha.8
 

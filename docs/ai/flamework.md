@@ -87,6 +87,8 @@ before you write Flamework code you are not sure of.
   provider's `onStart`, `getAllComponents<T>()` finds none yet: use `onComponentAdded<T>()`.
 - Settings go in `flamework.config.json`, one section per package. The tsconfig plugin entry holds
   only `"transform"` (and `"configFile"`, to move that file); the build refuses any other key.
+- Flamework's transformer goes first in `plugins`. Another transformer before it can make the build
+  lose Flamework's file-level helpers: `Cannot find name 'vsize'` (or `vwrite`, `vread`, `codec`).
 
 ## Building
 
