@@ -35,16 +35,23 @@ class FrameListener implements OnTick {
 	public onTick() {}
 }
 
-/** A weak-keyed table: an object in it is held by nothing but whoever else still has it. */
+/**
+ * A weak-valued list: an object in it is held by nothing but whoever else still has it.
+ *
+ * A list, read by its length alone, rather than a weak-keyed map: a map's `size()` counts its
+ * entries by walking them, and the walk leaves the last key it visited -- the object being watched
+ * -- in a register of the function that asked, which then held it for as long as it ran. A case
+ * collecting that way never saw the object go, in Studio, however much it allocated.
+ */
 function weakProbe() {
-	return setmetatable(new Map<object, true>(), { __mode: "k" });
+	return setmetatable(new Array<object>(), { __mode: "v" });
 }
 
 /**
  * A collection is brought on by allocating, until the probe lets go or the rounds run out, since
  * `collectgarbage("collect")` is not a thing a place can call. Returns what the probe still holds.
  */
-function collectUntilReleased(probe: Map<object, true>) {
+function collectUntilReleased(probe: Array<object>) {
 	for (let round = 0; round < 50 && probe.size() > 0; round++) {
 		const junk = new Array<object>();
 		for (let i = 0; i < 20000; i++) junk.push({ i });
@@ -370,7 +377,7 @@ export class LifecycleTests implements OnStart, OnTick, OnPhysics {
 				// In a function of its own, so that no register of this frame still names the instance.
 				const attachTickAndRemove = () => {
 					const instance = module.createClassInstance(FrameListener);
-					probe.set(instance, true);
+					probe.push(instance);
 
 					task.wait(0.1);
 					module.removeClassInstance(instance);

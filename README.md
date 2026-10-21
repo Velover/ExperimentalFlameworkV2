@@ -81,6 +81,10 @@ per configuration, and the width-check specs run each build in both realms. Buil
 `bun run build` (at the root, or in `packages/specs`), which runs `variants/build.mjs` after
 `rbxtsc`: a bare `rbxtsc` or `bun run watch` leaves the variants' builds missing or stale.
 
+`bun run test` also runs the packaging checks (`bun run test:packaging`) and the `flamework-test`
+CLI's tests, and runs the runtime specs a second time with networking serialization off: it builds
+the specs with `FLAMEWORK_SPECS_SERIALIZATION=false`, runs them, and builds them back with it on.
+
 <!-- end repository only -->
 
 A third suite runs against the real engine, and `bun run test` leaves it out. It lives in the
