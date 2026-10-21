@@ -58,6 +58,7 @@ const FROZEN_IDS = [
 	"$:utility/runtimeConfig@RuntimeConfig",
 	"$:utility/runtimeConfig@ScopesRuntimeConfig",
 	"$:utility/runtimeConfig@TestingRuntimeConfig",
+	"$:utility/types@Connection",
 	"$c:baseComponent@BaseComponent",
 	"$c:baseComponent@ComponentMetadata",
 	"$c:componentModule@ComponentPlugin",
@@ -103,15 +104,17 @@ const COMPARED_IDS = [
  */
 const PRIVATE_IDS = ["$c:componentModule@ComponentModuleConfig"];
 
-function luauFiles(dir: string): string[] {
+function filesEndingIn(dir: string, extension: string): string[] {
 	const files: string[] = [];
 	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
 		const full = path.join(dir, entry.name);
-		if (entry.isDirectory()) files.push(...luauFiles(full));
-		else if (entry.name.endsWith(".luau")) files.push(full);
+		if (entry.isDirectory()) files.push(...filesEndingIn(full, extension));
+		else if (entry.name.endsWith(extension)) files.push(full);
 	}
 	return files;
 }
+
+const luauFiles = (dir: string) => filesEndingIn(dir, ".luau");
 
 const read = (file: string) => fs.readFileSync(path.join(ROOT, "packages", file), "utf8");
 const out = (pkg: Package) => path.join(ROOT, "packages", pkg, "out");
@@ -281,16 +284,30 @@ describe("runtime names emitted code reaches (frozen for 2.x)", () => {
 		expectNoProblems(problems);
 	});
 
-	// The hidden members a send or `setCallback` is rewritten to call on a networking handler.
-	const HANDLER_MEMBERS = ["_fire", "_except", "_broadcast", "_invoke", "_invokeWithTimeout", "_setCallback"];
+	// The hidden members a send or `setCallback` is rewritten to call on a networking handler, by the
+	// file that builds each kind of handler. Each has to keep all of its own: emitted code calls them
+	// on whichever handler it is given.
+	const HANDLER_FILES: [file: string, members: string[]][] = [
+		["networking/out/events/createClientMethod.luau", ["_fire"]],
+		["networking/out/events/createServerMethod.luau", ["_fire", "_broadcast", "_except"]],
+		["networking/out/functions/createClientMethod.luau", ["_invoke", "_invokeWithTimeout", "_setCallback"]],
+		["networking/out/functions/createServerMethod.luau", ["_invoke", "_invokeWithTimeout", "_setCallback"]],
+	];
+	const HANDLER_MEMBERS = [...new Set(HANDLER_FILES.flatMap(([, members]) => members))];
 
-	test("networking's handlers define the members emitted sends call", () => {
-		const source = luauFiles(out("networking"))
-			.map((file) => fs.readFileSync(file, "utf8"))
-			.join("\n");
-		const problems = HANDLER_MEMBERS.filter((name) => !new RegExp(`\\b${name} = function\\(self`).test(source)).map(
-			(name) => `networking's handlers no longer define ${name}: renaming it ${BREAKS}`,
-		);
+	test.each(HANDLER_FILES)("%s defines the members emitted code calls on its handlers", (file, members) => {
+		const full = path.join(ROOT, "packages", file);
+		const problems: string[] = [];
+		if (!fs.existsSync(full)) {
+			problems.push(`${file} is gone: moving it ${BREAKS}`);
+		} else {
+			const source = fs.readFileSync(full, "utf8");
+			for (const name of members) {
+				if (!new RegExp(`\\b${name} = function\\(self`).test(source)) {
+					problems.push(`${file} no longer defines ${name}: renaming it ${BREAKS}`);
+				}
+			}
+		}
 		expectNoProblems(problems);
 	});
 
@@ -332,7 +349,30 @@ describe("runtime names emitted code reaches (frozen for 2.x)", () => {
 			path.join(transformer, "transformations", "transformNetworkingCall.ts"),
 			"utf8",
 		);
-		const rewrites = fs.readFileSync(path.join(out("core"), "flamework.d.ts"), "utf8");
+		// Every package's declarations, each rewrite named by the namespaces it is declared in: a
+		// rewrite added anywhere emits a call to a hidden member there.
+		const rewrites = new Set<string>();
+		for (const pkg of Object.keys(PACKAGES) as Package[]) {
+			for (const file of filesEndingIn(out(pkg), ".d.ts")) {
+				const source = ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+				const visit = (node: ts.Node) => {
+					for (const doc of ts.getJSDocCommentsAndTags(node)) {
+						for (const match of doc
+							.getText(source)
+							.matchAll(/\{@link (\w+) intrinsic-flamework-rewrite\}/g)) {
+							const names = [match[1]];
+							for (let parent = node.parent; parent !== undefined; parent = parent.parent) {
+								if (ts.isModuleDeclaration(parent) && ts.isIdentifier(parent.name))
+									names.unshift(parent.name.text);
+							}
+							rewrites.add(`${pkg}: ${names.join(".")}`);
+						}
+					}
+					ts.forEachChild(node, visit);
+				};
+				visit(source);
+			}
+		}
 
 		const found = {
 			subpaths: new Set(
@@ -345,9 +385,7 @@ describe("runtime names emitted code reaches (frozen for 2.x)", () => {
 				[...sources.matchAll(/\.addFileImport\([^;]*?,\s*"(\w+)",?\s*\)/g)].map((match) => match[1]),
 			),
 			members: new Set([...networking.matchAll(/"(_(?!flamework_)\w+)"/g)].map((match) => match[1])),
-			rewrites: new Set(
-				[...rewrites.matchAll(/\{@link (\w+) intrinsic-flamework-rewrite\}/g)].map((match) => match[1]),
-			),
+			rewrites,
 		};
 
 		expect({
@@ -360,7 +398,7 @@ describe("runtime names emitted code reaches (frozen for 2.x)", () => {
 			imports: ["Reflect", "SYMBOL_ATTRIBUTE_SETTER", "t"],
 			members: [...HANDLER_MEMBERS].sort(),
 			rewrites: CORE_NAMESPACE_MEMBERS.filter(([namespace]) => namespace === "Flamework").map(
-				([, member]) => member,
+				([namespace, member]) => `core: ${namespace}.${member}`,
 			),
 		});
 	});

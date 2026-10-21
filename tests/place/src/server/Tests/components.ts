@@ -100,7 +100,7 @@ export class ComponentTests implements OnStart {
 				const definition = Flamework.createModule()
 					.includePlugin(ComponentPlugin.fromPath("src/server/Discovery/nested"))
 					.includePlugin(ComponentPlugin.fromGlob("src/server/Discovery/hid*.ts"))
-					.includePlugin(ComponentPlugin.createPlugin().registerComponent(DiscoveryExportedComponent).build())
+					.includePlugin(ComponentPlugin.builder().registerComponent(DiscoveryExportedComponent).build())
 					.registerClassProvider(ComponentsHolder)
 					.build();
 

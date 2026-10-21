@@ -428,3 +428,147 @@ requireModules(folder);
 		expect(result.output).toContain("Path is invalid, expected string literal and got: string");
 	});
 });
+
+// The public intrinsic names, `Modding.Injectable` and the reflect metadata keys guide 07
+// documents: the guide's promises, compiled once.
+describe("the documented macro surface", () => {
+	const SOURCES = {
+		docEnv: `import { Modding } from "@flamework-experimental/core";
+
+/** @metadata macro */
+function fromEnv<N extends string>(_name: N, value?: Modding.Intrinsic<"env", [N, undefined], string | undefined>) {
+	return value;
+}
+
+/** @metadata macro */
+function withFallback<N extends string>(_name: N, value?: Modding.Intrinsic<"env", [N, "dev"], string>) {
+	return value!;
+}
+
+export const scopes = fromEnv("FLAMEWORK_FIXTURE_SCOPES");
+export const missing = fromEnv("FLAMEWORK_FIXTURE_NOT_SET");
+export const channel = withFallback("FLAMEWORK_FIXTURE_NOT_SET");
+`,
+		docInjectable: `import { Dependency, Modding, Provider } from "@flamework-experimental/core";
+
+export class Logger {}
+export class OtherLogger {}
+
+type Tagged<T, Tag extends string> = Modding.Injectable<{ type: T; metadata: [Tag] }>;
+type Elsewhere<T> = Modding.Injectable<{ type: T; id: OtherLogger }>;
+
+@Provider()
+export class Shop {
+	constructor(private readonly log: Tagged<Logger, "shop">) {}
+}
+
+export const tagged = Dependency<Tagged<Logger, "here">>();
+export const moved: Logger = Dependency<Elsewhere<Logger>>();
+`,
+		docReflect: `/** @metadata reflect identifier flamework:implements flamework:parameters flamework:parameter_names flamework:parameter_guards flamework:dependencies */
+function OnClass(ctor: object) {}
+
+/** @metadata reflect flamework:type flamework:guard */
+function OnProperty(target: object, key: string) {}
+
+/** @metadata reflect flamework:parameters flamework:return_type flamework:return_guard */
+function OnMethod(target: object, key: string, descriptor: object) {}
+
+/** @metadata reflect * ~flamework:parameter_guards */
+function Everything(ctor: object) {}
+
+export interface Marker {}
+
+@OnClass
+export class Reflected implements Marker {
+	@OnProperty
+	public count = 0;
+
+	constructor(name: string) {}
+
+	@OnMethod
+	public describe(n: number) {
+		return tostring(n);
+	}
+}
+
+@Everything
+export class Starred {
+	constructor(name: string) {}
+}
+`,
+	};
+
+	let compiled: ReturnType<typeof compileProbes> | undefined;
+	const files = () => {
+		compiled ??= compileProbes(SOURCES);
+		if (compiled.status !== 0) throw new Error(`the probes failed to compile:\n${compiled.output}`);
+		return compiled.files;
+	};
+
+	test("the env intrinsic hands a user macro the variable, its fallback, or nil", () => {
+		const source = normalize(files().get("docEnv")!);
+		expect(source).toContain('local scopes = fromEnv("FLAMEWORK_FIXTURE_SCOPES", "fixture, demo")');
+		expect(source).toContain('local missing = fromEnv("FLAMEWORK_FIXTURE_NOT_SET", nil)');
+		expect(source).toContain('local channel = withFallback("FLAMEWORK_FIXTURE_NOT_SET", "dev")');
+	});
+
+	test("Modding.Injectable carries its metadata and its id override into the dependency info", () => {
+		const source = normalize(files().get("docInjectable")!);
+		expect(source).toMatch(
+			/defineMetadata\(Shop, "flamework:dependencies", \{ \{ id = "fw:docInjectable@Logger", metadata = \{ "shop" \},? \},? \}\)/,
+		);
+		expect(source).toMatch(/Dependency\(nil, \{ id = "fw:docInjectable@Logger", metadata = \{ "here" \},? \}\)/);
+		expect(source).toContain('Dependency(nil, "fw:docInjectable@OtherLogger")');
+	});
+
+	// The request keys are frozen for 2.x (guide 07, docs/stability.md): renaming one breaks every
+	// decorator that asks for it.
+	test("records every documented reflect key under its documented name", () => {
+		const source = normalize(files().get("docReflect")!);
+		// Each `Reflect.defineMetadata(target, key, value[, member])` call, as "target key [member]".
+		const calls = new Set(
+			source
+				.split("Reflect.defineMetadata(")
+				.slice(1)
+				.map((rest) => {
+					const call = rest.split(/ end | -- /)[0].trim();
+					const [, target, key] = /^(\w+), "([^"]+)"/.exec(call)!;
+					const member = /, "(\w+)"\)$/.exec(call)?.[1];
+					return member === undefined ? `${target} ${key}` : `${target} ${key} ${member}`;
+				}),
+		);
+		const recorded = (target: string, key: string, member?: string) =>
+			member === undefined ? `${target} ${key}` : `${target} ${key} ${member}`;
+
+		for (const key of [
+			"identifier",
+			"flamework:module",
+			"flamework:implements",
+			"flamework:parameters",
+			"flamework:parameter_names",
+			"flamework:parameter_guards",
+			"flamework:dependencies",
+		]) {
+			expect([...calls]).toContain(recorded("Reflected", key));
+		}
+		expect([...calls]).toContain(recorded("Reflected", "flamework:type", "count"));
+		expect([...calls]).toContain(recorded("Reflected", "flamework:guard", "count"));
+		expect([...calls]).toContain(recorded("Reflected", "flamework:parameters", "describe"));
+		expect([...calls]).toContain(recorded("Reflected", "flamework:return_type", "describe"));
+		expect([...calls]).toContain(recorded("Reflected", "flamework:return_guard", "describe"));
+
+		// `*` asks for every class key, and `~key` leaves one out.
+		const starred = [...source.matchAll(/Reflect\.defineMetadata\(Starred, "([^"]+)"/g)].map((m) => m[1]).sort();
+		expect(starred).toEqual(
+			[
+				"flamework:dependencies",
+				"flamework:implements",
+				"flamework:module",
+				"flamework:parameter_names",
+				"flamework:parameters",
+				"identifier",
+			].sort(),
+		);
+	});
+});

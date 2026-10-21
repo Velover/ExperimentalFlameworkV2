@@ -130,8 +130,11 @@ export interface PluginTarget {
 	 */
 	onPreIgnite: (callback: (module: Module) => void, options?: HookOptions) => void;
 
-	/** Runs after every provider has been constructed. */
-	onPostIgnite: (callback: (module: Module) => void, options?: HookOptions) => void;
+	/**
+	 * Runs once every eager provider has been constructed, while the module is still igniting: a
+	 * hook that raises fails the ignition. The lifecycle plugin runs `onInit` here.
+	 */
+	onConstructed: (callback: (module: Module) => void, options?: HookOptions) => void;
 
 	/**
 	 * Runs once ignition has completed: the module is ignited, and its imports count it among

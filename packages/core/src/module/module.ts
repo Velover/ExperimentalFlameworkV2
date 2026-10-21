@@ -782,7 +782,7 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 		// From here on the module holds things: what the plugins set up, then the providers, then
 		// what the hooks connect. A raise anywhere in it takes the module down the way `extinguish`
 		// does before it comes out, so that a failed ignition holds nothing. The lifecycle plugin's
-		// postIgnite hook connects the RunService signals, and a hook after it that raised used to
+		// onConstructed hook connects the RunService signals, and a hook after it that raised used to
 		// leave those ticking a module stuck in `Igniting`, which nothing could extinguish.
 		const [success, err] = pcall(() => {
 			// Plugins are set up before any provider exists, so a setup that resolves is refused the
@@ -816,7 +816,7 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 				}
 			}
 
-			runHooks("postIgnite");
+			runHooks("constructed");
 
 			// Checked again once everything has run: an `onInit` that yields lets other threads run in
 			// the middle of ignition, and one that extinguished an import then did not see this module
@@ -1046,8 +1046,8 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 	const isActive: PluginTarget["isActive"] = (...conditions) => holdsEveryCondition([moduleScope, ...conditions]);
 	const onPreIgnite: PluginTarget["onPreIgnite"] = (callback, hookOptions) =>
 		registerHook("preIgnite", callback, hookOptions?.priority);
-	const onPostIgnite: PluginTarget["onPostIgnite"] = (callback, hookOptions) =>
-		registerHook("postIgnite", callback, hookOptions?.priority);
+	const onConstructed: PluginTarget["onConstructed"] = (callback, hookOptions) =>
+		registerHook("constructed", callback, hookOptions?.priority);
 	const onIgnited: PluginTarget["onIgnited"] = (callback, hookOptions) =>
 		registerHook("ignited", callback, hookOptions?.priority);
 	const onExtinguished: PluginTarget["onExtinguished"] = (callback, hookOptions) =>
@@ -1133,7 +1133,7 @@ export function createModuleInstantiation(state: ModuleState, options?: IgniteOp
 			},
 			includePlugin,
 			onPreIgnite,
-			onPostIgnite,
+			onConstructed,
 			onIgnited,
 			onExtinguished,
 			observe,

@@ -291,7 +291,7 @@ class EarlyAdder implements OnInit, OnStart {
 @Component({ tag: "Blocked" })
 class Blocked extends BaseComponent<{}, Folder> {}
 
-@Component({ tag: "Allowed", ancestorWhitelist: [ReplicatedStorage] })
+@Component({ tag: "Allowed", ancestorAllowList: [ReplicatedStorage] })
 class Allowed extends BaseComponent<{}, Folder> {}
 
 /** Implemented by a component, so it can be resolved polymorphically. */
@@ -833,7 +833,7 @@ class ComponentsTaker {
  * depends on path-based discovery.
  */
 function createComponentPlugin() {
-	return ComponentPlugin.createPlugin()
+	return ComponentPlugin.builder()
 		.registerComponent(Tagged)
 		.registerComponent(Defaulted)
 		.registerComponent(PartOnly)
@@ -4304,7 +4304,7 @@ export = suite("components", [
 		},
 	],
 	[
-		"builds the component of a tagged instance once it enters an ancestor its whitelist allows",
+		"builds the component of a tagged instance once it enters an ancestor its allowlist names",
 		() => {
 			for (const deferred of [false, true]) {
 				const mode = deferred ? "deferred" : "immediate";
@@ -4312,10 +4312,10 @@ export = suite("components", [
 				const components = module.resolveDependency<Components>();
 				const baseline = registryCounts(components);
 
-				const outside = folder("WhitelistOutside");
-				const instance = folderIn(outside, "WhitelistCandidate");
-				const elsewhere = folder("WhitelistElsewhere");
-				const inside = folderIn(ReplicatedStorage, "WhitelistInside");
+				const outside = folder("AllowlistOutside");
+				const instance = folderIn(outside, "AllowlistCandidate");
+				const elsewhere = folder("AllowlistElsewhere");
+				const inside = folderIn(ReplicatedStorage, "AllowlistInside");
 				try {
 					// `Allowed` is only built under ReplicatedStorage: tagged in the workspace, it waits,
 					// watched on its own.
@@ -4328,7 +4328,7 @@ export = suite("components", [
 						`${mode}: watches outside`,
 					);
 
-					// Moved about outside the whitelist: still refused, and still watched once.
+					// Moved about outside the allowlist: still refused, and still watched once.
 					resumption(deferred, () => {
 						instance.Parent = elsewhere;
 					});
@@ -4339,7 +4339,7 @@ export = suite("components", [
 						`${mode}: watches elsewhere`,
 					);
 
-					// Into the whitelist: built, and the watch let go of.
+					// Into the allowlist: built, and the watch let go of.
 					resumption(deferred, () => {
 						instance.Parent = inside;
 					});
@@ -4444,7 +4444,7 @@ export = suite("components", [
 				const connections = connectionsOn([ReplicatedStorage, game.Workspace]);
 
 				// Both kinds of wait: a template under a blocked ancestor, and an instance outside the
-				// whitelist. Made in a function of their own, so that nothing on this stack holds them.
+				// allowlist. Made in a function of their own, so that nothing on this stack holds them.
 				const storage = folderIn(ReplicatedStorage, "DoomedStorage");
 				const outside = folder("DoomedOutside");
 				try {
@@ -4506,7 +4506,7 @@ export = suite("components", [
 				const baseline = registryCounts(components);
 
 				// Both kinds of wait: a template under a blocked ancestor, and an instance outside the
-				// whitelist.
+				// allowlist.
 				const storage = folderIn(ReplicatedStorage, "UntaggedStorage");
 				const outside = folder("UntaggedOutside");
 				const place = folder("UntaggedPlace");
@@ -6802,7 +6802,7 @@ export = suite("components", [
 	[
 		"refuses a link to a component the plugin does not register",
 		() => {
-			const plugin = ComponentPlugin.createPlugin().registerComponent(Owner).build();
+			const plugin = ComponentPlugin.builder().registerComponent(Owner).build();
 
 			const message = expectThrows(
 				() => Flamework.createModule().includePlugin(plugin).ignite(),
@@ -8439,8 +8439,8 @@ export = suite("components", [
 		// `provider ID was registered more than once` at ignition.
 		"several component plugins in one module share one Components",
 		() => {
-			const first = ComponentPlugin.createPlugin().registerComponent(Engine).registerComponent(Handler).build();
-			const second = ComponentPlugin.createPlugin().registerComponent(Car).registerComponent(Owner).build();
+			const first = ComponentPlugin.builder().registerComponent(Engine).registerComponent(Handler).build();
+			const second = ComponentPlugin.builder().registerComponent(Car).registerComponent(Owner).build();
 
 			const definition = Flamework.createModule()
 				.includePlugin(first)
@@ -8499,11 +8499,11 @@ export = suite("components", [
 	[
 		"keeps a component two plugins register once, and when either registration holds",
 		() => {
-			const scoped = ComponentPlugin.createPlugin()
+			const scoped = ComponentPlugin.builder()
 				.registerComponent(Engine, { activeIn: ["fix5NeverActive"] })
 				.registerComponent(Handler, { activeIn: ["fix5NeverActive"] })
 				.build();
-			const plain = ComponentPlugin.createPlugin().registerComponent(Engine).build();
+			const plain = ComponentPlugin.builder().registerComponent(Engine).build();
 
 			const module = Flamework.createModule().includePlugin(scoped).includePlugin(plain).ignite();
 			const components = module.resolveDependency<Components>();
@@ -8533,10 +8533,10 @@ export = suite("components", [
 		"keeps a Components per module across imports",
 		() => {
 			const imported = Flamework.createModule()
-				.includePlugin(ComponentPlugin.createPlugin().registerComponent(Engine).build())
+				.includePlugin(ComponentPlugin.builder().registerComponent(Engine).build())
 				.ignite();
 			const importing = Flamework.createModule()
-				.includePlugin(ComponentPlugin.createPlugin().registerComponent(Handler).build())
+				.includePlugin(ComponentPlugin.builder().registerComponent(Handler).build())
 				.ignite({ imports: [imported] });
 			const plain = Flamework.createModule().ignite({ imports: [imported] });
 
@@ -8574,7 +8574,7 @@ export = suite("components", [
 		() => {
 			// `Car` takes an `Engine`, which is a component this module does not register at all.
 			const module = Flamework.createModule()
-				.includePlugin(ComponentPlugin.createPlugin().registerComponent(Car).build())
+				.includePlugin(ComponentPlugin.builder().registerComponent(Car).build())
 				.ignite();
 			const components = module.resolveDependency<Components>();
 

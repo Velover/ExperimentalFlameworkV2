@@ -231,7 +231,7 @@ class RgBadTeardown extends BaseComponent<{ speed: number }, Folder> {
 }
 
 function componentPlugin() {
-	return ComponentPlugin.createPlugin()
+	return ComponentPlugin.builder()
 		.registerComponent(RgTicker)
 		.registerComponent(RgSelfish)
 		.registerComponent(RgCyclic)
@@ -344,7 +344,7 @@ export = suite("regressions", [
 		"rejects an undecorated subclass of a component",
 		() => {
 			const message = expectThrows(
-				() => ComponentPlugin.createPlugin().registerComponent(RgUndecorated),
+				() => ComponentPlugin.builder().registerComponent(RgUndecorated),
 				"registering an undecorated component subclass",
 			);
 

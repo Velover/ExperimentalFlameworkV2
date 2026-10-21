@@ -1275,3 +1275,61 @@ export const second = Flamework.createSerializer<${secondType}>();
 		}, 120_000);
 	}
 });
+
+describe("names renamed or removed before beta", () => {
+	// TypeScript's own message for each says only that the name does not exist, or guesses another;
+	// the build names the replacement instead.
+	test("names the replacement of onPostIgnite, the ancestor lists and ComponentStreamingMode.Default", () => {
+		const result = compileProbe(
+			"renamedBeforeBeta",
+			`import { Flamework } from "@flamework-experimental/core";
+import { BaseComponent, Component, ComponentPlugin, ComponentStreamingMode } from "@flamework-experimental/components";
+
+export const plugin = Flamework.createPlugin("Renamed", (target) => {
+	target.onPostIgnite(() => {});
+});
+
+// TypeScript reports one unknown key per object literal, so each list gets a decorator of its own.
+@Component({ tag: "Renamed", ancestorWhitelist: [game] })
+export class Renamed extends BaseComponent {}
+
+@Component({ tag: "RenamedBlocked", ancestorBlacklist: [] })
+export class RenamedBlocked extends BaseComponent {}
+
+export const plugin2 = ComponentPlugin.createPlugin().build();
+export const mode = ComponentStreamingMode.Default;
+export type Mode = ComponentStreamingMode.Default;
+`,
+		);
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("'target.onPostIgnite' was renamed 'target.onConstructed' before beta.");
+		expect(result.output).toContain("'ancestorWhitelist' was renamed 'ancestorAllowList' before beta.");
+		expect(result.output).toContain("'ancestorBlacklist' was renamed 'ancestorBlockList' before beta.");
+		expect(result.output).toContain(
+			"'ComponentStreamingMode.Default' was removed before beta. It stood for 'ComponentStreamingMode.Contextual', which replaces it.",
+		);
+		expect(result.output.split("'ComponentStreamingMode.Default' was removed").length).toBe(3);
+		expect(result.output).toContain("Write 'onConstructed'.");
+		expect(result.output).toContain(
+			"'ComponentPlugin.createPlugin' was renamed 'ComponentPlugin.builder' before beta.",
+		);
+	});
+
+	test("leaves TypeScript's own message for a name of the user's", () => {
+		const result = compileProbe(
+			"renamedLookalike",
+			`interface Mine {
+	onConstructed(): void;
+	ancestorAllowList?: number;
+}
+
+declare const mine: Mine;
+mine.onPostIgnite();
+export const literal: Mine = { onConstructed() {}, ancestorWhitelist: 1 };
+`,
+		);
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("onPostIgnite");
+		expect(result.output).not.toContain("before beta");
+	});
+});

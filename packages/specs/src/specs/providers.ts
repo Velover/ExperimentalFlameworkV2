@@ -1,4 +1,4 @@
-import { Flamework, Provider, type Module } from "@flamework-experimental/core";
+import { Flamework, Provider, type Modding, type Module } from "@flamework-experimental/core";
 import { expectEqual, expectNoThrow, expectThrows, expectTrue, suite } from "../testkit";
 
 @Provider()
@@ -20,6 +20,18 @@ class Incrementer {
 class Standalone {}
 
 class NotAProvider {}
+
+class TaggedLogger {
+	constructor(public readonly tag: string) {}
+}
+
+// Guide 07's Modding.Injectable example: the metadata reaches the function provider.
+type Tagged<T, Tag extends string> = Modding.Injectable<{ type: T; metadata: [Tag] }>;
+
+@Provider()
+class TaggedShop {
+	constructor(public readonly log: Tagged<TaggedLogger, "shop">) {}
+}
 
 export = suite("providers", [
 	[
@@ -100,6 +112,22 @@ export = suite("providers", [
 
 			expectEqual(module.resolveDependency<string>("greeting"), "made:greeting", "function provider result");
 			expectTrue(resolvedFrom === module, "the context names the resolving module");
+
+			module.extinguish();
+		},
+	],
+	[
+		"hands a function provider the metadata of a Modding.Injectable type",
+		() => {
+			const module = Flamework.createModule()
+				.registerProvider<TaggedLogger>({
+					type: "function",
+					callback: (context) => new TaggedLogger(context.dependencyInfo.metadata?.[0] as string),
+				})
+				.registerClassProvider(TaggedShop)
+				.ignite();
+
+			expectEqual(module.resolveDependency<TaggedShop>().log.tag, "shop", "the constructor parameter's tag");
 
 			module.extinguish();
 		},

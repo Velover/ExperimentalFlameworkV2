@@ -99,6 +99,32 @@ describe("Rojo project files", () => {
 	});
 });
 
+describe("the flamework.build each package ships", () => {
+	// A game's transformer refuses to build when a package's flamework.build was written by another
+	// version than its own (docs/stability.md). One published without a rebuild after the version bump
+	// would carry the previous version, and break every game's build that installs it.
+	const version = (pkg: string) =>
+		(JSON.parse(fs.readFileSync(path.join(ROOT, "packages", pkg, "package.json"), "utf8")) as { version: string })
+			.version;
+
+	test.each(["core", "components", "networking", "testing"])(
+		"%s ships one written by its own version, the transformer's",
+		(pkg) => {
+			for (const packer of PACKERS) {
+				expect(packed(pkg, packer)).toContain("flamework.build");
+			}
+
+			const buildInfo = JSON.parse(
+				fs.readFileSync(path.join(ROOT, "packages", pkg, "flamework.build"), "utf8"),
+			) as {
+				flameworkVersion: string;
+			};
+			expect(version(pkg)).toBe(version("transformer"));
+			expect(buildInfo.flameworkVersion).toBe(version(pkg));
+		},
+	);
+});
+
 /**
  * The anchors GitHub gives a Markdown file's headings: lower case, punctuation and symbols dropped,
  * each space a hyphen, and `-1`, `-2`, ... after a repeated one. Headings inside code blocks are

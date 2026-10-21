@@ -379,7 +379,7 @@ rather than half-working.
    forward and dependency order still wins. Each provider's `loadOrder` rides along in the
    `onAdded` context (none for a lazy one), and the lifecycle plugin sorts `onStart` by it, stably,
    once, as it starts the providers.
-5. `onPostIgnite` hooks run -- the lifecycle plugin runs `onInit` in its own -- and the imports are
+5. `onConstructed` hooks run -- the lifecycle plugin runs `onInit` in its own -- and the imports are
    checked again, since a yielding `onInit` lets another thread extinguish one. Before a provider's
    `onInit`, and before a provider without one is started, the plugin waits for the pending
    `onInit`s of any lazy providers of an import that its constructor took directly.
@@ -902,7 +902,7 @@ lists refused to build one for.
 The ancestor lists are about where an instance is, and an instance moves within the DataModel
 without its tag being announced again, so a refusal is recorded rather than final (`refuse`, in
 `refusals`, per component): the instance is weighed again once it moves out of the blocked
-ancestor or into a whitelisted one (`Refusals.reconsider`), by the path its announcement takes --
+ancestor or into an allowlisted one (`Refusals.reconsider`), by the path its announcement takes --
 `instanceAdded` itself for an instance the announcement refused, which reads the DataModel, the
 tag, the predicate and the lists again before it tracks. Both paths that build on their own record
 one. The announcement refuses before it tracks anything, as it always did. The tag path's listener
@@ -924,9 +924,9 @@ looks the departing instance up; it is connected with the first refusal under th
 go of with the last, and a refusal counts only on the ancestor the instance sits under, so templates
 in ReplicatedStorage cost nothing when a map leaves ServerStorage. `DescendantRemoving` fires before
 the move, so the instance is weighed on a deferred task; one that moved to another blocked ancestor
-is counted there instead. A whitelisted ancestor is the opposite, where instances live and arrive
+is counted there instead. An allowlisted ancestor is the opposite, where instances live and arrive
 all the time, so a `DescendantAdded` there would run for every arrival in the place: a refusal under
-a whitelist is heard by the instance's own `AncestryChanged` instead, one connection per refused
+an allowlist is heard by the instance's own `AncestryChanged` instead, one connection per refused
 instance, deferred the same way.
 
 The other way round -- an `AncestryChanged` per refused instance under the blocklist too -- was
@@ -1844,12 +1844,12 @@ it before it ends.
   README now documents the monorepo's development workflow rather than the framework.
   `scripts/copy-docs.mjs` (`bun run prepare:docs`, part of `prepare:publish`, and core's own
   `prepack`, which `npm pack`/`bun pm pack` and the publishes run) copies `docs/README.md`,
-  `docs/stability.md`, `docs/ai` and `docs/guide` into `packages/core/docs`. Both scripts point every link to a file the package does
-  not ship at GitHub, and leave code fences and code spans alone (`scripts/links.mjs`). core ships
-  no Rojo project file, so a place maps its whole folder: the docs arrive as two empty Folders, and a
-  nested `node_modules` (npm and bun nest core's `@rbxts/t` there when the game's own is older than
-  3.1.0) reaches the place, where the guards the transformer routes through `core/out/prelude` find
-  core's own `t`.
+  `docs/stability.md`, `docs/ai` and `docs/guide` into `packages/core/docs`. Both scripts point
+  every link to a file the package does not ship at GitHub, and leave code fences and code spans
+  alone (`scripts/links.mjs`). core ships no Rojo project file, so a place maps its whole folder:
+  the docs arrive as two empty Folders, and a nested `node_modules` (npm and bun nest core's
+  `@rbxts/t` there when the game's own is older than 3.1.0) reaches the place, where the guards the
+  transformer routes through `core/out/prelude` find core's own `t`.
 - The plugin host loads plugins with `require` at transform time. A plugin that throws takes the
   build with it, which is intended, but there is no isolation if one misbehaves.
 - **The harness announces a tag's removal after the instance has left, where the engine announces

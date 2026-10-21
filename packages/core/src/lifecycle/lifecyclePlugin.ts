@@ -260,7 +260,7 @@ export class LifecycleProvider {
 	/**
 	 * A provider on a per-frame event does not tick before the pending `onInit`s of what its
 	 * constructor took have finished, as its `onStart` does not start before them: during ignition
-	 * the ignition waits for them (see `postIgnite`), and afterwards one without an `onInit` or
+	 * the ignition waits for them (see `constructed`), and afterwards one without an `onInit` or
 	 * `onStart` of its own gets a turn for it, which keeps it out of the per-frame events until then.
 	 */
 	private addFrameProvider(object: object, context: InterfaceContext) {
@@ -432,7 +432,7 @@ export class LifecycleProvider {
 
 	/**
 	 * Queues a late provider for the next turn, which one deferred thread takes for everything queued
-	 * by then, the way `postIgnite` and `start` take the eager providers: every `onInit` in the order
+	 * by then, the way `constructed` and `start` take the eager providers: every `onInit` in the order
 	 * the providers were resolved -- a dependency, constructed as a constructor parameter, before
 	 * what needs it -- each finished before the next begins, then every `onStart`. A thread per
 	 * provider ran the next one's `onInit` as soon as the one before yielded, and started it before
@@ -610,7 +610,7 @@ export class LifecycleProvider {
 		this.lateTurns.set(turn, providers);
 		const initialised = new Array<object>();
 
-		// Walked live, as `postIgnite` walks: an `onInit` may resolve another lazy provider, which
+		// Walked live, as `constructed` walks: an `onInit` may resolve another lazy provider, which
 		// joins the end of this turn and is initialised after the ones before it.
 		while (!providers.isEmpty()) {
 			// Nothing once the module has begun to extinguish: by then it may have been told
@@ -622,7 +622,7 @@ export class LifecycleProvider {
 				break;
 			}
 
-			// Nor while the module is still igniting -- one a postIgnite hook after this plugin's
+			// Nor while the module is still igniting -- one an onConstructed hook after this plugin's
 			// resolved, whose turn came when a hook yielded: it was started before the module was
 			// ignited, even by an ignition that then failed. `start` gives them their turn again.
 			if (this.module?.isIgnited() !== true) {
@@ -779,7 +779,7 @@ export class LifecycleProvider {
 	 *
 	 * @internal
 	 */
-	public postIgnite(module: Module) {
+	public constructed(module: Module) {
 		this.module = module;
 
 		// Walked live rather than over a copy: an `onInit` may resolve a lazy provider, which joins
@@ -830,7 +830,7 @@ export class LifecycleProvider {
 	/**
 	 * Starts the providers, then connects the per-frame events, once ignition has completed.
 	 *
-	 * Not at `postIgnite`, where `onStart` ran while the module was still igniting: `isIgnited()`
+	 * Not at `constructed`, where `onStart` ran while the module was still igniting: `isIgnited()`
 	 * answered false, `extinguish()` raised, a module importing this one could not ignite, the
 	 * hooks of plugins after this one had not run, and ignition could still fail -- an import
 	 * extinguished while an `onInit` yielded had the providers started against it first.
@@ -993,7 +993,7 @@ export function createLifecyclePlugin(options: LifecyclePluginOptions = {}): Plu
 		const lifecycle = new LifecycleProvider(options);
 		target.provideInstance(lifecycle);
 
-		target.onPostIgnite((module) => lifecycle.postIgnite(module));
+		target.onConstructed((module) => lifecycle.constructed(module));
 		target.onIgnited((module) => lifecycle.start(module));
 		target.onExtinguished((module) => lifecycle.extinguished(module));
 

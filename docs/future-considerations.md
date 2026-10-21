@@ -361,11 +361,21 @@ or the other way round.
 - Or obfuscate its code's structure while keeping remote names stable across builds: network logs
   stay readable, and remote names don't churn with every plain build.
 
-**The proposal.** Keep `obfuscation: true` as the shorthand for everything, and let it also take an
-object, for example `{ "networking": true, "ids": false, "text": true }`, one switch per group
-above. `idGenerationMode` keeps working and wins for the ids. Possibly a seed of its own for
-networking, so a game can pin remote names without pinning everything else (today `transformer.salt`
-pins the whole build's seed and warns).
+**The shape (decided October 2026, before beta).** The config takes
+`obfuscation: boolean | { networking?: boolean; text?: boolean }`:
+- `true` stays the shorthand for everything, byte-identical to today's `true`;
+- the object turns on each group above on its own: `networking` for the remotes, `text` for glob
+  strings, `Modding.Obfuscate`/`Hash` text and `Caller.Uuid`;
+- the object has no `ids` key: `idGenerationMode` alone governs the ids, so two keys never control
+  one thing. `obfuscation` only picks its default: `"obfuscated"` when `obfuscation` is `true` or
+  the object asks for it (how it asks is left to the feature's design), `"full"` otherwise, and an
+  explicit `idGenerationMode` is always what the build uses;
+- a seed of networking's own, if one is wanted (so a game can pin remote names without pinning
+  everything else; today `transformer.salt` pins the whole build's seed and warns), is
+  `obfuscation.networkingSalt`, not a new top-level key.
+
+Widening the boolean to an object is additive, so nothing changes in code until the feature is
+built.
 
 **What it touches.** The transformer config type and schema (each group with its default stated),
 every `state.config.obfuscation` / `obfuscateText` / `obfuscateArray` call site (each is told which
@@ -395,10 +405,11 @@ most one frame of delay.
 Zap, Blink and ByteNet all batch per frame, which suggests the gain is real for this kind of traffic.
 
 **How a game would ask for it** (to decide; it should be explicit):
-- a marker per member, composable like `Raw`, `Serialized` and `Unreliable`: `Networking.Batched<Fn>`,
-  with `Unreliable<Batched<Fn>>` for an unreliable one, not a `BatchedReliable`/`BatchedUnreliable`
-  family (`SerializedReliable` and `RawReliable` were dropped before beta for that reason). Every
-  fire of that member goes through the batch, and the wire format stays fixed per member;
+- a marker per member, composable like `Raw`, `Serialized` and `Unreliable`:
+  `Networking.Batched<Fn>`, with `Unreliable<Batched<Fn>>` for an unreliable one, not a
+  `BatchedReliable`/`BatchedUnreliable` family (`SerializedReliable` and `RawReliable` were dropped
+  before beta for that reason). Every fire of that member goes through the batch, and the wire
+  format stays fixed per member;
 - or a method at the call site, `Events.shot.queue(...)` next to `.fire(...)`. One member can then be
   sent either way, but the receiver has to accept both forms.
 
@@ -474,7 +485,7 @@ polymorphic index, the observer rollback list, and the quadratic removal. What i
 | # | Cost | Cheapest change |
 | --- | --- | --- |
 | 1 | The attribute criterion | Don't connect it when every guarded attribute has a default; otherwise check only the attribute that changed, synchronously. |
-| 2 | Warning timers in production | Default `warningTimeout` to 0 outside Studio, or one shared sweeper thread. |
+| 2 | Warning timers in production | One shared sweeper thread. Decided before beta (October 2026): `warningTimeout` stays 5 everywhere, Studio or not, since changing a default after beta changes behaviour; make the timers cheap instead. |
 | 3 | Provider-list scans when a component is removed | Return early for components in the lifecycle plugin's remove path. |
 | 4 | `addComponent`'s `try`/`finally` | It compiles to `TS.try` with two closures per add; a `pcall` of a static function would avoid them. |
 | 5 | A Maid per component | Created even when the component has no attribute connections; make it on first use. |
@@ -614,8 +625,8 @@ Edge cases found and deliberately left alone, because the fix would cost more th
   interface already walked makes the rollback tell the wrong observers.
 - **core:** per-frame callbacks are called with trailing `nil` arguments (`onTick(self, dt, nil, …)`);
   only a vararg callback counting `select("#", ...)` sees them.
-- **core:** `postIgnite`'s pass over providers without `onInit` that have dependencies rescans its map
-  on each step, quadratic in their number; not measurable at normal sizes.
+- **core:** `constructed`'s pass over providers without `onInit` that have dependencies rescans its
+  map on each step, quadratic in their number; not measurable at normal sizes.
 - **core, components, networking:** per-frame callbacks, component `onStart`s and networking handlers
   run on recycled threads. A thread cancelled or closed while parked is dropped, but code that keeps
   the thread it ran on (`coroutine.running()`) and cancels it while it runs another job cuts that job

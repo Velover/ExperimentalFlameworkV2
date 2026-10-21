@@ -57,6 +57,7 @@ export type {
 	TestingRuntimeConfig,
 } from "./utility/runtimeConfig";
 export type { AbstractConstructor, Constructor } from "./utility/constructors";
+export type { Connection } from "./utility/types";
 
 // Shared with Flamework's other packages, which import them from here and are always installed at
 // the same version: typed, since they import them, but @hidden and outside the stability promise

@@ -391,7 +391,7 @@ export = suite("modules", [
 		},
 	],
 	[
-		// Regression: `ignite` ran the hooks bare, so a postIgnite hook that raised after the
+		// Regression: `ignite` ran the hooks bare, so an onConstructed hook that raised after the
 		// lifecycle plugin's left its RunService connections live, ticking the failed module's
 		// providers on every frame, and left the module in `Igniting`, where `extinguish` refused
 		// it. Nothing could take it down.
@@ -403,10 +403,10 @@ export = suite("modules", [
 			const log = new Array<string>();
 			let seen: Module | undefined;
 
-			const failing = Flamework.createPlugin("FailingPostIgnite", (target) => {
+			const failing = Flamework.createPlugin("FailingOnConstructed", (target) => {
 				seen = target.module;
 				target.onExtinguished(() => log.push("extinguished"));
-				target.onPostIgnite(() => error("post-ignite failed"));
+				target.onConstructed(() => error("post-ignite failed"));
 			});
 
 			const message = expectThrows(
@@ -474,8 +474,8 @@ export = suite("modules", [
 			const anchor = Flamework.createModule().registerClassProvider(Widget).ignite({ default: true });
 
 			try {
-				const failing = Flamework.createPlugin("FailingPostIgnite", (target) => {
-					target.onPostIgnite(() => error("post-ignite failed"));
+				const failing = Flamework.createPlugin("FailingOnConstructed", (target) => {
+					target.onConstructed(() => error("post-ignite failed"));
 				});
 				expectThrows(
 					() => Flamework.createModule().includePlugin(failing).ignite({ default: true }),

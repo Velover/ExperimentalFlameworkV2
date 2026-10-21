@@ -76,7 +76,8 @@ export function getComponentOnlyClass(state: TransformState, type: ts.Type) {
 	}
 }
 
-function getDeclaringPackage(declaration: ts.Declaration) {
+/** The name of the package whose package.json is nearest above the file that declares this. */
+export function getDeclaringPackage(declaration: ts.Declaration) {
 	try {
 		return getPackageJson(path.dirname(declaration.getSourceFile().fileName)).result.name;
 	} catch {

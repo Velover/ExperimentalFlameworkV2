@@ -1,4 +1,5 @@
 import {
+	type Connection,
 	Flamework,
 	OnInit,
 	OnStart,
@@ -144,7 +145,7 @@ function cancelPendingLink(pending: PendingLink) {
 	pending.cancelled = true;
 }
 
-const DEFAULT_ANCESTOR_BLACKLIST = [ServerStorage, ReplicatedStorage, StarterPack, StarterGui, StarterPlayer];
+const DEFAULT_ANCESTOR_BLOCKLIST = [ServerStorage, ReplicatedStorage, StarterPack, StarterGui, StarterPlayer];
 
 /**
  * The tagged instances the ancestor lists kept one component off, each until it moves somewhere the
@@ -153,7 +154,7 @@ const DEFAULT_ANCESTOR_BLACKLIST = [ServerStorage, ReplicatedStorage, StarterPac
 interface Refusals {
 	/**
 	 * Each refused instance, with what hears it move: the blocked ancestor it sits under, whose
-	 * `DescendantRemoving` is shared (`leavingWatches`), or, under a whitelist, its own
+	 * `DescendantRemoving` is shared (`leavingWatches`), or, under an allowlist, its own
 	 * `AncestryChanged`.
 	 */
 	instances: Map<Instance, Instance | RBXScriptConnection>;
@@ -240,7 +241,7 @@ function defaultStreamingMode(): ComponentStreamingMode {
 		case "Contextual":
 			return ComponentStreamingMode.Contextual;
 		default:
-			return ComponentStreamingMode.Default;
+			return ComponentStreamingMode.Contextual;
 	}
 }
 
@@ -475,7 +476,7 @@ export class Components {
 	/**
 	 * Whether the ancestor lists let Flamework construct this component on this instance.
 	 *
-	 * A whitelist takes priority over the blocklist: with one configured, being inside it is the
+	 * An allowlist takes priority over the blocklist: with one configured, being inside it is the
 	 * whole question and the blocklist is not consulted.
 	 */
 	private passesAncestorLists(componentInfo: ComponentInfo, instance: Instance) {
@@ -484,22 +485,22 @@ export class Components {
 
 	/**
 	 * What keeps Flamework from constructing this component on this instance: the first blocked
-	 * ancestor the instance sits under, `true` when a whitelist is configured and the instance is
+	 * ancestor the instance sits under, `true` when an allowlist is configured and the instance is
 	 * under none of it, or nothing when the lists let it through.
 	 */
 	private refusingAncestor(componentInfo: ComponentInfo, instance: Instance): Instance | true | undefined {
 		const { config } = componentInfo;
 
-		const whitelist = config.ancestorWhitelist;
-		if (whitelist !== undefined) {
-			for (const ancestor of whitelist) {
+		const allowlist = config.ancestorAllowList;
+		if (allowlist !== undefined) {
+			for (const ancestor of allowlist) {
 				if (instance.IsDescendantOf(ancestor)) return undefined;
 			}
 
 			return true;
 		}
 
-		for (const ancestor of config.ancestorBlacklist ?? DEFAULT_ANCESTOR_BLACKLIST) {
+		for (const ancestor of config.ancestorBlockList ?? DEFAULT_ANCESTOR_BLOCKLIST) {
 			if (instance.IsDescendantOf(ancestor)) return ancestor;
 		}
 	}
@@ -507,7 +508,7 @@ export class Components {
 	/**
 	 * Records a tagged instance the ancestor lists kept this component off, so that it is weighed
 	 * again once it moves somewhere they let it through: out of the blocked ancestor it sits under,
-	 * or into a whitelisted one. Moving within the DataModel announces nothing, so without this a
+	 * or into an allowlisted one. Moving within the DataModel announces nothing, so without this a
 	 * template announced in ReplicatedStorage, or a map kept in ServerStorage, never got its
 	 * components once it was moved into the workspace.
 	 *
@@ -515,7 +516,7 @@ export class Components {
 	 * `DescendantRemoving`, one connection per ancestor shared by every component and instance
 	 * refused under it (`leavingWatches`): storage holds templates by the thousand and loses an
 	 * instance seldom, so a connection per template would cost far more than the lookup each
-	 * departure costs. A whitelist is the other way round: its ancestors are where instances live
+	 * departure costs. An allowlist is the other way round: its ancestors are where instances live
 	 * and arrive all the time, so the instance's own `AncestryChanged` hears it instead, one
 	 * connection per refused instance.
 	 *
@@ -883,7 +884,7 @@ export class Components {
 					if (instance.IsDescendantOf(game)) {
 						const ancestor = this.refusingAncestor(componentInfo, instance);
 						if (ancestor !== undefined) {
-							// Moved from one blocked ancestor to another, or still outside the whitelist.
+							// Moved from one blocked ancestor to another, or still outside the allowlist.
 							this.refuse(refusals, instance, ancestor);
 							return;
 						}
@@ -3251,7 +3252,7 @@ export class Components {
 	onComponentAdded<T extends object>(
 		callback: (value: T, instance: Instance) => void,
 		componentSpecifier?: AbstractConstructorRef<T>,
-	) {
+	): Connection {
 		const componentId = getIdFromSpecifier(componentSpecifier);
 		assert(componentId !== undefined);
 
@@ -3275,7 +3276,7 @@ export class Components {
 	onComponentRemoved<T extends object>(
 		callback: (value: T, instance: Instance) => void,
 		componentSpecifier?: AbstractConstructorRef<T>,
-	) {
+	): Connection {
 		const componentId = getIdFromSpecifier(componentSpecifier);
 		assert(componentId !== undefined);
 

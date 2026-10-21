@@ -228,7 +228,16 @@ constructor(private components: Components) {} // worked because Components was 
 constructor(private components: Components) {}
 ```
 
-The component API itself is largely unchanged. What is new:
+The component API itself is largely unchanged. A few names are not:
+
+| v1 | v2 |
+|---|---|
+| `ancestorWhitelist` | `ancestorAllowList` |
+| `ancestorBlacklist` | `ancestorBlockList` |
+| `ComponentStreamingMode.Default` | `ComponentStreamingMode.Contextual`, the value `Default` stood for |
+| `onComponentAdded`, `onComponentRemoved` and `onAttributeChanged` return an `RBXScriptConnection` | they return a `Connection` from core: `Connected` and `Disconnect()`, which an `RBXScriptConnection` variable still accepts |
+
+The build names the new name when it meets an old one. What is new:
 
 - `ComponentMetadata` must be the first constructor parameter if a component declares its own
   constructor.

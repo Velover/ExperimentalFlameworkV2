@@ -165,12 +165,15 @@ key on the entry fails the build, and the error names the key. For a transformer
 names the file to move it to. For any other key it says to remove it. (Keys that the plugin loader
 reads itself, such as `import`, are allowed.)
 
-For a game project, the transformer copies the runtime sections (`core`, `networking`,
-`components`, `scopes` and `testing`) into
-`include/flamework/config.json`, and the packages read them through `getRuntimeConfig()` from
-`@flamework-experimental/core`. `cloud` is not one of them and never reaches the place, and neither
-is `serialization`, which is compiled into the code that writes values. A package (a
-project with a scoped name) gets no such file: its defaults come from the game that uses it.
+Each section holds one package's options, read whenever that package needs them. For a game
+project, the transformer copies the package sections (`core`, `networking`, `components`, `scopes`
+and `testing`) into `include/flamework/config.json`, and the packages read them at runtime through
+`getRuntimeConfig()` from `@flamework-experimental/core`. An option that shapes the code the
+transformer emits is read at build time too, wherever it lives: `networking.serialization` is one,
+so changing it needs a plain build. `transformer` and `serialization` are read at build time only,
+since what they decide is compiled in, and `flameworkTest` by the flamework-test CLI only: none of
+the three reaches the place. A package (a project with a scoped name) gets no such file: its
+defaults come from the game that uses it.
 
 **Do not set `idGenerationMode` or `obfuscation` in a published package.** Ids have to be stable,
 and must not collide, in every game that uses the package.

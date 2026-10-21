@@ -285,10 +285,10 @@ waits for, and what happens when something goes wrong:
   with eager providers.
 - **An `onInit` that raises.** The error is reported, and that provider never ticks and is never
   started. The providers after it, or waiting for it, carry on.
-- **Resolved while the module is still igniting**, by a plugin's `onPostIgnite` hook that runs after
-  the lifecycle plugin's. It waits for ignition to finish, and gets neither `onInit` nor `onStart` if
-  the ignition fails. Its per-frame events wait for that too: it does not tick before its `onInit`
-  has finished.
+- **Resolved while the module is still igniting**, by a plugin's `onConstructed` hook that runs
+  after the lifecycle plugin's. It waits for ignition to finish, and gets neither `onInit` nor
+  `onStart` if the ignition fails. Its per-frame events wait for that too: it does not tick before
+  its `onInit` has finished.
 - **Once the module has begun to extinguish**, neither `onInit` nor `onStart` runs for a lazy
   provider that has not had them yet, whenever it was resolved. One first resolved by an
   `onExtinguished` handler is told `onExtinguished`, and that is all it hears.
@@ -353,8 +353,8 @@ print(lifecycle.onTick.size(), "objects are ticking");
 ```
 
 `onStart`, `onTick`, `onPhysics`, `onRender` and `onExtinguished` are the live sets, one per module.
-They are there to be read, typed `ReadonlySet`. The plugin fills and empties them from the interfaces a class implements.
-To attach something by hand, use `listen`.
+They are there to be read, typed `ReadonlySet`. The plugin fills and empties them from the
+interfaces a class implements. To attach something by hand, use `listen`.
 
 ```ts
 @Injectable()

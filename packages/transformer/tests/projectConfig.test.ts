@@ -1049,7 +1049,7 @@ describe("the $schema line", () => {
 			const copy = path.join(FIXTURE, "probe-config", "flamework.config.json");
 			fs.mkdirSync(path.dirname(copy), { recursive: true });
 			// Plugin paths resolve from the package root, so the copy's list works unchanged.
-			fs.writeFileSync(copy, ownText.replace(/^\t"\$schema": .*\n/m, ""));
+			fs.writeFileSync(copy, ownText.replace(/^\t"\$schema": .*\r?\n/m, ""));
 
 			try {
 				const result = compileWithEntry({
@@ -1061,7 +1061,8 @@ describe("the $schema line", () => {
 				expect(result.output).toContain(
 					`Added a "$schema" line to ${path.join("probe-config", "flamework.config.json")}`,
 				);
-				expect(fs.readFileSync(copy, "utf8")).toStartWith(
+				// The line keeps the file's own line endings; a CRLF checkout of the fixture is fine.
+				expect(fs.readFileSync(copy, "utf8").replace(/\r\n/g, "\n")).toStartWith(
 					`{\n\t"$schema": "../../../../../node_modules/@flamework-experimental/transformer/flamework.config.schema.json",\n\t"transformer": {`,
 				);
 				expect(fs.readFileSync(path.join(FIXTURE, "out", "nested.luau"), "utf8")).toContain("fw:nested@Target");

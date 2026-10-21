@@ -1,6 +1,8 @@
 import ts from "typescript";
 import { Diagnostics } from "../../classes/diagnostics";
 import { TransformState } from "../../classes/transformState";
+import { NETWORKING_PACKAGE } from "../packages";
+import { getDeclaringPackage } from "./getFlameworkDecorators";
 
 /**
  * How a networking member's values travel:
@@ -57,16 +59,18 @@ const REMOVED_MARKERS = new Map([
  * TypeScript's error for `Networking.SerializedReliable` or `Networking.RawReliable`, which were dropped
  * before beta, as one that names the marker replacing it; `undefined` for any other diagnostic.
  * TypeScript's own asks "Did you mean 'SerializedUnreliable'?", which would make the event unreliable.
- * Only TypeScript's "no exported member" errors are looked at, so a build without one pays nothing.
+ * Only TypeScript's "no exported member" errors are looked at, so a build without one pays nothing,
+ * and only where the namespace is networking's own: a namespace of the user's that happens to look
+ * like it keeps TypeScript's message.
  */
 export function explainRemovedNetworkMarker(
 	state: TransformState,
-	file: ts.SourceFile,
 	diagnostic: ts.DiagnosticWithLocation,
 ): ts.DiagnosticWithLocation | undefined {
 	// 2694: has no exported member 'X'. 2724: has no exported member named 'X'. Did you mean 'Y'?
 	if (diagnostic.code !== 2694 && diagnostic.code !== 2724) return undefined;
 
+	const file = diagnostic.file;
 	const name = ts.getTokenAtPosition(file, diagnostic.start);
 	if (!ts.isIdentifier(name) || !ts.isQualifiedName(name.parent) || name.parent.right !== name) return undefined;
 
@@ -76,8 +80,10 @@ export function explainRemovedNetworkMarker(
 	// Only networking's namespace, however it was imported or renamed.
 	let namespace = state.typeChecker.getSymbolAtLocation(name.parent.left);
 	if (namespace && namespace.flags & ts.SymbolFlags.Alias) namespace = state.typeChecker.getAliasedSymbol(namespace);
-	const exports = namespace?.exports;
-	if (!exports?.has("Serialized" as ts.__String) || !exports.has("RawUnreliable" as ts.__String)) return undefined;
+	const declaredByNetworking = namespace?.declarations?.some(
+		(declaration) => getDeclaringPackage(declaration) === NETWORKING_PACKAGE,
+	);
+	if (!declaredByNetworking) return undefined;
 
 	const written = name.parent.left.getText(file);
 	return Diagnostics.createDiagnostic(

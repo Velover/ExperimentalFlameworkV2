@@ -123,7 +123,7 @@ export function createTestingPlugin(options?: TestingOptions): PluginDefinition 
 		target.onIgnited(restore, { priority: HookPriority.Last });
 
 		let attached = false;
-		target.onPostIgnite(
+		target.onConstructed(
 			() => {
 				attach({ timeout: resolved.timeout, concurrency: resolved.concurrency });
 				attached = true;

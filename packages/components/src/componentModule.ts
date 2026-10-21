@@ -66,7 +66,11 @@ interface SharedRegistration {
 const sharedRegistrations = new WeakMap<Module, SharedRegistration>();
 
 export class ComponentPlugin {
-	public static createPlugin() {
+	/**
+	 * Starts a components plugin to register components into one by one, by folder or by glob.
+	 * `build()` turns it into the plugin to include in a module.
+	 */
+	public static builder() {
 		return new ComponentPlugin();
 	}
 
@@ -83,7 +87,7 @@ export class ComponentPlugin {
 		options?: ScopeCondition,
 		path?: Modding.Intrinsic<"path", [T], string[]>,
 	) {
-		return this.createPlugin().registerFolder(`ComponentPlugin.fromPath("${_stringPath}")`, options, path).build();
+		return this.builder().registerFolder(`ComponentPlugin.fromPath("${_stringPath}")`, options, path).build();
 	}
 
 	/**
@@ -96,7 +100,7 @@ export class ComponentPlugin {
 		options?: ScopeCondition,
 		glob?: Modding.Intrinsic<"pathglob", [T], string>,
 	) {
-		return this.createPlugin().registerGlob(`ComponentPlugin.fromGlob("${_glob}")`, options, glob).build();
+		return this.builder().registerGlob(`ComponentPlugin.fromGlob("${_glob}")`, options, glob).build();
 	}
 
 	private components = new Array<Constructor>();

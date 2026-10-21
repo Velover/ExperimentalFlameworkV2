@@ -433,7 +433,7 @@ export = suite("lifecycle", [
 
 			function hookPlugin(name: string, priority?: number) {
 				return Flamework.createPlugin(name, (target) => {
-					target.onPostIgnite(() => order.push(name), { priority });
+					target.onConstructed(() => order.push(name), { priority });
 				});
 			}
 
@@ -465,14 +465,14 @@ export = suite("lifecycle", [
 
 			const plugin = Flamework.createPlugin("Order", (target) => {
 				target.onPreIgnite(() => order.push("preIgnite"));
-				target.onPostIgnite(() => order.push("postIgnite"));
+				target.onConstructed(() => order.push("constructed"));
 			});
 
 			const module = Flamework.createModule().includePlugin(plugin).registerClassProvider(Tracked).ignite();
 
 			expectEqual(order[0], "preIgnite", "first event");
 			expectEqual(order[1], "provider", "second event");
-			expectEqual(order[2], "postIgnite", "third event");
+			expectEqual(order[2], "constructed", "third event");
 
 			module.extinguish();
 		},
@@ -536,7 +536,7 @@ export = suite("lifecycle", [
 
 			function hookPlugin(name: string) {
 				return Flamework.createPlugin(name, (target) => {
-					target.onPostIgnite(() => order.push(name));
+					target.onConstructed(() => order.push(name));
 				});
 			}
 
@@ -682,7 +682,7 @@ export = suite("lifecycle", [
 		},
 	],
 	[
-		// Regression: `postIgnite` ran `onInit` over a copy of its list, so a lazy provider resolved
+		// Regression: `constructed` ran `onInit` over a copy of its list, so a lazy provider resolved
 		// from another provider's `onInit` -- attached while the copy was being walked -- was never
 		// initialised, yet was started with the rest.
 		"initialises a lazy provider resolved during another provider's onInit before anything starts",

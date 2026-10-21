@@ -43,7 +43,7 @@ export const ScorePlugin = createScorePlugin();
   - `observe<T>({ onAdded, onRemoved })`: every object that implements `T` as the module creates
     it, providers and `createClassInstance` alike. Only a class with a Flamework decorator that
     names `T` in its `implements` clause is matched;
-  - `onPreIgnite`, `onPostIgnite`, `onIgnited` and `onExtinguished`, ordered within a phase by
+  - `onPreIgnite`, `onConstructed`, `onIgnited` and `onExtinguished`, ordered within a phase by
     `{ priority }` (`HookPriority.First`, `Normal`, `Last`). The lifecycle plugin calls `onStart`
     in `onIgnited`; `Last` runs after it.
   - `includePlugin(other)`: a plugin it depends on, set up first and only once per ignition.
@@ -62,8 +62,11 @@ export const ScorePlugin = createScorePlugin();
   providers with `target.registerClassProvider(SomeClass)`.
 - **No `idGenerationMode` or `obfuscation`** in the package's `flamework.config.json`: its ids must
   be the same in every game.
-- **Core as a peer dependency,** pinned to the release the package is built against, and as a dev
-  dependency at the same version. The same for any other Flamework package it uses.
+- **Core as a peer dependency,** as a `^` range from the release the package is built against
+  (`"^2.0.0-beta.0"`), and as a dev dependency at that release. A package compiled against one 2.x
+  release keeps working under a later one ([Stability](../stability.md)), so the range lets a game
+  upgrade Flamework without waiting for the package. The same for any other Flamework package it
+  uses.
 - `"declaration": true` in its tsconfig, and `"stripInternal": true` keeps members marked
   `@internal` out of the published typings.
 - A game that installs it adds `node_modules/@scope` to `typeRoots` and maps it in its Rojo project

@@ -247,9 +247,76 @@ The rules are the same as for `registerProviders`:
   So a glob macro called from a published package raises
   `Flamework has no paths for the glob '...'` when it runs.
 
+### Intrinsic parameters
+
+`Modding.Intrinsic<N, M, T>` is how a macro's parameter asks the transformer for something it works
+out at the callsite: `N` names what, `M` lists what it is worked out from (usually the call's type
+arguments), and `T` is the type the parameter receives. Four names are public, and stay as they are
+through 2.x ([Stability](../stability.md)):
+
+| Name | Declared as | The parameter receives |
+|---|---|---|
+| `path` | `Modding.Intrinsic<"path", [T], string[]>` | The Rojo path of the source folder the string literal `T` names (above). |
+| `pathglob` | `Modding.Intrinsic<"pathglob", [T], string>` | The glob `T`, matched against your source when you build (above). |
+| `env` | `Modding.Intrinsic<"env", [N, F], string \| undefined>` | The environment variable the string literal `N` names, read as `Flamework.env` reads it ([Project structure](09-project-structure.md)), as a string literal; else the string literal `F` when one is given; else `undefined`. |
+| `plugin` | `Modding.Intrinsic<"plugin", [Id, T], R>` | What the transformer plugin that registered the macro type `Id` builds from `T` ([Transformer plugins](../reference/transformer-plugins.md)). |
+
+```ts
+/** @metadata macro */
+export function channel<N extends string>(
+    _name: N,
+    value?: Modding.Intrinsic<"env", [N, "dev"], string>,
+) {
+    return value!;
+}
+
+channel("BUILD_CHANNEL"); // "live" when .env sets BUILD_CHANNEL=live, else "dev"
+```
+
+The other intrinsic names in Flamework's declarations (`serializer`, `obfuscate-obj` and the rest)
+are Flamework's own, and may change in any release.
+
 `Modding.Intrinsic` is marked `@hidden` in core's declarations. That tag is for documentation
 generators, and TypeScript ignores it. It is the same type that `registerProviders`,
 `ComponentPlugin.fromPath` and a plugin target's `registerProviders` declare.
+
+### Injectable types
+
+`Modding.Injectable<{ type: T; id?: I; metadata?: [...] }>` is the type `T`, with two things for
+dependency injection attached:
+
+- `id`: resolve the id of the type `I` instead of `T`'s. The value is still typed `T`.
+- `metadata`: a tuple of macro types (string and number literals, `Modding.Caller.*`,
+  `Modding.Target.*` and the rest), generated where the dependency is asked for. A function provider
+  receives them as `context.dependencyInfo.metadata`
+  ([Function providers](03-providers.md#function-providers)).
+
+Both apply wherever Flamework generates a dependency's info: a constructor parameter,
+`Dependency<T>()`, `module.resolveDependency<T>()`, and a macro's `Modding.Target.Dependency<T>`
+parameter.
+
+```ts
+import { Flamework, Modding, Provider } from "@flamework-experimental/core";
+
+class Logger {
+    constructor(readonly tag: string) {}
+}
+
+type Tagged<T, Tag extends string> = Modding.Injectable<{ type: T; metadata: [Tag] }>;
+
+@Provider()
+class Shop {
+    constructor(private readonly log: Tagged<Logger, "shop">) {}
+}
+
+Flamework.createModule()
+    .registerProvider<Logger>({
+        type: "function",
+        callback: (context) => new Logger(context.dependencyInfo.metadata?.[0] as string),
+    })
+    .registerClassProvider(Shop)
+    .ignite(); // Shop's logger has the tag "shop"
+```
 
 ### Serializers
 
@@ -413,6 +480,41 @@ function load(buf: buffer): DataV2 {
     return migrate(legacy.deserialize(buf)); // written before the version
 }
 ```
+
+## Reflection metadata
+
+A decorator can ask the transformer to record facts about what it decorates: put
+`@metadata reflect` and the keys it wants in the decorator function's JSDoc. The transformer writes
+each one after the class as `Reflect.defineMetadata(class, key, value)` (with the member's name for
+a property or a method), where `Reflect.getOwnMetadata` reads it
+([custom decorators](10-migrating-from-v1.md#8-custom-decorators)):
+
+```ts
+/** @metadata reflect identifier flamework:parameters */
+export function Command(name: string) {
+    return (ctor: object) => Reflect.defineMetadata(ctor, "myGame:command", name);
+}
+```
+
+An interface's JSDoc can carry the same tag, for every class that `implements` it, and so can an
+interface member's, for the class member that implements it. These are the keys:
+
+| Key | Recorded on | Holds |
+|---|---|---|
+| `identifier` | a class | Its Flamework id. A class declared at the top level of its file (or of a namespace in it) also gets `flamework:module`: the ModuleScript that defines it. |
+| `flamework:implements` | a class | The ids of the interfaces it `implements`, in order. |
+| `flamework:parameters` | a class (its constructor), a method | The id of each parameter's type. |
+| `flamework:parameter_names` | a class, a method | Each parameter's name, `_binding_` for a destructured one. |
+| `flamework:parameter_guards` | a class, a method | A `t` guard for each parameter's type. |
+| `flamework:dependencies` | a class, a method | Each parameter's dependency info (`Modding.DependencyInfo`: the id, and any [injectable](#injectable-types) metadata), as a module's injection reads it. |
+| `flamework:type` | a property | The id of its type. |
+| `flamework:guard` | a property | A `t` guard for its type. |
+| `flamework:return_type` | a method | The id of its return type. |
+| `flamework:return_guard` | a method | A `t` guard for its return type. |
+
+`*` asks for every key, and `~key` leaves one out, even when `*` or another tag asks for it. The
+keys keep v1's names, mixed casing included, and they are frozen for 2.x: no 2.x release renames
+one or changes what it holds ([Stability](../stability.md)).
 
 ## When a macro does not fire
 

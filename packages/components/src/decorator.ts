@@ -26,11 +26,6 @@ export enum ComponentStreamingMode {
 	 * Otherwise, this behaves like `Watching`.
 	 */
 	Contextual,
-
-	/**
-	 * This is equivalent to {@link ComponentStreamingMode.Contextual Contextual}.
-	 */
-	Default = Contextual,
 }
 
 /**
@@ -128,11 +123,11 @@ export interface ComponentConfig {
 
 	/**
 	 * Specifies where components can be constructed via CollectionService.
-	 * This has higher priority than `ancestorBlacklist`, including the default blacklist.
+	 * This has higher priority than `ancestorBlockList`, including the default blocklist.
 	 *
 	 * This has the same behavior as a predicate.
 	 */
-	ancestorWhitelist?: Instance[];
+	ancestorAllowList?: Instance[];
 
 	/**
 	 * Specifies where components can not be constructed via CollectionService.
@@ -140,7 +135,7 @@ export interface ComponentConfig {
 	 *
 	 * This has the same behavior as a predicate.
 	 */
-	ancestorBlacklist?: Instance[];
+	ancestorBlockList?: Instance[];
 
 	/**
 	 * Flamework will warn whenever a component isn't able to be created while watching for CollectionService tags,

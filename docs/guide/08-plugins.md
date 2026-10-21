@@ -15,7 +15,7 @@ export const MetricsPlugin = Flamework.createPlugin("Metrics", (target) => {
     const metrics = new Metrics();
 
     target.provideInstance(metrics); // providers can now inject Metrics
-    target.onPostIgnite(() => metrics.start()); // once every provider exists
+    target.onConstructed(() => metrics.start()); // once every provider exists
 });
 ```
 
@@ -43,7 +43,7 @@ Everything is a method on `target`, and everything registers into the module bei
 | `registerProviders(path, options?)` / `registerProvidersGlob(glob, options?)` | Registers every `@Provider()` class the ModuleScripts under a folder define, exported or not, as the module builder does. How a plugin in your game's source ships a folder of providers: the path is resolved in the project that compiles the plugin, so a plugin published as a package cannot use it ([Macros › Paths](07-macros.md#paths)). When the options' scope condition does not hold, the folder is not looked up at all. |
 | `includePlugin(plugin, options?)` | Includes another plugin, set up now, before this one continues. |
 | `onPreIgnite(cb, options?)` | Runs `cb` before the module's providers are constructed. |
-| `onPostIgnite(cb, options?)` | Runs `cb` after every provider has been constructed. |
+| `onConstructed(cb, options?)` | Runs `cb` after every provider has been constructed. |
 | `onIgnited(cb, options?)` | Runs `cb` once ignition has completed; the lifecycle plugin starts the providers here. |
 | `onExtinguished(cb, options?)` | Runs `cb` when the module extinguishes. |
 | `observe<T>({ onAdded, onRemoved })` | Tells the plugin about every object implementing `T`. |
@@ -51,7 +51,8 @@ Everything is a method on `target`, and everything registers into the module bei
 | `module` | The module itself, for the hooks to close over. It cannot resolve anything until it ignites. |
 | `scope` | The module's own scope condition, when `ignite` was given one. For messages; `isActive` already folds it in. |
 
-Every hook receives the module: `target.onPostIgnite((module) => module.resolveDependency<Shop>())`.
+Every hook receives the module:
+`target.onConstructed((module) => module.resolveDependency<Shop>())`.
 
 The `options` on the registrations and on `includePlugin` are a
 [scope condition](11-scopes.md#conditions) (`activeIn`, `inactiveIn`). When an inclusion's condition
@@ -70,17 +71,23 @@ for (const component of registered) {
 
 ## Hooks
 
-| Hook | Runs |
-|---|---|
-| `onPreIgnite` | After every plugin has been set up, **before** the module's providers are constructed. |
-| `onPostIgnite` | After every provider has been constructed, and `onInit` has run. The module is still igniting, so an error raised here fails the ignition. |
-| `onIgnited` | Once ignition has completed and the module is ignited. The lifecycle plugin calls `onStart` here. An error raised here is only warned about. If the module is extinguished (by an `onStart`, say), the hooks after that one do not run. |
-| `onExtinguished` | When `extinguish()` runs, before the providers are released. |
+A module runs the four hooks in this order, each once per ignition:
+
+| Hook | Runs | The lifecycle plugin, there |
+|---|---|---|
+| `onPreIgnite` | After every plugin has been set up, **before** the module's providers are constructed. | Nothing. |
+| `onConstructed` | Once every provider has been constructed (lazy ones aside), while the module is **still igniting**: `isIgnited()` is false, and an error raised here fails the ignition. | Runs `onInit` on every provider that has one, in dependency order and then `loadOrder`, and waits for each Promise one returns ([Lifecycle events](04-lifecycle-events.md)). |
+| `onIgnited` | Once ignition has completed and the module **is ignited**. An error raised here is only warned about. If the module is extinguished (by an `onStart`, say), the hooks after that one do not run. | Runs `onStart`, then connects `onTick`, `onPhysics` and `onRender`. |
+| `onExtinguished` | When `extinguish()` runs, before the providers are released. | Disconnects the per-frame events, then runs `onExtinguished`. |
+
+Every module starts with the lifecycle plugin, so at the default priority its hook runs before
+yours in each phase: an `onConstructed` hook of yours sees every `onInit` done, and an `onIgnited`
+one every `onStart` called.
 
 Which one to use:
 
 - `onPreIgnite`: registering state that providers look at while they are constructed.
-- `onPostIgnite`: anything that needs the providers to exist.
+- `onConstructed`: anything that needs the providers to exist.
 - `onIgnited`: anything that should only start once the module is fully up, after the providers.
 
 **Nothing can be resolved during setup or `onPreIgnite`.** Providers do not exist yet, and trying
@@ -91,7 +98,7 @@ raises `module is in pre-ignite phase, dependency cannot be resolved`.
 Hooks of the same phase run in `priority` order, lowest first, then in registration order:
 
 ```ts
-target.onPostIgnite(() => {}, { priority: HookPriority.First });
+target.onConstructed(() => {}, { priority: HookPriority.First });
 ```
 
 `HookPriority.First` is `-1000`, `Normal` is `0` (the default), `Last` is `1000`. They are
@@ -116,7 +123,7 @@ export const PlayerPlugin = Flamework.createPlugin("Players", (target) => {
         onRemoved: (value) => listeners.delete(value),
     });
 
-    target.onPostIgnite(() => {
+    target.onConstructed(() => {
         Players.PlayerAdded.Connect((player) => {
             for (const listener of listeners) listener.onPlayerJoined(player);
         });

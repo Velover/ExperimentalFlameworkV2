@@ -2,7 +2,7 @@
 	"$schema": "http://json-schema.org/draft-07/schema#",
 	"$id": "flamework.config.schema.json",
 	"title": "Flamework project configuration",
-	"description": "One file for every Flamework package, read from flamework.config.json next to (or above) your tsconfig.json. The transformer section is read at build time and is the only place transformer options go: the tsconfig entry takes none. The serialization section is read at build time too. The flameworkTest section is read by the flamework-test CLI only. The other sections are compiled into include/flamework/config.json for the runtime packages. Every option says its default; leave an option out to keep the default. Any string may reference the environment as ${NAME} or ${NAME:-fallback} ($$ for a literal dollar), read from .env and .env.local next to this file with the process environment on top; a string where a boolean, number or list is expected is converted.",
+	"description": "One file for every Flamework package, read from flamework.config.json next to (or above) your tsconfig.json. The transformer section is read at build time and is the only place transformer options go: the tsconfig entry takes none. The serialization section is read at build time too. The flameworkTest section is read by the flamework-test CLI only. Each of the other sections holds one package's options, read whenever that package needs them: they are compiled into include/flamework/config.json for the runtime packages, and the transformer also reads an option that shapes the code it emits (networking.serialization). Every option says its default; leave an option out to keep the default. Any string may reference the environment as ${NAME} or ${NAME:-fallback} ($$ for a literal dollar), read from .env and .env.local next to this file with the process environment on top; a string where a boolean, number or list is expected is converted.",
 	"type": "object",
 	"additionalProperties": false,
 	"properties": {
@@ -60,7 +60,7 @@
 				"optimizations": {
 					"type": "object",
 					"additionalProperties": false,
-					"description": "Experimental output optimisations. Default: none.",
+					"description": "Output optimisations, outside the 2.x stability promise (docs/stability.md): any of them may change or go in a minor release. Default: none.",
 					"default": {},
 					"properties": {
 						"guardGenerationDedupLimit": {
@@ -127,7 +127,7 @@
 			"properties": {
 				"serialization": {
 					"type": "boolean",
-					"description": "Serialises every event and function payload into a buffer, with encode and decode code generated from the event's parameter types at each createServer/createClient call site. Values that cannot live in a buffer (Instances, unknown) travel alongside it. Networking.Serialized* members are packed whatever this says, and Networking.Raw* members never are. Default: false.",
+					"description": "Serialises every event and function payload into a buffer, with encode and decode code generated from the event's parameter types at each createServer/createClient call site. Values that cannot live in a buffer (Instances, unknown) travel alongside it. Networking.Serialized* members are packed whatever this says, and Networking.Raw* members never are. Read at build time, since the encoding is compiled in (changing it needs a plain build); the copy in include/flamework/config.json is informational. Default: false.",
 					"default": false
 				}
 			}

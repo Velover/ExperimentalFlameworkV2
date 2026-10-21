@@ -112,11 +112,11 @@ function registerMissingFolders(condition: core.ScopeCondition) {
 		["ComponentPlugin.fromGlob", () => ComponentPlugin.fromGlob("src/*/Tests/**", condition, glob)],
 		[
 			"registerComponents",
-			() => ComponentPlugin.createPlugin().registerComponents("src/server/Tests", condition, folder),
+			() => ComponentPlugin.builder().registerComponents("src/server/Tests", condition, folder),
 		],
 		[
 			"registerComponentsGlob",
-			() => ComponentPlugin.createPlugin().registerComponentsGlob("src/*/Tests/**", condition, glob),
+			() => ComponentPlugin.builder().registerComponentsGlob("src/*/Tests/**", condition, glob),
 		],
 		[
 			"a plugin target's registerProviders and registerProvidersGlob",
@@ -327,7 +327,7 @@ export = suite("scopes", [
 			let hooks = 0;
 			const plugin = Flamework.createPlugin("Scoped", (target) => {
 				target.registerClassProvider(Always);
-				target.onPostIgnite(() => (hooks += 1));
+				target.onConstructed(() => (hooks += 1));
 			});
 
 			withScopes([], () => {
@@ -403,7 +403,7 @@ export = suite("scopes", [
 			const ignite = () =>
 				Flamework.createModule()
 					.includePlugin(
-						ComponentPlugin.createPlugin().registerComponent(Scoped).registerComponent(Unscoped).build(),
+						ComponentPlugin.builder().registerComponent(Scoped).registerComponent(Unscoped).build(),
 					)
 					.ignite();
 
@@ -443,7 +443,7 @@ export = suite("scopes", [
 			withScopes([], () => {
 				const module = Flamework.createModule()
 					.includePlugin(
-						ComponentPlugin.createPlugin()
+						ComponentPlugin.builder()
 							.registerComponent(Unscoped, { activeIn: ["gamma"] })
 							.build(),
 					)

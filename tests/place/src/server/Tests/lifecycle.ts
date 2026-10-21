@@ -305,7 +305,7 @@ export class LifecycleTests implements OnStart, OnTick, OnPhysics {
 			// The Lune `lifecycle` suite's regression cases, against the engine's own frames.
 
 			test("initialises a lazy provider resolved during another provider's onInit before anything starts", () => {
-				// Regression: `postIgnite` ran `onInit` over a copy of its list, so a lazy provider
+				// Regression: `constructed` ran `onInit` over a copy of its list, so a lazy provider
 				// resolved from another provider's `onInit` -- attached while the copy was being
 				// walked -- was never initialised, yet was started with the rest.
 				inits.clear();

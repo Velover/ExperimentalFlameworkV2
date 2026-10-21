@@ -20,6 +20,23 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   the event unreliable. The build names the right one (unless `noSemanticDiagnostics` is on, which
   leaves TypeScript's own message).
 
+- **A few names are renamed, and one alias is gone, before beta.** Nothing is kept under the old
+  name. Nothing changes at runtime once renamed. Code compiled against an earlier release that uses
+  an old name, such as a library, has to be built again: an old `onPostIgnite` or `createPlugin()`
+  call raises, `ancestorWhitelist`/`ancestorBlacklist` are ignored (the default blocklist applies),
+  and `ComponentStreamingMode.Default` reads as unset (the project's default streaming mode).
+
+  | Was | Now |
+  |---|---|
+  | `target.onPostIgnite(cb)` in a plugin | `target.onConstructed(cb)`, the same hook |
+  | `ComponentPlugin.createPlugin()` | `ComponentPlugin.builder()` |
+  | `ancestorWhitelist` in `@Component({ ... })` | `ancestorAllowList` |
+  | `ancestorBlacklist` in `@Component({ ... })` | `ancestorBlockList` |
+  | `ComponentStreamingMode.Default` | `ComponentStreamingMode.Contextual`, which it stood for |
+
+  The build names the new name for each, in place of TypeScript's "does not exist" error (unless
+  `noSemanticDiagnostics` is on).
+
 - **The transformer refuses a mix of Flamework versions.** Each `@flamework-experimental` package
   records the transformer version that built it in its `flamework.build`, and the transformer now
   compares that with its own: a project with, say, core 2.0.0-alpha.8 beside this transformer stops
@@ -35,7 +52,7 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `getSections`, `resolveTestingOptions` and `ResolvedTestingOptions`; transformer-plugin's
   `drainRegisteredPlugins`. None was documented. `LifecycleProvider`'s `onStart`, `onTick`,
   `onPhysics`, `onRender` and `onExtinguished` are `ReadonlySet`s now, and its `addInit`,
-  `removeInit`, `addStart`, `removeStart`, `postIgnite`, `start` and `extinguished` are
+  `removeInit`, `addStart`, `removeStart`, `constructed`, `start` and `extinguished` are
   internal: read the sets, and attach with `module.listen`. [Stability](docs/stability.md) lists
   what else is outside the promise.
 - **flamework-test's settings are renamed, and the old names are refused.** Every setting now has
@@ -87,7 +104,7 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   testing: an older transformer refuses the `flameworkTest` section, and this one refuses the old
   keys.
 
-- **A tagged instance moved out of ReplicatedStorage or ServerStorage, or into a whitelisted
+- **A tagged instance moved out of ReplicatedStorage or ServerStorage, or into an allowlisted
   ancestor, now gets its component.** Every earlier release, v1 included, read the ancestor lists
   only when the tag was announced, and moving within the DataModel announces nothing, so such an
   instance was left without one for as long as it stayed in the DataModel. A game that relied on
@@ -107,6 +124,23 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ### components
 
+#### Changed
+
+- **`ComponentPlugin.builder()`** replaces `ComponentPlugin.createPlugin()`, which returned a
+  builder where every other `create*Plugin` returns a plugin (see the upgrade notes).
+  `fromPath` and `fromGlob` are unchanged.
+- **`ancestorAllowList` and `ancestorBlockList`** replace v1's `ancestorWhitelist` and
+  `ancestorBlacklist`, and `ComponentStreamingMode.Default`, an alias of `Contextual`, is gone
+  (see the upgrade notes).
+- **`onComponentAdded`, `onComponentRemoved` and `onAttributeChanged` return core's
+  `Connection`** (`Connected`, `Disconnect()`), typed by its shape rather than as an
+  `RBXScriptConnection`, so that what is behind it may change without breaking code that holds
+  one. The object is the same as before, and a variable typed `RBXScriptConnection` still takes
+  it.
+- **`ComponentModuleConfig` is left out of the typings** (`@internal`). It is the config
+  `ComponentPlugin` hands the `Components` it builds, outside the stability promise like the
+  `Components` constructor that takes it; it is still in the Luau.
+
 #### Fixed
 
 - **A tagged instance the ancestor lists refused is built once it moves somewhere they allow.** The
@@ -115,9 +149,9 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   child a container stored before the child's tag was announced, never got a component, whatever
   the predicate, the instance guard or the links said; only leaving the DataModel and entering it
   again helped. A refused instance is now weighed again once it leaves a blocked ancestor or enters
-  a whitelisted one, the way its tag's announcement would be. Under the blocklist one
+  an allowlisted one, the way its tag's announcement would be. Under the blocklist one
   `DescendantRemoving` connection per blocked ancestor holding a refused instance hears it leave,
-  shared by every component; under a whitelist the instance's own `AncestryChanged` hears it enter.
+  shared by every component; under an allowlist the instance's own `AncestryChanged` hears it enter.
   Since v1.
 - **No component is rebuilt under a blocked ancestor.** A component kept in storage (the lists gate
   construction, not removal) and taken down there, by its tree breaking where the tree is followed
@@ -150,6 +184,9 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 #### Added
 
+- **`Connection`**, the type of what a Flamework listener returns: `Connected` and `Disconnect()`.
+  Components' listeners return it, and networking's `Networking.Connection` and an engine
+  `RBXScriptConnection` both satisfy it.
 - **`Serialization.u64` and `Serialization.i64`,** with `Serialization.Implicit.u64` and
   `Implicit.i64`, for whole numbers past 32 bits: a UserId, a time in milliseconds, a large counter.
   The value is a plain number, as with every other width. On the wire it is eight bytes in the
@@ -178,6 +215,10 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   are the constructors of `ModuleDefinition` and `Components`.
 - **The refusal of a serializer built without its header names the transformer version to
   install:** the version of `@flamework-experimental/core`, and 2.0.0-alpha.8 or later.
+- **The plugin hook `onPostIgnite` is `onConstructed`** (see the upgrade notes), after what it
+  follows: every provider constructed, the module still igniting. It ran the same moment under
+  either name; `onIgnited` is unchanged. Guide 08 tables the four hooks, with what the lifecycle
+  plugin does in each.
 
 ### networking
 
@@ -283,12 +324,19 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 #### Added
 
+- **A build error that names the replacement of a name renamed before beta**
+  (`'target.onPostIgnite' was renamed 'target.onConstructed' before beta.`), for `onPostIgnite`,
+  `ComponentPlugin.createPlugin`, `ancestorWhitelist`, `ancestorBlacklist` and
+  `ComponentStreamingMode.Default`, in place of TypeScript's "does not exist" error. Only where the
+  new name is there on the same type, declared by Flamework's package: a name of your own keeps
+  TypeScript's message.
 - **A build error that names the replacement of a dropped networking marker:**
   `'Networking.SerializedReliable' was removed before beta. It was the same type as
   'Networking.Serialized', which replaces it.`, in place of TypeScript's "no exported member" error,
   whose "Did you mean 'SerializedUnreliable'?" would make the event unreliable. The same for
   `RawReliable`. Only TypeScript's "no exported member" errors are looked at, so a build without
-  one costs nothing more.
+  one costs nothing more, and only on networking's own namespace: one of your own that looks like
+  it keeps TypeScript's message.
 - **The `u64` and `i64` widths** (see core), with their implicit twins. `buffer` has no 64-bit call,
   so each is two 32-bit writes: `buffer.writeu32(buf, o, n % 2^32)`, then
   `buffer.writeu32(buf, o + 4, math.floor(n / 2^32))` (`writei32` for an `i64`), and read back as
@@ -318,6 +366,9 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - **`api.version` for plugins** (see transformer-plugin).
 
 #### Fixed
+
+- `@flamework-experimental/transformer`'s `files` no longer lists an `index.d.ts`, which the package
+  never had.
 
 - **Another transformer listed before Flamework's in `tsconfig.json`'s `plugins` no longer breaks
   the build.** Such a transformer (one for `@rbxts/services`, for instance, which rewrites a class
@@ -418,10 +469,22 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   themselves, check each table once, and refuse a value nested deeper than about 1,000 levels.
 - `docs/stability.md`, linked from `docs/README.md`, which now says v2 is in beta: what 2.x keeps
   from one release to the next, and what is internal.
-- Guide 07, "Serializers" and "Versions": no 2.x release changes a layout or its hash; a change comes
-  behind an option, or in 3.0. Guide 04: `LifecycleProvider`'s sets are `ReadonlySet`s.
+- Guide 07, "Serializers" and "Versions": no 2.x release changes a layout or its hash; a change
+  comes behind an option, or in 3.0. Guide 04: `LifecycleProvider`'s sets are `ReadonlySet`s.
 - `docs/reference/transformer-plugins.md`: `api.version`, and `api.options` comes from
   `flamework.config.json`.
+- Guide 07: "Intrinsic parameters" lists the public `Modding.Intrinsic` names (`path`,
+  `pathglob`, `env`, `plugin`); "Injectable types" documents `Modding.Injectable`, whose metadata
+  reaches a function provider as `context.dependencyInfo.metadata`; "Reflection metadata" lists
+  every key `@metadata reflect` can ask for, frozen for 2.x. A transformer test and a runtime spec
+  hold each to what the guide says.
+- Guide 08, "Hooks": when each hook runs, and what the lifecycle plugin does in it.
+- Guide 09 and the config schema: each section holds one package's options, read whenever that
+  package needs them, rather than "runtime sections"; `networking.serialization` is read at build
+  time. `transformer.optimizations` is described as outside the stability promise, as
+  `docs/stability.md` says.
+- `docs/ai/flamework.md`: the transformer refuses a mix of versions. `docs/ai/plugins.md`: a
+  library takes core as a `^` peer range from the release it is built against.
 
 ## 2026-10-06: every package 2.0.0-alpha.8
 

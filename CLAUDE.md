@@ -17,10 +17,11 @@ small change never needs it.
 
 - **Release gates.** Before every release, whatever else it runs: `bun run build`, then
   `bun run test:runtime` with its `golden layouts` suite passing, and `packages/specs/golden`
-  changed since the previous release only by added lines (`git diff <previous release> --
-  packages/specs/golden`: a new type or width adds samples; a changed or removed line is a changed
-  layout), since the serializer layouts and their hashes are frozen for 2.x; and `bun run test:packaging`, whose `abi.test.ts` pins the package
-  ids and runtime names. Neither is rewritten to make a release pass (docs/stability.md).
+  changed since the previous release only by added lines
+  (`git diff <previous release> -- packages/specs/golden`: a new type or width adds samples; a
+  changed or removed line is a changed layout), since the serializer layouts and their hashes are
+  frozen for 2.x; and `bun run test:packaging`, whose `abi.test.ts` pins the package ids and runtime
+  names. Neither is rewritten to make a release pass (docs/stability.md).
 - **Ask first, saying why and how long:**
   - `bun run test` (every suite);
   - the whole `test:unit` (about 12 min);

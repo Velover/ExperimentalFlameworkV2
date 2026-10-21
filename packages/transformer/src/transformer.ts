@@ -8,6 +8,7 @@ import { f } from "./util/factory";
 import chalk from "chalk";
 import { emitTypescriptMismatch } from "./util/functions/emitTypescriptMismatch";
 import { explainRemovedNetworkMarker } from "./util/functions/networkMode";
+import { explainRenamed } from "./util/functions/explainRenamed";
 import { PKG_VERSION } from "./util/constants";
 import { getTsBuildInfoPath } from "./util/functions/isCleanBuildDirectory";
 import { ProjectError } from "./classes/diagnostics";
@@ -76,7 +77,9 @@ export default function (program: ts.Program, entry?: TransformerEntry) {
 						preEmitDiagnostics
 							.filter(isDiagnosticWithLocation)
 							.forEach((diag) =>
-								context.addDiagnostic(explainRemovedNetworkMarker(state, originalFile, diag) ?? diag),
+								context.addDiagnostic(
+									explainRemovedNetworkMarker(state, diag) ?? explainRenamed(state, diag) ?? diag,
+								),
 							);
 						return file;
 					}

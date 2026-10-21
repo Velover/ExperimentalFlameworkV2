@@ -10,7 +10,6 @@
   "files": [
     "out",
     "default.project.json",
-    "index.d.ts",
     "rojo-schema.json",
     "flamework-schema.json",
     "flamework.config.schema.json",

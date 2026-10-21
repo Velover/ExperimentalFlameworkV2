@@ -66,7 +66,7 @@ In order:
    providers, hooks and observers into it. A plugin reached twice is set up once.
 2. `onPreIgnite` hooks run.
 3. Every registered provider is constructed, and its constructor dependencies are resolved.
-4. `onPostIgnite` hooks run. This is where `LifecyclePlugin` calls `onInit` on everything that
+4. `onConstructed` hooks run. This is where `LifecyclePlugin` calls `onInit` on everything that
    implements it. An error raised up to this point fails the ignition.
 5. The module is now ignited, and `onIgnited` hooks run. This is where `LifecyclePlugin` calls
    `onStart` on everything that implements it, and then starts its `RunService` connections. So an
@@ -238,7 +238,7 @@ Flamework.createModule()
   container, ignite the *definition* again.
 - **You cannot resolve during plugin setup or `onPreIgnite`.** Providers do not exist yet. The error
   `module is in pre-ignite phase, dependency cannot be resolved` means a plugin tried. Register state
-  early, and resolve in `onPostIgnite`.
+  early, and resolve in `onConstructed`.
 - **`Dependency<T>()` answers from one module.** It uses the first module ignited, unless a later one
   was ignited with `{ default: true }`. A realm with two running modules (tests, tools) should say
   which one, or resolve through the module handle.

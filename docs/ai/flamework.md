@@ -19,10 +19,12 @@ own assistant's instructions, with one line:
 - A project pins every `@flamework-experimental/*` package exactly and upgrades them together, to
   one release. From 2.0.0-alpha.8 on, a release gives every package the same version, the
   unchanged ones included, so every `@flamework-experimental/*` entry in `package.json` names the
-  same version. Don't count on the package manager to catch a mix: only components, networking
-  and testing name core in their peer ranges (and testing the transformer), so an older core
-  without any of those three, an older transformer without testing, an older transformer-plugin, or
-  an older components, networking or testing beside a newer core installs without a word. The
+  same version. The transformer refuses a mix when it builds: it compares the version that wrote
+  the `flamework.build` of each Flamework package the project imports with its own, and stops with
+  `Flamework's packages are not all the same version`, naming each one built by another. The
+  package manager catches less: components, networking and testing name core in their peer ranges
+  (testing the transformer too), and core names the transformer as an optional peer, which npm
+  checks only when the transformer is installed and bun only warns about. The
   [CHANGELOG](https://github.com/Velover/ExperimentalFlameworkV2/blob/HEAD/CHANGELOG.md) heads each
   release with its version and lists its upgrade notes; before alpha.8, versions differed per
   package.

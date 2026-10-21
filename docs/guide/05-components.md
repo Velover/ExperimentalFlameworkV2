@@ -56,7 +56,7 @@ Tag a `Model` with `Vehicle` in Studio, set a `speed` attribute, and the compone
 ComponentPlugin.fromPath("src/shared/components");
 
 // Full form: the same thing, with room to add more
-ComponentPlugin.createPlugin()
+ComponentPlugin.builder()
     .registerComponents("src/shared/components")
     .registerComponent(SpecialCase)
     .build();
@@ -472,7 +472,7 @@ that instance is tagged.
 | Change | Effect |
 |---|---|
 | The tag is removed | Removed. |
-| The instance leaves the DataModel (unparented, destroyed, or an **ancestor** of it unparented) | Removed. CollectionService announces the tag as gone for the whole subtree that left, and announces it again when it is parented back in, so the components come back with it. Moving an instance *within* the DataModel announces nothing and takes nothing down. It can only build: a tagged instance the ancestor lists refused gets its component once it moves out of a blocked ancestor, or into a whitelisted one (see [Where components may attach](#where-components-may-attach)). |
+| The instance leaves the DataModel (unparented, destroyed, or an **ancestor** of it unparented) | Removed. CollectionService announces the tag as gone for the whole subtree that left, and announces it again when it is parented back in, so the components come back with it. Moving an instance *within* the DataModel announces nothing and takes nothing down. It can only build: a tagged instance the ancestor lists refused gets its component once it moves out of a blocked ancestor, or into an allowlisted one (see [Where components may attach](#where-components-may-attach)). |
 | The component a link names is destroyed | Removed, whatever the streaming mode: that is a lifecycle event, not the tree moving. |
 | Some **other** component on a linked instance is destroyed | **Kept**, including a subclass of the one the link names. |
 | A link attribute is re-pointed at something that fails its guard | Removed, and built again if it is pointed back at something valid. |
@@ -602,8 +602,8 @@ never came up, with the reason.
 | Option | Effect |
 |---|---|
 | `predicate` | Rejects an instance outright, before anything else runs. |
-| `ancestorWhitelist` | Only construct under these ancestors. Takes priority over the blocklist. |
-| `ancestorBlacklist` | Never construct under these. Defaults to ServerStorage, ReplicatedStorage, StarterPack, StarterGui and StarterPlayer. |
+| `ancestorAllowList` | Only construct under these ancestors. Takes priority over the blocklist. |
+| `ancestorBlockList` | Never construct under these. Defaults to ServerStorage, ReplicatedStorage, StarterPack, StarterGui and StarterPlayer. |
 
 ```ts
 @Component({ tag: "Prop", predicate: (instance) => !instance.IsDescendantOf(ServerStorage) })
@@ -618,7 +618,7 @@ tagged instance cloned into Workspace does.
 
 The lists are about where an instance is, so they are read again when a refused instance moves.
 Moving within the DataModel announces nothing, but a tagged instance the lists refused gets its
-component once it moves out of the blocked ancestor, or into a whitelisted one: a template moved
+component once it moves out of the blocked ancestor, or into an allowlisted one: a template moved
 from ReplicatedStorage into Workspace, or a map kept in ServerStorage and moved in when the round
 starts. The move is weighed the way the tag's announcement would be: the predicate first, then the
 lists, then the instance guard, the attributes and the links. Moving the other way keeps the
@@ -742,6 +742,9 @@ export class VehicleService {
 | `waitForComponent<T>(instance)` | Promise; resolves immediately if it already exists. A waiter whose handler removes the component leaves the others waiting for the next one. |
 | `onComponentAdded<T>(cb)` | Fires for every future component of that type. |
 | `onComponentRemoved<T>(cb)` | Fires after the component has left the lookups: before `destroy` where the place delivers signals immediately, after it where they are deferred. |
+
+Both listeners, and `onAttributeChanged`, return a `Connection` (from core): `Connected`, and
+`Disconnect()` to stop listening.
 
 `getComponent` needs the exact class. The polymorphic ones (`getComponents`, `getAllComponents`,
 and both listeners) accept an interface the component implements, or a superclass that is itself

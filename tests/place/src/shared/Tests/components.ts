@@ -117,7 +117,7 @@ class Atomic extends BaseComponent<{}, Model & { Core: Folder }> {}
 @Component({ tag: "Blocked" })
 class Blocked extends BaseComponent<{}, Folder> {}
 
-@Component({ tag: "Allowed", ancestorWhitelist: [ReplicatedStorage] })
+@Component({ tag: "Allowed", ancestorAllowList: [ReplicatedStorage] })
 class Allowed extends BaseComponent<{}, Folder> {}
 
 /** Implemented by a component, so it can be resolved polymorphically. */
@@ -792,7 +792,7 @@ class FussyPointer extends BaseComponent<{ Target: Folder; Linked: Fussy }, Fold
 class Static extends BaseComponent<{ speed: number }, Folder> {}
 
 /** The plugin every case's module is built from: just these components, no path discovery. */
-const SPEC_PLUGIN = ComponentPlugin.createPlugin()
+const SPEC_PLUGIN = ComponentPlugin.builder()
 	.registerComponent(Tagged)
 	.registerComponent(Defaulted)
 	.registerComponent(PartOnly)
@@ -3823,28 +3823,28 @@ export class ComponentSpecs implements OnStart {
 				expectReleased(components, baseline, [template, storage, place], "destroyed");
 			});
 
-			test("builds the component of a tagged instance once it enters an ancestor its whitelist allows", () => {
+			test("builds the component of a tagged instance once it enters an ancestor its allowlist names", () => {
 				const { components, baseline } = createRefusalModule(["Allowed"]);
 
 				// `Allowed` is only built under ReplicatedStorage: tagged in the workspace, it waits,
 				// watched on its own.
-				const outside = folder("WhitelistOutside");
-				const instance = folderIn(outside, "WhitelistCandidate");
+				const outside = folder("AllowlistOutside");
+				const instance = folderIn(outside, "AllowlistCandidate");
 				CollectionService.AddTag(instance, "Allowed");
 				settle();
 				expectEqual(components.getComponents<Allowed>(instance).size(), 0, "components outside");
 				expectEqual(refusedCount(components, Allowed), 1, "refusals outside");
 				expectEqual(registryCounts(components).get("Allowed: refusal connections"), 1, "watches outside");
 
-				// Moved about outside the whitelist: still refused, and still watched once.
-				const elsewhere = folder("WhitelistElsewhere");
+				// Moved about outside the allowlist: still refused, and still watched once.
+				const elsewhere = folder("AllowlistElsewhere");
 				instance.Parent = elsewhere;
 				settle();
 				expectEqual(components.getComponents<Allowed>(instance).size(), 0, "components elsewhere");
 				expectEqual(registryCounts(components).get("Allowed: refusal connections"), 1, "watches elsewhere");
 
-				// Into the whitelist: built, and the watch let go of.
-				const inside = storageFolder("WhitelistInside");
+				// Into the allowlist: built, and the watch let go of.
+				const inside = storageFolder("AllowlistInside");
 				instance.Parent = inside;
 				const built = untilFound(() => components.getComponents<Allowed>(instance)[0], "the component inside");
 				expectEqual(refusedCount(components, Allowed), 0, "refusals inside");
@@ -3891,7 +3891,7 @@ export class ComponentSpecs implements OnStart {
 				const { components, quiet, baseline } = createHidingModule(["Allowed"]);
 
 				// Both kinds of wait: a template under a blocked ancestor, and an instance outside the
-				// whitelist.
+				// allowlist.
 				const storage = storageFolder("DoomedStorage");
 				const outside = folder("DoomedOutside");
 				const template = itemIn(storage, "DoomedTemplate");
@@ -3923,7 +3923,7 @@ export class ComponentSpecs implements OnStart {
 				const { components, quiet, baseline } = createHidingModule(["Allowed"]);
 
 				// Both kinds of wait: a template under a blocked ancestor, and an instance outside the
-				// whitelist.
+				// allowlist.
 				const storage = storageFolder("UntaggedStorage");
 				const outside = folder("UntaggedOutside");
 				const place = folder("UntaggedPlace");
@@ -5917,7 +5917,7 @@ export class ComponentSpecs implements OnStart {
 			});
 
 			test("refuses a link to a component the plugin does not register", () => {
-				const plugin = ComponentPlugin.createPlugin().registerComponent(Owner).build();
+				const plugin = ComponentPlugin.builder().registerComponent(Owner).build();
 
 				const message = expectThrows(
 					() => Flamework.createModule().includePlugin(plugin).ignite(),

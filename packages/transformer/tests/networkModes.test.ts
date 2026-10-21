@@ -281,6 +281,22 @@ export const events = Networking.createEvent<ProbeServerEvents, {}>();
 		// TypeScript's own error suggests the unreliable marker.
 		expect(result.output).not.toContain("Did you mean");
 	});
+
+	test("leaves TypeScript's own message for a namespace of the user's that looks like networking's", () => {
+		const result = compileProbe(
+			"removedMarkersLookalike",
+			`export namespace Lookalike {
+	export type Serialized<T> = T;
+	export type RawUnreliable<T> = T;
+}
+
+export type Saved = Lookalike.SerializedReliable<(value: number) => void>;
+`,
+		);
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain("SerializedReliable");
+		expect(result.output).not.toContain("was removed before beta");
+	});
 });
 
 describe("guards of tuples with a rest element", () => {

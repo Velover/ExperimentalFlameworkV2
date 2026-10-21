@@ -29,7 +29,7 @@ export = suite("plugins", [
 			const plugin = Flamework.createPlugin("Metrics", (target) => {
 				const metrics = new Metrics();
 				target.provideInstance(metrics);
-				target.onPostIgnite(() => (metrics.started += 1));
+				target.onConstructed(() => (metrics.started += 1));
 			});
 
 			const module = Flamework.createModule().includePlugin(plugin).registerClassProvider(Reporter).ignite();
@@ -112,12 +112,12 @@ export = suite("plugins", [
 
 			const database = Flamework.createPlugin("Database", (target) => {
 				order.push("database");
-				target.onPostIgnite(() => order.push("database:ignited"));
+				target.onConstructed(() => order.push("database:ignited"));
 			});
 			const inventory = Flamework.createPlugin("Inventory", (target) => {
 				target.includePlugin(database);
 				order.push("inventory");
-				target.onPostIgnite(() => order.push("inventory:ignited"));
+				target.onConstructed(() => order.push("inventory:ignited"));
 			});
 
 			const module = Flamework.createModule().includePlugin(inventory).ignite();

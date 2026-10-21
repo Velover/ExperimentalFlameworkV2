@@ -237,7 +237,7 @@ export = suite("duplicate ids", [
 		() => {
 			const sites = new Array<string>();
 			const plugin = Flamework.createPlugin("Late", (target) =>
-				target.onPostIgnite(() => target.provideInstance(mark(sites, new Ledger()))),
+				target.onConstructed(() => target.provideInstance(mark(sites, new Ledger()))),
 			);
 
 			const message = expectThrows(

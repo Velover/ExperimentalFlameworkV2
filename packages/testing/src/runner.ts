@@ -15,8 +15,7 @@ export interface RunOptions {
 
 	/**
 	 * The most concurrent tests that run at once in this run, a whole number, 1 or more: overrides
-	 * `testing.concurrency`. With 1, every test runs alone, one after another. A runner from before
-	 * concurrent tests ignores it.
+	 * `testing.concurrency`. With 1, every test runs alone, one after another.
 	 */
 	concurrency?: number;
 }
@@ -31,9 +30,8 @@ export interface TestResult {
 	name: string;
 
 	/**
-	 * Whether the test did not fail: true when it passed and when it was skipped. `status` tells
-	 * the two apart; `ok` stays for what reads it alone, such as a `flamework-test` from before
-	 * skips, which then sees a skip as it saw one before skips had a status, as no failure.
+	 * Whether the test did not fail: true when it passed and when it was skipped. A convenience
+	 * for code that only asks whether anything failed; `status` tells the two apart.
 	 */
 	ok: boolean;
 
@@ -55,7 +53,7 @@ export interface TestResult {
 	/**
 	 * Set on a concurrent test, one registered with `test.concurrent` or in a section defined with
 	 * `{ concurrent: true }`, which may have run alongside others: its `durationMs` then counts the
-	 * time they took as well. Absent on a plain test, and from a runner before concurrent tests.
+	 * time they took as well. Absent on a plain test.
 	 */
 	concurrent?: boolean;
 
@@ -90,7 +88,7 @@ export interface RunResult {
 	unknown: string[];
 	/**
 	 * The most concurrent tests the run let run at once (in a listing, would have): `RunOptions`'
-	 * `concurrency`, else `testing.concurrency`. Absent from a runner before concurrent tests.
+	 * `concurrency`, else `testing.concurrency`.
 	 */
 	concurrency: number;
 }

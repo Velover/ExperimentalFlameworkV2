@@ -1,4 +1,14 @@
 /**
+ * What a Flamework listener returns: `Connected`, and `Disconnect()` to stop listening. Typed by its
+ * shape, so that the object behind it may change without breaking code that holds one. An engine
+ * `RBXScriptConnection` and networking's `Networking.Connection` both satisfy it.
+ */
+export interface Connection {
+	readonly Connected: boolean;
+	Disconnect(): void;
+}
+
+/**
  * Alias for destructors, which is just a callback.
  */
 export type Destructor = () => void;

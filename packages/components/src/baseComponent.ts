@@ -1,3 +1,4 @@
+import type { Connection } from "@flamework-experimental/core";
 import Signal from "@rbxts/signal";
 import { Component } from "./decorator";
 
@@ -112,7 +113,7 @@ export interface ComponentMetadata {
 	writeAttribute?: (key: string, value: unknown) => boolean;
 }
 
-/**x
+/**
  * This is the base component class which handles instance guards, attribute guards and cleanup.
  *
  * You should not construct this class manually, and all components must extend this class.
@@ -231,7 +232,7 @@ export class BaseComponent<A = {}, I extends Instance = Instance> {
 	onAttributeChanged<K extends keyof A>(
 		name: K,
 		cb: (newValue: ResolvedAttributes<A>[K], oldValue: ResolvedAttributes<A>[K]) => void,
-	) {
+	): Connection {
 		let list = this[SYMBOL_ATTRIBUTE_HANDLERS].get(name as string);
 		if (!list) this[SYMBOL_ATTRIBUTE_HANDLERS].set(name as string, (list = new Signal()));
 

@@ -28,7 +28,7 @@ export interface HookOptions {
 }
 
 /** @internal */
-export type HookPhase = "preIgnite" | "postIgnite" | "ignited" | "extinguished";
+export type HookPhase = "preIgnite" | "constructed" | "ignited" | "extinguished";
 
 /** @internal */
 export interface RegisteredHook {

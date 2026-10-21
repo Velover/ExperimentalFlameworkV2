@@ -66,8 +66,8 @@ export class Boat
   per realm with the same tag. The two realms' components never see each other.
 - **Where:** by default no component is built under ServerStorage, ReplicatedStorage, StarterPack,
   StarterGui or StarterPlayer, so a tagged template there gets none until it is cloned or moved into
-  the world (`ancestorWhitelist`/`ancestorBlacklist` change this). Moving a tagged instance out of a
-  blocked ancestor, or into a whitelisted one, builds its component; moving it in keeps the one it
+  the world (`ancestorAllowList`/`ancestorBlockList` change this). Moving a tagged instance out of a
+  blocked ancestor, or into an allowlisted one, builds its component; moving it in keeps the one it
   has. A `predicate` that refuses a stored instance where it is stored
   (`(instance) => !instance.IsDescendantOf(ServerStorage)`) keeps it from getting one when it moves
   out: a predicate's refusal when the tag is announced is final.
