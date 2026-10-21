@@ -5,6 +5,7 @@ import { TransformState } from "../classes/transformState";
 import { f } from "../util/factory";
 import { checkSerializerOutput } from "../util/functions/buildSerializerFromType";
 import { transformStatementList } from "./transformStatementList";
+import { LUAU_MAX_LOCALS, sureImportLocals, sureLocalsOf, sureMainChunkLocals } from "../util/luauLimits";
 
 export function transformFile(state: TransformState, file: ts.SourceFile): ts.SourceFile {
 	state.buildInfo.invalidateGlobs(state.getFileId(file));
@@ -61,6 +62,12 @@ export function transformFile(state: TransformState, file: ts.SourceFile): ts.So
 	}
 
 	checkSerializerOutput(state, file);
+	checkMainChunkLocals(
+		state,
+		parseTreeFile,
+		statements,
+		imports?.reduce((sum, info) => sum + info.entries.length, 0) ?? 0,
+	);
 
 	for (const diag of Diagnostics.flush()) {
 		state.addDiagnostic(diag);
@@ -69,4 +76,45 @@ export function transformFile(state: TransformState, file: ts.SourceFile): ts.So
 	const sourceFile = f.update.sourceFile(file, statements);
 
 	return sourceFile;
+}
+
+/**
+ * The build's error for a file whose main chunk Flamework's code takes past the 200 locals Luau loads a
+ * function with: the file would build and then fail to load. It counts only the locals the file is
+ * sure to keep (see `sureMainChunkLocals`), so it never refuses a file that loads: the file as written
+ * and as transformed, with the imports (a local for each name read as a value, and roblox-ts's `TS`
+ * for the runtime library, which a file that imports anything at run time has: see
+ * `sureImportLocals`) and the ones Flamework added. A file past the limit without Flamework's code is
+ * roblox-ts's to report, and is left alone.
+ */
+function checkMainChunkLocals(
+	state: TransformState,
+	original: ts.SourceFile,
+	statements: readonly ts.Statement[],
+	imports: number,
+) {
+	if (Diagnostics.diagnostics.some((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)) return;
+
+	const own = sureImportLocals(state.typeChecker, original);
+	const before = sureMainChunkLocals(original.statements) + own.locals + (own.runtime ? 1 : 0);
+	let running = own.locals + imports + (own.runtime || imports > 0 ? 1 : 0);
+	let at: ts.Statement | undefined;
+	for (const statement of statements) {
+		running += sureLocalsOf(statement);
+		// Where Luau stops: the first statement the count passes the limit at, or the next one written in the file.
+		if (running > LUAU_MAX_LOCALS && (at === undefined || ts.getParseTreeNode(at) === undefined)) at = statement;
+	}
+
+	if (running <= LUAU_MAX_LOCALS || running <= before) return;
+
+	const written = statements.map((statement) => ts.getParseTreeNode(statement)).filter((node) => node !== undefined);
+	const located = ts.getParseTreeNode(at!) ?? written[written.length - 1] ?? original;
+	Diagnostics.addDiagnostic(
+		Diagnostics.createDiagnostic(
+			located,
+			ts.DiagnosticCategory.Error,
+			`This file declares at least ${running} locals at its top level, ${running - before} of them in code Flamework generated, and Luau loads a module with at most ${LUAU_MAX_LOCALS} there: it would build, then fail to load ("Out of local registers").`,
+			"Move some of the file's top-level declarations into a table or another module, or split the file.",
+		),
+	);
 }

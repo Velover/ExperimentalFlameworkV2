@@ -594,8 +594,8 @@ check gives, so nothing is sent:
 as for the widths: in the other realm the values are still tested, but one of the wrong type raises
 nothing and is written as it would be without the checks. A value of the wrong type cannot be
 written, so `"warn"` raises all the same, with one exception: a value declared `boolean`, which is
-warned about and then written as whether it is truthy, as it is without the checks. A lone literal
-type (`true`, `"circle"`) is no exception: under `"warn"` it raises like the rest.
+warned about and then written as whether Luau finds it truthy, as it is without the checks. A lone
+literal type (`true`, `"circle"`) is no exception: under `"warn"` it raises like the rest.
 
 A test is a `type` or `typeof` call and a comparison per value (an enum's reads its `EnumType` as
 well), one to three nanoseconds in Lune: a send of a list of ten `{ x, y }` costs about 13% more, one
@@ -637,8 +637,8 @@ member of a union. Some do not:
   string`. A `varint` raises `attempt to compare string < number` before its check, when it is
   measured, and an `f32` takes the string as its number: it passes the check and is written. The
   type checks refuse such a string: `number expected, got string`.
-- A `boolean` is written as whether the value is truthy. The type checks raise instead, or under
-  `"warn"` warn first.
+- A `boolean` is written as whether Luau finds the value truthy: anything but `nil` and `false`, so
+  `0` and `""` are written as `true`. The type checks raise instead, or under `"warn"` warn first.
 - An object is written field by field, so the fields its type does not declare are dropped. Any
   table fits an object whose fields are all optional.
 - The last member tried in a union may only be checked to be a table (see above). A table of the

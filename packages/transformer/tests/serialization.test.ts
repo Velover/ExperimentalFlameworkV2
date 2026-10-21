@@ -253,16 +253,16 @@ describe("Flamework.createSerializer", () => {
 		// `[number, ...string[], boolean]`: the rest count leaves out both, and the boolean is the last value.
 		const middle = serializer("restMiddleSerializer");
 		expect(middle).toMatch(/local count\w* = math\.max\(#v\w* - 2, 0\)/);
-		expect(middle).toMatch(/local _value\w* = v\w*\[count\w* \+ 2\]\s*buffer\.writeu8\(/);
+		expect(middle).toMatch(/buffer\.writeu8\(buf\w*, o\w*, if v\w*\[count\w* \+ 2\] then 1 else 0\)/);
 		expect(middle).toMatch(
 			/end\s*local arg\w* = buffer\.readu8\(buf\w*, o\w*\) ~= 0\s*list\w*\[count\w* \+ 2\] = arg\w*/,
 		);
-		expect(middle).not.toMatch(/local _value\w* = v\w*\[2\]/);
+		expect(middle).not.toMatch(/if v\w*\[2\] then 1 else 0/);
 
 		// `[...string[], boolean]`: nothing before the rest.
 		const first = serializer("restFirstSerializer");
 		expect(first).toMatch(/local count\w* = math\.max\(#v\w* - 1, 0\)/);
-		expect(first).toMatch(/local _value\w* = v\w*\[count\w* \+ 1\]/);
+		expect(first).toMatch(/if v\w*\[count\w* \+ 1\] then 1 else 0/);
 		expect(first).toMatch(/list\w*\[count\w* \+ 1\] = arg\w*/);
 	});
 });

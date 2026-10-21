@@ -18,6 +18,14 @@ import {
 import { localName } from "./identifierName";
 import { getPropertyKey, keyAccess, keyName, keySegment, TableKey } from "./propertyKey";
 import { isArrayType, isTupleType } from "./isTupleType";
+import {
+	exceedsLimits,
+	holdsLocals,
+	LUAU_MAX_LOCALS,
+	LUAU_MAX_REGISTERS,
+	measurePressure,
+	needsCompacting,
+} from "../luauLimits";
 
 /**
  * Generates serialization code from types.
@@ -485,6 +493,8 @@ export interface EncodingSite {
 	name?: string;
 	/** The one value is a function's result (`result` in a message) rather than an argument list. */
 	result?: boolean;
+	/** The locals live where a call's packing lands, which the packing's own estimate adds to. */
+	outer?: number;
 }
 
 /** A hoisted type: its functions are `s_<name>`, `w_<name>` and `r_<name>` in the file's table. */
@@ -503,6 +513,9 @@ interface Hoisted {
 }
 
 type HoistedRole = "s" | "w" | "r";
+
+/** Where a guard or a table of the file is kept: a local, or a field of the file's table. */
+type Slot = ts.Identifier | { field: string };
 
 /** The per-file varint helpers: `vsize(n)`, `vwrite(buf, o, n) -> o` and `vread(buf, o) -> n, o`. */
 interface Varint {
@@ -627,27 +640,25 @@ function typeNodes(global: (name: string, args?: ts.TypeNode[]) => ts.TypeNode) 
 			]),
 		map: () => global("Map", [unknown(), unknown()]),
 		set: () => global("Set", [defined()]),
+		boolean: () => f.keywordType(ts.SyntaxKind.BooleanKeyword),
 		enumItem: () => global("EnumItem"),
-		tuple: (elements: ts.TypeNode[]) => global("LuaTuple", [f.tupleType(elements)]),
-		/** What a file's table of hoisted functions holds: the functions, called through casts to their own types. */
-		functions: () =>
+		/** An enum's items by `Value`: a plain table, read by indexing it (see `enumTableFor`). */
+		enumTable: () =>
 			factory.createTypeLiteralNode([
 				factory.createIndexSignature(
 					undefined,
-					[f.parameterDeclaration("key", string())],
-					f.functionType(
-						[
-							f.parameterDeclaration(
-								"args",
-								factory.createArrayTypeNode(f.keywordType(ts.SyntaxKind.NeverKeyword)),
-								undefined,
-								false,
-								true,
-							),
-						],
-						unknown(),
-					),
+					[f.parameterDeclaration("value", number())],
+					global("EnumItem"),
 				),
+			]),
+		tuple: (elements: ts.TypeNode[]) => global("LuaTuple", [f.tupleType(elements)]),
+		/**
+		 * What a file's table holds: the hoisted functions, called through casts to their own types, and the
+		 * guards and tables past the file's budget of locals, read through casts to theirs.
+		 */
+		functions: () =>
+			factory.createTypeLiteralNode([
+				factory.createIndexSignature(undefined, [f.parameterDeclaration("key", string())], unknown()),
 			]),
 	};
 }
@@ -980,9 +991,12 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	const called = new Map<string, { node: ts.Node; owner: string }>();
 	const definitionOf = new Map<ts.Statement, string>();
 	const handedOut = new Set<string>();
-	const guards = new Map<ts.Type, ts.Identifier>();
-	const enumTables = new Map<string, ts.Identifier>();
-	const literalTables = new Map<Kind, { list: ts.Identifier; index: ts.Identifier }>();
+	/** Where each guard and table the file's code reads is kept; see {@link fileSlot}. */
+	const guards = new Map<ts.Type, Slot>();
+	const enumTables = new Map<string, Slot>();
+	const literalTables = new Map<Kind, { list: Slot; index: Slot }>();
+	/** How many of each kind of {@link Slot} went into the file's table, for their field names. */
+	const tableFields = new Map<string, number>();
 	const discriminants = new Map<UnionKind, string | undefined>();
 	const evaluations = new Map<UnionKind, Evaluation>();
 	/** `fit`'s results, by the kind whose guard is asked and then the kind of the values. */
@@ -1038,6 +1052,15 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 * up in the module's scope rather than the call site's. See {@link globalRef}.
 	 */
 	let fileLevel = 0;
+	/**
+	 * Whether the function being built is built compactly (see {@link fitted}): each field or element of
+	 * an object or a list in a block of its own, a read one stored into a table made first, a size added
+	 * to a running total. Its locals end with its block, so the function holds one field's at a time,
+	 * where the plain form holds every one to its end; Luau refuses to load a function with more than
+	 * 200 locals or 255 registers, which a type with about a hundred fields took the plain form past.
+	 * Only a function that would come near those is built this way.
+	 */
+	let compact = false;
 	/** Whether each global is hidden where the current code lands, by scope, meaning and name. */
 	const hiddenHere = new Map<string, ts.Symbol | undefined>();
 	/** The module-level `const` each aliased global is read through, declared once per file. */
@@ -1391,15 +1414,24 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		countUses(type);
 		const header = versioned && { ...versioned, hash: layoutHash(layoutText(type)) };
 		const value = parameter("v");
-		const serialize = f.arrowFunction(f.block(encodeBody(type, layout, value, rootPath(type), header)), [
-			f.parameterDeclaration(value, T.unknown()),
-		]);
+		const named = () => shapeText(type);
+		const serialize = f.arrowFunction(
+			f.block(fitted(() => encodeBody(type, layout, value, rootPath(type), header), [value], named)),
+			[f.parameterDeclaration(value, T.unknown())],
+		);
 
 		const buf = uid("buf");
 		const blobs = layout.blobs ? uid("blobs") : undefined;
-		const body = new Array<ts.Statement>();
-		const result = decodeBody(type, layout, buf, blobs, body, header);
-		body.push(f.returnStatement(result));
+		const body = fitted(
+			() => {
+				const statements = new Array<ts.Statement>();
+				const result = decodeBody(type, layout, buf, blobs, statements, header);
+				statements.push(f.returnStatement(result));
+				return statements;
+			},
+			blobs ? [buf, blobs] : [buf],
+			named,
+		);
 		const deserialize = f.arrowFunction(
 			f.block(body),
 			blobs
@@ -1424,9 +1456,16 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		countUses(list);
 		const buf = uid("buf");
 		const blobs = layout.blobs ? uid("blobs") : undefined;
-		const body = new Array<ts.Statement>();
-		const result = decodeBody(list, layout, buf, blobs, body);
-		body.push(f.returnStatement(result));
+		const body = fitted(
+			() => {
+				const statements = new Array<ts.Statement>();
+				const result = decodeBody(list, layout, buf, blobs, statements);
+				statements.push(f.returnStatement(result));
+				return statements;
+			},
+			blobs ? [buf, blobs] : [buf],
+			() => "these arguments",
+		);
 		return f.arrowFunction(
 			f.block(body),
 			blobs
@@ -1441,6 +1480,11 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		site: EncodingSite = {},
 	): InlineEncoding {
 		return encodeElements(isKind(type) ? type : listOf(type), values, site);
+	}
+
+	/** What the build error of a function that does not fit names: a type as written, or "this value". */
+	function shapeText(shape: Shape): string {
+		return isKind(shape) ? "this value" : `the type '${typeText(shape)}'`;
 	}
 
 	/** A list with nothing to carry: no elements, or only `void` ones. Such a list sends no payload. */
@@ -1574,14 +1618,30 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 		const layout = layoutOf(list);
 		countUses(list);
-		const statements = new Array<ts.Statement>();
+		// Each build declares a payload of its own: the one returned is the kept body's (`fitted` may keep
+		// the plain one after building the compact one).
+		type Encoding = { buf: ts.Identifier; blobs: ts.Identifier | undefined };
+		let encoding: Encoding | undefined;
+		const encodings = new Map<ts.Statement[], Encoding>();
+		const kept = (statements: ts.Statement[]): InlineEncoding => {
+			const chosen = encodings.get(statements)!;
+			return { statements, payload: chosen.buf, blobs: chosen.blobs };
+		};
 		if (!Array.isArray(values)) {
-			const { buf, blobs } = encodeInto(list, layout, values.table, statements, {
-				path: "",
-				site: site.name,
-				args: true,
-			});
-			return { statements, payload: buf, blobs };
+			const statements = fitted(
+				() => {
+					const body = new Array<ts.Statement>();
+					encoding = encodeInto(list, layout, values.table, body, { path: "", site: site.name, args: true });
+					encodings.set(body, encoding);
+					return body;
+				},
+				[],
+				// A send's packing is never refused (see `fitted`).
+				undefined,
+				undefined,
+				site.outer,
+			);
+			return kept(statements);
 		}
 
 		for (const value of values) if (f.is.identifier(value)) typed.add(value);
@@ -1597,19 +1657,73 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		// The rest count is known here, so its varint is a constant: literal bytes, no helper call.
 		const countBytes = staticVarint(rest.length);
 
+		// A function's result is packed in a function of its own, whose one parameter is the value; a
+		// call's arguments where it is, in a function the estimate does not see whole.
+		const first = values[0];
+		const own = site.result && first !== undefined && f.is.identifier(first) ? [first] : [];
+		const statements = fitted(
+			() => {
+				const body = new Array<ts.Statement>();
+				encoding = encodeValues(list, layout, site, body, {
+					elementValue,
+					rest,
+					after,
+					afterValues,
+					countBytes,
+				});
+				encodings.set(body, encoding);
+				return body;
+			},
+			own,
+			undefined,
+			// The function then returns the payload, as a list.
+			site.result
+				? () => [f.returnStatement(f.array([encoding!.buf, ...(encoding!.blobs ? [encoding!.blobs] : [])]))]
+				: undefined,
+			site.outer,
+		);
+		return kept(statements);
+	}
+
+	/** {@link encodeElements}' statements for a list whose values are known one by one. */
+	function encodeValues(
+		list: ListKind,
+		layout: Layout,
+		site: EncodingSite,
+		statements: ts.Statement[],
+		values: {
+			elementValue: (index: number) => ts.Expression;
+			rest: ts.Expression[];
+			after: Shape[];
+			afterValues: ts.Expression[];
+			countBytes: number[];
+		},
+	): { buf: ts.Identifier; blobs: ts.Identifier | undefined } {
+		const { elementValue, rest, after, afterValues, countBytes } = values;
 		const total = new Sum();
 		const sizePlace = (index: number): Place => ({ path: site.result ? "result" : `[${index}]`, site: site.name });
-		list.elements.forEach((element, index) =>
-			total.add(emitSize(element, elementValue(index), statements, sizePlace(index))),
+		addSizes(
+			statements,
+			total,
+			list.elements.map(
+				(element, index) => (body) => emitSize(element, elementValue(index), body, sizePlace(index)),
+			),
 		);
 		if (list.rest) {
 			total.add(countBytes.length);
 			const start = list.elements.length;
-			rest.forEach((value, index) =>
-				total.add(emitSize(list.rest!, value, statements, sizePlace(start + index))),
+			addSizes(
+				statements,
+				total,
+				rest.map((value, index) => (body) => emitSize(list.rest!, value, body, sizePlace(start + index))),
 			);
-			after.forEach((element, index) =>
-				total.add(emitSize(element, afterValues[index], statements, sizePlace(start + rest.length + index))),
+			addSizes(
+				statements,
+				total,
+				after.map(
+					(element, index) => (body) =>
+						emitSize(element, afterValues[index], body, sizePlace(start + rest.length + index)),
+				),
 			);
 		}
 
@@ -1631,20 +1745,22 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		};
 		// Each argument is where a check's message starts: `[0]`, or `result` for a function's result.
 		const argument = (index: number) => within(ctx, site.result ? "result" : `[${index}]`, true);
-		list.elements.forEach((element, index) => emitWrite(element, elementValue(index), argument(index)));
+		// A compact list writes each argument in a block of its own.
+		const write = compact ? emitScopedWrite : emitWrite;
+		list.elements.forEach((element, index) => write(element, elementValue(index), argument(index)));
 		if (list.rest) {
 			for (const byte of countBytes) {
 				ctx.out.push(f.statement(bufferCall("writeu8", [buf, at(ctx), num(byte)])));
 				ctx.cursor.offset += 1;
 			}
 			const start = list.elements.length;
-			rest.forEach((value, index) => emitWrite(list.rest!, value, argument(start + index)));
+			rest.forEach((value, index) => write(list.rest!, value, argument(start + index)));
 			after.forEach((element, index) =>
-				emitWrite(element, afterValues[index], argument(start + rest.length + index)),
+				write(element, afterValues[index], argument(start + rest.length + index)),
 			);
 		}
 
-		return { statements, payload: buf, blobs };
+		return { buf, blobs };
 	}
 
 	/** The bytes of a varint known at compile time. */
@@ -3007,11 +3123,19 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const kind = describe(type);
 
 		const value = parameter("v");
-		const sizeBody = new Array<ts.Statement>();
 		// With type checks, the size pass tests what it measures, from the `where` its caller passes.
 		const sizeWhere = info.sizeChecks ? uid("where") : undefined;
-		const size = emitSize(kind, value, sizeBody, { path: "", owner: displayName(type), where: sizeWhere });
-		sizeBody.push(f.returnStatement(size));
+		const named = () => `the type '${typeText(type)}'`;
+		const sizeBody = fitted(
+			() => {
+				const body = new Array<ts.Statement>();
+				const size = emitSize(kind, value, body, { path: "", owner: displayName(type), where: sizeWhere });
+				body.push(f.returnStatement(size));
+				return body;
+			},
+			sizeWhere ? [value, sizeWhere] : [value],
+			named,
+		);
 		const sizeParameters = [f.parameterDeclaration(value, T.unknown())];
 		if (sizeWhere) sizeParameters.push(f.parameterDeclaration(sizeWhere, T.string()));
 		definitions.push(define(fieldName(info, "s"), f.arrowFunction(f.block(sizeBody), sizeParameters)));
@@ -3024,22 +3148,29 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		const withBlobs = (list: Array<[ts.Identifier, ts.TypeNode]>) =>
 			declare(blobs ? [...list, [blobs, T.blobs()]] : list);
 
-		const writeBody = new Array<ts.Statement>();
 		// Shared by every place that reaches the type: a check's path starts from the `where` its caller
 		// passes, and the `where` this passes on to another type's `w_` from this type's name.
 		const where = info.checks ? uid("where") : undefined;
-		const writeCtx: Ctx = {
-			buf,
-			blobs,
-			cursor: { variable: o, base: o, offset: 0 },
-			out: writeBody,
-			path: "",
-			where,
-			owner: displayName(type),
-		};
-		emitWrite(kind, value, writeCtx);
-		sync(writeCtx);
-		writeBody.push(f.returnStatement(o));
+		const writeBody = fitted(
+			() => {
+				const body = new Array<ts.Statement>();
+				const writeCtx: Ctx = {
+					buf,
+					blobs,
+					cursor: { variable: o, base: o, offset: 0 },
+					out: body,
+					path: "",
+					where,
+					owner: displayName(type),
+				};
+				emitWrite(kind, value, writeCtx);
+				sync(writeCtx);
+				body.push(f.returnStatement(o));
+				return body;
+			},
+			[buf, o, value, ...(blobs ? [blobs] : []), ...(where ? [where] : [])],
+			named,
+		);
 		const writeParameters = withBlobs([
 			[buf, T.buffer()],
 			[o, T.number()],
@@ -3048,12 +3179,19 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		if (where) writeParameters.push(f.parameterDeclaration(where, T.string()));
 		definitions.push(define(fieldName(info, "w"), f.arrowFunction(f.block(writeBody), writeParameters)));
 
-		const readBody = new Array<ts.Statement>();
-		const readCtx: Ctx = { buf, blobs, cursor: { variable: o, base: o, offset: 0 }, out: readBody };
-		const result = emitRead(kind, readCtx);
-		const bound = f.is.identifier(result) || isLiteral(result) ? result : bind(readBody, result, "value");
-		sync(readCtx);
-		readBody.push(f.returnStatement(tuple([bound, o])));
+		const readBody = fitted(
+			() => {
+				const body = new Array<ts.Statement>();
+				const readCtx: Ctx = { buf, blobs, cursor: { variable: o, base: o, offset: 0 }, out: body };
+				const result = emitRead(kind, readCtx);
+				const bound = f.is.identifier(result) || isLiteral(result) ? result : bind(body, result, "value");
+				sync(readCtx);
+				body.push(f.returnStatement(tuple([bound, o])));
+				return body;
+			},
+			blobs ? [buf, o, blobs] : [buf, o],
+			named,
+		);
 		definitions.push(
 			define(
 				fieldName(info, "r"),
@@ -3189,63 +3327,102 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return symbolName.replace(/\W/g, "_");
 	}
 
-	function guardFor(type: ts.Type): ts.Identifier {
+	/**
+	 * Where a guard or a table the file's code reads at runtime is kept: a local of its own while the
+	 * file's budget of Flamework locals lasts (`LOCAL_BUDGET`; one for each of `hints`), then a
+	 * field of the file's table (see {@link hoistedTable}), which costs a read one table index more and
+	 * the file no local however many there are. Luau allows a function 200 locals, the main chunk
+	 * included: one per guard and two per literal union ran a file with a hundred literal unions past it.
+	 */
+	function fileSlots(hints: string[]): Slot[] {
+		if (state.localBudget.claim(file.fileName, hints.length)) return hints.map((hint) => uid(hint));
+		return hints.map((hint) => {
+			const count = tableFields.get(hint) ?? 0;
+			tableFields.set(hint, count + 1);
+			return { field: count === 0 ? hint : `${hint}_${count}` };
+		});
+	}
+
+	/** A {@link Slot} as the code reads it: the local, or the table's field cast to what it holds. */
+	function readSlot(slot: Slot, type: ts.TypeNode): ts.Expression {
+		return "field" in slot ? f.as(slotField(slot), type) : slot;
+	}
+
+	function slotField(slot: Slot): ts.Expression {
+		return "field" in slot ? prop(hoistedTable(), slot.field) : slot;
+	}
+
+	/** `const <local> = value`, or `codec.<field> = value`. */
+	function declareSlot(slot: Slot, value: ts.Expression, type?: ts.TypeNode): ts.Statement {
+		return "field" in slot ? assign(slotField(slot), value) : constDecl(slot, value, type);
+	}
+
+	function guardFor(type: ts.Type): ts.Expression {
 		let guard = guards.get(type);
 		if (!guard) {
-			guard = uid("guard");
+			const [slot] = fileSlots(["guard"]);
 			const expression = atFileLevel(() => checkGlobalsIn(buildGuardFromType(state, diagnosticNode, type, file)));
-			tables.push(constDecl(guard, expression));
+			tables.push(declareSlot(slot, expression));
+			guard = slot;
 			guards.set(type, guard);
 		}
 
-		return guard;
+		return readSlot(guard, T.fn([["value", T.unknown()]], f.keywordType(ts.SyntaxKind.BooleanKeyword)));
 	}
 
-	/** `Enum.X` items by `Value`, built once: values are not always below 256, so they are sent as u16. */
-	function enumTableFor(name: string): ts.Identifier {
+	/**
+	 * `Enum.X` items by `Value`, built once: values are not always below 256, so they are sent as u16.
+	 * A table typed by its index rather than a `Map`, so that a read is an index (`enum_X[n]`) with no
+	 * temporary of roblox-ts's: a `Map`'s `get` reads its argument into a local first, and the table
+	 * too when it is the file table's field, and a type of a hundred enum fields then passed Luau's 200
+	 * locals in its read function.
+	 */
+	function enumTableFor(name: string): ts.Expression {
+		const type = () => T.enumTable();
 		let table = enumTables.get(name);
 		if (!table) {
-			const id = uid(`enum_${name}`);
+			const [slot] = fileSlots([`enum_${name}`]);
+			// Built in a local either way: one in the file's table is built in a block of its own and stored.
+			const id = "field" in slot ? uid(`enum_${name}`) : slot;
 			const item = uid("item");
-			atFileLevel(() =>
-				tables.push(
-					constDecl(id, construct("Map", []), globalType("Map", [T.number(), T.enumItem()])),
+			atFileLevel(() => {
+				const build = [
+					constDecl(id, f.object([], false), type()),
 					forOf(item, f.call(prop(prop(globalRef("Enum"), name), "GetEnumItems"), []), [
-						f.statement(f.call(prop(id, "set"), [prop(item, "Value"), item])),
+						assign(f.elementAccessExpression(id, prop(item, "Value")), item),
 					]),
-				),
-			);
-			table = id;
+				];
+				if (id === slot) tables.push(...build);
+				else tables.push(f.block([...build, declareSlot(slot, id)]));
+			});
+			table = slot;
 			enumTables.set(name, table);
 		}
 
-		return table;
+		return readSlot(table, type());
 	}
 
 	/** A literal union's members as a list (decode) and as a lookup from member to index (encode). */
-	function literalTablesFor(kind: Kind & { kind: "literals" }) {
+	function literalTablesFor(kind: Kind & { kind: "literals" }): { list: ts.Expression; index: ts.Expression } {
+		const indexType = () => globalType("Map", [T.defined(), T.number()]);
 		let entry = literalTables.get(kind);
 		if (!entry) {
-			entry = { list: uid("literals"), index: uid("literalIndex") };
+			const [list, index] = fileSlots(["literals", "literalIndex"]);
 			// The key type is spelled out: inferred from the pairs, TypeScript would pick the first literal's
 			// type (`"lit"`, or one EnumItem interface) and reject the others.
-			const { list, index } = entry;
 			atFileLevel(() => {
 				const values = kind.values.map(checkGlobalsIn);
 				const pairs = values.map((value, position) => f.array([value, num(position)], false));
 				tables.push(
-					constDecl(list, f.array(values, false), T.blobs()),
-					constDecl(
-						index,
-						construct("Map", [f.array(pairs)], [T.defined(), T.number()]),
-						globalType("Map", [T.defined(), T.number()]),
-					),
+					declareSlot(list, f.array(values, false), T.blobs()),
+					declareSlot(index, construct("Map", [f.array(pairs)], [T.defined(), T.number()]), indexType()),
 				);
 			});
+			entry = { list, index };
 			literalTables.set(kind, entry);
 		}
 
-		return entry;
+		return { list: readSlot(entry.list, T.blobs()), index: readSlot(entry.index, indexType()) };
 	}
 
 	// --- varints -------------------------------------------------------------------------------------
@@ -4907,6 +5084,96 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		return names.reduce((current, name) => prop(current, name), object);
 	}
 
+	// --- compact functions ---------------------------------------------------------------------------
+
+	/**
+	 * Builds the body of a generated function, and builds it again compactly when it would hold more
+	 * locals or registers than Luau loads a function with (see {@link compact}). `build` makes the whole
+	 * body; `parameters` are the function's, the locals it starts with; `tail`, what the function does
+	 * after the body, measured with it; `outer`, the locals live where the body lands in a function of
+	 * the user's. `what` names the code in the build error for a type's function that does not fit even
+	 * so. A send's packing has none (`undefined`) and is never refused: it lands in the user's function,
+	 * among temporaries of roblox-ts's the estimate cannot all see, so refusing it would be a guess;
+	 * where neither form fits by the estimate, the smaller is kept, as it is. Compact code keeps a
+	 * running size for each level it nests (a list in a list, a map in a map), so a deep nest can be no
+	 * smaller built compactly: then the body stays as it was, where it fits.
+	 */
+	function fitted(
+		build: () => ts.Statement[],
+		parameters: readonly ts.Identifier[],
+		what: (() => string) | undefined,
+		tail?: () => ts.Statement[],
+		outer = 0,
+	): ts.Statement[] {
+		const previous = compact;
+		const names = parameters.map((parameter) => parameter.text);
+		const measure = (body: ts.Statement[]) => measurePressure(tail ? [...body, ...tail()] : body, names, outer);
+		compact = false;
+		try {
+			const body = build();
+			const plain = measure(body);
+			if (!needsCompacting(plain)) return body;
+
+			compact = true;
+			const rebuilt = build();
+			const pressure = measure(rebuilt);
+			const noSmaller = pressure.locals >= plain.locals && pressure.registers >= plain.registers;
+			if (!exceedsLimits(plain) && (noSmaller || exceedsLimits(pressure))) return body;
+			if (exceedsLimits(pressure)) {
+				// Neither form fits: a send keeps the smaller; a type is refused, with the numbers of the
+				// form that would be kept.
+				if (!what) return noSmaller ? body : rebuilt;
+				const kept = noSmaller ? plain : pressure;
+				fail(
+					`the code for ${what()} needs about ${kept.locals} locals and ${kept.registers} registers in one function, built one field at a time or not, past Luau's limit of ${LUAU_MAX_LOCALS} locals / ${LUAU_MAX_REGISTERS} registers. Split the type into smaller named types`,
+				);
+			}
+			return rebuilt;
+		} finally {
+			compact = previous;
+		}
+	}
+
+	/**
+	 * Adds the sizes `parts` measure to `total`. In a compact function each part's statements go in a
+	 * block of their own and its size into a running `size` local, so that the function holds one
+	 * part's locals at a time and no chain of terms longer than one.
+	 */
+	function addSizes(out: ts.Statement[], total: Sum, parts: Array<(body: ts.Statement[]) => ts.Expression>) {
+		if (!compact) {
+			for (const part of parts) total.add(part(out));
+			return;
+		}
+
+		let running: ts.Identifier | undefined;
+		for (const part of parts) {
+			const body = new Array<ts.Statement>();
+			const size = part(body);
+			if (f.is.number(size) && body.length === 0) {
+				total.add(size);
+				continue;
+			}
+
+			if (!running) {
+				running = uid("size");
+				out.push(letDecl(running, num(0)));
+			}
+			body.push(addAssign(running, size));
+			pushScoped(out, body);
+		}
+
+		if (running) total.add(running);
+	}
+
+	/**
+	 * `body` as a block of its own when it leaves a local (its own, or a temporary roblox-ts declares for
+	 * it), so its locals end with it; as it is otherwise.
+	 */
+	function pushScoped(out: ts.Statement[], body: ts.Statement[]) {
+		if (holdsLocals(body)) out.push(f.block(body));
+		else out.push(...body);
+	}
+
 	// --- size ----------------------------------------------------------------------------------------
 
 	/**
@@ -4991,20 +5258,28 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "list": {
 				const list = bind(out, cast(value, T.array()), "list");
 				const total = new Sum();
-				kind.elements.forEach((element, index) => {
-					const at = within(place, `[${index}]`);
-					total.add(emitSize(element, f.elementAccessExpression(list, num(index)), out, at));
-				});
+				addSizes(
+					out,
+					total,
+					kind.elements.map((element, index) => (body) => {
+						const at = within(place, `[${index}]`);
+						return emitSize(element, f.elementAccessExpression(list, num(index)), body, at);
+					}),
+				);
 
 				if (kind.rest) {
 					const rest = layoutOf(kind.rest);
 					const after = kind.after ?? [];
 					const count = restCount(out, list, kind.elements.length + after.length);
 					// The elements after the rest are at the end of the list, past `count` rest values.
-					after.forEach((element, index) => {
-						const at = add(count, kind.elements.length + index);
-						total.add(emitSize(element, f.elementAccessExpression(list, at), out, within(place, "[]")));
-					});
+					addSizes(
+						out,
+						total,
+						after.map((element, index) => (body) => {
+							const at = add(count, kind.elements.length + index);
+							return emitSize(element, f.elementAccessExpression(list, at), body, within(place, "[]"));
+						}),
+					);
 
 					const prefix = f.call(varintHelpers().size, [count]);
 					if (rest.size !== undefined) {
@@ -5032,10 +5307,14 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "object": {
 				const object = bind(out, cast(value, T.record()), "object");
 				const total = new Sum();
-				for (const field of kind.fields) {
-					const at = within(place, keySegment(field.key));
-					total.add(emitSize(field.shape, keyAccess(object, field.key), out, at));
-				}
+				addSizes(
+					out,
+					total,
+					kind.fields.map((field) => (body) => {
+						const at = within(place, keySegment(field.key));
+						return emitSize(field.shape, keyAccess(object, field.key), body, at);
+					}),
+				);
 
 				return total.build();
 			}
@@ -5211,10 +5490,20 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "boolean": {
 				// The value is the condition rather than `value === true`: an argument packed at its
 				// call site can be a literal, and `false === true` is a comparison TypeScript rejects
-				// when it checks the emitted code.
+				// when it checks the emitted code. It is cast to `boolean`, so that roblox-ts tests it as
+				// Luau does (`if v.b then 1 else 0`): a value of no type is otherwise read into a temporary
+				// for JavaScript's test (not 0, NaN or ""), and the arguments before it into two more, a
+				// local each for every boolean field, in one function. A value of another type is
+				// written as whether Luau finds it truthy.
 				const write = (b: ts.Expression, target: Ctx) => {
 					target.out.push(
-						f.statement(bufferCall("writeu8", [target.buf, at(target), conditional(b, num(1), num(0))])),
+						f.statement(
+							bufferCall("writeu8", [
+								target.buf,
+								at(target),
+								conditional(cast(b, T.boolean()), num(1), num(0)),
+							]),
+						),
 					);
 					target.cursor.offset += 1;
 				};
@@ -5497,10 +5786,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	 * the limit does not load without them either.
 	 */
 	function emitScopedWrite(shape: Shape, value: ts.Expression, place: Ctx) {
-		if (!checks.types) return emitWrite(shape, value, place);
+		if (!checks.types && !compact) return emitWrite(shape, value, place);
 		const block: Ctx = { ...place, out: [] };
 		emitWrite(shape, value, block);
-		if (block.out.some((statement) => ts.isVariableStatement(statement))) place.out.push(f.block(block.out));
+		if (holdsLocals(block.out)) place.out.push(f.block(block.out));
 		else place.out.push(...block.out);
 	}
 
@@ -5721,7 +6010,7 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 			case "enum": {
 				const index = bufferCall("readu16", [ctx.buf, at(ctx)]);
 				ctx.cursor.offset += 2;
-				return f.call(prop(enumTableFor(kind.name), "get"), [index]);
+				return f.elementAccessExpression(enumTableFor(kind.name), index);
 			}
 			case "optional": {
 				const present = bind(
@@ -5797,12 +6086,25 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				return map;
 			}
 			case "list": {
-				const elements = kind.elements.map((element) => readInto(element, ctx, "arg"));
-				// Typed explicitly: an empty list would otherwise be an implicit `any[]`.
-				if (!kind.rest) return f.as(f.array(elements, false), T.array());
+				let list: ts.Expression;
+				let count: ts.Expression;
+				if (compact) {
+					// Compact: the list first, then each element read in a block of its own and stored in it.
+					const built = bind(ctx.out, f.array([], false), "list", T.array());
+					kind.elements.forEach((element, index) =>
+						readScoped(element, ctx, () => f.elementAccessExpression(built, num(index))),
+					);
+					if (!kind.rest) return built;
+					list = built;
+					count = readCount(ctx, layoutOf(kind.rest).min);
+				} else {
+					const elements = kind.elements.map((element) => readInto(element, ctx, "arg"));
+					// Typed explicitly: an empty list would otherwise be an implicit `any[]`.
+					if (!kind.rest) return f.as(f.array(elements, false), T.array());
+					count = readCount(ctx, layoutOf(kind.rest).min);
+					list = bind(ctx.out, f.array(elements, false), "list", T.array());
+				}
 
-				const count = readCount(ctx, layoutOf(kind.rest).min);
-				const list = bind(ctx.out, f.array(elements, false), "list", T.array());
 				const index = uid("i");
 				ctx.out.push(
 					forOf(
@@ -5819,13 +6121,21 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 
 				// The elements after the rest, in their places past it.
 				kind.after?.forEach((shape, position) => {
+					const at = () => f.elementAccessExpression(list, add(count, kind.elements.length + position));
+					if (compact) return readScoped(shape, ctx, at);
 					const element = readInto(shape, ctx, "arg");
-					const at = add(count, kind.elements.length + position);
-					ctx.out.push(assign(f.elementAccessExpression(list, at), element));
+					ctx.out.push(assign(at(), element));
 				});
 				return list;
 			}
 			case "object": {
+				// Compact: the table first, then each field read in a block of its own and stored in it.
+				if (compact) {
+					const object = bind(ctx.out, f.object([], false), "object", T.record());
+					for (const field of kind.fields) readScoped(field.shape, ctx, () => keyAccess(object, field.key));
+					return object;
+				}
+
 				const fields = kind.fields.map((field) =>
 					f.propertyAssignmentDeclaration(keyName(field.key), readInto(field.shape, ctx, field.name)),
 				);
@@ -5861,6 +6171,19 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 				return value;
 			}
 		}
+	}
+
+	/**
+	 * A compact function's read of one field or element, in a block of its own and stored at `target`.
+	 * The position is brought back to the position variable before the block ends, since what comes
+	 * after cannot read the locals the block held.
+	 */
+	function readScoped(shape: Shape, ctx: Ctx, target: () => ts.Expression) {
+		const body = new Array<ts.Statement>();
+		const inner: Ctx = { ...ctx, out: body };
+		body.push(assign(target(), emitRead(shape, inner)));
+		if (inner.cursor.variable) sync(inner);
+		pushScoped(ctx.out, body);
 	}
 
 	/** A read whose result is bound to a local in variable layouts; see {@link emitRead}. */

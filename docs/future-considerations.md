@@ -114,6 +114,130 @@ statement in a file that gets imports crashed the build.
 - Flamework reads positions, callsite ids and a component's class from the code as written: a
   transformer that moves a Flamework call elsewhere keeps the id it had where it was written.
 
+## Found and fixed: generated code that built but did not load past Luau's limits
+
+**What it was.** Luau refuses to load a function with more than 200 locals ("Out of local
+registers when trying to allocate x: exceeded limit 200") or one that needs more than 255 registers
+("Out of registers when trying to allocate 1 registers: exceeded limit 255"), a module's main chunk
+included. roblox-ts checks neither: such a file builds, and fails when Roblox loads it. Measured on
+f773f52 by building probes in the transformer's fixture and loading them with Lune's Luau compiler
+(`luau.compile`), the first count that no longer loaded:
+- in one object's generated functions, however it is reached (`createSerializer`, an event's
+  arguments, a hoisted type's `s_`/`w_`/`r_`): 99 fields of a named type (two locals each in
+  the read function), 66 string fields (three each), 99 optional numbers, 100 literal-union fields,
+  between 91 and 100 `string[]` fields, 70 booleans after a field of no fixed size (three of
+  roblox-ts's temporaries each), 100 enums in a tuple or a remote's arguments (one temporary each);
+  and the size function of 150 string fields ran out of registers, since a chain of `+` keeps a
+  register per term. Fixed-size fields (numbers) take no local and loaded at 300;
+- in a nest of objects written out in one function: 40 levels of `{ a: string; b: ... }`, 30 with a
+  number and a boolean at each level;
+- in a file's main chunk: 99 literal unions (two locals each), about 197 enum tables or guards of
+  a serialized union's members (one each), 197 deduplicated types in one `createGuard` at the top
+  of a file, 97 callbacks set at the top of a file (`target` and `callback`), 198 call sites of a
+  macro with `Modding.Caller.Constant` metadata (each counted with the file's own few locals; at
+  220, the function that used them also passed Luau's 200 upvalues);
+- in one function: 50 sends of a string (four locals each);
+- in the function a guard of recursive types is wrapped in: 198 recursive types.
+
+**What changed** (transformer, 2026-10-20; see the changelog):
+- What Flamework adds to a file's main chunk has a budget of 16 locals (`LOCAL_BUDGET`,
+  `util/luauLimits.ts`), shared by the serializer's guards, literal tables and enum tables,
+  deduplicated guards, `Caller.Constant` metadata and a call site's packing at the top of the file.
+  Past it, a serializer's guards and tables are fields of the file's `codec` table, the metadata
+  goes in one `macroMetadata` table, deduplicated guards go with their guard into a function called
+  once, and a call's packing goes in a `do` block with its statement (in a function, when the
+  statement declares a name). On top of the budget come a few fixed ones: `codec`, the varint
+  helpers, the zero tally, at most three global aliases and the metadata table. A file within the
+  budget comes out as before.
+- A function a call site's packing lands in has a budget of 64 (`FUNCTION_LOCAL_BUDGET`), past
+  which each send goes in a `do` block with its packing, and so does each send once the function's
+  locals, its own and the earlier sends' still live, would pass 150 (`COMPACT_LOCALS`).
+- Each generated serializer function (a hoisted type's three, a `createSerializer`'s two, a decoder,
+  a call site's packing) is measured once built (`measurePressure`: the locals and registers its
+  TypeScript compiles to, with the function's parameters, the temporaries roblox-ts declares for it
+  and the registers Luau's compiler takes for each expression, estimated so as never to count
+  short; the `Temporaries` class in `luauLimits.ts` has a table of what each shape costs). A send's
+  packing counts the locals of the function it lands in that the source shows: its parameters,
+  the names declared ahead of it and the locals of the earlier sends still live there (each kept by
+  the statement it went ahead of; a send's in a block that has ended is not). Past 150
+  locals or 200 registers it is built again compactly: each field or element in a `do` block of its
+  own, a read one stored into a table made first, a size added to a running total. It writes the
+  same bytes and reads the same values; the goldens did not change.
+- Two shapes of code that took a temporary of roblox-ts's for each field now take none. An enum's
+  table is a plain table typed by its index, read by indexing it (`enum_KeyCode[n]`): a `Map`'s
+  `get` read its index into a temporary, and the table too once it was a field of `codec`, which
+  took an object of 99 enum fields past the file's budget out of loading. A boolean is cast to
+  `boolean` before it is tested, so roblox-ts writes `if v.b then 1 else 0`, where it read a value
+  of no type into a temporary for JavaScript's test (not `0`, NaN or `""`) and copied the two
+  arguments before it into two more. A value of another type (with the checks off, or under
+  `"warn"`) is now written as Luau finds it truthy: `0`, NaN and `""` write `true`.
+- A function that holds guards (a recursive type's wrapper, or one holding deduplicated guards)
+  keeps them in a table past 150.
+- What still cannot load is a build error rather than a file that fails at runtime: a type's
+  function (a `createSerializer`'s, a hoisted type's, a decoder: code whose cost depends on the type
+  alone) still past Luau's 200 locals or 255 registers, by the estimate, in the form kept (compact
+  unless that is no smaller, or past the limit while the plain one is not), naming the type and that
+  form's numbers. There is no margin: a nest of objects takes two locals a level, which the
+  estimate counts exactly (99 levels take 199, build and load; 100 take 201, are refused, and
+  would not load), and so are nests of lists, maps and sets (35 levels of `Set<...>` take 255
+  registers and load; 36 are refused); and a file whose main chunk Flamework's code takes past 200
+  locals, counting only those the file is sure to keep (its own imports read as values and
+  roblox-ts's `TS` among them). Neither refuses a file that loads. A file past the limit without
+  Flamework's code is left to fail as it would. A send's packing (a call's arguments, a remote
+  function's result) is never refused: it lands in the user's function, whose temporaries the
+  estimate cannot all see, so a refusal would be a guess. Past the limits it is built compactly,
+  and where even that is over by the estimate the smaller form is emitted anyway, without an
+  error.
+- `packages/transformer/tests/luauLimits.test.ts` builds a probe past each threshold above and loads
+  it with Lune (`tests/luauLoad.luau`), round-trips two types built compactly and an object of 80
+  booleans, and runs a file whose statements past the budget declare what a remote returns; on
+  f773f52 the probes past a threshold build and fail to load, except the object of enum fields past
+  the budget, which only an earlier version of this change broke. Of the probes at the edges of the
+  build errors, f773f52 loads 200 top-level locals, 34 levels of lists, 22 of maps and 35 of sets,
+  and, with the type checks off as the fixture has them, not 99 levels of objects, 35 of lists or
+  24 of maps, which load now; the build refuses none
+  of what loaded there (swept with the type checks off and on: every nest of objects, lists, sets,
+  maps, tuples, unions and optionals at its edge, and 270 shapes of fields at 60, 100 and 160 of
+  each). It also checks two estimates against Luau's own numbers. Built once with every budget at 0
+  and every function compact, the runtime specs passed (520 and 18) with the goldens unchanged.
+
+**Cost.** Below the budgets and the thresholds the code is as it was, but for the two shapes above,
+which got faster. Past them, measured in Lune
+(`luau.compile` at `-O1`, a million round trips, alternating): a literal union whose tables are
+fields of `codec` serializes and deserializes a one-literal value 12% slower than one with locals
+(about 0.11 µs on a 1 µs round trip, the smallest payload there is); a union member told apart by a
+guard read from `codec` is within noise (±2% of an 18 µs check). A compact function is built only
+near or past the limits; forced on for an object of 40 strings and 40 numbers, it wrote the same
+bytes and took 0 to 4% longer per round trip than the plain one. A boolean's plain test is faster
+than JavaScript's: an object of 70 booleans serializes in 2.06 µs rather than 3.2 to 3.3 (36 to 38%
+less; 200,000 calls in each of 5 rounds, alternating), and a tuple of 99 enums reads 3 to 5% faster
+by index than through `get`.
+
+**Still open:**
+- A plugin's `hoist` and `hoistStatement` add a main-chunk local each, outside the budget; the
+  build error counts them.
+- A send's packing in a function of the project's own counts the locals the source shows there
+  (parameters, names declared ahead of the send, the earlier sends' still live), not the temporaries
+  roblox-ts adds for the project's own code: a function near 200 locals by those can still be taken
+  past it, and, as a send is never refused, then builds and fails to load as it did on f773f52.
+- The build error counts only what it is sure of (a value that is a call, a table or a function; a
+  function, class or enum declaration; the names a file imports and reads as values, with the
+  module table roblox-ts keeps for several and its `TS`; the imports Flamework added). A file taken
+  past the limit by locals Luau may fold into constants, by a re-export, or by roblox-ts's own
+  temporaries at its top level still builds.
+- The estimate's model of roblox-ts's temporaries and of Luau's registers is written against
+  roblox-ts 3.0 and the Luau Lune ships: one that adds temporaries for shapes it does not list, or a
+  compiler that takes more registers for one, would need it updated. The refusal has no margin
+  below Luau's limits, so a shape the model counts short at the very edge would build and fail to
+  load; the sweeps found none (each generated function's estimate against its bytecode).
+- A remote with more than about 250 arguments needs more than 255 registers to return them from its
+  decoder; nothing reports it.
+- A guard of a non-recursive object nested about 126 levels deep runs out of registers, and builds.
+- A remote with a tuple argument of about 200 elements (190 load) passes Luau's limit of 200
+  upvalues in its arrival guard, and builds.
+- An object of about 220 optional discriminated-union fields stops the build with TypeScript's
+  TS2563 (a function too large for its control flow analysis) in the compact form.
+
 ## Next: don't check again what a serialized member's decoder produced
 
 **The cost today.** An incoming member that travels packed is decoded from its buffer, and then its
@@ -165,27 +289,6 @@ confirm the guards are the ~40 µs.
 - hostile payloads: wrong blob kinds, NaN, truncated and oversized counts;
 - guards emitted only for blob slots, and for members decoded from a buffer only;
 - the Studio receive-cost measurement, before and after.
-
-## Small: a plain test when the serializer writes a boolean
-
-**Today** a boolean field or argument compiles to:
-
-```lua
-local _value = v.Surfaced
-buffer.writeu8(_exp, _exp_1, if _value ~= 0 and _value == _value and _value ~= "" and _value then 1 else 0)
-```
-
-The generator emits the conditional `value ? 1 : 0`
-(`packages/transformer/src/util/functions/buildSerializerFromType.ts`, the `"boolean"` case of the
-encoder). The synthesized `value` carries no type, so roblox-ts expands the condition into
-JavaScript's full truthiness test: not `0`, not NaN, not `""`, and truthy. The value is known to be a
-boolean, so three of the four checks are wasted on every write. The comment there explains why it
-avoids `value === true`: an argument packed at its call site can be a literal, and TypeScript rejects
-`false === true` when it checks the emitted code.
-
-**Fix:** give the condition the boolean type, for example `(value as boolean) ? 1 : 0`, so that
-roblox-ts emits `if _value then 1 else 0`. Check that a literal argument still compiles, and that the
-output of every other type is unchanged.
 
 ## Small: two cosmetic leftovers in the duplicate provider id error
 
@@ -677,21 +780,16 @@ Edge cases found and deliberately left alone, because the fix would cost more th
   - A class-instance blob next to an all-optional object is sent as `{}`.
   - A payload nested about 20,000 levels deep raises "stack overflow" (caught) instead of
     "malformed payload".
-  - Luau limits, none reported by rbxtsc:
-    - about 100 hoisted-type fields in one object's read function run out of Luau's registers;
-    - about 100 distinct literal unions or guards in one file pass its 200 locals;
+  - Luau limits: what Flamework generated past them is fixed (see "Found and fixed: generated code
+    that built but did not load past Luau's limits" above), with these left:
     - a recursive type with about 20 or more nested object levels between the places it reaches
       itself overflows the stack before the guard's 1,000-level limit: the check raises "stack
       overflow" rather than refusing the value (it does not hang);
-    - more than 197 self-recursive types in one guard (198 when the guard's own type is one of
-      them) pass the 200 locals of the function the guard is wrapped in, and the file fails to
-      load.
+    - the fixed main-chunk locals a file's code can bring (`codec` for a width check, a `math` or
+      `error` alias under a `catch`, the varint helpers) still take a file already at Luau's 200
+      past it: a build error now, when the file's own locals are ones it can be sure of;
+    - the other items under "Still open" in that section.
   - Width checks and generated names (2026-10-01):
-    - A file with checks but no hoisted type gets its `codec` table, one more main-chunk local, so
-      under `category: "all"` a strict file already at 200 locals stops loading. A `catch (math)`
-      around a checked `f32` send adds the `math` alias as well.
-    - Inside a `catch (assert)` nested in a `catch (error)`, a packed array's hole check reaches
-      `error` through an alias: one more main-chunk local.
     - `catch (table)` and `catch (type)` break roblox-ts's own `table.insert` and `type(...)`,
       packed or not.
     - Guards built outside the serializer (tuple guards, `createGuard`, component guards, and the

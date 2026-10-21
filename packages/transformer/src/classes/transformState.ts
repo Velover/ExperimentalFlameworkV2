@@ -33,6 +33,7 @@ import {
 } from "../util/projectConfig";
 import type { Env } from "../util/env";
 import { Diagnostics, ProjectError } from "./diagnostics";
+import { LocalBudget } from "../util/luauLimits";
 import { FLAMEWORK_SCOPE, CORE_PACKAGE } from "../util/packages";
 import { findPlaceSource, findSourcePath, type SourcePathState } from "../util/functions/findSourcePath";
 
@@ -147,6 +148,13 @@ export class TransformState {
 
 	public isUserMacroCache = new Map<ts.Symbol, boolean>();
 	public nextRootStatements = new Array<ts.Statement>();
+	/** The locals Flamework's code has added to each file's main chunk and each function, this pass. */
+	public localBudget = new LocalBudget();
+	/**
+	 * Statements a call site's code went ahead of past their scope's budget of locals: each goes in a
+	 * block of its own with that code, which ends its locals with it (see `transformStatement`).
+	 */
+	public scopedStatements = new WeakSet<ts.Node>();
 	public flameworkGuardLibraryPath?: string;
 
 	/**

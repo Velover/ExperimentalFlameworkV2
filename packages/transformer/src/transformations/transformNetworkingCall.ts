@@ -4,6 +4,14 @@ import { TransformState } from "../classes/transformState";
 import { f } from "../util/factory";
 import { buildInlineEncoding, buildInlineResultEncoding, packingKey } from "../util/functions/buildSerializerFromType";
 import { getNetworkMode, isPackedMode, NetworkMode } from "../util/functions/networkMode";
+import {
+	COMPACT_LOCALS,
+	declaredLocals,
+	enclosingScope,
+	enclosingStatement,
+	localsAround,
+	type LocalBudget,
+} from "../util/luauLimits";
 
 /**
  * A call that sends over a packed networking member -- every member but the raw ones with
@@ -285,17 +293,22 @@ function transformSend(
 		bindArgument(statements, argument, "target", emptyListAnnotation(node.arguments[index])),
 	);
 
-	const site = { name: memberName(state, target) };
+	// The packing lands among the locals of the function the call is in: its own, those Flamework's code
+	// ahead of it holds there still (not those of a block that has ended), and the ones bound above.
+	const site = { name: memberName(state, target), outer: 0 };
+	const outer = () => liveLocals(state.localBudget, node) + declaredLocals(statements);
 	let encoding;
 	if (packed.some(ts.isSpreadElement)) {
 		// A spread makes the count a runtime matter: gather the list first, as `fire` itself would.
 		const table = f.identifier("args", true);
 		statements.push(f.variableStatement(table, f.as(f.array(packed, false), arrayType())));
+		site.outer = outer();
 		encoding = buildInlineEncoding(state, node, listType, { table }, site);
 	} else {
 		const values = packed.map((argument, index) =>
 			bindArgument(statements, argument, "arg", emptyListAnnotation(node.arguments[restIndex + index])),
 		);
+		site.outer = outer();
 		encoding = buildInlineEncoding(state, node, listType, values, site);
 	}
 
@@ -405,12 +418,46 @@ function emitWithStatements(
 ): ts.Expression {
 	if (statements.length === 0) return call;
 
+	const inFunction = () => f.call(f.arrowFunction(f.block([...statements, f.returnStatement(call)])), []);
 	if (wrap || !hoistsCleanly(node, hoisted)) {
-		return f.call(f.arrowFunction(f.block([...statements, f.returnStatement(call)])), []);
+		return inFunction();
+	}
+
+	// Luau allows a function 200 locals, the file's main chunk included, and a file or a handler with
+	// many sends would pass it, and build, and fail to load. Past the scope's budget of Flamework's
+	// locals, the statement with its packing goes in a block of its own, which ends their locals with
+	// it; a statement that declares something the code after it uses cannot, and the call goes in a
+	// function instead. So does one where the function holds so many locals already that these would
+	// take it past what a packing is built compactly at (`COMPACT_LOCALS`): a user's function of many
+	// parameters with many sends would otherwise keep each one's locals, and fail to load.
+	const locals = declaredLocals(statements);
+	const scope = enclosingScope(node);
+	const statement = enclosingStatement(node);
+	if (
+		locals > 0 &&
+		(scope === undefined ||
+			liveLocals(state.localBudget, node) + locals > COMPACT_LOCALS ||
+			!state.localBudget.claim(scope, locals, statement))
+	) {
+		if (!statement || !(ts.isExpressionStatement(statement) || ts.isReturnStatement(statement))) {
+			return inFunction();
+		}
+
+		state.scopedStatements.add(statement);
 	}
 
 	state.prereqList(statements);
 	return call;
+}
+
+/**
+ * The locals live where code put ahead of `node`'s statement lands, as far as can be told: the user's
+ * (see `localsAround`) and Flamework's, those it claimed ahead of the statements around `node` and
+ * those its scope keeps to its end.
+ */
+function liveLocals(budget: LocalBudget, node: ts.Node) {
+	const scope = enclosingScope(node);
+	return localsAround(node, budget) + (scope === undefined ? 0 : budget.scopeWide(scope));
 }
 
 /**

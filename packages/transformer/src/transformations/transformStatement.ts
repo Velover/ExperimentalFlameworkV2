@@ -1,6 +1,7 @@
 import ts from "typescript";
 import { TransformState } from "../classes/transformState";
 import { catchDiagnostic } from "../util/diagnosticsUtils";
+import { f } from "../util/factory";
 import { getNodeList } from "../util/functions/getNodeList";
 import { transformClassDeclaration } from "./statements/transformClassDeclaration";
 import { transformNode } from "./transformNode";
@@ -33,13 +34,18 @@ export function transformStatement(
 			return ts.visitEachChild(statement, (newNode) => transformNode(state, newNode), state.context);
 		});
 
+		// A statement a call site's packing went ahead of past the scope's budget of locals goes in a
+		// block of its own with it (see `emitWithStatements`), which ends those locals with it.
+		const scoped = prereqs.length > 0 && state.scopedStatements.has(ts.getParseTreeNode(statement) ?? statement);
+		const statements = scoped ? [f.block([...prereqs, ...getNodeList(node)])] : [...prereqs, ...getNodeList(node)];
+
 		if (root) {
 			const nextRootStatements = state.nextRootStatements;
 			state.nextRootStatements = [];
 
-			return [...nextRootStatements, ...prereqs, ...getNodeList(node)];
+			return [...nextRootStatements, ...statements];
 		}
 
-		return [...prereqs, ...getNodeList(node)];
+		return statements;
 	});
 }

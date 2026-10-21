@@ -58,6 +58,26 @@ Two pieces of state matter while transforming a file:
   anything is in scope.
 - **Root statements.** `state.nextRootStatements` collects statements to prepend at the file root.
   This is how hoisted macro metadata and plugin results get their own top-level locals.
+- **Local budgets.** Luau loads a function, a module's main chunk included, with at most 200 locals,
+  and roblox-ts does not check. `state.localBudget` counts the locals Flamework's code adds to each
+  scope: `LOCAL_BUDGET` (16) for a file's main chunk, `FUNCTION_LOCAL_BUDGET` (64) for a function
+  (`src/util/luauLimits.ts`). Code past the budget goes elsewhere: the serializer's guards and
+  tables into `codec`, `Caller.Constant` metadata into one `macroMetadata` table, deduplicated
+  guards into a function with their guard, and a call site's packing (`emitWithStatements`) into a
+  `do` block with its statement, which `transformStatement` builds for a statement in
+  `state.scopedStatements`, or into a function when the statement is not an expression or a
+  `return`. Each claim is kept by the statement its locals went ahead of
+  (`claim(scope, count, statement)`), so a send's estimate counts the claims still live where it
+  lands, those ahead of the statements of the blocks around it (`localsAround(node, budget)`), not
+  those of a block that has ended; and a send whose locals would take the function's live ones past
+  `COMPACT_LOCALS` (150) is not claimed but put in a block of its own. At the end of a file,
+  `checkMainChunkLocals` counts the top-level locals the file is
+  sure to keep (`sureMainChunkLocals`: values that are calls, tables or functions; function, class
+  and enum declarations; `sureImportLocals`: the names the file imports and reads as values, the
+  module table roblox-ts keeps for a module several come from, and `TS`, decided with TypeScript's
+  emit resolver as roblox-ts decides them; the imports Flamework added) and stops the build when
+  Flamework's code takes the count past 200. Literals are left out because Luau folds a local that
+  holds one into a constant: a file of 201 `local x = 1` loads.
 
 ### Compiler internals
 
@@ -182,7 +202,9 @@ Three details are easy to get wrong when changing this:
   runtime with "attempt to call a nil value" -- that failure mode has accounted for most of the bugs
   found in this area.
 - **`Modding.Caller.Constant`** hoists to a file-root local named after the callsite's line, so two
-  callsites get two tables and every invocation of one callsite shares a table. Its marker is checked
+  callsites get two tables and every invocation of one callsite shares a table. Past the file's
+  budget of Flamework locals (see "Local budgets"), the table is a field of one `macroMetadata`
+  table per file instead, named the same way. Its marker is checked
   before `Emit`'s, because `Constant<Emit<T>>` carries both and finding `Emit` first dropped the
   `Constant`. `Constant` around a basic macro changes nothing.
 
@@ -252,8 +274,15 @@ started inside another, by a metatable, goes on from its count. A deduplicated g
 scope of its own; one that calls a type still being built outside it stays in place, its locals
 merged into the outer scope. When a deduplicated guard is recursive, all of them are declared inside
 the guard's function, after the count and the memo: one count for the guard, and no locals added
-around it. The dedup heuristic gives up on a type nested over 500 types deep (nothing is
-deduplicated), and the builder then refuses it with an error that says where.
+around it. A function that holds guards keeps them in locals up to 150 (`GUARD_LOCALS`), and past
+that in one table (`holdGuards`): `guards.Tree = ...`, every reference to a local rewritten to the
+table's field (`replaceIdentifiers`, by node, since the generated code refers to a local through the
+node it was declared with). Deduplicated guards that do not recurse are declared ahead of the
+statement, against the scope's budget of Flamework locals (`LOCAL_BUDGET` at the top of a file,
+`FUNCTION_LOCAL_BUDGET` in a function); past it they go into a function called once with the guard
+(`holdInFunction`), which adds no local around it. The dedup heuristic gives up on a type nested
+over 500 types deep (nothing is deduplicated), and the builder then refuses it with an error that
+says where.
 
 **Keys.** A property roblox-ts keys by a number (`{ 10: v }`, `{ [-1]: v }`, `{ [Level.High]: v }`,
 read as `v[10]`) is keyed by that number in generated code too: `t.interface({ [10] = ... })`, the
@@ -1249,6 +1278,58 @@ a whole number below 2^35 travels as a varint. Named variable-size objects, unio
 far in the file reach more than once (`countUses`), which is also what hoists a recursive type with
 no name of its own. The functions are fields of one table per file (`hoistedTable`): three locals
 per type ran a file with about 66 hoisted types past Luau's 200 locals, and it no longer loaded.
+The guards, literal tables and enum tables a file's code reads at runtime (`fileSlots`) are locals
+of their own while the file's budget of Flamework locals lasts (`LOCAL_BUDGET`, 16, in
+[`src/util/luauLimits.ts`](../../packages/transformer/src/util/luauLimits.ts), kept per pass in
+`state.localBudget` and shared with the other code Flamework puts at a file's top level), and fields
+of the same table past it (`codec.literals_1`, `codec.guard`, `codec.enum_KeyCode`), read through a
+cast to what they hold; an enum table past it is built in a local inside a `do` block and stored.
+An enum's table is a plain table typed by its index (`{ [value: number]: EnumItem }`), built with
+`enum_X[item.Value] = item` and read by indexing it: a `Map`'s `get` reads its index into a
+temporary of roblox-ts's, and its table too when that is a field, two locals a field of the
+function the read is in.
+A field costs a read one table index more: 12% on the round trip of a one-literal value, within
+noise behind a guard. The table's type is an index signature of `unknown` for that reason, every
+read of it cast.
+
+Every generated function (a hoisted type's `s_`/`w_`/`r_`, a `createSerializer`'s `serialize` and
+`deserialize`, a decoder, and a call site's packing) is built through `fitted`, which measures it
+(`measurePressure`: the function's parameters, each local to the end of its block, the temporaries
+roblox-ts declares ahead of a statement among them, and the registers Luau's compiler takes for each
+expression: a local read where it is, anything else an operation reads in a register of its own
+held until it is done, so `a.b.c` takes two and a chain of `+` one per term; a call's function and
+arguments one after another, a method's object too; an interpolated string `string.format`'s; an
+index that is not a constant taken for a list's, read at `i + 1`; a number arithmetic takes as it
+is only while the function may hold fewer than 256 constants; a send's packing on top of the
+locals the source shows in the function it lands in, and those Flamework's code ahead of it still
+holds there) and, past 150 locals or 200
+registers, builds it again with `compact` set. The temporaries are counted from the shape of the
+code, by what roblox-ts 3.0 does for it (`Temporaries`, whose comment has a table of them): an
+operand ahead of a later one with statements of its own is copied (`ensureTransformOrder`), a macro
+call copies its arguments, a test of a value that may be `0`, NaN or `""` copies the value, and an
+object literal with such a value is built in `_object` with a `_left` per key. Generated code avoids
+the costly ones where it can: a boolean is cast to `boolean` before it is tested, and an enum's
+table is indexed rather than read with `get`. A compact object or list reads into
+a table made first, each field in a `do` block of its own that ends by storing the value and putting
+the position back in the position variable (`readScoped`); its writes go through `emitScopedWrite`'s
+blocks; its sizes add up into a running `size` local, a block per part (`addSizes`). The plain form
+keeps every field's locals to the end of the function and adds the sizes in one expression, which
+ran a type of about 65 string fields or 99 fields of a named type past Luau's limits. The bytes are
+the same either way. Compact code keeps a running size a level more for each list or map it nests,
+so a deep nest of them can be no smaller built compactly: where the compact form is no smaller in
+both counts, or past Luau's limits where the plain one is not, the plain one is kept. A type's
+function still past Luau's 200 locals or 255 registers in the form kept is refused, naming the type
+and that form's numbers. A send's packing never is (`fitted` is given no name for it): it lands in
+the user's function, among temporaries of roblox-ts's the estimate cannot all see, so a refusal
+would be a guess, and the smaller form is emitted. There is no margin, so the estimate must never
+count short: measured function by function against the bytecode it compiles to, it counts as many
+as Luau or a few more (a nest of objects, two locals a level: 99 levels take 199 and load, 100 take
+201 and would not; so are nests of lists, maps and sets). A loop's own
+registers are registers, not locals: three for a numeric `for` (a `$range`), its variable the
+third, and three for a generic one, then one per variable, two at least. A compact block holds
+its statements' locals, its own or roblox-ts's temporaries (`holdsLocals`). Rebuilding is safe
+because building has no effect a second build repeats: a type hoisted
+by the first is found by the second, and `countUses` runs outside `fitted`.
 There is one generator per file and transform pass (`generatorFor`, keyed by the `TransformState`
 and then the `SourceFile`): roblox-ts after 3.0.0 hands a watcher's rebuild the same `SourceFile`
 for a file whose text did not change, and a generator kept by file alone took the earlier pass's

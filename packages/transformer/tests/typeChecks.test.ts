@@ -274,7 +274,7 @@ describe("each kind", () => {
 
 	test("a boolean is tested in a block of its own with its write", () => {
 		expect(serialize(on(), "tcBoolean")).toMatch(
-			/do\s*local (v\w*) = v\w*\s*if not \(type\(\1\) == "boolean"\) then\s*codec\.checkType\("boolean", \1, "value"\)\s*end\s*buffer\.writeu8\(buf\w*, 0, if \1 ~= 0 and [^\n]* then 1 else 0\)\s*end/,
+			/do\s*local (v\w*) = v\w*\s*if not \(type\(\1\) == "boolean"\) then\s*codec\.checkType\("boolean", \1, "value"\)\s*end\s*buffer\.writeu8\(buf\w*, 0, if \1 then 1 else 0\)\s*end/,
 		);
 	});
 
@@ -445,13 +445,14 @@ describe("call sites", () => {
 });
 
 describe("Luau's limit of 200 locals in a function", () => {
-	test("a type at the limit without the checks holds far fewer with them: each field's write in a block of its own", () => {
+	test("a type at the limit holds far fewer, checks or not: each field's write in a block of its own", () => {
 		for (const name of ["TcBrinkW", "TcBrinkT"]) {
+			// Written out plainly, its write would hold 200 locals, and `where` would make it 201, which
+			// Luau refuses to load; past 150 it is built one field at a time, the checks on or off.
 			const off = peakLocals(hoisted(probe("off", "zzTcBrink"), "w", name));
 			const on = peakLocals(hoisted(probe("on", "zzTcBrink"), "w", name));
-			// `where` would have made it 201, which Luau refuses to load.
-			expect(`${name}: ${off}`).toBe(`${name}: 200`);
-			expect(on).toBeLessThan(off);
+			expect(off).toBeLessThan(50);
+			expect(on).toBeLessThan(50);
 		}
 		// A CFrame's twelve components go out of scope with its block, its test inside it.
 		expect(hoisted(probe("on", "zzTcBrink"), "w", "TcBrinkW")).toMatch(

@@ -17,6 +17,13 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   predicate's refusal when the tag is announced is final, so the instance stays without its
   component when it moves out, while a copy cloned into the workspace still gets one. Or keep an
   untagged copy in storage and tag the one you move.
+- **A value sent for a `boolean` that is not one is now written as whether Luau finds it truthy.**
+  Wherever the type checks do not raise for it, `0`, `NaN` and `""` now send `true`, where they
+  sent `false`: with `serialization.checks.types` off, the default; under `"mode": "warn"`, after
+  the warning; and in the realm `side` leaves unchecked. Data typed `boolean` that holds `0` and
+  `1` (read from a DataStore or from JSON, or passed through an `as any`) changes meaning: `0`
+  arrives as `true`. Convert it before sending (`value === 1`), or turn the type checks on
+  (`"types": true`), which raise for it instead.
 
 ### components
 
@@ -142,6 +149,20 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   widths and go in unions and structs as those do. The layouts of the existing widths, and so their
   goldens and layout hashes, are unchanged.
 
+- **A build error where generated code would not load.** A file whose top level Flamework's code
+  takes past Luau's 200 locals stops the build there, saying how many the file has and how many are
+  Flamework's, instead of building a file Roblox refuses. It counts only the locals the file is sure
+  to keep (values that are calls, tables or functions; functions, classes and enums; the names it
+  imports and reads as values, and roblox-ts's `TS`; the imports Flamework adds), so it never
+  refuses a file that loads, and leaves a file past the limit on its own to fail as it did. A
+  serialized type too deeply nested for any one function to hold its code, built one field at a
+  time or not, is refused too, naming the type: only past Luau's limits, by an estimate that counts
+  no fewer than Luau does, so no type that loaded before is refused (100 levels of objects or more;
+  99 build and load). A send is never refused: its packing lands in your function, among
+  temporaries of roblox-ts's that Flamework cannot all see, so past the limits it is built one field
+  at a time, and where even that is over by the estimate the smaller form is emitted anyway,
+  without an error.
+
 #### Fixed
 
 - **Another transformer listed before Flamework's in `tsconfig.json`'s `plugins` no longer breaks
@@ -185,6 +206,32 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 - **A type that makes a new type of itself as it nests**
   (`interface Box<T> { inner?: Box<Box<T>> }`) is refused with a build error once its guard is 500
   types deep, instead of overflowing the stack.
+- **Generated code no longer builds and then fails to load past Luau's limits.** Luau loads a
+  function, a module's top level included, with at most 200 locals and 255 registers, and roblox-ts
+  does not check: a file past them built and then failed in Roblox with "Out of local registers".
+  Flamework's code took a file there with, for example, about 65 string fields, 99 fields of a
+  named type or 70 booleans after a string in one serialized object, 100 enums in a tuple or in a
+  remote's arguments, 30 to 40 levels of nested objects, 99 literal unions or about 200 enum types
+  serialized in one file, about 200 types deduplicated in one guard or recursive types in one
+  guard, 97 callbacks set at the top of a file, 50 sends of a string in one function, or about 200
+  call sites of a macro with `Modding.Caller.Constant` metadata. All of those now load:
+  - the code Flamework adds at the top of a file takes at most 16 locals of its own besides a few
+    fixed ones (the `codec` table and the varint helpers among them); past that, a serializer's
+    guards and literal and enum tables are fields of `codec`, macro metadata goes in one table,
+    deduplicated guards go into a function with their guard, and a send's packing goes in a `do`
+    block with its statement. A function gets the same for sends past 64 locals, or once its own
+    locals and those of its sends still in scope pass 150;
+  - a serializer function that would need more than Luau loads, counting the temporaries roblox-ts
+    adds for it, is built one field at a time instead, each in a `do` block of its own: the same
+    bytes and values, so no layout or hash moves;
+  - a guard function holds its guards in one table past 150;
+  - an enum's table is read by indexing it, and a boolean is tested as Luau tests a value, neither
+    with a temporary of roblox-ts's: an object of 70 booleans serializes 36% faster. A value of
+    another type passed for a boolean (with the checks off, or under `"warn"`) is written as Luau
+    finds it truthy, so `0`, `NaN` and `""` now write `true`.
+  Files below these limits come out as before, but for those two shapes. Past the 16, a literal
+  union's or an enum's table is read one table index slower (12% on the round trip of a one-literal
+  value).
 
 ### Docs
 

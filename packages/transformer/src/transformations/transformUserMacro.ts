@@ -31,6 +31,41 @@ import { transformComponentConfig } from "./macros/intrinsics/components";
 import { CORE_PACKAGE } from "../util/packages";
 import { getComponentOnlyClass, isCoreDependencyResolver } from "../util/functions/getFlameworkDecorators";
 
+/**
+ * Each file's table of the user macro metadata hoisted past its budget of locals, per transform pass
+ * (a pass starts every file with nothing hoisted), and the fields taken in it.
+ */
+const metadataTables = new WeakMap<TransformState, Map<string, { table: ts.Identifier; fields: Set<string> }>>();
+
+/**
+ * A field of `file`'s table of hoisted macro metadata, named after `hint`, as a function that makes
+ * a node reading it. The table is declared ahead of the next root statement the first time.
+ */
+function metadataField(state: TransformState, file: ts.SourceFile, hint: string): () => ts.Expression {
+	let perPass = metadataTables.get(state);
+	if (!perPass) metadataTables.set(state, (perPass = new Map()));
+
+	let entry = perPass.get(file.fileName);
+	if (!entry) {
+		entry = { table: f.identifier("macroMetadata", true), fields: new Set() };
+		perPass.set(file.fileName, entry);
+		const record = ts.factory.createTypeLiteralNode([
+			ts.factory.createIndexSignature(
+				undefined,
+				[f.parameterDeclaration("key", f.keywordType(ts.SyntaxKind.StringKeyword))],
+				f.keywordType(ts.SyntaxKind.UnknownKeyword),
+			),
+		]);
+		state.nextRootStatements.push(f.variableStatement(entry.table, f.object([], false), record));
+	}
+
+	let name = hint;
+	for (let suffix = 1; entry.fields.has(name); suffix++) name = `${hint}_${suffix}`;
+	entry.fields.add(name);
+	const table = entry.table;
+	return () => ts.factory.createPropertyAccessExpression(table, name);
+}
+
 export function transformUserMacro(
 	state: TransformState,
 	node: ts.NewExpression | ts.CallExpression,
@@ -281,15 +316,30 @@ function buildUserMacro(state: TransformState, node: ts.Node, macro: UserMacro):
 			true,
 		);
 		const comment = ts.factory.createEmptyStatement();
-		const variable = f.variableStatement(uniqueName, result);
+		const file = state.getSourceFile(node);
 
+		// A local of its own while the file's budget of Flamework locals lasts, then a field of one table:
+		// a file with hundreds of these call sites would otherwise pass the 200 locals Luau allows its
+		// main chunk, and build, and fail to load.
+		if (state.localBudget.claim(file.fileName, 1)) {
+			const variable = f.variableStatement(uniqueName, result);
+			addLeadingComment(
+				comment,
+				` Flamework hoisted this macro's metadata (${uniqueName.text}) to the file root.`,
+			);
+			addLeadingComment(variable, ` Flamework user macro metadata (line ${line + 1})`);
+			state.nextRootStatements.push(variable);
+			state.prereq(comment);
+			return f.asNever(uniqueName);
+		}
+
+		const field = metadataField(state, file, uniqueName.text);
+		const assignment = f.statement(f.binary(field(), ts.SyntaxKind.EqualsToken, result));
 		addLeadingComment(comment, ` Flamework hoisted this macro's metadata (${uniqueName.text}) to the file root.`);
-		addLeadingComment(variable, ` Flamework user macro metadata (line ${line + 1})`);
-
-		state.nextRootStatements.push(variable);
+		addLeadingComment(assignment, ` Flamework user macro metadata (line ${line + 1})`);
+		state.nextRootStatements.push(assignment);
 		state.prereq(comment);
-
-		return f.asNever(uniqueName);
+		return f.asNever(field());
 	}
 
 	return f.asNever(f.nil());

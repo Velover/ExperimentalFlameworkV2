@@ -7,6 +7,7 @@ import { getInstanceTypeFromType } from "./getInstanceTypeFromType";
 import { localName } from "./identifierName";
 import { getPropertyKey, keyName } from "./propertyKey";
 import assert from "assert";
+import { COMPACT_LOCALS, enclosingScope, enclosingStatement, replaceIdentifiers } from "../luauLimits";
 
 /**
  * Convert a type into a list of typeguards.
@@ -91,6 +92,12 @@ export const GUARD_RECURSION_LIMIT = 1000;
  * this: a recursive type that comes back to itself is checked through a function that calls itself.
  */
 const TYPE_NESTING_LIMIT = 500;
+
+/**
+ * How many guards a function that holds them (the one a guard of recursive types is wrapped in, or one
+ * that holds deduplicated guards) keeps in locals of its own before it keeps them in a table.
+ */
+const GUARD_LOCALS = COMPACT_LOCALS;
 
 /** Stops the whole of {@link getTypesRequiringDedupHeuristic}'s walk at once. */
 class NestingLimitReached {}
@@ -215,10 +222,19 @@ export function buildGuardFromTypeWithDedup(
 		generator.calculateDedup(type, Math.max(dedupLimit, 1));
 	}
 
-	return {
-		guard: generator.buildGuard(type),
-		statements: generator.dedupStatements,
-	};
+	const guard = generator.buildGuard(type);
+	// Luau allows a function 200 locals, the file's main chunk included: past the scope's budget of
+	// Flamework's locals, the deduplicated guards go into a function of their own with the guard. They
+	// go ahead of the statement the guard is in, and are live to the end of its block.
+	const count = generator.dedupStatements.length;
+	if (
+		count === 0 ||
+		state.localBudget.claim(enclosingScope(node) ?? file.fileName, count, enclosingStatement(node))
+	) {
+		return { guard, statements: generator.dedupStatements };
+	}
+
+	return { guard: generator.holdInFunction(guard), statements: [] };
 }
 
 /** A type whose guard is being built, with the types it is being built inside of below it. */
@@ -334,7 +350,7 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 	let checkState: CheckState | undefined;
 	let dedupIsRecursive = false;
 
-	return { buildGuard, buildGuardsFromType, calculateDedup, dedupStatements };
+	return { buildGuard, buildGuardsFromType, calculateDedup, dedupStatements, holdInFunction };
 
 	function fail(err: string): never {
 		const basicDiagnostic = Diagnostics.createDiagnostic(diagnosticNode, ts.DiagnosticCategory.Error, err);
@@ -560,31 +576,95 @@ export function createGuardGenerator(state: TransformState, file: ts.SourceFile,
 			scopes.pop();
 		}
 
-		const locals = scope.locals.map((local) => f.variableStatement(local, undefined, checkType(), true));
 		if (!root) {
-			if (locals.length === 0) {
+			if (scope.locals.length === 0) {
 				return guard;
 			}
 
 			dedupIsRecursive = true;
-			return calledOnce([...locals, ...scope.statements, f.returnStatement(guard)]);
+			return calledOnce(holdGuards(scope.locals, [], [...scope.statements, f.returnStatement(guard)]));
 		}
 
 		// The deduplicated guards are only ever called from this one.
 		const deduplicated = dedupIsRecursive ? dedupStatements.splice(0) : [];
-		if (locals.length === 0 && deduplicated.length === 0) {
+		if (scope.locals.length === 0 && deduplicated.length === 0) {
 			return guard;
 		}
 
-		const body = [...checkStateDeclarations(), ...deduplicated, ...locals, ...scope.statements];
+		const rest = [...scope.statements];
 		let entry = guard;
 		if (!f.is.identifier(entry)) {
 			entry = f.identifier("guard", true);
-			body.push(f.variableStatement(entry as ts.Identifier, guard));
+			rest.push(f.variableStatement(entry as ts.Identifier, guard));
 		}
 
-		body.push(f.returnStatement(checkThrough(entry as ts.Identifier)));
-		return calledOnce(body);
+		rest.push(f.returnStatement(checkThrough(entry as ts.Identifier)));
+		return calledOnce([...checkStateDeclarations(), ...holdGuards(scope.locals, deduplicated, rest)]);
+	}
+
+	/**
+	 * The body of a function that holds guards: the deduplicated ones (`const Name = ...`), the locals of
+	 * the recursive ones, then `rest`. Luau allows a function 200 locals, so past {@link GUARD_LOCALS}
+	 * of them they are fields of one table instead (`guards.Name = ...`), and every place that calls one
+	 * reads it from there: a guard of more recursive types than that no longer fails to load.
+	 */
+	function holdGuards(selves: ts.Identifier[], deduplicated: ts.Statement[], rest: ts.Statement[]): ts.Statement[] {
+		if (selves.length + deduplicated.length <= GUARD_LOCALS) {
+			return [
+				...deduplicated,
+				...selves.map((local) => f.variableStatement(local, undefined, checkType(), true)),
+				...rest,
+			];
+		}
+
+		const table = f.identifier("guards", true);
+		const taken = new Set<string>();
+		const replacements = new Map<ts.Identifier, () => ts.Expression>();
+		const fieldOf = (local: ts.Identifier) => {
+			let name = local.text;
+			for (let suffix = 1; taken.has(name); suffix++) name = `${local.text}_${suffix}`;
+			taken.add(name);
+			replacements.set(local, () => ts.factory.createPropertyAccessExpression(table, name));
+			return name;
+		};
+
+		// Each deduplicated guard is one `const` its builder declared, which now assigns its field.
+		const assigned = deduplicated.map((statement) => {
+			const declaration = (statement as ts.VariableStatement).declarationList.declarations[0];
+			const name = fieldOf(declaration.name as ts.Identifier);
+			return [name, declaration.initializer!] as const;
+		});
+		selves.forEach(fieldOf);
+
+		const tableType = ts.factory.createTypeLiteralNode([
+			ts.factory.createIndexSignature(
+				undefined,
+				[f.parameterDeclaration("key", f.keywordType(ts.SyntaxKind.StringKeyword))],
+				checkType(),
+			),
+		]);
+		return [
+			f.variableStatement(table, f.object([], false), tableType),
+			...assigned.map(([name, value]) =>
+				f.statement(
+					f.binary(
+						ts.factory.createPropertyAccessExpression(table, name),
+						ts.SyntaxKind.EqualsToken,
+						replaceIdentifiers(value, replacements, state.context),
+					),
+				),
+			),
+			...rest.map((statement) => replaceIdentifiers(statement, replacements, state.context)),
+		];
+	}
+
+	/**
+	 * A guard and the deduplicated guards it is built from (`dedupStatements`, which this empties), in a
+	 * function of their own called once: what a scope past its budget of locals gets instead of them
+	 * (see `buildGuardFromTypeWithDedup`).
+	 */
+	function holdInFunction(guard: ts.Expression): ts.Expression {
+		return calledOnce(holdGuards([], dedupStatements.splice(0), [f.returnStatement(guard)]));
 	}
 
 	/**
