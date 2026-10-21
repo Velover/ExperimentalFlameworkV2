@@ -435,8 +435,10 @@ FLAMEWORK_TEST_PROJECT=default.project.json,tests/deferred.project.json,tests/st
 
 Each project is a run of both realms in a place of its own name (`place.deferred.rbxl`, laid
 over the original when one is named, else the build with the project's properties set on it),
-under a heading with the project's name, every one of them even after one fails, and a line at the
-end, which counts each project's skips:
+under a heading with the project's name, every one of them even after one fails (but for a window
+that would not close, which keeps its place among the windows open at once, so the projects that
+would need another are not run, and fail saying why), and a line at the end, which counts each
+project's skips:
 
 ```
 === deferred: tests/deferred.project.json ===

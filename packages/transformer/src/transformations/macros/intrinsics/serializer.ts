@@ -45,9 +45,7 @@ export function getSerializerVersion(state: TransformState, node: ts.Node): numb
 			);
 		}
 
-		const name = property.name && ts.isIdentifier(property.name) ? property.name.text : undefined;
-		const named = name ?? (property.name && ts.isStringLiteral(property.name) ? property.name.text : undefined);
-		if (named !== "version") continue;
+		if (optionName(state, property.name) !== "version") continue;
 
 		if (ts.isPropertyAssignment(property)) {
 			version = { node: property.initializer, type: state.typeChecker.getTypeAtLocation(property.initializer) };
@@ -82,4 +80,25 @@ export function getSerializerVersion(state: TransformState, node: ts.Node): numb
 	}
 
 	return value;
+}
+
+/**
+ * The option a property names: an identifier, a string, or a computed key whose type is one string
+ * (`["version"]`, or `[KEY]` for a `const` holding it). A computed key of any other type could
+ * name any option, so it is refused rather than taken for none.
+ */
+function optionName(state: TransformState, name: ts.PropertyName | undefined): string | undefined {
+	if (!name) return;
+	if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
+	if (!ts.isComputedPropertyName(name)) return;
+
+	const type = state.typeChecker.getTypeAtLocation(name.expression);
+	if (type.isStringLiteral()) return type.value;
+	if (type.isNumberLiteral()) return String(type.value);
+
+	Diagnostics.error(
+		name,
+		`Flamework reads a serializer's options when the project builds, and cannot tell which option this key names: its type is '${state.typeChecker.typeToString(type)}'.`,
+		"Write the option's name out, as `version: 1`.",
+	);
 }

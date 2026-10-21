@@ -357,6 +357,7 @@ interface Pin {
 const V = 7;
 enum Versions { First = 1, Second = 2 }
 const version = 9;
+const VERSION_KEY = "version";
 
 export const fixed = Flamework.createSerializer<{ a: Serialization.u8; b: Serialization.i16 }>({ version: 3 });
 export const pin = Flamework.createSerializer<Pin>({ version: 0 });
@@ -364,6 +365,8 @@ export const counts = Flamework.createSerializer<Map<string, Serialization.u8>>(
 export const byConst = Flamework.createSerializer<{ a: Serialization.u8 }>({ version: V });
 export const byEnum = Flamework.createSerializer<{ a: Serialization.u8 }>({ version: Versions.Second });
 export const shorthand = Flamework.createSerializer<{ a: Serialization.u8 }>({ version });
+export const computed = Flamework.createSerializer<{ a: Serialization.u8 }>({ ["version"]: 4 });
+export const computedConst = Flamework.createSerializer<{ a: Serialization.u8 }>({ [VERSION_KEY]: 5 });
 export const implicitA = Flamework.createSerializer<{ a: Serialization.Implicit.u8 }>({ version: 1 });
 export const instanceA = Flamework.createSerializer<{ a: Instance }>({ version: 1 });
 export const unknownA = Flamework.createSerializer<{ a: unknown }>({ version: 1 });
@@ -444,13 +447,15 @@ export const wider = Flamework.createSerializer<{ id: Serialization.u32; name: s
 		);
 	});
 
-	test("takes the version from a literal, a const, an enum member or a shorthand property", () => {
+	test("takes the version from a literal, a const, an enum member, a shorthand or a computed key", () => {
 		expect(header("fixed").version).toBe(3);
 		expect(header("pin").version).toBe(0);
 		expect(header("counts").version).toBe(255);
 		expect(header("byConst").version).toBe(7);
 		expect(header("byEnum").version).toBe(2);
 		expect(header("shorthand").version).toBe(9);
+		expect(header("computed").version).toBe(4);
+		expect(header("computedConst").version).toBe(5);
 	});
 
 	test("hashes the layout's bytes: names, checks and blob types change nothing, keys, orders and widths do", () => {
@@ -664,6 +669,7 @@ return {
 			versionFraction: `${head}export const s = Flamework.createSerializer<Serialization.u8>({ version: 1.5 });\n`,
 			versionNegative: `${head}export const s = Flamework.createSerializer<Serialization.u8>({ version: -1 });\n`,
 			optionsVariable: `${head}const options = { version: 1 };\nexport const s = Flamework.createSerializer<Serialization.u8>(options);\n`,
+			optionsComputedKey: `${head}declare const key: "version" | "other";\nexport const s = Flamework.createSerializer<Serialization.u8>({ version: 1, [key]: 2 });\n`,
 		});
 		expect(result.status).not.toBe(0);
 		const output = result.output.replace(/\x1b\[[0-9;]*m/g, "");
@@ -692,7 +698,10 @@ return {
 		expect(errors.get("optionsVariable")).toBe(
 			"Flamework reads a serializer's options when the project builds, so they have to be written here as an object literal, such as `{ version: 1 }`.",
 		);
-		expect(errors.size).toBe(5);
+		expect(errors.get("optionsComputedKey")).toBe(
+			`Flamework reads a serializer's options when the project builds, and cannot tell which option this key names: its type is '"version" | "other"'.`,
+		);
+		expect(errors.size).toBe(6);
 	});
 });
 

@@ -33,6 +33,11 @@ export interface SignInReading {
 	state: SignIn;
 	/** The log it was read from, for the error to name. */
 	log: string;
+	/**
+	 * What says `signed-out`: the login dialog showing, or a sign-in that failed, in a log
+	 * that does not show the dialog (yet). Absent for the other states.
+	 */
+	cause?: "dialog" | "failure";
 }
 
 /** The line that names a log's process: `Constructing UIThreadNotifier for process '<pid>' ...`. */
@@ -43,11 +48,17 @@ const SIGN_IN_FAILED = "[FLog::StudioKeyEvents] login [end][failure]";
 const LOGIN_DIALOG = "[FLog::StudioKeyEvents] show login dialog [start]";
 
 /**
- * How much of a log is read: its start, where the process line (within the first second) and the
- * sign-in (within the first few seconds; a failed one 4.6 s in, the login dialog 2 s in, measured)
- * are. A log grows by megabytes over a long session.
+ * How much of a log is read: its start, where the sign-in is (within the first few seconds; a
+ * failed one 4.6 s in, the login dialog 2 s in, measured; its end at up to 53 KB in the logs of
+ * 2026-10-21). A log grows by megabytes over a long session.
  */
-export const LOG_HEAD_BYTES = 1024 * 1024;
+export const LOG_HEAD_BYTES = 128 * 1024;
+
+/**
+ * How much of a log is read for whose it is: the process line is within its first second, at up
+ * to 5.3 KB in the logs of 2026-10-21.
+ */
+export const LOG_OWNER_BYTES = 16 * 1024;
 
 /** The process a log is of, from its text; undefined when it does not say (yet). */
 export function processOf(text: string): number | undefined {
@@ -56,14 +67,27 @@ export function processOf(text: string): number | undefined {
 }
 
 /**
- * What a log's text says of its process's sign-in: the last word of it, since a sign-in that failed
- * ends showing the login dialog; undefined when it has not started signing in yet (or never does,
- * as a Studio run by Studio itself for a play session's server).
+ * What a log's text says of its process's sign-in: the last word of it, whichever of a success, a
+ * failure and the login dialog comes last (a sign-in that failed ends showing the dialog, and one
+ * someone made there ends in a success); `signing-in` once it has started and none has come yet;
+ * undefined when it has not started (or never does, as a Studio run by Studio itself for a play
+ * session's server).
  */
 export function signInFromLog(text: string): SignIn | undefined {
-	if (text.includes(LOGIN_DIALOG) || text.includes(SIGN_IN_FAILED)) return "signed-out";
-	if (text.includes(SIGNED_IN)) return "signed-in";
-	if (text.includes(SIGN_IN_STARTED)) return "signing-in";
+	return signInDetail(text)?.state;
+}
+
+/** {@link signInFromLog}, with what said `signed-out` (see {@link SignInReading.cause}). */
+function signInDetail(text: string): { state: SignIn; cause?: "dialog" | "failure" } | undefined {
+	const dialog = text.lastIndexOf(LOGIN_DIALOG);
+	const failure = text.lastIndexOf(SIGN_IN_FAILED);
+	const success = text.lastIndexOf(SIGNED_IN);
+	const last = Math.max(dialog, failure, success);
+	if (last >= 0) {
+		if (last === success) return { state: "signed-in" };
+		return { state: "signed-out", cause: dialog >= 0 ? "dialog" : "failure" };
+	}
+	if (text.includes(SIGN_IN_STARTED)) return { state: "signing-in" };
 	return undefined;
 }
 
@@ -102,43 +126,56 @@ const realFiles: LogFiles = {
 
 /**
  * Reads launched processes' sign-in from their logs, remembering which log is whose: a log is
- * found once (the first one, written since `since`, that names the process) and read again on
- * each look. Undefined when no log names the process: not written yet, Studio's log folder
- * elsewhere, a Studio whose log says neither, or not Windows.
+ * found once per launch (the newest one, written since `since`, that names the process; a PID
+ * Windows reuses within one run is another launch, with a later `since`) and read again on each
+ * look. A log is bound to one launch only. One last written before the launch is never read for
+ * it: it may be the log of an earlier process with that PID, and the launch's own log, written
+ * after `since` (taken before the launch), is found at a later look. Undefined when no log names
+ * the process: not written yet, Studio's log folder elsewhere, a Studio whose log says neither, or
+ * not Windows.
  */
 export function signInReader(
 	env: Record<string, string | undefined>,
 	files: LogFiles = realFiles,
 ): (pid: number, since: number) => Promise<SignInReading | undefined> {
 	const dir = studioLogDir(env);
-	const logOf = new Map<number, string>();
+	// By launch: `<pid>:<since>`; and the launch each of those logs is bound to.
+	const logOf = new Map<string, string>();
+	const launchOf = new Map<string, string>();
 	// Whose each log read so far is, so that no log is read twice for that.
 	const ownerOf = new Map<string, number>();
 	return async (pid, since) => {
 		try {
-			let path = logOf.get(pid);
+			const launch = `${pid}:${since}`;
+			let path = logOf.get(launch);
 			if (path === undefined) {
-				// Written since the launch, with a few seconds' leeway for the clocks' rounding.
-				const recent = (await files.list(dir)).filter((entry) => entry.modifiedMs >= since - 5000);
+				// Written since the launch, the newest first, so an older log of a process that
+				// had the same PID is not taken.
+				const recent = (await files.list(dir))
+					.filter((entry) => entry.modifiedMs >= since)
+					.sort((a, b) => b.modifiedMs - a.modifiedMs);
 				for (const entry of recent) {
 					const candidate = join(dir, entry.name);
+					const bound = launchOf.get(candidate);
+					if (bound !== undefined && bound !== launch) continue;
 					let owner = ownerOf.get(candidate);
 					if (owner === undefined) {
-						owner = processOf(await files.head(candidate, 64 * 1024));
+						owner = processOf(await files.head(candidate, LOG_OWNER_BYTES));
 						// Not saying yet: read again at the next look.
 						if (owner === undefined) continue;
 						ownerOf.set(candidate, owner);
 					}
 					if (owner === pid) {
 						path = candidate;
-						logOf.set(pid, path);
+						logOf.set(launch, path);
+						launchOf.set(path, launch);
 						break;
 					}
 				}
 			}
 			if (path === undefined) return undefined;
-			const state = signInFromLog(await files.head(path, LOG_HEAD_BYTES));
-			return state === undefined ? undefined : { state, log: path };
+			const detail = signInDetail(await files.head(path, LOG_HEAD_BYTES));
+			return detail === undefined ? undefined : { ...detail, log: path };
 		} catch {
 			// No log folder, or a log that cannot be read: nothing is known.
 			return undefined;

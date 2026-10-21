@@ -128,12 +128,13 @@ there, in one line:
 
 Each package you install arrives in the place with its `out` folder: `core`, and `components`,
 `networking` and `testing` when you install them. `core` also ships this guide and the instructions
-for a coding assistant, as Markdown, which Rojo skips; their folders arrive as empty Folders,
-`core.docs`, `core.docs.ai` and `core.docs.guide`. `testing` also ships the sources of its CLI, and
-a `default.project.json` that maps its `out` folder alone, so they stay out of the place (from 2.0.0-alpha.4; an older one brings three empty Folders,
-`testing.cli`, `cli.src` and `cli.tasks`). Rojo uses a package's `default.project.json` in place of
-its folder. The transformer is installed in the same folder, and it arrives as one empty Folder: it
-ships a `default.project.json` too. Two entries are the same as in the roblox-ts template:
+for a coding assistant, as Markdown, which Rojo skips: its `docs` folder arrives as a Folder
+holding two empty Folders, `ai` and `guide`. `testing` also ships the sources of its CLI, and a
+`default.project.json` that maps its `out` folder alone, so they stay out of the place (from
+2.0.0-alpha.4; an older one brings three empty Folders, `testing.cli`, `cli.src` and `cli.tasks`).
+Rojo uses a package's `default.project.json` in place of its folder. The transformer is installed
+in the same folder, and it arrives as one empty Folder: it ships a `default.project.json` too. Two
+entries are the same as in the roblox-ts template:
 
 - `include` holds the roblox-ts runtime and the files Flamework generates when you build
   (`include/flamework`).

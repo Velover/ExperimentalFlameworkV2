@@ -13,6 +13,7 @@ import {
 	type WindowIdentity,
 } from "../src/cli.ts";
 import type { StudioClient, StudioEntry } from "../src/studio.ts";
+import type { SignInReading } from "../src/studioLog.ts";
 import {
 	FIXTURE_CWD,
 	fakeMachine,
@@ -74,8 +75,9 @@ interface Ask {
  * default) under the id `win-<file>` for as long as its process runs, answers who it is with
  * `answer` (by default its file's name and the launch id the patch wrote into that file, at once),
  * and runs the tests in a play session. `before` is listed from the start; `joining` registers once
- * the first window has been launched. `asked` records every window asked who it is, in order, and
- * `asks` when and with what timeout.
+ * the first window has been launched. A launched window registers `registerAfterMs` after its
+ * launch (at once by default). `asked` records every window asked who it is, in order, and `asks`
+ * when and with what timeout.
  */
 function proxyOn(
 	machine: FakeMachine,
@@ -84,6 +86,7 @@ function proxyOn(
 		before?: StudioEntry[];
 		joining?: Joining[];
 		answer?: (window: Launched, call: FakeCall) => WindowIdentity;
+		registerAfterMs?: number;
 	} = {},
 ) {
 	const entries: Array<StudioEntry & { pid?: number; file?: string; at?: number }> = [...(setup.before ?? [])];
@@ -103,6 +106,9 @@ function proxyOn(
 			entries
 				.filter(
 					(entry) => entry.pid === undefined || machine.windows.some((window) => window.pid === entry.pid),
+				)
+				.filter(
+					(entry) => entry.at === undefined || machine.time.now - entry.at >= (setup.registerAfterMs ?? 0),
 				)
 				.map((entry) => ({ id: entry.id, name: listed(entry) })),
 		answers: {
@@ -194,7 +200,11 @@ const unreachableFor =
 		return { name: window.file, ...(window.launch !== undefined ? { launch: window.launch } : {}) };
 	};
 
-/** No window is asked again sooner than a look after it was last asked, whichever project asks. */
+/**
+ * No window is asked again sooner than a look after it was last asked, whichever project asks. It
+ * measures from the start of each question; the CLI spaces them from the end of the last answer, so
+ * this is the weaker bound.
+ */
 function expectSpacedAsks(asks: Ask[]): void {
 	for (const id of new Set(asks.map((ask) => ask.id))) {
 		const times = asks.filter((ask) => ask.id === id).map((ask) => ask.at);
@@ -209,7 +219,11 @@ async function runWith(
 	machine: FakeMachine,
 	argv: string[],
 	names: string[],
-	extra: { launchIds?: string[]; env?: Record<string, string | undefined> } = {},
+	extra: {
+		launchIds?: string[];
+		env?: Record<string, string | undefined>;
+		signIn?: (pid: number, since: number) => SignInReading | undefined;
+	} = {},
 ) {
 	const ids = [...(extra.launchIds ?? names.map((name) => `launch-${name}`))];
 	return await runCli(argv, {
@@ -221,6 +235,7 @@ async function runWith(
 		spawnCode: proxy.spawnCode,
 		launchId: () => ids.shift() ?? "launch-spare",
 		...(extra.env !== undefined ? { env: extra.env } : {}),
+		...(extra.signIn !== undefined ? { signIn: extra.signIn } : {}),
 	});
 }
 
@@ -300,6 +315,32 @@ describe("a launched window the MCP proxy lists under another name", () => {
 			"connected: place.streaming.rbxl (win-place.streaming.rbxl), which the MCP proxy lists as",
 		);
 		expect([...proxy.asked].sort()).toEqual(["win-place.deferred.rbxl", "win-place.streaming.rbxl"]);
+	});
+
+	test("the projects of a --parallel run whose windows register late tell each other's apart by launch id", async () => {
+		// Each Studio signs in at once, which lets the next launch go, and its window registers
+		// 20 s after its launch, by when the other project has launched its own: each project then
+		// sees its sibling's window as new too, and only the launch id tells them apart.
+		const machine = fakeMachine();
+		const proxy = proxyOn(machine, { registerAfterMs: 20_000 });
+		const names = ["deferred", "streaming"];
+		const run = await runWith(
+			proxy,
+			machine,
+			["test", "place.rbxl", ...projectFlag(names), "--parallel", "2"],
+			names,
+			{ signIn: () => ({ state: "signed-in", log: "studio.log" }) },
+		);
+		expect(run.code).toBe(0);
+		expect(run.out).toContain("projects: deferred passed, streaming passed");
+		expect(run.out).toContain("connected: place.deferred.rbxl (win-place.deferred.rbxl)");
+		expect(run.out).toContain("connected: place.streaming.rbxl (win-place.streaming.rbxl)");
+		expect([...proxy.asked].sort()).toEqual(["win-place.deferred.rbxl", "win-place.streaming.rbxl"]);
+		expect(proxy.runs.filter((call) => call.startsWith("win-place.deferred.rbxl ")).length).toBeGreaterThan(0);
+		expect(proxy.runs.filter((call) => call.startsWith("win-place.streaming.rbxl ")).length).toBeGreaterThan(0);
+		// Both registered at once, so each project's look found both new.
+		expect(new Set(proxy.asks.map((ask) => ask.at)).size).toBe(1);
+		expectSpacedAsks(proxy.asks);
 	});
 
 	test("a window listed before the launch is never asked, whatever it is listed as", async () => {
@@ -575,6 +616,29 @@ describe("a launched window the MCP proxy lists under another name", () => {
 			listedAs: "Game",
 		});
 		expect(earlier.asked).toEqual(["win-place.deferred.rbxl"]);
+	});
+
+	test("studio open of a patched file whose window answers Game first, with the file's launch id, waits for its game.Name", async () => {
+		// Its place still loading, the window says Game, yet its Workspace already carries the
+		// earlier launch's id: that says nothing yet, rather than making it another run's window
+		// for good.
+		const patched = fakeMachine();
+		const loading = proxyOn(patched, {
+			answer: (window, call) => {
+				call.elapse(300);
+				return { name: window.sinceLaunch < 8000 ? "Game" : window.file, launch: "an-earlier-test-launch" };
+			},
+		});
+		const opened = await runCli(["studio", "open", "place.deferred.rbxl", "--json"], {
+			machine: patched,
+			files: { "place.deferred.rbxl": "made" },
+			studio: loading.fake,
+			onLaunch: loading.onLaunch,
+		});
+		expect(opened.code).toBe(0);
+		expect(JSON.parse(opened.out)).toMatchObject({ studio_id: "win-place.deferred.rbxl", listedAs: "Game" });
+		expect(loading.asked.length).toBeGreaterThan(1);
+		expect(new Set(loading.asked)).toEqual(new Set(["win-place.deferred.rbxl"]));
 	});
 });
 

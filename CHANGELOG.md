@@ -263,6 +263,19 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 #### Fixed
 
+- **A window still loading, whose place carries an earlier `test`'s launch id, is waited for.** A
+  run with no launch id of its own (`studio open`, a plain run's build) took a window answering
+  `game.Name` "Game" with any launch id for another run's, for good; it now asks again until the
+  window names its place, as it did for one with no id.
+- **flamework-test's commands that read no config run when `flamework.config.json` does not load.**
+  The check for renamed variables read the config first, so a broken one also stopped `studio
+  close`, `unlock`, `lock` and `list`; it now checks the shell's variables alone then, and a
+  command that reads the config still reports why it cannot.
+- **The signed-out error says what the log showed**: `its sign-in failed` for a log with the failed
+  sign-in and no login dialog yet, rather than always `it showed its login dialog`. The log's last
+  word now decides (a sign-in made at the dialog reads as signed in), a PID Windows reuses within a
+  run reads its own launch's log (the newest naming it), and a look reads 128 KB of the log instead
+  of 1 MB, and 16 KB of each recent log to find whose it is instead of 64 KB.
 - **`flamework-test test` finds its window when the MCP proxy lists it under another name.** A
   hidden window could register with the proxy as `Game` and stay so, while `game.Name` inside was
   right, and the run, looking for the file's name only, waited out its whole `--timeout` and failed
@@ -369,7 +382,9 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 - `@flamework-experimental/transformer`'s `files` no longer lists an `index.d.ts`, which the package
   never had.
-
+- **`createSerializer` reads `version` under a computed key**: `{ ["version"]: 3 }`, or `[KEY]` for
+  a `const` holding `"version"`, which failed with "found no `version`". A computed key whose type
+  is not one string is refused, naming its type, since it could name any option.
 - **Another transformer listed before Flamework's in `tsconfig.json`'s `plugins` no longer breaks
   the build.** Such a transformer (one for `@rbxts/services`, for instance, which rewrites a class
   that uses a service) hands Flamework the statements it rewrote with no `parent`. Flamework told a
@@ -485,6 +500,14 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `docs/stability.md` says.
 - `docs/ai/flamework.md`: the transformer refuses a mix of versions. `docs/ai/plugins.md`: a
   library takes core as a `^` peer range from the release it is built against.
+- `docs/ai/flamework.md` and `docs/ai/networking.md`: network declarations and middleware may
+  live in a registered folder, which only loads them early; only realm-specific setup
+  (`createServer()`, `createClient()`, which return `nil` on the other realm) needs a folder its own
+  realm registers.
+- Guide 06, `u64` and `i64`: 2^53 is in range, both ends included; a value another system wrote
+  past 2^53 reads as the nearest number; and what an unchecked one past 2^53, a negative `u64` and
+  a negative fraction in an `i64` arrive as.
+- Guide 01: core's `docs` folder arrives as a Folder holding two empty Folders, `ai` and `guide`.
 
 ## 2026-10-06: every package 2.0.0-alpha.8
 

@@ -1,7 +1,7 @@
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
-import { main, type CliDeps, type LaunchOptions } from "../src/cli.ts";
+import { CliError, main, type CliDeps, type LaunchOptions } from "../src/cli.ts";
 import type { CloudSettings } from "../src/config.ts";
 import {
 	normalizeOwner,
@@ -339,6 +339,8 @@ export async function runCli(
 		env?: Record<string, string | undefined>;
 		/** What the config reader answers; by default nothing, so no real .env is read. */
 		settings?: Partial<CloudSettings>;
+		/** What the config reader raises instead, as for a config file it cannot parse. */
+		settingsError?: string;
 		/**
 		 * Exit code of every spawned process; a function may decide per command (and its timeout), answer
 		 * later, or throw as the real spawn does (`ChildTimedOut` past the timeout).
@@ -581,7 +583,10 @@ export async function runCli(
 			}
 		},
 		now: () => new Date(time.now),
-		loadSettings: () => ({ env: {}, ...options.settings }),
+		loadSettings: () => {
+			if (options.settingsError !== undefined) throw new CliError(options.settingsError);
+			return { env: {}, ...options.settings };
+		},
 		// Never the real process's signals: a run hears only the Ctrl+C a test presses.
 		onInterrupt: (handler) => (options.ctrlC ? options.ctrlC.listen(handler) : () => {}),
 		exit: (code) => {

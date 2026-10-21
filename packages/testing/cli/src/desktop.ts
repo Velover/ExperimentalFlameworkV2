@@ -196,6 +196,8 @@ export function launchOnDesktop(
 	const threadHandle = Number(processInfo.readBigUInt64LE(8));
 	if (threadHandle !== 0) kernel32.symbols.CloseHandle(threadHandle as Pointer);
 	if (processHandle !== 0) kernel32.symbols.CloseHandle(processHandle as Pointer);
+	// `info` points at it; this keeps it referenced by name too.
+	void station;
 	return processInfo.readUInt32LE(16);
 }
 

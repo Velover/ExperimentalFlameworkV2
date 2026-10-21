@@ -25,6 +25,14 @@ const NOISE = "2026-10-20T15:50:02.536Z,0.536715,70c4,6 [FLog::Output] BaseUrl: 
 
 const log = (...lines: string[]) => lines.join("\n");
 
+/** Log files as `signInReader` sees them, each read only as far as it asks, as real ones are. */
+function sizedFiles(files: Record<string, { modifiedMs: number; text: string }>): LogFiles {
+	return {
+		list: async () => Object.entries(files).map(([name, file]) => ({ name, modifiedMs: file.modifiedMs })),
+		head: async (path, bytes) => files[basename(path)]!.text.slice(0, bytes),
+	};
+}
+
 describe("a Studio process's sign-in, from its log", () => {
 	test("the process a log is of, and what it says of the sign-in: the last word of it", () => {
 		expect(processOf(log(NOISE, PROCESS(2200), STARTED))).toBe(2200);
@@ -36,6 +44,10 @@ describe("a Studio process's sign-in, from its log", () => {
 		// A refresh that failed (one of two Studios signing in at once), and a session already gone.
 		expect(signInFromLog(log(PROCESS(1), STARTED, FAILURE))).toBe("signed-out");
 		expect(signInFromLog(log(PROCESS(1), STARTED, DIALOG))).toBe("signed-out");
+		// The last word: someone signed in at the dialog, and a failure the dialog follows.
+		expect(signInFromLog(log(PROCESS(1), STARTED, DIALOG, SUCCESS))).toBe("signed-in");
+		expect(signInFromLog(log(PROCESS(1), STARTED, FAILURE, DIALOG))).toBe("signed-out");
+		expect(signInFromLog(log(PROCESS(1), STARTED, SUCCESS, DIALOG))).toBe("signed-out");
 	});
 
 	test("the log folder, and which files in it are a Studio process's log", () => {
@@ -88,8 +100,69 @@ describe("a Studio process's sign-in, from its log", () => {
 		expect(lists).toBe(listed);
 		expect(reads).toEqual(["c_Studio_00003_last.log"]);
 
-		// The other process's log was read once, for whose it is.
-		expect((await read(777, 99_000))?.state).toBe("signed-out");
+		// The other process's log was read once, for whose it is; it shows a failure, no dialog
+		// yet.
+		expect(await read(777, 99_000)).toEqual({
+			state: "signed-out",
+			cause: "failure",
+			log: join(dir, "b_Studio_00002_last.log"),
+		});
+	});
+
+	test("takes the newest log that names the process, and a PID used again later as another launch", async () => {
+		const dir = studioLogDir({ LOCALAPPDATA: "L:" });
+		const files: Record<string, { modifiedMs: number; text: string }> = {
+			"old_Studio_00001_last.log": { modifiedMs: 100_000, text: log(PROCESS(4001), STARTED, DIALOG) },
+			"new_Studio_00002_last.log": { modifiedMs: 120_000, text: log(PROCESS(4001), STARTED) },
+		};
+		const fake: LogFiles = {
+			list: async () => Object.entries(files).map(([name, file]) => ({ name, modifiedMs: file.modifiedMs })),
+			head: async (path) => files[basename(path)]!.text,
+		};
+		const read = signInReader({ LOCALAPPDATA: "L:" }, fake);
+		expect(await read(4001, 99_000)).toEqual({ state: "signing-in", log: join(dir, "new_Studio_00002_last.log") });
+
+		// Windows hands 4001 to a later launch in the same run: its own log, not the one found
+		// before.
+		files["later_Studio_00003_last.log"] = { modifiedMs: 300_000, text: log(PROCESS(4001), STARTED, SUCCESS) };
+		expect(await read(4001, 299_000)).toEqual({
+			state: "signed-in",
+			log: join(dir, "later_Studio_00003_last.log"),
+		});
+		// The first launch still reads its own.
+		expect((await read(4001, 99_000))?.log).toBe(join(dir, "new_Studio_00002_last.log"));
+	});
+
+	test("a log written just before the launch, of an earlier process with that PID, is not bound to it", async () => {
+		const dir = studioLogDir({ LOCALAPPDATA: "L:" });
+		// The earlier process 4001 signed in; its log was last written at 299.999 s.
+		const files: Record<string, { modifiedMs: number; text: string }> = {
+			"old_Studio_00001_last.log": { modifiedMs: 299_999, text: log(PROCESS(4001), STARTED, SUCCESS) },
+		};
+		const read = signInReader({ LOCALAPPDATA: "L:" }, sizedFiles(files));
+		// A launch at 300 s gets PID 4001, and looks before its own log exists: the earlier
+		// process's sign-in is not reported as its own.
+		expect(await read(4001, 300_000)).toBeUndefined();
+		// Its log appears, showing the login dialog: that one is read from then on.
+		files["new_Studio_00002_last.log"] = { modifiedMs: 301_000, text: log(PROCESS(4001), STARTED, DIALOG) };
+		expect(await read(4001, 300_000)).toEqual({
+			state: "signed-out",
+			cause: "dialog",
+			log: join(dir, "new_Studio_00002_last.log"),
+		});
+		// And a log bound to one launch is not taken for another.
+		expect((await read(4001, 302_000))?.log).not.toBe(join(dir, "new_Studio_00002_last.log"));
+	});
+
+	test("finds the process line past the first 4 KB, as real logs have it (5011 and 5244 bytes in)", async () => {
+		const files = {
+			"late_Studio_00001_last.log": {
+				modifiedMs: 100_000,
+				text: `${"x".repeat(5_100)}\n${log(PROCESS(5005), STARTED, DIALOG)}`,
+			},
+		};
+		const read = signInReader({ LOCALAPPDATA: "L:" }, sizedFiles(files));
+		expect((await read(5005, 99_000))?.state).toBe("signed-out");
 	});
 
 	test("nothing is known when the folder cannot be read", async () => {
@@ -174,6 +247,23 @@ describe("a launched Studio that is not signed in", () => {
 		expect(machine.lock.owner).toBeUndefined();
 		// Two looks, one poll apart: not the 180 s connect timeout.
 		expect(machine.time.now - start).toBe(CONNECT_POLL_MS);
+	});
+
+	test("hidden, with a log that shows only the failed sign-in: the error says so rather than a dialog", async () => {
+		const studio = signingStudio(["signed-out"]);
+		const run = await runCli(["test", "place.rbxl"], {
+			files: { "place.rbxl": "built" },
+			studio: studio.fake,
+			onLaunch: studio.onLaunch,
+			signIn: () => {
+				const reading = studio.signIn();
+				return reading === undefined ? undefined : { ...reading, cause: "failure" };
+			},
+		});
+		expect(run.code).toBe(1);
+		expect(run.err).toContain(
+			"so place.rbxl never opened: its sign-in failed, which leaves it showing its login dialog on the hidden desktop, where nobody can answer it",
+		);
 	});
 
 	test("hidden with --keep: the window is left, and the run says it holds the lock", async () => {

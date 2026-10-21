@@ -521,6 +521,27 @@ describe("the names of before 2.0.0-beta.0 are refused, each naming its new one"
 		expect(several.launched).toHaveLength(0);
 	});
 
+	test("with a config that does not load, the shell's old variables are still refused, and the commands that read no config still run", async () => {
+		const broken = "flamework.config.json is not valid JSON";
+		const shell = await runCli(["studio", "list"], {
+			env: { ROJO_PROJECT: "a.project.json" },
+			settingsError: broken,
+		});
+		expect(shell.code).toBe(1);
+		expect(shell.err).toContain("ROJO_PROJECT is now FLAMEWORK_TEST_PROJECT");
+		expect(shell.err).not.toContain(broken);
+
+		const unlock = await runCli(["studio", "unlock"], { settingsError: broken });
+		expect(unlock.err).not.toContain(broken);
+		expect(unlock.code).toBe(0);
+
+		// A command that reads the config still says why it cannot.
+		const run = await runCli(["test", "place.rbxl"], { files: { "place.rbxl": "built" }, settingsError: broken });
+		expect(run.code).toBe(1);
+		expect(run.err).toContain(broken);
+		expect(run.launched).toHaveLength(0);
+	});
+
 	test("the API key's one name is ROBLOX_API_KEY: the TESTING_PLACE_API_KEY alias is gone", async () => {
 		const ids = { FLAMEWORK_TEST_UNIVERSE_ID: UNIVERSE, FLAMEWORK_TEST_PLACE_ID: PLACE };
 		const alias = await runCli(["cloud", "run"], { env: { ...ids, TESTING_PLACE_API_KEY: SECRET } });

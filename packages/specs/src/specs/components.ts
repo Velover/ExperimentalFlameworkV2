@@ -4595,14 +4595,26 @@ export = suite("components", [
 
 					// Each cycle: into ServerStorage, still refused and watched under it instead; out to
 					// the workspace, built; out of the DataModel, removed; and back into storage, refused
-					// again.
+					// again. A cycle whose move to the workspace builds nothing is named with
+					// what it logged (it failed once in a full Lune run, 99 builds, and rarely
+					// since).
+					const unbuilt = new Array<string>();
 					for (let cycle = 0; cycle < 100; cycle++) {
+						const logged = hidingLog.size();
+						const built = HideableItem.builds;
 						step(deferred, () => {
 							item.Parent = deeper;
 						});
 						step(deferred, () => {
 							item.Parent = place;
 						});
+						if (HideableItem.builds !== built + 1) {
+							const since = new Array<string>();
+							for (let index = logged; index < hidingLog.size(); index++) since.push(hidingLog[index]);
+							unbuilt.push(
+								`cycle ${cycle}: ${HideableItem.builds - built} builds, ${refusedCount(components, HideableItem)} refused, logged [${since.join(", ")}]`,
+							);
+						}
 						step(deferred, () => {
 							item.Parent = undefined;
 						});
@@ -4614,6 +4626,7 @@ export = suite("components", [
 
 					// Every cycle built one component and took it away, and the registry, the signals and
 					// the instances hold exactly what they held while the first refusal waited.
+					expectEqual(unbuilt.join("; "), "", `${mode}: cycles whose move to the workspace built nothing`);
 					checkItemBuilds(`${mode}: a hundred cycles`, 0);
 					expectEqual(HideableItem.builds, 100, `${mode}: builds`);
 					expectEqual(refusedCount(components, HideableItem), 1, `${mode}: refusals at the end`);

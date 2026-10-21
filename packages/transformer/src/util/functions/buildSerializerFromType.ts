@@ -38,9 +38,9 @@ import {
  * missing or invalid value never shifts the others.
  *
  * Wire format, in bytes:
- * - numbers: 8 (f64) unless branded (`u8` .. `f64`, or `varint` for a LEB128 unsigned integer); booleans 1.
- *   A `u64` or `i64` is 8, little-endian: the low 32 bits as a u32, then the high 32 bits (a u32, an i32
- *   for `i64`), exact for the whole numbers up to 2^53 in size
+ * - numbers: 8 (f64) unless branded (`u8` .. `f64`, or `varint` for a LEB128 unsigned integer);
+ *   booleans 1. A `u64` or `i64` is 8, little-endian: the low 32 bits as a u32, then the high 32
+ *   bits (a u32, an i32 for `i64`), exact for the whole numbers up to 2^53 in size
  * - strings and buffers: varint length + bytes (a fixed 1 / 2 / 4 with the `u8_string` .. `u32_buffer` brands)
  * - literal unions: a 1-byte index (2 past 255 members) into the values in canonical order (see
  *   `sortLiterals`: `false`, `true`, `""`, `0` and the names `typeof` returns first, then sorted, a
@@ -103,7 +103,7 @@ import {
  */
 
 type Width = "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "u64" | "i64" | "f32" | "f64";
-/** The 64-bit integer widths, which `buffer` has no call for: each is written as two 32-bit halves. */
+/** The 64-bit integer widths, which `buffer` has no call for: each goes as two 32-bit halves. */
 type WideWidth = Extract<Width, "u64" | "i64">;
 /** A length prefix: a varint (`v`) by default, or the fixed width a brand asks for. */
 type LengthWidth = "v" | "u8" | "u16" | "u32";
@@ -4348,13 +4348,13 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 	}
 
 	/**
-	 * A `u64` or `i64`, which `buffer` has no call for: eight bytes, little-endian, the low 32 bits as a
-	 * u32 and then the high 32 bits, a u32 for `u64` and an i32 for `i64` (two's complement, so a
-	 * negative value is the standard layout too). `math.floor(n / 2^32)` is the high half and
-	 * `n % 2^32` the low one, which Luau defines as `n - math.floor(n / 2^32) * 2^32`: exact for every
-	 * whole number up to 2^53 in size, the range the checks hold a value to. A literal is split here. A
-	 * value that is more than a name is read once, into a local in a block of its own, as
-	 * {@link writeNumber} reads a checked one.
+	 * A `u64` or `i64`, which `buffer` has no call for: eight bytes, little-endian, the low 32
+	 * bits as a u32 and then the high 32 bits, a u32 for `u64` and an i32 for `i64` (two's
+	 * complement, so a negative value is the standard layout too). `math.floor(n / 2^32)` is the
+	 * high half and `n % 2^32` the low one, which Luau defines as
+	 * `n - math.floor(n / 2^32) * 2^32`: exact for every whole number up to 2^53 in size, the range
+	 * the checks hold a value to. A literal is split here. A value that is more than a name is read
+	 * once, into a local in a block of its own, as {@link writeNumber} reads a checked one.
 	 */
 	function writeWide(ctx: Ctx, width: WideWidth, value: ts.Expression) {
 		const high = width === "u64" ? "writeu32" : "writei32";
@@ -4386,7 +4386,10 @@ export function createSerializerGenerator(state: TransformState, file: ts.Source
 		if (target === block) ctx.out.push(f.block(block.out));
 	}
 
-	/** `buffer.readu32(buf, o + 4) * 2^32 + buffer.readu32(buf, o)`, with `readi32` for an `i64`'s high half. */
+	/**
+	 * `buffer.readu32(buf, o + 4) * 2^32 + buffer.readu32(buf, o)`, with `readi32` for an `i64`'s
+	 * high half. A value another system wrote past 2^53 in size comes out as the nearest double.
+	 */
 	function readWide(ctx: Ctx, width: WideWidth): ts.Expression {
 		const high = bufferCall(width === "u64" ? "readu32" : "readi32", [ctx.buf, at(ctx, 4)]);
 		const low = bufferCall("readu32", [ctx.buf, at(ctx)]);

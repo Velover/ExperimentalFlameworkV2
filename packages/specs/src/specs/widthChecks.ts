@@ -95,6 +95,7 @@ interface WidthEvents {
 
 interface WidthFunctions {
 	widthAsk: Networking.Serialized<(id: Serialization.Implicit.u8) => Serialization.Implicit.u16>;
+	widthWideAsk: Networking.Serialized<(id: Serialization.Implicit.u8) => Serialization.Implicit.i64>;
 }
 
 const WidthEventsNetwork = Networking.createEvent<WidthEvents, WidthEvents>();
@@ -878,6 +879,47 @@ export = suite("width checks", [
 			expectEqual(refused[0].args[1], false, "answered as a failure, with no result");
 			expectEqual(refused[0].args.size(), 2, "no packed result");
 			expectWarned("[Flamework] u16 cannot hold 70000, at 'widthAsk' result", "the result");
+			__harness.clearWarnings();
+		},
+	],
+	[
+		"packs a 64-bit result as eight bytes, and checks it against 2^53 where the callback's value is packed",
+		() => {
+			const { functions } = handlers();
+			// -35 * 2^46 is past 32 bits and negative, so the high half is a negative i32;
+			// 150 * 2^46 is past 2^53.
+			const answer = (id: number) => (id - 100) * 2 ** 46;
+			if (functions.server !== undefined) functions.server.widthWideAsk.setCallback((_player, id) => answer(id));
+			else functions.client!.widthWideAsk.setCallback((id) => answer(id));
+
+			const receive = expectDefined(
+				__harness.findRemoteById(`${isServer ? "$" : "@"}widthWideAsk`),
+				"receive channel",
+			);
+			const request = Flamework.createSerializer<[Serialization.Implicit.u8]>();
+			const result = Flamework.createSerializer<[Serialization.Implicit.i64]>();
+
+			__harness.clearSent(receive);
+			deliver(receive, 1, request.serialize([65])[0]);
+			const answered = __harness.sent(receive);
+			expectEqual(answered.size(), 1, "responses");
+			expectEqual(answered[0].args[1], true, "a result that fits");
+			const packed = answered[0].args[2] as buffer;
+			expectEqual(buffer.len(packed), 8, "eight bytes");
+			expectEqual(buffer.readi32(packed, 4), -35 * 2 ** 14, "the high half, signed");
+			expectEqual(result.deserialize(packed)[0], -35 * 2 ** 46, "the packed result");
+
+			__harness.clearSent(receive);
+			__harness.clearWarnings();
+			deliver(receive, 2, request.serialize([250])[0]);
+			const refused = __harness.sent(receive);
+			expectEqual(refused.size(), 1, "responses");
+			expectEqual(refused[0].args[1], false, "answered as a failure, with no result");
+			expectEqual(refused[0].args.size(), 2, "no packed result");
+			expectWarned(
+				`[Flamework] i64 cannot hold ${tostring(150 * 2 ** 46)}, at 'widthWideAsk' result`,
+				"the result past 2^53",
+			);
 			__harness.clearWarnings();
 		},
 	],

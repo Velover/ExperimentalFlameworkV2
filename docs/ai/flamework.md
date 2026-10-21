@@ -77,10 +77,11 @@ before you write Flamework code you are not sure of.
   place and registers nothing, but git keeps no empty folder, so a fresh clone lacks it and waits.
 - Registered folders must not overlap (`src/server` and `src/server/services`): ignition raises
   `provider ID was registered more than once`.
-- Registration requires every ModuleScript under a registered folder at startup, and a module that
-  errors at its top level fails ignition. Keep modules that are neither providers nor components,
-  such as the network declarations and middleware, outside those folders. A plain helper that does
-  nothing as it loads and serves only that folder may stay.
+- Registration requires every ModuleScript under a registered folder at startup, before ignition,
+  on each realm that registers it, and a module that errors at its top level fails ignition. Any
+  module may live there if its top level runs cleanly on that realm: network declarations and
+  middleware are fine. Keep realm-specific setup (`createServer()`, `createClient()`) in a folder
+  only that realm registers, and never call `Dependency()` at a module's top level.
 - Classes are found whether exported or not, if declared at the top level of a file or namespace.
   Export them anyway when another file, or a test, imports them.
 - Inject providers through the constructor. `Dependency<T>()` is for code without a constructor,

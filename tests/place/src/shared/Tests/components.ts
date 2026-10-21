@@ -934,11 +934,21 @@ export function untilGone(lookup: () => unknown, what: string) {
 }
 
 /**
- * Everything `warn` says while the case runs, off `LogService`; a case reads it after giving a
- * warning's timer the time it asked for.
+ * Everything `warn` says while the case runs, off `LogService`. A case waits for a warning with
+ * `expectWarned`, and gives a warning's timer a fixed 0.3 seconds only to show one never came.
  */
 export function recordWarnings() {
 	return recordMessages(Enum.MessageType.MessageWarning);
+}
+
+/**
+ * Waits up to two seconds for a warning that mentions `needle`, then fails naming every warning
+ * seen. The timers here ask for 0.1 seconds, but a stalled frame can hold one past a fixed wait.
+ */
+function expectWarned(warnings: Recorded, needle: string, what = "warnings") {
+	const deadline = os.clock() + 2;
+	while (!warnings.mentions(needle) && os.clock() < deadline) task.wait();
+	expectTrue(warnings.mentions(needle), `${what}: ${warnings.describe()}`);
 }
 
 /**
@@ -948,6 +958,9 @@ export function recordWarnings() {
 function recordErrors() {
 	return recordMessages(Enum.MessageType.MessageError);
 }
+
+/** What `recordWarnings` and `recordErrors` hand a case. */
+type Recorded = ReturnType<typeof recordMessages>;
 
 function recordMessages(kind: Enum.MessageType) {
 	const lines = new Array<string>();
@@ -4625,9 +4638,7 @@ export class ComponentSpecs implements OnStart {
 
 				warnings.clear();
 				CollectionService.AddTag(core, "Impatient");
-				task.wait(0.3);
-
-				expectTrue(warnings.mentions("Impatient"), `warnings: ${warnings.describe()}`);
+				expectWarned(warnings, "Impatient");
 			});
 
 			test("drops the warning again when the tag goes while a link is still watching", () => {
@@ -4653,9 +4664,7 @@ export class ComponentSpecs implements OnStart {
 				// And the entry has not spent its one warning: tagging it again waits again.
 				warnings.clear();
 				CollectionService.AddTag(core, "Impatient");
-				task.wait(0.3);
-
-				expectTrue(warnings.mentions("Impatient"), `warnings after tagging again: ${warnings.describe()}`);
+				expectWarned(warnings, "Impatient", "warnings after tagging again");
 			});
 
 			test("leaves the dependencies of a component a link only watches unwarned", () => {
@@ -6442,12 +6451,7 @@ export class ComponentSpecs implements OnStart {
 				const instance = folder("Explained");
 				folderIn(instance, "Root");
 				CollectionService.AddTag(instance, "DeepImpatient");
-				task.wait(0.3);
-
-				expectTrue(
-					warnings.mentions("instance guard (child 'Root.Texture' is missing (expected Folder))"),
-					`warnings: ${warnings.describe()}`,
-				);
+				expectWarned(warnings, "instance guard (child 'Root.Texture' is missing (expected Folder))");
 				expectEqual(components.getComponent<DeepImpatient>(instance), undefined, "component");
 			});
 
@@ -6584,19 +6588,13 @@ export class ComponentSpecs implements OnStart {
 
 				CollectionService.AddTag(instance, "ExplainedOwner");
 				CollectionService.AddTag(rooted, "RootedImpatient");
-				task.wait(0.3);
-
-				expectTrue(
-					warnings.mentions(
-						`child 'Core' with component '${Flamework.id<Rig>()}' (${core.GetFullName()} is waiting for: instance guard (child 'Root' is missing (expected Folder)))`,
-					),
-					`warnings: ${warnings.describe()}`,
+				expectWarned(
+					warnings,
+					`child 'Core' with component '${Flamework.id<Rig>()}' (${core.GetFullName()} is waiting for: instance guard (child 'Root' is missing (expected Folder)))`,
 				);
-				expectTrue(
-					warnings.mentions(
-						`attribute 'Target' (${target.GetFullName()}: child 'Root' is missing (expected Folder))`,
-					),
-					`warnings: ${warnings.describe()}`,
+				expectWarned(
+					warnings,
+					`attribute 'Target' (${target.GetFullName()}: child 'Root' is missing (expected Folder))`,
 				);
 			});
 
@@ -6684,13 +6682,14 @@ export class ComponentSpecs implements OnStart {
 				expectEqual(components.getComponent<BrokenOwner>(instance), undefined, "the owner");
 				expectEqual(initAttempts, 1, "onInit attempts after asking again");
 
-				// A fresh wait says why it waits: the warning belongs to a wait, and the owner had qualified
-				// before the link was lost.
+				// A fresh wait says why it waits: the warning belongs to a wait, and the owner had
+				// qualified before the link was lost. Cleared first, so an earlier warning cannot
+				// stand in for it.
+				warnings.clear();
 				CollectionService.RemoveTag(instance, "BrokenOwner");
 				settle();
 				CollectionService.AddTag(instance, "BrokenOwner");
-				task.wait(0.3);
-				expectTrue(warnings.mentions("carries an invalid"), `warnings: ${warnings.describe()}`);
+				expectWarned(warnings, "carries an invalid");
 
 				// The tag going and coming back is a reason: a fresh component, and a fresh onInit.
 				CollectionService.RemoveTag(core, "BrokenInitTagged");
@@ -6951,9 +6950,7 @@ export class ComponentSpecs implements OnStart {
 
 				const instance = folder("SpeedyBad", { speed: "fast" });
 				CollectionService.AddTag(instance, "Speedy");
-				task.wait(0.3);
-
-				expectTrue(warnings.mentions(`invalid attribute 'speed' ("fast")`), `warnings: ${warnings.describe()}`);
+				expectWarned(warnings, `invalid attribute 'speed' ("fast")`);
 			});
 
 			test("warns again when a component loses a criterion and stays down", () => {
@@ -6970,8 +6967,7 @@ export class ComponentSpecs implements OnStart {
 				texture.Destroy();
 				untilGone(() => components.getComponent<DeepImpatient>(instance), "component after its tree broke");
 
-				task.wait(0.3);
-				expectTrue(warnings.mentions("child 'Root.Texture' is missing"), `warnings: ${warnings.describe()}`);
+				expectWarned(warnings, "child 'Root.Texture' is missing");
 			});
 
 			test("skips tagged instances under a blocked ancestor", () => {

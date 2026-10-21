@@ -650,7 +650,7 @@ Studio (needs "MCP server" enabled in Studio's Assistant settings):
   studio close        close the window flamework-test opened for this project
   studio status       what that window reports: edit or play, which data models exist
   studio play         start a play session in it;  studio stop  ends one
-  studio exec         run Luau in it:  --code "<luau>" | --script <file>  [--realm edit|server|client]
+  studio exec         run Luau in it: --code "<luau>" | --script <file> [--realm edit|server|client]
   studio run          run the tests in it, in a play session, without opening or closing anything
   studio list         the windows on the MCP proxy: id, place, whether flamework-test opened it
   studio tools [name] the proxy's tools, read live; with a name, its description and arguments
@@ -682,13 +682,13 @@ Flags:
              --cloud                 run in the cloud instead of Studio
              --original-place <place.rbxl>  patch a copy of this place with the build first, and
                                      run that (needs lune)
-             --project <path>        the Rojo project the run follows: its $properties are set on the
-                                     place (Workspace.SignalBehavior, the streaming radii: what no
-                                     script can set) and the patch follows its tree; repeatable or
-                                     comma-separated, one run per project, named after the file
+             --project <path>        the Rojo project the run follows: its $properties are set on
+                                     the place (Workspace.SignalBehavior, the streaming radii: what
+                                     no script can set) and the patch follows its tree; repeatable
+                                     or comma-separated, one run per project, named after the file
                                      (getProject() in a test); needs lune. Default:
-                                     $FLAMEWORK_TEST_PROJECT, else ${DEFAULT_PROJECT}, followed only
-                                     when an original is patched
+                                     $FLAMEWORK_TEST_PROJECT, else ${DEFAULT_PROJECT}, followed
+                                     only when an original is patched
              --sections <a,b>        only these sections ("economy", "economy/buys")
              --list                  list the tests instead of running them
              --json                  print the raw result JSON instead of a summary
@@ -702,10 +702,11 @@ Flags:
              --keep-awake            keep the display on while the run lasts: RenderStepped stops
                                      while it sleeps, which fails onRender tests in a run nobody
                                      watches; Windows only, not with --cloud
-             --parallel [n]          run up to n projects' Studio windows side by side (no number: 2;
-                                     at most ${PARALLEL_MOST}, and no more than there are projects), each
-                                     project's lines printed together, in project order; each window
-                                     takes about 3 GB. Not with --cloud (default: 1, one after another)
+             --parallel [n]          run up to n projects' Studio windows side by side (no number:
+                                     2; at most ${PARALLEL_MOST}, and no more than there are projects),
+                                     each project's lines printed together, in project order; each
+                                     window takes about 3 GB. Not with --cloud (default: 1, one
+                                     after another)
              --lock-timeout <seconds>  how long to wait for the Studio lock; 0 does not wait
                                      (default: ${LOCK_TIMEOUT_SECONDS})
              --connect-timeout <seconds>  how long to wait for a window Studio opened to show up on
@@ -770,16 +771,18 @@ Environment (the shell, .env or .env.local):
                                           universe.place.luau-execution-session:read/:write
   FLAMEWORK_TEST_UNIVERSE_ID, FLAMEWORK_TEST_PLACE_ID   the testing experience and its place
   FLAMEWORK_TEST_ORIGINAL_PLACE           a copy of the original place, for --original-place
-  FLAMEWORK_TEST_PROJECT                  the project(s) a run follows, comma-separated, for --project
+  FLAMEWORK_TEST_PROJECT                  the project(s) a run follows, comma-separated, for
+                                          --project
   FLAMEWORK_TEST_FAIL_ON_SKIP, FLAMEWORK_TEST_KEEP_AWAKE, FLAMEWORK_TEST_SHOW_WINDOWS
                                           true or false (1 or 0), for their flags
   FLAMEWORK_TEST_LOCK_TIMEOUT             seconds, for --lock-timeout
   FLAMEWORK_TEST_LOCK_HOLD                minutes, for --lock-hold
   FLAMEWORK_TEST_CONNECT_TIMEOUT          seconds, for --connect-timeout
   FLAMEWORK_TEST_PARALLEL                 windows at once, for --parallel
-  FLAMEWORK_TEST_STATE_DIR                where the Studio lock lives; every project must agree on it,
-                                          so set it in the shell, never in a project's .env (Bun loads
-                                          the .env of the folder a command runs in, which moves it)
+  FLAMEWORK_TEST_STATE_DIR                where the Studio lock lives; every project must agree on
+                                          it, so set it in the shell, never in a project's .env (Bun
+                                          loads the .env of the folder a command runs in, which
+                                          moves it)
   FLAMEWORK_TEST_LUNE_EXE, FLAMEWORK_TEST_STUDIO_EXE, FLAMEWORK_TEST_STUDIO_MCP_EXE
                                           lune, Roblox Studio and its MCP proxy, when not found by
                                           themselves
@@ -3178,11 +3181,16 @@ function neverConnected(
  * shows its login dialog there, where nobody can answer it, and never opens the file, so it never
  * registers with the proxy (see studioLog.ts). `window` as for {@link neverConnected}.
  */
-function signedOut(what: string, window: "open" | "closed" | "unstated", pid: number, log: string): CliError {
+function signedOut(
+	what: string,
+	window: "open" | "closed" | "unstated",
+	pid: number,
+	reading: SignInReading,
+): CliError {
 	const advice =
 		"ask the user to open Roblox Studio and sign in (one sign-in serves every Studio of theirs), then run this again. A Studio that fails to sign in at start-up signs every Studio out: seen when two started in the same second while the sign-in was due a refresh, which flamework-test no longer does";
 	return new CliError(
-		`Studio started (PID ${pid}) but is not signed in to Roblox, so ${what} never opened: it showed its login dialog on the hidden desktop, where nobody can answer it (Studio's log: ${log})`,
+		`Studio started (PID ${pid}) but is not signed in to Roblox, so ${what} never opened: ${reading.cause === "failure" ? "its sign-in failed, which leaves it showing its login dialog" : "it showed its login dialog"} on the hidden desktop, where nobody can answer it (Studio's log: ${reading.log})`,
 		window === "open"
 			? `${advice}; the window is open, and holds the Studio lock until it closes (\`flamework-test studio close\` closes it)`
 			: window === "closed"
@@ -3281,7 +3289,8 @@ export function parseIdentity(text: string): WindowIdentity | undefined {
  *   No id at all says nothing yet when `game.Name` is the file's (the attribute may not be readable
  *   yet) or `Game` or nothing (its place is still loading); another file's name makes it another's.
  * - With none (a plain run's build, `studio open`'s file), `game.Name` alone tells, whatever launch
- *   id the file carries from an earlier `test`'s patch; `Game` or nothing says nothing yet.
+ *   id the file carries from an earlier `test`'s patch; `Game` or nothing says nothing yet, with
+ *   that id or without.
  */
 function judgeAnswer(
 	answer: WindowIdentity,
@@ -3294,7 +3303,7 @@ function judgeAnswer(
 		return { unsettled: `game.Name ${JSON.stringify(answer.name)}, but no launch id yet` };
 	}
 	if (launch === undefined && named) return "ours";
-	if (answer.launch === undefined && (answer.name.trim() === "" || answer.name === "Game")) {
+	if (answer.name.trim() === "" || answer.name === "Game") {
 		return { unsettled: `its place had not loaded yet (game.Name ${JSON.stringify(answer.name)})` };
 	}
 	return "theirs";
@@ -5436,7 +5445,7 @@ async function studioTestWindow(
 			const out = signIn.signedOut();
 			if (found.studio === undefined && out !== undefined && pid !== undefined) {
 				const closed = await giveUp();
-				throw signedOut(label, keep ? "open" : closed ? "closed" : "unstated", pid, out.log);
+				throw signedOut(label, keep ? "open" : closed ? "closed" : "unstated", pid, out);
 			}
 			if (found.studio === undefined) {
 				const closed = await giveUp();
@@ -5568,10 +5577,18 @@ export function cliVersion(): string {
 /**
  * Refuses a run while an environment variable flamework-test read before 2.0.0-beta.0 is set, in
  * the shell, `.env` or `.env.local`, naming each one's new name: one read no more would otherwise
- * turn its setting off without a word. Every command checks, before it does anything.
+ * turn its setting off without a word. Every command checks, before it does anything. A config that
+ * does not load leaves the shell's to check: the error is the command's to give if it reads the
+ * config, and `studio close`, `unlock`, `lock` and `list` still run without one.
  */
 function refuseRenamedVariables(io: Io): void {
-	const lines = describeRenamedVariables(io.env, settingsOf(io).env);
+	let fromFiles: Record<string, string | undefined> = {};
+	try {
+		fromFiles = settingsOf(io).env;
+	} catch {
+		// Not remembered: the next read of the settings raises it again.
+	}
+	const lines = describeRenamedVariables(io.env, fromFiles);
 	if (lines.length === 0) return;
 	throw new CliError(
 		`flamework-test's environment variables were renamed: ${lines.join("; ")}`,

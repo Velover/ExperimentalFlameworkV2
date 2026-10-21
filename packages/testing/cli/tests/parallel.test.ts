@@ -284,7 +284,7 @@ describe("--parallel: several projects' windows side by side", () => {
 		expect(all).toContain("(client, project c)");
 	});
 
-	test("two windows launched at once are each taken for their own project's, whichever registers first", async () => {
+	test("two windows that register only once both are launched, one turn apart, are each taken for their own project's, whichever is listed first", async () => {
 		const names = ["a", "b"];
 		const machine = fakeMachine();
 		let both = false;

@@ -55,8 +55,10 @@ since v1.
   event, return without calling it. A function middleware returns `Networking.Skip` instead, and
   the caller's Promise rejects with `Cancelled`.
 - `player` is optional in the type because the client shares it; on the server it is always there.
-- Keep middleware modules outside the folders an entry point registers, since registration
-  requires every module in them.
+- Middleware and network declarations may live in a registered folder: registration requires
+  every module in it, which only loads them early. `createServer()` and `createClient()` may not:
+  keep each in a folder only its own realm registers. On the other realm it returns `nil` instead
+  of raising, which fails later, where its handlers are used.
 
 ## Config
 

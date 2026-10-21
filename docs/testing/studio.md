@@ -184,10 +184,11 @@ to anyone.
   first `StudioMCP.exe`, on 127.0.0.1:13469, every Studio and proxy connected to it) was fine. The
   user opened Studio 16 minutes later and signed in through the browser (its log: `Successfully
   received external login code`); every window since, hidden ones included, signed in by itself
-  and registered within seconds. Since then a run launches one window at a time, each once the one before has
-  signed in (3 to 5 seconds), and reads each launched window's log while it waits: a signed-out one
-  ends the wait with `... is not signed in to Roblox ...` at the first look that shows it. Each log
-  names its process (`UIThreadNotifier for process '<pid>'`) within its first second.
+  and registered within seconds. Since then a run launches one window at a time, each once the one
+  before has signed in (3 to 5 seconds), and reads each launched window's log while it waits: a
+  signed-out one ends the wait with `... is not signed in to Roblox ...` at the first look that
+  shows it. Each log names its process (`UIThreadNotifier for process '<pid>'`) within its first
+  second.
 - **A window listed under another name.** On 2026-10-07 hidden windows of `tests/place` (6 of 7 in
   two `--parallel 2` runs, and two of another project's) registered with the MCP proxy as `Game` and
   stayed so, while `game.Name` inside was the file's name; `--show-windows` runs connected by name.

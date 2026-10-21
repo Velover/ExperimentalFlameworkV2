@@ -319,22 +319,32 @@ Sizes follow the types:
 - Counts and lengths (of arrays, sets, maps, strings and buffers) are varints: one byte below 128,
   two below 16384, up to five.
 
-To pick a number's width, use a brand. `Serialization.u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `u64`,
-`i64`, `f32`, `f64` and `varint` from `@flamework-experimental/core` are `number & { __brand: "u8" }`-style
-types. Any brand with one of those literal names counts, so branded types you already have keep
-working.
+To pick a number's width, use a brand. `Serialization.u8`, `i8`, `u16`, `i16`, `u32`, `i32`,
+`u64`, `i64`, `f32`, `f64` and `varint` from `@flamework-experimental/core` are
+`number & { __brand: "u8" }`-style types. Any brand with one of those literal names counts, so
+branded types you already have keep working.
 
 `u64` and `i64` are for whole numbers past 32 bits, such as a UserId, a time in milliseconds or a
 large counter. They are eight bytes in the standard layout, little-endian: the low 32 bits, then the
 high 32 bits (in two's complement for `i64`), so other systems can read them. A Luau number holds
 whole numbers exactly only up to 2^53, so that is their range: 0 to 2^53 for `u64`, -2^53 to 2^53
-for `i64`. The checks below refuse a value past it, or a fraction.
+for `i64`, both ends included. The checks below refuse a value past it, or a fraction. A number
+that only seems to pass 2^53 can be 2^53 itself, and passes: 2^53 + 1 is 2^53 as a number. Reading
+goes the other way: a `u64` or `i64` another system wrote past 2^53 in size arrives as the nearest
+number, rounded, up to about 2^64 (an `i64` of 2^63 - 1 reads as 2^63).
 `Serialization.string8` / `string16` / `string32` (and `buffer16` / `buffer32`) give a string or
 buffer a fixed-width length instead.
 
 A brand is a cast: `7 as Serialization.u16`. By default nothing checks a cast value, so a number
 that does not fit its width wraps when it is written: 70000 sent as a `u16` arrives as 4464, -1 as
 65535, and 2.7 as 2. For values you would rather not cast, use the implicit widths below.
+
+`u64` and `i64` written unchecked (or under `"warn"`, below) go differently. A value past 2^53 is
+written as exactly the number it is (a number that large is a whole one), below 2^64 for a `u64`
+and 2^63 in size for an `i64`, wrapping only past that. A negative `u64` arrives as 2^64 plus
+it: -1 arrives as 2^64 - 1, which reads as 2^64. And a negative fraction in an `i64` is rounded
+down, -1.5 arriving as -2, where the 32-bit widths drop the fraction (-1.5 as an `i32` arrives as
+-1).
 
 Each union value carries a one-byte tag: its member's position as written. In
 `{ Coins: number } | { Items: string[] }`, Coins is 0 and Items is 1. In `number | string`, the
@@ -508,7 +518,7 @@ What each width checks:
 | Width | Check |
 |---|---|
 | `u8`, `i8`, `u16`, `i16`, `u32`, `i32` | A whole number in range. |
-| `u64`, `i64` | A whole number from 0 (`u64`) or -2^53 (`i64`) to 2^53, the ones a number holds exactly. |
+| `u64`, `i64` | A whole number from 0 (`u64`) or -2^53 (`i64`) to 2^53, both included. |
 | `varint` | A whole number from 0 to 2^35 - 1. |
 | `f32` | Not a finite number past its range. NaN and the infinities are written as they are. |
 | `string8`, `string16` | At most 255 or 65535 bytes. |
@@ -523,7 +533,8 @@ values holds no more locals than it would unchecked (Luau allows 200). A value t
 helper its file shares, kept in the file's `codec` table (`codec.checkWidth`). A file that has
 that table pays no local for it; one that has none gets the table, one local at the top of the file,
 which a file already at Luau's 200 cannot take. A number literal is judged when you build: one that
-fits needs no check. Reading needs none either, since a decoded value always fits its width.
+fits needs no check. Reading needs none either, since a decoded value always fits its width, but
+for a `u64` or `i64` another system wrote past 2^53, which arrives rounded (see `u64` above).
 
 The checks are set in `flamework.config.json`, in a section of their own, since
 `Flamework.createSerializer` checks the same way:
