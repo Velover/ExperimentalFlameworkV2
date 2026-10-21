@@ -73,8 +73,8 @@ old version emitted, so the first build stops:
 ```
 [Flamework]: Project was compiled on different version of Flamework.
 [Flamework]: This is an incremental build, which recompiles only the files that changed. Delete out/tsconfig.tsbuildinfo and build again: the next build compiles every file.
-[Flamework]: Current Flamework Version: 2.0.0-alpha.5
-[Flamework]: Previous Flamework Version: 2.0.0-alpha.4
+[Flamework]: Current Flamework Version: 2.0.0-beta.0
+[Flamework]: Previous Flamework Version: 2.0.0-alpha.8
 ```
 
 Delete the file it names and build again. roblox-ts chooses the files to compile before it loads the

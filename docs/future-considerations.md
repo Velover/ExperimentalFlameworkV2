@@ -572,6 +572,15 @@ rules:
 - **Validator rounds find contrived cases once the real bugs are gone.** Later rounds kept finding
   thread interleavings no game writes, and each fix added machinery the next round could attack. Stop
   earlier, and put such cases in section 5 instead.
+- **For beta.1: leak tests beyond components and lifecycle.** Today only those two have them:
+  weak-reference checks that an object is collected, and checks that Flamework's own tables empty.
+  Add the same for networking (a player's and each connection's state once they leave or a
+  handler disconnects), function callbacks, middleware chains and pending invokes after a timeout or
+  cancel, the serializer's per-call buffers and caches, and the testing runner between runs. Add a
+  soak test too: a long loop of adds, removals, hides and fires that watches the heap (`gcinfo()`
+  or `collectgarbage("count")`, both work in Lune and Studio) and fails on steady growth. Watch
+  through a weak-valued list read with `#`: a weak-keyed Map read with `size()` keeps its last key
+  in a register of the counting function, so it never sees the object go.
 
 ## 5. Known limits, not being pursued
 
@@ -686,7 +695,7 @@ Edge cases found and deliberately left alone, because the fix would cost more th
 - **core, `loadOrder`:** objects handed over with `provideInstance` join before any provider, so an
   `onInit`/`onStart` on one (none exists today) would precede every `loadOrder`. A lazy provider
   resolved during ignition runs `onInit` where it was resolved, and `onStart` at the default 1.
-- **packaging:** the peer range `^2.0.0-alpha.8` stops matching at the first 2.1.0 prerelease; widen
+- **packaging:** the peer range `^2.0.0-beta.0` stops matching at the first 2.1.0 prerelease; widen
   it when one ships.
 - **core, components, left-out folder registrations:** only a registration's own condition keeps its
   folder from loading (a failing inclusion also skips the registrations a plugin's setup makes); the

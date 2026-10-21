@@ -12,8 +12,9 @@ own assistant's instructions, with one line:
 ## Which Flamework
 
 - **v2** is the `@flamework-experimental/*` packages: `core`, `components`, `networking` and
-  `testing`, plus `transformer`, the tsconfig plugin that fills in the macros. It is alpha, and its
-  API changes between releases.
+  `testing`, plus `transformer`, the tsconfig plugin that fills in the macros. It is in beta: from
+  2.0.0-beta.0 on, its API changes only for a strong reason, with an upgrade note in the
+  CHANGELOG, and [Stability](../stability.md) says what is frozen.
 - **v1** is `@flamework/*` and `rbxts-transformer-flamework`. The Flamework website
   (flamework.fireboltofdeath.dev) documents v1. Don't use v1 docs, or v1's API from memory.
 - A project pins every `@flamework-experimental/*` package exactly and upgrades them together, to

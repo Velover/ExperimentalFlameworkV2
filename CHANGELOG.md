@@ -3,7 +3,13 @@
 Notable changes to the `@flamework-experimental` packages. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 2026-10-21: every package 2.0.0-beta.0
+
+The first beta. From this release on, what [Stability](docs/stability.md) covers is frozen: it
+changes only in 3.0, and during the beta only for a strong reason, with an upgrade note. Every
+package is 2.0.0-beta.0, and the sibling peer ranges ask for `^2.0.0-beta.0`. The renames and
+removals made before the freeze break code written for 2.0.0-alpha.8: read the upgrade notes below
+before upgrading.
 
 ### Upgrade notes
 
@@ -39,12 +45,13 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 - **The transformer refuses a mix of Flamework versions.** Each `@flamework-experimental` package
   records the transformer version that built it in its `flamework.build`, and the transformer now
-  compares that with its own: a project with, say, core 2.0.0-alpha.8 beside this transformer stops
-  with `Flamework's packages are not all the same version`, one line per package naming its
-  version, and the fix: install the same version of every `@flamework-experimental` package. Such a
-  mix built before and failed at runtime, or not at all, in ways that did not name the cause (the
-  alpha.8 upgrade note lists them). Install the packages at one version and build again. Libraries
-  of other scopes compiled with Flamework are not checked: any 2.x may have built them.
+  compares that with its own: a project with, say, core 2.0.0-alpha.8 beside transformer
+  2.0.0-beta.0 stops with `Flamework's packages are not all the same version`, one line per package
+  naming its version, and the fix: install the same version of every `@flamework-experimental`
+  package. Such a mix built before and failed at runtime, or not at all, in ways that did not name
+  the cause (the alpha.8 upgrade note lists them). Install the packages at one version and build
+  again. Libraries of other scopes compiled with Flamework are not checked: any 2.x may have built
+  them.
 - **Internals left the typings of core, components, testing and transformer-plugin.** They are still
   in the Luau, so nothing compiled changes, but TypeScript no longer finds them through the package
   entry: core's `holdsEveryCondition`, `ModuleState`, `ModuleProvider`, `PluginInclusion` and
