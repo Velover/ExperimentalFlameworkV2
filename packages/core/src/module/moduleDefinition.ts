@@ -36,7 +36,12 @@ export interface IgniteOptions extends ScopeCondition {
 	imports?: readonly Module[];
 }
 
-/** How a plugin was included: the plugin, and the condition its inclusion was given. */
+/**
+ * How a plugin was included: the plugin, and the condition its inclusion was given.
+ *
+ * @hidden Internal to core: not exported from the package entry, and outside the 2.x stability
+ * promise (docs/stability.md).
+ */
 export interface PluginInclusion {
 	readonly plugin: PluginDefinition;
 
@@ -44,7 +49,12 @@ export interface PluginInclusion {
 	readonly scope?: ScopeCondition;
 }
 
-/** The configuration of the module. */
+/**
+ * The configuration of the module.
+ *
+ * @hidden Internal to core: not exported from the package entry, and outside the 2.x stability
+ * promise (docs/stability.md).
+ */
 export interface ModuleState {
 	/** The debug name of this module. */
 	readonly debugName: string;
@@ -63,6 +73,10 @@ export interface ModuleState {
 }
 
 export class ModuleDefinition {
+	/**
+	 * @hidden A module is made by `ModuleBuilder.build()`; this constructor is outside the 2.x
+	 * stability promise (docs/stability.md).
+	 */
 	constructor(private moduleState: ModuleState) {}
 
 	public ignite(options?: IgniteOptions) {
@@ -96,6 +110,10 @@ export class ModuleDefinition {
 	}
 }
 
+/**
+ * @hidden Internal to core: not exported from the package entry, and outside the 2.x stability
+ * promise (docs/stability.md).
+ */
 export type ModuleProvider = {
 	config: ProviderConfig;
 	injectionId: string;

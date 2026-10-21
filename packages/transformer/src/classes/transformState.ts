@@ -34,7 +34,8 @@ import {
 import type { Env } from "../util/env";
 import { Diagnostics, ProjectError } from "./diagnostics";
 import { LocalBudget } from "../util/luauLimits";
-import { FLAMEWORK_SCOPE, CORE_PACKAGE } from "../util/packages";
+import { FLAMEWORK_SCOPE, CORE_PACKAGE, TRANSFORMER_PACKAGE } from "../util/packages";
+import { PKG_VERSION } from "../util/constants";
 import { findPlaceSource, findSourcePath, type SourcePathState } from "../util/functions/findSourcePath";
 
 /**
@@ -107,21 +108,46 @@ export function buildInfoFileName(currentDirectory: string, options: ts.Compiler
 		: "the tsbuildinfo";
 }
 
+/** The name in the package.json nearest to `file`, if there is one that names a package. */
+function packageNameOf(file: string): string | undefined {
+	try {
+		const packageJson = ts.findPackageJson(path.dirname(file), ts.sys as never);
+		const name = packageJson !== undefined ? JSON.parse(ts.sys.readFile(packageJson) ?? "{}").name : undefined;
+		return typeof name === "string" ? name : undefined;
+	} catch {
+		// Named by its folder instead.
+	}
+}
+
+/**
+ * Refuses Flamework's own packages built by another version of the transformer. Every
+ * `@flamework-experimental` package is released at one version, and each one's compiled code holds
+ * what the transformer of that version emits and expects (ids, imports of the runtime, generated
+ * metadata), so a mix fails at runtime in ways that do not name the cause. A package's flamework.build
+ * records the transformer that built it, and that is compared here, whatever installed the mix.
+ * Packages of other scopes, built with Flamework by their authors, may come from any 2.x.
+ */
+function refuseMixedVersions(packages: { name: string; version: string; file: string }[]) {
+	if (packages.length === 0) return;
+
+	const versions = [...new Set(packages.map((entry) => entry.version))];
+	throw new ProjectError(
+		[
+			`Flamework's packages are not all the same version: ${TRANSFORMER_PACKAGE} is ${PKG_VERSION}, and ${packages.length === 1 ? "this package was" : "these packages were"} built by another version.`,
+			...packages.map((entry) => `  ${entry.name} ${entry.version} (${entry.file})`),
+			`Install the same version of every ${FLAMEWORK_SCOPE} package: update ${packages.length === 1 ? "it" : "them"} to ${PKG_VERSION}, or install ${TRANSFORMER_PACKAGE}@${versions.length === 1 ? versions[0] : "<their version>"} instead, then build again.`,
+		].join("\n"),
+	);
+}
+
 /**
  * What to do when a package's flamework.build cannot be used: it was written when the package was
  * built and came with it, and this build reads it for the ids of the package's classes. The package
  * is named from the nearest package.json.
  */
 function packageBuildInfoRemedy(file: string): string[] {
-	let name: string | undefined;
-	try {
-		const packageJson = ts.findPackageJson(path.dirname(file), ts.sys as never);
-		name = packageJson !== undefined ? JSON.parse(ts.sys.readFile(packageJson) ?? "{}").name : undefined;
-	} catch {
-		// Named by its folder instead.
-	}
-
-	const owner = typeof name === "string" ? `the package ${name}` : "the package it is in";
+	const name = packageNameOf(file);
+	const owner = name !== undefined ? `the package ${name}` : "the package it is in";
 	return [
 		`It came with ${owner}, which wrote it when it was built, and this build reads it for the ids of that package's classes. Reinstall the package, or build it again if it is your own.`,
 	];
@@ -205,12 +231,20 @@ export class TransformState {
 			}
 		}
 
+		const mixed = new Array<{ name: string; version: string; file: string }>();
 		for (const candidate of candidates) {
 			const relativeCandidate = path.relative(this.currentDirectory, candidate).replace(/\\/g, "/");
 			const buildInfo = BuildInfo.fromPath(candidate, relativeCandidate, packageBuildInfoRemedy(candidate));
 			Logger.infoIfVerbose(`Loaded buildInfo at ${relativeCandidate}, next id: ${buildInfo.getLatestId()}`);
 			baseBuildInfo.addBuildInfo(buildInfo);
+
+			const name = packageNameOf(candidate);
+			const version = buildInfo.getFlameworkVersion();
+			if (name?.startsWith(`${FLAMEWORK_SCOPE}/`) && version !== PKG_VERSION) {
+				mixed.push({ name, version, file: relativeCandidate });
+			}
 		}
+		refuseMixedVersions(mixed);
 	}
 
 	/**

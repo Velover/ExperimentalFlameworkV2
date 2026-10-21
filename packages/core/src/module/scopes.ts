@@ -68,7 +68,13 @@ export function holdsCondition(condition: ScopeCondition | undefined): boolean {
 	return true;
 }
 
-/** Whether every condition holds. */
+/**
+ * Whether every condition holds.
+ *
+ * Internal: left out of the typings, and outside the 2.x stability promise (docs/stability.md).
+ *
+ * @internal
+ */
 export function holdsEveryCondition(conditions: ReadonlyArray<ScopeCondition>): boolean {
 	for (const condition of conditions) {
 		if (!holdsCondition(condition)) {
@@ -112,6 +118,9 @@ export function listConditions(conditions: ReadonlyArray<ScopeCondition>): strin
 /**
  * Describes the conditions that applied to something, and the active set they were judged
  * against, for an error message: `activeIn [a, b]; inactiveIn [c]; active scopes [a]`.
+ *
+ * @hidden Shared between Flamework's own packages, which are installed at one version: outside the 2.x
+ * stability promise (docs/stability.md), and may change in any release.
  */
 export function describeConditions(conditions: ReadonlyArray<ScopeCondition>): string {
 	const parts = listConditions(conditions);

@@ -130,15 +130,25 @@ export class LifecycleProvider {
 	 * `start` orders them by. Empty unless a provider sets one, and emptied once they have started.
 	 */
 	private startLoadOrders = new Map<OnStart, number>();
-	public onStart = new Set<OnStart>();
-	public onTick = new Set<OnTick>();
-	public onPhysics = new Set<OnPhysics>();
-	public onRender = new Set<OnRender>();
-	public onExtinguished = new Set<OnExtinguished>();
+	private startMembers = new Set<OnStart>();
+	private tickMembers = new Set<OnTick>();
+	private physicsMembers = new Set<OnPhysics>();
+	private renderMembers = new Set<OnRender>();
+	private extinguishedMembers = new Set<OnExtinguished>();
 
-	private tickListeners = new FrameListeners(this.onTick);
-	private physicsListeners = new FrameListeners(this.onPhysics);
-	private renderListeners = new FrameListeners(this.onRender);
+	/**
+	 * What is attached to each event right now: providers, and the objects attached through
+	 * `listen` or `createClassInstance`. They are there to be read; only the plugin changes them.
+	 */
+	public readonly onStart: ReadonlySet<OnStart> = this.startMembers;
+	public readonly onTick: ReadonlySet<OnTick> = this.tickMembers;
+	public readonly onPhysics: ReadonlySet<OnPhysics> = this.physicsMembers;
+	public readonly onRender: ReadonlySet<OnRender> = this.renderMembers;
+	public readonly onExtinguished: ReadonlySet<OnExtinguished> = this.extinguishedMembers;
+
+	private tickListeners = new FrameListeners(this.tickMembers);
+	private physicsListeners = new FrameListeners(this.physicsMembers);
+	private renderListeners = new FrameListeners(this.renderMembers);
 
 	private identifiers = new Map<object, string>();
 	private moduleConnections = new Map<Module, RBXScriptConnection[]>();
@@ -678,6 +688,11 @@ export class LifecycleProvider {
 		return true;
 	}
 
+	/**
+	 * The plugin's own hook, outside the stability promise (docs/stability.md).
+	 *
+	 * @internal
+	 */
 	public addInit(object: OnInit, context: InterfaceContext) {
 		this.initMembers.add(object);
 
@@ -697,6 +712,11 @@ export class LifecycleProvider {
 		}
 	}
 
+	/**
+	 * The plugin's own hook, outside the stability promise (docs/stability.md).
+	 *
+	 * @internal
+	 */
 	public removeInit(object: OnInit) {
 		this.initMembers.delete(object);
 		this.lateProviders.delete(object);
@@ -711,8 +731,13 @@ export class LifecycleProvider {
 		this.forget(object);
 	}
 
+	/**
+	 * The plugin's own hook, outside the stability promise (docs/stability.md).
+	 *
+	 * @internal
+	 */
 	public addStart(object: OnStart, context: InterfaceContext) {
-		this.onStart.add(object);
+		this.startMembers.add(object);
 
 		// Only a provider is started by the plugin, as with `onInit`: an instance attached through
 		// `listen` or `createClassInstance` is owned by whoever created it. `Components` starts a
@@ -731,8 +756,13 @@ export class LifecycleProvider {
 		}
 	}
 
+	/**
+	 * The plugin's own hook, outside the stability promise (docs/stability.md).
+	 *
+	 * @internal
+	 */
 	public removeStart(object: OnStart) {
-		this.onStart.delete(object);
+		this.startMembers.delete(object);
 		this.lateProviders.delete(object);
 		this.startLoadOrders.delete(object);
 
@@ -744,6 +774,11 @@ export class LifecycleProvider {
 		this.forget(object);
 	}
 
+	/**
+	 * The plugin's own hook, outside the stability promise (docs/stability.md).
+	 *
+	 * @internal
+	 */
 	public postIgnite(module: Module) {
 		this.module = module;
 
@@ -799,6 +834,8 @@ export class LifecycleProvider {
 	 * answered false, `extinguish()` raised, a module importing this one could not ignite, the
 	 * hooks of plugins after this one had not run, and ignition could still fail -- an import
 	 * extinguished while an `onInit` yielded had the providers started against it first.
+	 *
+	 * @internal
 	 */
 	public start(module: Module) {
 		// An `onStart` may extinguish the module; nothing starts or ticks after that.
@@ -870,6 +907,11 @@ export class LifecycleProvider {
 		return sorted;
 	}
 
+	/**
+	 * The plugin's own hook, outside the stability promise (docs/stability.md).
+	 *
+	 * @internal
+	 */
 	public extinguished(module: Module) {
 		const connections = this.moduleConnections.get(module);
 		if (connections) {
@@ -910,7 +952,7 @@ export class LifecycleProvider {
 
 	/** @internal */
 	public addExtinguished(object: OnExtinguished) {
-		this.onExtinguished.add(object);
+		this.extinguishedMembers.add(object);
 
 		if (this.isExtinguishing) {
 			this.untold.add(object);
@@ -934,7 +976,7 @@ export class LifecycleProvider {
 			}
 		}
 
-		this.removeFrom(this.onExtinguished, object);
+		this.removeFrom(this.extinguishedMembers, object);
 	}
 }
 

@@ -145,7 +145,7 @@ export namespace Flamework {
 		const version = (first as Serialization.SerializerOptions).version;
 		if (second.version !== version) {
 			error(
-				`[Flamework] createSerializer was given version ${version}, but the transformer built this serializer without a header: update @flamework-experimental/transformer`,
+				`[Flamework] createSerializer was given version ${version}, but the transformer built this serializer without a header: install @flamework-experimental/transformer at the version of @flamework-experimental/core (a versioned serializer needs 2.0.0-alpha.8 or later)`,
 				2,
 			);
 		}

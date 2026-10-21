@@ -255,7 +255,13 @@ export function afterEach(callback: TestHook) {
 	requireBody("afterEach()").afterEach.push(callback);
 }
 
-/** Every section, in the order they were first defined. */
+/**
+ * Every section, in the order they were first defined.
+ *
+ * Internal: left out of the typings, and outside the 2.x stability promise (docs/stability.md).
+ *
+ * @internal
+ */
 export function getSections(): readonly Section[] {
 	return sections;
 }

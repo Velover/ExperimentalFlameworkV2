@@ -30,6 +30,14 @@
     "@rbxts/types": "^1.0.948",
     "roblox-ts": "^3.0.0"
   },
+  "peerDependencies": {
+    "@flamework-experimental/transformer": "^2.0.0-alpha.8"
+  },
+  "peerDependenciesMeta": {
+    "@flamework-experimental/transformer": {
+      "optional": true
+    }
+  },
   "dependencies": {
     "@rbxts/maid": "^1.0.0-ts.1",
     "@rbxts/object-utils": "^1.0.4",

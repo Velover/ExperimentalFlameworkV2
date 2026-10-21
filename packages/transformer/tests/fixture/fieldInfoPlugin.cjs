@@ -44,6 +44,9 @@ registerPlugin((api) => {
 		);
 	});
 
+	/** The version of the transformer running the plugin, which a plugin can check. */
+	api.registerMacroType("transformerVersion", () => expr.string(api.version));
+
 	/** Exercises the expression factory beyond literals. */
 	api.registerMacroType("describe", (type) => expr.string(describe(type)));
 

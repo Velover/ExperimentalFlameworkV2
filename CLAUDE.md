@@ -11,10 +11,16 @@ small change never needs it.
 | `packages/testing/cli` | `bun test packages/testing/cli/tests` (one file when the change is local) and `tsc -p packages/testing/cli` | 20 s |
 | runtime code in `packages/core`, `components`, `networking`, `testing/src` | `bun run build`, then `bun run test:runtime` | 3 min |
 | `packages/transformer` | the test files of that area: `bun test --timeout 120000 packages/transformer/tests/<file>` | 1–3 min |
-| what can change a byte on the wire: `buildSerializerFromType.ts`, the packing in `transformNetworkingCall.ts`, the networking runtime's packed paths | also `bun run build`, then `bun run test:runtime`: its `golden layouts` suite writes every sample of `packages/specs/src/golden/layouts.ts` and compares the bytes with `packages/specs/golden`, then reads each golden back. A deliberate layout change only: `bun run test:runtime --update-golden` rewrites the goldens on any shell (the Server run writes, the Client run checks), committed with a CHANGELOG upgrade note | 3 min |
-| packaging: a package's `files`, `scripts/copy-*.mjs`, `scripts/links.mjs` | `bun run test:packaging` | 1 min |
+| what can change a byte on the wire: `buildSerializerFromType.ts`, the packing in `transformNetworkingCall.ts`, the networking runtime's packed paths | also `bun run build`, then `bun run test:runtime`: its `golden layouts` suite writes every sample of `packages/specs/src/golden/layouts.ts` and compares the bytes with `packages/specs/golden`, then reads each golden back. A deliberate layout change only: `bun run test:runtime --update-golden` rewrites the goldens on any shell (the Server run writes, the Client run checks), committed with a CHANGELOG upgrade note. From 2.0.0-beta.0 no 2.x release may change a layout or its hash (docs/stability.md): a golden that differs blocks the release; it is not rewritten to pass | 3 min |
+| packaging: a package's `files`, `scripts/copy-*.mjs`, `scripts/links.mjs`; a moved or renamed file or declaration in a package, or a change to what the transformer emits (`tests/packaging/abi.test.ts` pins the package ids and runtime names compiled code depends on) | `bun run test:packaging` | 1 min |
 | behaviour only the engine shows (signals, replication, streaming) | `bun run test:place --project default.project.json --sections <section>`, one project; all four projects: `bun run test:place --parallel 2` (the place's default; `--parallel 1` only for timing or a window's focus) | several min, Studio; all four projects about 5 min with `--parallel 2`, 7 min 20 s one after another |
 
+- **Release gates.** Before every release, whatever else it runs: `bun run build`, then
+  `bun run test:runtime` with its `golden layouts` suite passing, and `packages/specs/golden`
+  changed since the previous release only by added lines (`git diff <previous release> --
+  packages/specs/golden`: a new type or width adds samples; a changed or removed line is a changed
+  layout), since the serializer layouts and their hashes are frozen for 2.x; and `bun run test:packaging`, whose `abi.test.ts` pins the package
+  ids and runtime names. Neither is rewritten to make a release pass (docs/stability.md).
 - **Ask first, saying why and how long:**
   - `bun run test` (every suite);
   - the whole `test:unit` (about 12 min);

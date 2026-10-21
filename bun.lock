@@ -57,6 +57,12 @@
         "@rbxts/types": "^1.0.948",
         "roblox-ts": "^3.0.0",
       },
+      "peerDependencies": {
+        "@flamework-experimental/transformer": "^2.0.0-alpha.8",
+      },
+      "optionalPeers": [
+        "@flamework-experimental/transformer",
+      ],
     },
     "packages/networking": {
       "name": "@flamework-experimental/networking",

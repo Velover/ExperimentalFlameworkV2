@@ -6,6 +6,7 @@
 		"rootDir": "src",
 		"typeRoots": ["node_modules/@types"],
 		"declaration": true,
+		"stripInternal": true,
 
 		"strict": true,
 		"lib": ["ES2020"],

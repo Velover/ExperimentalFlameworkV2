@@ -20,6 +20,24 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   the event unreliable. The build names the right one (unless `noSemanticDiagnostics` is on, which
   leaves TypeScript's own message).
 
+- **The transformer refuses a mix of Flamework versions.** Each `@flamework-experimental` package
+  records the transformer version that built it in its `flamework.build`, and the transformer now
+  compares that with its own: a project with, say, core 2.0.0-alpha.8 beside this transformer stops
+  with `Flamework's packages are not all the same version`, one line per package naming its
+  version, and the fix: install the same version of every `@flamework-experimental` package. Such a
+  mix built before and failed at runtime, or not at all, in ways that did not name the cause (the
+  alpha.8 upgrade note lists them). Install the packages at one version and build again. Libraries
+  of other scopes compiled with Flamework are not checked: any 2.x may have built them.
+- **Internals left the typings of core, components, testing and transformer-plugin.** They are still
+  in the Luau, so nothing compiled changes, but TypeScript no longer finds them through the package
+  entry: core's `holdsEveryCondition`, `ModuleState`, `ModuleProvider`, `PluginInclusion` and
+  `ProviderLookup`; components' `ComponentModuleConfig`; testing's `runTests`, `RunnerConfig`,
+  `getSections`, `resolveTestingOptions` and `ResolvedTestingOptions`; transformer-plugin's
+  `drainRegisteredPlugins`. None was documented. `LifecycleProvider`'s `onStart`, `onTick`,
+  `onPhysics`, `onRender` and `onExtinguished` are `ReadonlySet`s now, and its `addInit`,
+  `removeInit`, `addStart`, `removeStart`, `postIgnite`, `start` and `extinguished` are
+  internal: read the sets, and attach with `module.listen`. [Stability](docs/stability.md) lists
+  what else is outside the promise.
 - **flamework-test's settings are renamed, and the old names are refused.** Every setting now has
   one name in three spellings: its flag, its key in a new `flameworkTest` section of
   `flamework.config.json`, and its variable, `FLAMEWORK_TEST_` and the key in capitals
@@ -140,6 +158,26 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   2^53, so that is the range: 0 to 2^53 for `u64`, -2^53 to 2^53 for `i64`. A value past it, or a
   fraction, fails `serialization.checks` as a value too big for any width does. Needs the
   transformer of the same release.
+- **An optional peer dependency on the transformer** (`peerDependenciesMeta`), with the same
+  range as core's siblings take: npm checks the range when the transformer is installed, and asks
+  nothing of a project that only needs core's types.
+
+#### Changed
+
+- **What 2.x freezes is written down:** [docs/stability.md](docs/stability.md), shipped in core's
+  `docs`, covers the exported and documented names, config keys, flamework-test's flags and
+  variables, the package ids, the emitted code and the runtime names it calls, and stored
+  `createSerializer` layouts with their layout-hash input; and lists what is outside it.
+  `tests/packaging/abi.test.ts` pins the ids and runtime names: a moved file or a renamed helper
+  fails it, saying that it breaks code compiled against an earlier 2.x.
+- **Internals are marked as such** (see the upgrade notes): `holdsEveryCondition`, `ModuleState`,
+  `ModuleProvider`, `PluginInclusion` and `ProviderLookup` are `@internal` and left out of the
+  typings; `LifecycleProvider`'s mutators are `@internal` and its sets `ReadonlySet`s. The helpers
+  components and testing import (`explainLeftOut`, `leftOutRegistration`, `LeftOutRegistration`,
+  `describeConditions`, `importModule`) stay typed but are `@hidden` and outside the promise, as
+  are the constructors of `ModuleDefinition` and `Components`.
+- **The refusal of a serializer built without its header names the transformer version to
+  install:** the version of `@flamework-experimental/core`, and 2.0.0-alpha.8 or later.
 
 ### networking
 
@@ -170,6 +208,10 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   test; `cloud test`, which ran the same thing, is refused (its `--dry-run`, `--code` and
   `--script` are `cloud publish` followed by `cloud run`). The old names are refused, each naming
   its new one, and the refusals are tested one by one.
+
+- **`runTests`, `RunnerConfig`, `getSections`, `resolveTestingOptions` and
+  `ResolvedTestingOptions` are `@internal`** and left out of the typings; `Testing.run` and
+  `Testing.list` are the way to run and list tests.
 
 #### Added
 
@@ -270,6 +312,11 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   at a time, and where even that is over by the estimate the smaller form is emitted anyway,
   without an error.
 
+- **A build error for a mix of Flamework versions** (see the upgrade notes): every
+  `@flamework-experimental` package whose `flamework.build` another transformer version wrote is
+  named, with that version, this transformer's, and the fix.
+- **`api.version` for plugins** (see transformer-plugin).
+
 #### Fixed
 
 - **Another transformer listed before Flamework's in `tsconfig.json`'s `plugins` no longer breaks
@@ -340,6 +387,19 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   union's or an enum's table is read one table index slower (12% on the round trip of a one-literal
   value).
 
+### transformer-plugin
+
+#### Added
+
+- **`PluginApi.version`:** the version of the transformer running the plugin, so that a plugin can
+  check it and refuse with a message of its own instead of failing on a member that is not there.
+
+#### Changed
+
+- **`drainRegisteredPlugins` is left out of the typings** (the package now builds with
+  `stripInternal`). It was `@internal` already; a plugin calling it would take the other plugins'
+  registrations.
+
 ### Docs
 
 - Guide 05, "What takes a component down again", and `docs/ai/components.md`: hiding a tagged child
@@ -356,6 +416,12 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   a skipped child is recovered, and what each costs.
 - Guide 06, "Good practices", and guide 07, "Macros": recursive types get guards that call
   themselves, check each table once, and refuse a value nested deeper than about 1,000 levels.
+- `docs/stability.md`, linked from `docs/README.md`, which now says v2 is in beta: what 2.x keeps
+  from one release to the next, and what is internal.
+- Guide 07, "Serializers" and "Versions": no 2.x release changes a layout or its hash; a change comes
+  behind an option, or in 3.0. Guide 04: `LifecycleProvider`'s sets are `ReadonlySet`s.
+- `docs/reference/transformer-plugins.md`: `api.version`, and `api.options` comes from
+  `flamework.config.json`.
 
 ## 2026-10-06: every package 2.0.0-alpha.8
 

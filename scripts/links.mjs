@@ -192,7 +192,7 @@ export function coreDocs() {
 			.sort()
 			.map((name) => `docs/${folder}/${name}`);
 
-	return ["docs/README.md", ...pages("ai"), ...pages("guide")];
+	return ["docs/README.md", "docs/stability.md", ...pages("ai"), ...pages("guide")];
 }
 
 /** Every Markdown file a package ships at the same path as in the repository. */

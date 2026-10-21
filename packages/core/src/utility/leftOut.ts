@@ -8,6 +8,9 @@ import { getPathRoot } from "./pathRoot";
  * A path or glob registration that its own scope condition left out. Its folder was never looked up,
  * so nothing under it was loaded, and nothing from it was registered or recorded as inactive: this
  * is what a miss can still say about the classes there.
+ *
+ * @hidden Shared between Flamework's own packages, which are installed at one version: outside the 2.x
+ * stability promise (docs/stability.md), and may change in any release.
  */
 export interface LeftOutRegistration {
 	/** The call as written, for messages: `registerProviders("src/server/debug")`. */
@@ -29,6 +32,9 @@ export interface LeftOutRegistration {
 /**
  * Records a registration left out by its own condition. Reads nothing but the path root, which is
  * found from Flamework's own metadata, never from the folder.
+ *
+ * @hidden Shared between Flamework's own packages, which are installed at one version: outside the 2.x
+ * stability promise (docs/stability.md), and may change in any release.
  */
 export function leftOutRegistration(
 	call: string,
@@ -104,6 +110,9 @@ function isUnder(moduleScript: unknown, registration: LeftOutRegistration) {
  * - the class has loaded some other way, and its module is under one of them: that one, and why;
  * - the class has not loaded: every one of them, since the class may be under any;
  * - nothing when there are none, or when the loaded class is under none of them.
+ *
+ * @hidden Shared between Flamework's own packages, which are installed at one version: outside the 2.x
+ * stability promise (docs/stability.md), and may change in any release.
  */
 export function explainLeftOut(id: string, leftOut: ReadonlyArray<LeftOutRegistration>): string | undefined {
 	if (leftOut.isEmpty()) return undefined;

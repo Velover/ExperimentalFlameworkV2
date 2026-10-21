@@ -12,6 +12,7 @@ import { f } from "../../util/factory";
 import { createNodeFactory, createNodeHandle, unwrapNode } from "./nodeFactory";
 import { createTypeFactory } from "./typeFacade";
 import { PLUGIN_PACKAGE } from "../../util/packages";
+import { PKG_VERSION } from "../../util/constants";
 import { localName } from "../../util/functions/identifierName";
 
 export interface PluginHost {
@@ -94,6 +95,7 @@ export function createPluginHost(state: TransformState): PluginHost | undefined 
 		}
 
 		const api: PluginApi = {
+			version: PKG_VERSION,
 			factory,
 			options,
 			registerMacroType(id, handler) {

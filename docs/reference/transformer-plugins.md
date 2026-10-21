@@ -117,12 +117,29 @@ users get a real TypeScript diagnostic with a source span rather than a stack tr
 |---|---|
 | `api.factory.expr` | `string`, `number`, `bool`, `nil`, `identifier`, `array`, `object`, `call`, `new`, `property`, `element`, `binary`, `not`, `conditional`, `arrow`, `parenthesize` |
 | `api.factory.stmt` | `variable`, `expression`, `return`, `block`, `if` |
-| `api.options` | the `options` object from tsconfig |
+| `api.options` | the plugin's `options` object from `flamework.config.json` |
+| `api.version` | the version of `@flamework-experimental/transformer` running the plugin, such as `"2.0.0-beta.0"` |
 | `Type` | `isSubtypeOf`, `isSupertypeOf`, `isEquivalentTo`, `isUnion`, `isIntersection`, `isObjectLike`, `isArray`, `isTuple`, `isLiteral(kind?)`, `isPrimitive`, `isOptional`, `getNonNullable`, `getName`, `toString` |
 | `ObjectLikeType` | `getFields`, `getIndexSignatures`, `getCallSignatures`, `getConstructSignatures` |
 | `ArrayType` / `TupleArrayType` | `getElementType`, `isReadonly`, `getElements` |
 | `UnionOrIntersectionType` | `getConstituents` |
 | `LiteralType` | `getLiteralValue` |
+
+## Versions
+
+`api.version` is the transformer's version. A plugin that needs something a later transformer added,
+or that was written against one major version, can check it and refuse with a message of its own,
+rather than fail on a member that is not there:
+
+```js
+registerPlugin((api) => {
+	const [major] = api.version.split(".");
+	if (major !== "2") throw new Error(`my-plugin supports Flamework 2.x, not ${api.version}`);
+});
+```
+
+The API above is covered by the [stability promise](../stability.md): a 2.x transformer only adds to
+it.
 
 ## Constraints
 

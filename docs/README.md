@@ -4,8 +4,9 @@ Flamework is a framework for roblox-ts built around **modules**. A module is a d
 container that you create and start yourself; starting it is called *igniting* it. Everything else
 is a plugin or a package built on top of modules: lifecycle events, components and networking.
 
-> These docs cover **v2**, which is still in alpha: its packages are published as `2.0.0-alpha`
-> prereleases. The
+> These docs cover **v2**, which is in beta: its packages are published as `2.0.0-beta`
+> prereleases. From 2.0.0-beta.0 on, the API changes only for a strong reason, with an upgrade
+> note; [Stability](stability.md) says what is frozen and what is not. The
 > [Flamework website](https://flamework.fireboltofdeath.dev/docs/introduction) documents v1, and
 > most of it no longer applies. See [migrating from v1](guide/10-migrating-from-v1.md).
 
@@ -45,6 +46,8 @@ providers, components, networking, tests or a plugin, it sends it to the file fo
 
 ## Reference
 
+- [Stability](stability.md) -- what 2.x keeps from one release to the next: exported names, config
+  keys, the CLI, package ids, emitted code and stored serializer layouts; and what is internal.
 - [Internals](reference/internals.md) -- what the transformer does to your code, and what the
   runtime does with the result. Read this to change Flamework, or to debug something that only fails
   at runtime.

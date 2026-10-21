@@ -10,7 +10,6 @@ import {
 	defer,
 	defineTests,
 	getProject,
-	runTests,
 	scratch,
 	skip,
 	test,
@@ -30,10 +29,21 @@ import {
 } from "../testkit";
 
 /**
- * The registry is process-wide, as it is in a game, so every case starts it empty. The reset and
- * the attachment probe are internal and stripped from the package's types, hence the cast.
+ * The registry is process-wide, as it is in a game, so every case starts it empty. The reset, the
+ * attachment probe, the runner and the resolved options are internal and stripped from the
+ * package's types, hence the cast.
  */
-const internal = testing as unknown as { __resetTests: () => void; __isAttached: () => boolean };
+const internal = testing as unknown as {
+	__resetTests: () => void;
+	__isAttached: () => boolean;
+	runTests: (
+		filter: testing.TestFilter,
+		options: testing.RunOptions | undefined,
+		config: { timeout: number; concurrency?: number },
+	) => testing.RunResult;
+	resolveTestingOptions: (options?: TestingOptions) => { concurrency: number };
+};
+const runTests = internal.runTests;
 
 /** The active scopes are compiled in; the specs set them the way the scopes suite does. */
 const scopeHarness = core as unknown as { __setActiveScopes: (scopes: readonly string[] | undefined) => void };
@@ -1604,8 +1614,8 @@ export = suite("testing", [
 		() => {
 			if (!RunService.IsServer()) return;
 
-			expectEqual(testing.resolveTestingOptions().concurrency, testing.DEFAULT_CONCURRENCY, "the default");
-			expectEqual(testing.resolveTestingOptions({ concurrency: 2 }).concurrency, 2, "an option");
+			expectEqual(internal.resolveTestingOptions().concurrency, testing.DEFAULT_CONCURRENCY, "the default");
+			expectEqual(internal.resolveTestingOptions({ concurrency: 2 }).concurrency, 2, "an option");
 
 			fresh(() => {
 				defineTests("configured", { concurrent: true }, () => test("runs", () => {}));

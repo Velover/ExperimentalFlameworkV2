@@ -1843,8 +1843,8 @@ it before it ends.
 - `scripts/copy-readme.mjs` copies the root README into every package at publish time, and the root
   README now documents the monorepo's development workflow rather than the framework.
   `scripts/copy-docs.mjs` (`bun run prepare:docs`, part of `prepare:publish`, and core's own
-  `prepack`, which `npm pack`/`bun pm pack` and the publishes run) copies `docs/README.md` and
-  `docs/guide` into `packages/core/docs`. Both scripts point every link to a file the package does
+  `prepack`, which `npm pack`/`bun pm pack` and the publishes run) copies `docs/README.md`,
+  `docs/stability.md`, `docs/ai` and `docs/guide` into `packages/core/docs`. Both scripts point every link to a file the package does
   not ship at GitHub, and leave code fences and code spans alone (`scripts/links.mjs`). core ships
   no Rojo project file, so a place maps its whole folder: the docs arrive as two empty Folders, and a
   nested `node_modules` (npm and bun nest core's `@rbxts/t` there when the game's own is older than

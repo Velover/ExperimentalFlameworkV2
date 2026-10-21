@@ -29,6 +29,9 @@ function otherRealmReason(rbxPath: readonly string[]): string | undefined {
 /**
  * Requires one ModuleScript through the roblox-ts runtime, as an `import` would, and returns what
  * it exported. A module that fails to load raises with its full name and how long it took.
+ *
+ * @hidden Shared between Flamework's own packages, which are installed at one version: outside the 2.x
+ * stability promise (docs/stability.md), and may change in any release.
  */
 export function importModule(moduleScript: ModuleScript): defined | undefined {
 	const start = os.clock();

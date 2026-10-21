@@ -1,4 +1,4 @@
-import { describe, fieldInfo } from "./macros";
+import { describe, fieldInfo, transformerVersion } from "./macros";
 
 interface PlayerSave {
 	coins: number;
@@ -18,3 +18,5 @@ export const booleanLiteralKind = describe<true>();
 export const unionKind = describe<string | number>();
 export const tupleKind = describe<[string, number]>();
 export const arrayKind = describe<boolean[]>();
+
+export const runningVersion = transformerVersion<void>();

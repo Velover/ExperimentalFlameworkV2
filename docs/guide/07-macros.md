@@ -334,8 +334,11 @@ any of it, and nothing in the output describes the type.
   a mapped type over a union of keys (`Record<"speed" | "power", V>`, `Pick`, `Omit`) sends its
   fields by key, sorted. Reordering fields, members or an enum's members, adding a literal value, a
   key or an enum member (which can renumber the others), or changing a width changes the format: a
-  buffer written before is then read wrong, or not at all. A Flamework upgrade can change a layout
-  too, and the changelog's upgrade notes say which. Keep that in mind before you store buffers, in a
+  buffer written before is then read wrong, or not at all. A Flamework upgrade does not: from
+  2.0.0-beta.0 on, no 2.x release changes the layout, or the layout hash, of a type that already
+  serializes. New types and widths may be added; a change to an existing layout comes only behind
+  an option you turn on, or in a major release, whose upgrade notes say which
+  ([Stability](../stability.md)). Keep your own changes in mind before you store buffers, in a
   DataStore say, and give their serializer a version (below).
 - `deserialize` checks lengths, counts, union tags and literal indices, and trusts no count or
   length it reads
@@ -379,7 +382,8 @@ here: `deserialize` then refuses a buffer whose type changed without the number 
 
 The hash is what catches a change to the type made without a new version: a field added, removed,
 renamed, reordered or retyped, a width changed, a union member added or moved, a literal value
-added, an enum's members reordered, and a Flamework upgrade that changes how the type is written.
+added, an enum's members reordered, and a major Flamework upgrade that changes how the type is
+written (no 2.x release does).
 It leaves out what changes no byte: the names of types, a width against its
 `Serialization.Implicit` twin (only checked, written the same), what a blob holds. A changed layout
 keeps its hash about once in four billion times.

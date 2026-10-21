@@ -21,6 +21,9 @@ for (const leftover of [
 	"tsconfig.buildinfo-probe.json",
 	"buildinfo-probe.tsbuildinfo",
 	"src/buildInfoPackage",
+	// versionCheck.test.ts's packages.
+	"src/versionProbe",
+	"src/versionProbeOther",
 ]) {
 	fs.rmSync(path.join(FIXTURE, leftover), { recursive: true, force: true });
 }

@@ -95,6 +95,11 @@ export interface RunResult {
 	concurrency: number;
 }
 
+/**
+ * Internal: left out of the typings, and outside the 2.x stability promise (docs/stability.md).
+ *
+ * @internal
+ */
 export interface RunnerConfig {
 	/** Seconds a single test may take before it is cancelled and counted as failed. */
 	timeout: number;
@@ -672,6 +677,10 @@ function concurrencyOf(options: RunOptions | undefined, config: RunnerConfig): n
  * per test as it ends (`PASS`, `FAIL` with the failure, or `SKIP` with the reason) and a summary,
  * so a console or a task log reads the same as the returned table, which lists every section and
  * test in the order they started (declaration order, or the filter's), however they finished.
+ *
+ * Internal: left out of the typings, and outside the 2.x stability promise (docs/stability.md).
+ *
+ * @internal
  */
 export function runTests(filter: TestFilter, options: RunOptions | undefined, config: RunnerConfig): RunResult {
 	if (running) {

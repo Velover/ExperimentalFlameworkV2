@@ -43,7 +43,13 @@ import {
 	type ScopeCondition,
 } from "./scopes";
 
-/** What a lookup through a module and its imports found: where, and which class when it is a class provider. */
+/**
+ * What a lookup through a module and its imports found: where, and which class when it is a class provider.
+ *
+ * Internal: left out of the typings, and outside the 2.x stability promise (docs/stability.md).
+ *
+ * @internal
+ */
 export interface ProviderLookup {
 	module: Module;
 	classValue?: object;

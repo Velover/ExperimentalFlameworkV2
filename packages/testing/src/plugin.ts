@@ -45,7 +45,13 @@ export interface TestingOptions {
 	concurrency?: number;
 }
 
-/** The options in effect: what was given in code, else the config file, else the defaults. */
+/**
+ * The options in effect: what was given in code, else the config file, else the defaults.
+ *
+ * Internal: left out of the typings, and outside the 2.x stability promise (docs/stability.md).
+ *
+ * @internal
+ */
 export interface ResolvedTestingOptions {
 	/** The override, when one was given; the condition decides otherwise. */
 	enabled: boolean | undefined;
@@ -55,6 +61,11 @@ export interface ResolvedTestingOptions {
 	concurrency: number;
 }
 
+/**
+ * Internal: left out of the typings, and outside the 2.x stability promise (docs/stability.md).
+ *
+ * @internal
+ */
 export function resolveTestingOptions(options?: TestingOptions): ResolvedTestingOptions {
 	const config: TestingRuntimeConfig = getRuntimeConfig().testing ?? {};
 	return {

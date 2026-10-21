@@ -17,6 +17,10 @@ import { Components } from "./components";
 import { BaseComponent } from "./baseComponent";
 import type { ComponentConfig } from "./decorator";
 
+/**
+ * @hidden Internal to components: not exported from the package entry, and outside the 2.x
+ * stability promise (docs/stability.md).
+ */
 export interface ComponentModuleConfig {
 	components: Constructor[];
 

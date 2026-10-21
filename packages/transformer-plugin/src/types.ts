@@ -9,6 +9,20 @@
 
 export interface PluginApi {
 	/**
+	 * The version of `@flamework-experimental/transformer` running this plugin, such as
+	 * `"2.0.0-beta.0"`. A plugin that needs something a later version added can check it and
+	 * refuse with a message of its own, rather than fail on a missing member.
+	 *
+	 * ```ts
+	 * registerPlugin((api) => {
+	 *     const [major] = api.version.split(".");
+	 *     if (major !== "2") throw new Error(`my-plugin needs Flamework 2.x, not ${api.version}`);
+	 * });
+	 * ```
+	 */
+	readonly version: string;
+
+	/**
 	 * Builds the nodes that a macro type handler returns.
 	 */
 	factory: NodeFactory;

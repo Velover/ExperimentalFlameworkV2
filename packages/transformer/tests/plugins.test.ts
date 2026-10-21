@@ -1,4 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import fs from "fs";
+import path from "path";
 import { compileFixture, emitted, normalize } from "./compile";
 
 beforeAll(() => {
@@ -22,6 +24,12 @@ describe("plugin macro types", () => {
 		// The fixture configures `{ "prefix": "fx" }`, which the plugin prepends to every field name.
 		expect(emitted("plugins")).toContain('"fxcoins"');
 		expect(emitted("plugins")).not.toContain('"coins"');
+	});
+
+	test("hands the plugin the transformer's version", () => {
+		const { version } = JSON.parse(fs.readFileSync(path.resolve(import.meta.dir, "../package.json"), "utf8"));
+		// The macro's generated parameter receives what the plugin built: the version as a string.
+		expect(emitted("plugins")).toContain(`local runningVersion = transformerVersion("${version}")`);
 	});
 
 	test("discriminates literal kinds", () => {

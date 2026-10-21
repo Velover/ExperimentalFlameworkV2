@@ -18,6 +18,11 @@ export function describe<T>(meta?: Modding.Intrinsic<"plugin", ["describe", T], 
 }
 
 /** @metadata macro */
+export function transformerVersion<T>(meta?: Modding.Intrinsic<"plugin", ["transformerVersion", T], string>): string {
+	return meta!;
+}
+
+/** @metadata macro */
 export function counter<T>(
 	meta?: Modding.Intrinsic<"plugin", ["counter", T], (increment: number) => number>,
 ): (increment: number) => number {

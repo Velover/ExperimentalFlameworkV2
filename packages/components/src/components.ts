@@ -386,6 +386,10 @@ export class Components {
 		return mapping;
 	}
 
+	/**
+	 * @hidden `ComponentPlugin` makes this provider; the constructor is outside the 2.x stability
+	 * promise (docs/stability.md).
+	 */
 	constructor(
 		private module: Module,
 		private config: ComponentModuleConfig,

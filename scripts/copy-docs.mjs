@@ -7,7 +7,8 @@ import { coreDocs, rewriteLinks, ROOT, shippedMarkdown } from "./links.mjs";
  * Copies the guide into core's package before publishing, so that a game's
  * `node_modules/@flamework-experimental/core/docs` holds the docs of the version it installed.
  *
- * What ships is the index (`docs/README.md`) and the guide (`docs/guide/*.md`), at the same paths
+ * What ships is the index (`docs/README.md`), the stability policy (`docs/stability.md`), the
+ * assistant's instructions (`docs/ai/*.md`) and the guide (`docs/guide/*.md`), at the same paths
  * under `packages/core/docs`, so that links between them stay relative. A link to anything else in
  * the repository (the reference, the testing docs, the changelog, a package) points at that file
  * on GitHub instead, anchor and all (see links.mjs).

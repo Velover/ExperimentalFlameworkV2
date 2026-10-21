@@ -353,7 +353,7 @@ print(lifecycle.onTick.size(), "objects are ticking");
 ```
 
 `onStart`, `onTick`, `onPhysics`, `onRender` and `onExtinguished` are the live sets, one per module.
-They are there to be read. The plugin fills and empties them from the interfaces a class implements.
+They are there to be read, typed `ReadonlySet`. The plugin fills and empties them from the interfaces a class implements.
 To attach something by hand, use `listen`.
 
 ```ts
