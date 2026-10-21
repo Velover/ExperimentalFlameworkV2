@@ -5,8 +5,8 @@ import { ReplicatedStorage, ServerScriptService, SoundService, Workspace } from 
 /**
  * What only the original place holds. The Rojo project declares none of it: `Assets` and `Sounds`
  * are not in the project file, so a plain build has neither. These pass only when the build was
- * laid over a copy of the original (`flamework-test test place.rbxl --original original.rbxl`, or
- * `ORIGINAL_PLACE` in `.env`), which is the point of that step.
+ * laid over a copy of the original (`flamework-test test place.rbxl --original-place original.rbxl`,
+ * or `FLAMEWORK_TEST_ORIGINAL_PLACE` in `.env`), which is the point of that step.
  *
  * The case names still speak of the game template this place was cut from, whose shared modules
  * waited for `Assets` and whose sound system looked those sounds up; the modules are gone, and what

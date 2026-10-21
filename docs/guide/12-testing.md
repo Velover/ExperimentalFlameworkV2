@@ -136,7 +136,7 @@ Everything a project needs, in the order it is needed:
    Ignore it with the other built places, `/*.rbxl` at the root. Besides the build, a run leaves:
    - the places `flamework-test` makes beside the build (`test.patched.rbxl` with an original
      place, `test.<project>.rbxl` under `--project`), which the same line covers;
-   - `build/version.json`, which `cloud publish` writes, and so `cloud test` and `test --cloud`;
+   - `build/version.json`, which `cloud publish` writes, and so `test --cloud`;
    - Studio's lock file beside a place it has open, `test.rbxl.lock`. `flamework-test` removes the
      lock of a window it ends, and of one it finds gone when it takes the Studio lock over, but one
      left by a Studio closed any other way can stay, so ignore `*.rbxl.lock` too.
@@ -366,8 +366,8 @@ the ones after it.
 Studio run takes the Studio lock first, and waits while another project's run or window holds it.
 `--parallel <n>` lets a run of several Rojo projects keep up to n of its windows open at once. On
 Windows, `test` opens them on a hidden desktop of their own, so a run never shows a window or takes
-the focus; `--show` opens them where they can be seen. A command that changes a window (`studio
-exec`, `close`, ...) acts only on the one it opened for this project, and not while another
+the focus; `--show-windows` opens them where they can be seen. A command that changes a window
+(`studio exec`, `close`, ...) acts only on the one it opened for this project, and not while another
 process's run of this project uses it; see [the Studio
 lock](../../packages/testing/README.md#the-studio-lock).
 
@@ -466,28 +466,39 @@ are written this way.
   "autoRun": false,            // run everything right after ignition
   "timeout": 30,               // seconds per test
   "concurrency": 4,            // concurrent tests that run at once; 1 runs every test alone
-  "entry": "src/server/main",  // cloud runs only: the ModuleScript exporting ignite()
-  "failOnSkip": false,         // flamework-test: a skipped test fails the run (--fail-on-skip)
-  "keepAwake": false,          // flamework-test: keep the display on during a Studio run (--keep-awake)
-  "lockTimeout": 300,          // flamework-test: seconds to wait for the Studio lock (--lock-timeout)
-  "lockHold": 15,              // flamework-test: minutes a window it left open may sit unused (--hold)
-  "parallel": 1,               // flamework-test: Rojo projects' windows at once (--parallel)
-  "showWindows": false         // flamework-test: show a test's Studio windows (--show)
+  "entry": "src/server/main"   // cloud runs only: the ModuleScript exporting ignite()
+},
+"flameworkTest": {             // flamework-test's own settings, never compiled into the place
+  "failOnSkip": false,         // a skipped test fails the run (--fail-on-skip)
+  "keepAwake": false,          // keep the display on during a Studio run (--keep-awake)
+  "lockTimeout": 300,          // seconds to wait for the Studio lock (--lock-timeout)
+  "lockHold": 15,              // minutes a window it left open may sit unused (--lock-hold)
+  "parallel": 1,               // Rojo projects' windows at once (--parallel)
+  "showWindows": false,        // show a test's Studio windows (--show-windows)
+  "universeId": "...",         // the testing experience, for a cloud run (--universe-id)
+  "placeId": "...",            // the testing place, never the original (--place-id)
+  "apiKey": "${ROBLOX_API_KEY:-}",          // the Open Cloud key, from the environment (--api-key)
+  "originalPlace": "places/original.rbxl"   // a copy of the original place (--original-place)
 }
 ```
 
-`failOnSkip`, `keepAwake`, `lockTimeout`, `lockHold`, `parallel` and `showWindows` are read by
-`flamework-test` alone, never by the place. Its flags come first, then the `FAIL_ON_SKIP`,
-`KEEP_AWAKE` and `FLAMEWORK_TEST_SHOW` variables (`true` or `false`, `1` or `0`), and
-`FLAMEWORK_TEST_LOCK_TIMEOUT`, `FLAMEWORK_TEST_LOCK_HOLD` and `FLAMEWORK_TEST_PARALLEL`, from the
-shell, `.env` or `.env.local`. A cloud run reads no `parallel` and no `showWindows`.
-`--fail-on-skip=false`, `--keep-awake=false` and `--show=false` turn them off for one run.
+The `testing` section is the place's, compiled into it; its `timeout` is one test's limit, and a
+whole run's is `flamework-test --run-timeout`. The `flameworkTest` section is read by
+`flamework-test` alone, never by the place. Each key has a flag of the same name in kebab case,
+which comes first, then a variable, `FLAMEWORK_TEST_` and the key in capitals
+(`FLAMEWORK_TEST_LOCK_HOLD`; the API key's is `ROBLOX_API_KEY`), from the shell, `.env` or
+`.env.local`; a switch's variable reads `true` or `false` (`1` or `0`). A cloud run reads no
+`parallel` and no `showWindows`. `--fail-on-skip=false`, `--keep-awake=false` and
+`--show-windows=false` turn them off for one run. The names from before 2.0.0-beta.0 (the `cloud`
+section, these keys under `testing`, `FAIL_ON_SKIP` and the other unprefixed variables, `--show`,
+`--timeout`, `cloud test`) are refused, each naming its new one; see the
+[testing README](../../packages/testing/README.md#settings).
 
 For a run of several Rojo projects, two windows at once (`"parallel": 2`, or `--parallel 2`; more
 when memory allows, about 3 GB a window) is the preferred way. Leave it at 1 for a run that
 measures time, such as a benchmark or a timing-sensitive case, since windows running side by side
 compete for the CPU and skew the timings, and for one that needs a window's focus, such as input
-that needs a visible, focused window (`--show`).
+that needs a visible, focused window (`--show-windows`).
 
 `entry` exists for one reason. An Open Cloud task loads the place but runs none of its Scripts, so
 nothing ignites the game there. The runner has to require a ModuleScript and call its `ignite()`

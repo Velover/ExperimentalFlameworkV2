@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { findProjectRoot, loadCloudSettings } from "../src/config.ts";
+import { describeRenamedVariables, findProjectRoot, loadCloudSettings, RENAMED_VARIABLES } from "../src/config.ts";
 
 function scratch(files: Record<string, string>): string {
 	const dir = mkdtempSync(join(tmpdir(), "flamework-test-"));
@@ -14,12 +14,12 @@ function scratch(files: Record<string, string>): string {
 }
 
 describe("loadCloudSettings", () => {
-	test("reads the cloud section with its environment substituted", () => {
+	test("reads the flameworkTest section with its environment substituted", () => {
 		const dir = scratch({
 			"flamework.config.json": JSON.stringify({
-				cloud: {
-					testingUniverseId: "10765968722",
-					testingPlaceId: "108973151455286",
+				flameworkTest: {
+					universeId: "10765968722",
+					placeId: "108973151455286",
 					apiKey: "${FLAMEWORK_CLOUD_TEST_KEY:-}",
 				},
 			}),
@@ -27,8 +27,8 @@ describe("loadCloudSettings", () => {
 		});
 		try {
 			const settings = loadCloudSettings(dir, {});
-			expect(settings.testingUniverseId).toBe("10765968722");
-			expect(settings.testingPlaceId).toBe("108973151455286");
+			expect(settings.universeId).toBe("10765968722");
+			expect(settings.placeId).toBe("108973151455286");
 			expect(settings.apiKey).toBe("from-dotenv");
 			expect(settings.configPath).toBe(join(dir, "flamework.config.json"));
 		} finally {
@@ -38,7 +38,7 @@ describe("loadCloudSettings", () => {
 
 	test("the process environment wins over .env, and an unset key is absent rather than empty", () => {
 		const dir = scratch({
-			"flamework.config.json": JSON.stringify({ cloud: { apiKey: "${FLAMEWORK_CLOUD_TEST_KEY:-}" } }),
+			"flamework.config.json": JSON.stringify({ flameworkTest: { apiKey: "${FLAMEWORK_CLOUD_TEST_KEY:-}" } }),
 			".env": "FLAMEWORK_CLOUD_TEST_KEY=from-dotenv\n",
 		});
 		try {
@@ -50,9 +50,12 @@ describe("loadCloudSettings", () => {
 		}
 	});
 
-	test("reads the CLI's own keys of the testing section, testing.keepAwake and testing.failOnSkip", () => {
+	test("reads flameworkTest.keepAwake and flameworkTest.failOnSkip, beside the place's testing section", () => {
 		const dir = scratch({
-			"flamework.config.json": JSON.stringify({ testing: { keepAwake: true, failOnSkip: false, timeout: 5 } }),
+			"flamework.config.json": JSON.stringify({
+				testing: { timeout: 5 },
+				flameworkTest: { keepAwake: true, failOnSkip: false },
+			}),
 		});
 		try {
 			const settings = loadCloudSettings(dir, {});
@@ -63,10 +66,10 @@ describe("loadCloudSettings", () => {
 		}
 	});
 
-	test("reads the Studio lock's keys, testing.lockTimeout and testing.lockHold, from the environment too", () => {
+	test("reads the Studio lock's keys, flameworkTest.lockTimeout and flameworkTest.lockHold, from the environment too", () => {
 		const dir = scratch({
 			"flamework.config.json": JSON.stringify({
-				testing: { lockTimeout: 90, lockHold: "${FLAMEWORK_TEST_HOLD_FOR_CONFIG:-30}" },
+				flameworkTest: { lockTimeout: 90, lockHold: "${FLAMEWORK_TEST_HOLD_FOR_CONFIG:-30}" },
 			}),
 		});
 		try {
@@ -82,8 +85,8 @@ describe("loadCloudSettings", () => {
 		try {
 			const settings = loadCloudSettings(dir, {});
 			expect(settings).toEqual({
-				testingUniverseId: undefined,
-				testingPlaceId: undefined,
+				universeId: undefined,
+				placeId: undefined,
 				originalPlace: undefined,
 				apiKey: undefined,
 				configPath: undefined,
@@ -106,14 +109,67 @@ describe("loadCloudSettings", () => {
 
 	test("a config file found above the working directory is used", () => {
 		const dir = scratch({
-			"flamework.config.json": JSON.stringify({ cloud: { testingPlaceId: "42" } }),
+			"flamework.config.json": JSON.stringify({ flameworkTest: { placeId: "42" } }),
 			"src/server/.keep": "",
 		});
 		try {
-			expect(loadCloudSettings(join(dir, "src", "server"), {}).testingPlaceId).toBe("42");
+			expect(loadCloudSettings(join(dir, "src", "server"), {}).placeId).toBe("42");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("the settings of before 2.0.0-beta.0", () => {
+	test("a config file with the CLI's keys in testing, or a cloud section, is refused, naming where each goes", () => {
+		const dir = scratch({
+			"flamework.config.json": JSON.stringify({
+				testing: { entry: "src/server/main", failOnSkip: true, showWindows: true },
+				cloud: { testingUniverseId: "1", testingPlaceId: "2", originalPlace: "original.rbxl" },
+			}),
+		});
+		try {
+			let message = "";
+			try {
+				loadCloudSettings(dir, {});
+			} catch (error) {
+				message = String(error);
+			}
+			expect(message).toContain(`flamework-test's settings have a section of their own, "flameworkTest"`);
+			expect(message).toContain("move 'testing.failOnSkip' to 'flameworkTest.failOnSkip'");
+			expect(message).toContain("move 'testing.showWindows' to 'flameworkTest.showWindows'");
+			expect(message).toContain("move 'cloud.testingUniverseId' to 'flameworkTest.universeId'");
+			expect(message).toContain("move 'cloud.testingPlaceId' to 'flameworkTest.placeId'");
+			expect(message).toContain("move 'cloud.originalPlace' to 'flameworkTest.originalPlace'");
+			expect(message).toContain("remove 'cloud'");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("every old variable is named with its new name, from any source; none, nothing", () => {
+		expect(describeRenamedVariables({ PATH: "x", FLAMEWORK_TEST_PROJECT: "a" }, {})).toEqual([]);
+		for (const [old, renamed] of Object.entries(RENAMED_VARIABLES)) {
+			expect(describeRenamedVariables({ [old]: "" }, {})).toEqual([`${old} is now ${renamed}`]);
+			expect(describeRenamedVariables({}, { [old]: "1" })).toEqual([`${old} is now ${renamed}`]);
+		}
+		expect(describeRenamedVariables({ FAIL_ON_SKIP: "1" }, { ROJO_PROJECT: "a" })).toEqual([
+			"FAIL_ON_SKIP is now FLAMEWORK_TEST_FAIL_ON_SKIP",
+			"ROJO_PROJECT is now FLAMEWORK_TEST_PROJECT",
+		]);
+	});
+
+	test("every new name is FLAMEWORK_TEST_ and a flag's name, but the API key's", () => {
+		for (const renamed of Object.values(RENAMED_VARIABLES)) {
+			expect(renamed === "ROBLOX_API_KEY" || renamed.startsWith("FLAMEWORK_TEST_")).toBe(true);
+		}
+		expect(RENAMED_VARIABLES).toMatchObject({
+			TESTING_PLACE_API_KEY: "ROBLOX_API_KEY",
+			TESTING_UNIVERSE_ID: "FLAMEWORK_TEST_UNIVERSE_ID",
+			TESTING_PLACE_ID: "FLAMEWORK_TEST_PLACE_ID",
+			ORIGINAL_PLACE: "FLAMEWORK_TEST_ORIGINAL_PLACE",
+			FLAMEWORK_TEST_SHOW: "FLAMEWORK_TEST_SHOW_WINDOWS",
+		});
 	});
 });
 

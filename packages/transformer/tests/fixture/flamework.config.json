@@ -21,5 +21,5 @@
 	"components": { "warningTimeout": 2, "watchRenames": true },
 	"scopes": { "active": "${FLAMEWORK_FIXTURE_SCOPES:-unset}" },
 	"testing": { "enabled": "${FLAMEWORK_FIXTURE_TESTS:-false}", "entry": "src/env" },
-	"cloud": { "testingUniverseId": "1", "testingPlaceId": "2", "apiKey": "${FLAMEWORK_FIXTURE_KEY:-}" }
+	"flameworkTest": { "universeId": "1", "placeId": "2", "apiKey": "${FLAMEWORK_FIXTURE_KEY:-}" }
 }

@@ -155,32 +155,42 @@ describe("skips in a Studio run", () => {
 		expect(run.out).toContain("1 skipped, which fails the run under --fail-on-skip");
 	});
 
-	test("FAIL_ON_SKIP and testing.failOnSkip turn it on; the flag wins over both, and the variable over the config", async () => {
+	test("FLAMEWORK_TEST_FAIL_ON_SKIP and flameworkTest.failOnSkip turn it on; the flag wins over both, and the variable over the config", async () => {
 		const answers = { server: skipping("server"), client: skipping("client", { skips: 0 }) };
 
-		expect((await testRun([], answers, { env: { FAIL_ON_SKIP: "1" } })).code).toBe(1);
+		expect((await testRun([], answers, { env: { FLAMEWORK_TEST_FAIL_ON_SKIP: "1" } })).code).toBe(1);
 		expect((await testRun([], answers, { settings: { failOnSkip: true } })).code).toBe(1);
 		// From .env, which the settings carry.
-		expect((await testRun([], answers, { env: {}, settings: { env: { FAIL_ON_SKIP: "true" } } })).code).toBe(1);
+		expect(
+			(await testRun([], answers, { env: {}, settings: { env: { FLAMEWORK_TEST_FAIL_ON_SKIP: "true" } } })).code,
+		).toBe(1);
 		// The variable over the config, the flag over both.
 		expect(
-			(await testRun([], answers, { env: { FAIL_ON_SKIP: "off" }, settings: { failOnSkip: true } })).code,
+			(
+				await testRun([], answers, {
+					env: { FLAMEWORK_TEST_FAIL_ON_SKIP: "off" },
+					settings: { failOnSkip: true },
+				})
+			).code,
 		).toBe(0);
-		expect((await testRun(["--fail-on-skip=false"], answers, { env: { FAIL_ON_SKIP: "yes" } })).code).toBe(0);
-		// Empty is off, as an empty ROJO_PROJECT is none.
-		expect((await testRun([], answers, { env: { FAIL_ON_SKIP: "" }, settings: { failOnSkip: true } })).code).toBe(
-			0,
-		);
+		expect(
+			(await testRun(["--fail-on-skip=false"], answers, { env: { FLAMEWORK_TEST_FAIL_ON_SKIP: "yes" } })).code,
+		).toBe(0);
+		// Empty is off, as an empty FLAMEWORK_TEST_PROJECT is none.
+		expect(
+			(await testRun([], answers, { env: { FLAMEWORK_TEST_FAIL_ON_SKIP: "" }, settings: { failOnSkip: true } }))
+				.code,
+		).toBe(0);
 	});
 
-	test("a FAIL_ON_SKIP that is neither true nor false is refused before Studio opens", async () => {
+	test("a FLAMEWORK_TEST_FAIL_ON_SKIP that is neither true nor false is refused before Studio opens", async () => {
 		const run = await testRun(
 			[],
 			{ server: skipping("server"), client: skipping("client") },
-			{ env: { FAIL_ON_SKIP: "sometimes" } },
+			{ env: { FLAMEWORK_TEST_FAIL_ON_SKIP: "sometimes" } },
 		);
 		expect(run.code).toBe(2);
-		expect(run.err).toContain('FAIL_ON_SKIP must be true or false (or 1 or 0), got "sometimes"');
+		expect(run.err).toContain('FLAMEWORK_TEST_FAIL_ON_SKIP must be true or false (or 1 or 0), got "sometimes"');
 		expect(run.launched).toHaveLength(0);
 	});
 
@@ -342,7 +352,7 @@ describe("skips in a Studio run", () => {
 });
 
 describe("skips in a cloud run", () => {
-	test("cloud run lists the server's skips; --fail-on-skip, FAIL_ON_SKIP and testing.failOnSkip fail it", async () => {
+	test("cloud run lists the server's skips; --fail-on-skip, FLAMEWORK_TEST_FAIL_ON_SKIP and flameworkTest.failOnSkip fail it", async () => {
 		const run = await runCli(["cloud", "run"], { responses: happyPath([skipping("server")]) });
 		expect(run.code).toBe(0);
 		expect(run.out).toContain(
@@ -358,7 +368,7 @@ describe("skips in a cloud run", () => {
 
 		const variable = await runCli(["cloud", "run"], {
 			responses: happyPath([skipping("server")]),
-			env: { ...ENV, FAIL_ON_SKIP: "true" },
+			env: { ...ENV, FLAMEWORK_TEST_FAIL_ON_SKIP: "true" },
 		});
 		expect(variable.code).toBe(1);
 
@@ -380,7 +390,7 @@ describe("skips in a cloud run", () => {
 		// Raw Luau has no tests to skip: a misspelt variable does not stand in its way.
 		const raw = await runCli(["cloud", "run", "--code", "return 1"], {
 			responses: happyPath(["1"]),
-			env: { ...ENV, FAIL_ON_SKIP: "maybe" },
+			env: { ...ENV, FLAMEWORK_TEST_FAIL_ON_SKIP: "maybe" },
 		});
 		expect(raw.code).toBe(0);
 	});
@@ -401,7 +411,7 @@ describe("the hang report", () => {
 			return skipping("server");
 		};
 		answers.get_console_output = () => output.join("\n");
-		return await runCli(["test", "place.rbxl", "--timeout", "1s"], {
+		return await runCli(["test", "place.rbxl", "--run-timeout", "1s"], {
 			files: { "place.rbxl": "built" },
 			studio: studio.fake,
 			onLaunch: studio.onLaunch,

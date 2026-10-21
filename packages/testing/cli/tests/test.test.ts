@@ -196,7 +196,7 @@ describe("test under several projects", () => {
 		expect(run.out).toContain("1 passed, 1 failed, 0 skipped in 12ms (server, project streaming)");
 	});
 
-	test("ROJO_PROJECT lists the projects when no flag does, and an empty one is the plain run", async () => {
+	test("FLAMEWORK_TEST_PROJECT lists the projects when no flag does, and an empty one is the plain run", async () => {
 		const studio = studioThatOpensEach({
 			"place.deferred.rbxl": {
 				Server: JSON.stringify(resultJson({ project: "deferred" })),
@@ -220,7 +220,7 @@ describe("test under several projects", () => {
 		};
 		const listed = await runCli(["test", "place.rbxl"], {
 			files,
-			env: { ROJO_PROJECT: "tests/deferred.project.json, tests/streaming.project.json" },
+			env: { FLAMEWORK_TEST_PROJECT: "tests/deferred.project.json, tests/streaming.project.json" },
 			studio: studio.fake,
 			onLaunch: studio.onLaunch,
 		});
@@ -233,7 +233,7 @@ describe("test under several projects", () => {
 
 		const plain = await runCli(["test", "place.rbxl"], {
 			files,
-			env: { ROJO_PROJECT: "" },
+			env: { FLAMEWORK_TEST_PROJECT: "" },
 			studio: studio.fake,
 			onLaunch: studio.onLaunch,
 		});
@@ -268,7 +268,7 @@ describe("test under several projects", () => {
 				"place.rbxl",
 				"--project",
 				"tests/deferred.project.json,tests/streaming.project.json",
-				"--timeout",
+				"--run-timeout",
 				"1s",
 			],
 			{
@@ -340,7 +340,7 @@ describe("test under several projects", () => {
 			},
 		});
 		const run = await runCli(
-			["test", "place.rbxl", "--original", "original.rbxl", "--project", "tests/deferred.project.json"],
+			["test", "place.rbxl", "--original-place", "original.rbxl", "--project", "tests/deferred.project.json"],
 			{
 				files: {
 					"place.rbxl": "built",
@@ -900,7 +900,7 @@ describe("test", () => {
 			Server: JSON.stringify(resultJson()),
 			Client: JSON.stringify(resultJson({ realm: "client" })),
 		});
-		const run = await runCli(["test", "place.rbxl", "--original", "original.rbxl"], {
+		const run = await runCli(["test", "place.rbxl", "--original-place", "original.rbxl"], {
 			files: {
 				"place.rbxl": "built",
 				"original.rbxl": "orig",
@@ -918,7 +918,7 @@ describe("test", () => {
 		expect(run.out).toContain("connected: place.patched.rbxl");
 		expect(run.closedWindows).toEqual(["place.patched.rbxl"]);
 
-		const noLune = await runCli(["test", "place.rbxl", "--original", "original.rbxl"], {
+		const noLune = await runCli(["test", "place.rbxl", "--original-place", "original.rbxl"], {
 			files: { "place.rbxl": "built", "original.rbxl": "orig", "default.project.json": PROJECT },
 			spawnCode: 1,
 		});
@@ -998,7 +998,7 @@ describe("test", () => {
 	});
 
 	test("a cloud run checks for testing.entry before publishing, when the config file was found", async () => {
-		const run = await runCli(["cloud", "test", "dist/place.rbxl"], {
+		const run = await runCli(["test", "dist/place.rbxl", "--cloud"], {
 			files: { "dist/place.rbxl": "x" },
 			settings: { configPath: "/game/flamework.config.json" },
 		});
@@ -1007,7 +1007,7 @@ describe("test", () => {
 		expect(run.err).toContain("Studio needs no entry");
 		expect(run.calls).toHaveLength(0);
 
-		const withEntry = await runCli(["cloud", "test", "dist/place.rbxl"], {
+		const withEntry = await runCli(["test", "dist/place.rbxl", "--cloud"], {
 			files: { "dist/place.rbxl": "x" },
 			settings: { configPath: "/game/flamework.config.json", testingEntry: "src/server/main" },
 			responses: [json({ versionNumber: 4 }), ...happyPath([resultJson()])],
@@ -1055,7 +1055,7 @@ describe("test", () => {
 				"[FWTEST] server economy/later: PASS (1ms)",
 			].join("\n");
 
-		const run = await runCli(["test", "place.rbxl", "--timeout", "1s"], {
+		const run = await runCli(["test", "place.rbxl", "--run-timeout", "1s"], {
 			files: { "place.rbxl": "built" },
 			studio: studio.fake,
 			onLaunch: studio.onLaunch,
@@ -1081,7 +1081,7 @@ describe("test", () => {
 				return serverResult;
 			};
 			answers.get_console_output = () => "[FWTEST] client economy/buys: PASS (2ms)";
-			return await runCli(["test", "place.rbxl", "--timeout", "1s", ...extra], {
+			return await runCli(["test", "place.rbxl", "--run-timeout", "1s", ...extra], {
 				files: { "place.rbxl": "built" },
 				studio: studio.fake,
 				onLaunch: studio.onLaunch,

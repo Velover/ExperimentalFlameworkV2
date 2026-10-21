@@ -137,7 +137,7 @@ describe("taking the Studio lock", () => {
 
 		// --json: the window as JSON alone on stdout, the progress on stderr.
 		const other = fakeMachine();
-		const json = await openHere(other, proxyOn(other), ["--json", "--hold", "30"]);
+		const json = await openHere(other, proxyOn(other), ["--json", "--lock-hold", "30"]);
 		expect(json.code).toBe(0);
 		expect(JSON.parse(json.out)).toMatchObject({
 			studio_id: "own-1",
@@ -318,7 +318,7 @@ describe("taking the Studio lock", () => {
 		expect(taking.err).toContain("the Studio lock is still being taken after waiting 0s");
 	});
 
-	test("its settings are refused when misspelt, and --hold and --keep fit only where a window is left open", async () => {
+	test("its settings are refused when misspelt, and --lock-hold and --keep fit only where a window is left open", async () => {
 		const bad = await runCli(["studio", "open", "place.rbxl", "--lock-timeout", "soon"], {
 			files: { "place.rbxl": "x" },
 		});
@@ -331,19 +331,21 @@ describe("taking the Studio lock", () => {
 		expect(badHold.code).toBe(2);
 		expect(badHold.err).toContain('FLAMEWORK_TEST_LOCK_HOLD must be a number of minutes, 1 or more, got "0"');
 		// Under a minute, a lease could lapse between two renewals of a window in use.
-		const short = await runCli(["studio", "open", "place.rbxl", "--hold", "0.5"], { files: { "place.rbxl": "x" } });
+		const short = await runCli(["studio", "open", "place.rbxl", "--lock-hold", "0.5"], {
+			files: { "place.rbxl": "x" },
+		});
 		expect(short.code).toBe(2);
-		expect(short.err).toContain('--hold must be a number of minutes, 1 or more, got "0.5"');
+		expect(short.err).toContain('--lock-hold must be a number of minutes, 1 or more, got "0.5"');
 		const configured = await runCli(["studio", "open", "place.rbxl"], {
 			files: { "place.rbxl": "x" },
 			settings: { lockHold: 0.25 },
 		});
 		expect(configured.code).toBe(2);
-		expect(configured.err).toContain('testing.lockHold must be a number of minutes, 1 or more, got "0.25"');
+		expect(configured.err).toContain('flameworkTest.lockHold must be a number of minutes, 1 or more, got "0.25"');
 
-		const hold = await runCli(["test", "place.rbxl", "--hold", "60"], { files: { "place.rbxl": "x" } });
+		const hold = await runCli(["test", "place.rbxl", "--lock-hold", "60"], { files: { "place.rbxl": "x" } });
 		expect(hold.code).toBe(2);
-		expect(hold.err).toContain("--hold is for a window left open");
+		expect(hold.err).toContain("--lock-hold is for a window left open");
 		const cloud = await runCli(["test", "place.rbxl", "--cloud", "--lock-timeout", "5"], {
 			files: { "place.rbxl": "x" },
 		});
@@ -420,7 +422,7 @@ describe("the lease", () => {
 			`error: the Studio window flamework-test opened for this project (${THIS_FILE}, Studio PID 4001, MCP id own-1) was closed at ${iso(opened + 26 * MINUTE)} by flamework-test for ${OTHER_PROJECT} (studio open), after 16 min idle, past its 15-minute hold, so that another project could use Studio`,
 		);
 		expect(gone.err).toContain(
-			`open it again: flamework-test studio open ${THIS_FILE} (--hold <minutes> keeps a window longer)`,
+			`open it again: flamework-test studio open ${THIS_FILE} (--lock-hold <minutes> keeps a window longer)`,
 		);
 		expect(gone.studioCalls).toEqual([]);
 		// Without --studio, the same: this project has no window, and the other project's is never
@@ -473,10 +475,10 @@ describe("the lease", () => {
 		expect(machine.lock.owner).toBeUndefined();
 	});
 
-	test("--hold gives the window a test --keep leaves a longer one, and the run says how to use it", async () => {
+	test("--lock-hold gives the window a test --keep leaves a longer one, and the run says how to use it", async () => {
 		const machine = fakeMachine();
 		const proxy = proxyOn(machine, { execute_luau: JSON.stringify(resultJson()), get_studio_state: PLAYING });
-		const run = await runCli(["test", "place.rbxl", "--keep", "--hold", "60", "--realm", "server"], {
+		const run = await runCli(["test", "place.rbxl", "--keep", "--lock-hold", "60", "--realm", "server"], {
 			machine,
 			files: { "place.rbxl": "built" },
 			studio: proxy.fake,
@@ -484,7 +486,7 @@ describe("the lease", () => {
 		});
 		expect(run.code).toBe(0);
 		expect(run.out.split("\n")).toContain("studio_id=own-1 pid=4001");
-		expect(run.out).toContain("until it has sat unused for 60 min (--hold)");
+		expect(run.out).toContain("until it has sat unused for 60 min (--lock-hold)");
 		expect(flatOf(machine.lock.owner!)).toMatchObject({
 			command: "test --keep",
 			holdMinutes: 60,
@@ -908,7 +910,7 @@ describe("when Studio's MCP server is off or missing", () => {
 				"error: StudioMCP.exe, Roblox Studio's MCP proxy, was not found under Roblox Studio's versions folder (%LOCALAPPDATA%\\Roblox\\Versions)",
 			);
 			expect(run.err).toContain(
-				"install Roblox Studio on this machine (the proxy ships with it), or set STUDIO_MCP_EXE",
+				"install Roblox Studio on this machine (the proxy ships with it), or set FLAMEWORK_TEST_STUDIO_MCP_EXE",
 			);
 		} finally {
 			rmSync(empty, { recursive: true, force: true });

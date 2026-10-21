@@ -22,11 +22,11 @@ bun run test:place --project tests/deferred.project.json --realm client --sectio
 bun run test:place --cloud                                            # a real server through Open Cloud, server realm
 ```
 
-The place's `flamework.config.json` sets `"testing": { "parallel": 2 }`, so a run of its projects
-opens two Studio windows side by side (about 3 GB each). Pass `--parallel 1` to run them one after
-another when the run measures time (windows side by side compete for the CPU and skew timings), or
-needs a window's focus (`--show`). A run of one project opens one window either way, and a cloud
-run ignores the key.
+The place's `flamework.config.json` sets `"flameworkTest": { "parallel": 2 }`, so a run of its
+projects opens two Studio windows side by side (about 3 GB each). Pass `--parallel 1` to run them
+one after another when the run measures time (windows side by side compete for the CPU and skew
+timings), or needs a window's focus (`--show-windows`). A run of one project opens one window either
+way, and a cloud run ignores the key.
 
 From here, once the packages are built:
 
@@ -62,18 +62,18 @@ are in [`packages/testing/README.md`](../../packages/testing/README.md) and
 | `src/client/Core/runtime.client.ts` | Ignites the client module. |
 | `src/*/Core/network.ts` | The `FwTest` events and functions the self-checks and the `client` section use. |
 | `default.project.json`, `tests/*.project.json` | The Rojo projects, see below. |
-| `flamework.config.json` | `networking.serialization` on, the `testing` scope from `FLAMEWORK_SCOPES`, `testing.entry`, and the `cloud` section. |
-| `.env` | `FLAMEWORK_SCOPES=testing`, `ORIGINAL_PLACE=original.rbxl`, `ROJO_PROJECT` (the four projects). No secrets. The scope is in the committed `.env` because this place exists only to run the suite and is never shipped. A game does the opposite and keeps the scope out of `.env` and `.env.local`, which every build reads; see [guide 12](../../docs/guide/12-testing.md#setting-up). |
+| `flamework.config.json` | `networking.serialization` on, the `testing` scope from `FLAMEWORK_SCOPES`, `testing.entry`, and the `flameworkTest` section: two windows at once, the testing place's ids, the key from the environment. |
+| `.env` | `FLAMEWORK_SCOPES=testing`, `FLAMEWORK_TEST_ORIGINAL_PLACE=original.rbxl`, `FLAMEWORK_TEST_PROJECT` (the four projects). No secrets. The scope is in the committed `.env` because this place exists only to run the suite and is never shipped. A game does the opposite and keeps the scope out of `.env` and `.env.local`, which every build reads; see [guide 12](../../docs/guide/12-testing.md#setting-up). |
 | `scripts/fabricate-original.luau` | Makes `original.rbxl` from a build: an `Assets` model, a `Sounds` folder, a marker in Workspace and a stale folder the patch has to replace, which is what the `assets` section checks. |
 
 ## One suite, four Rojo projects
 
-Some of what the suite has to run under is not a script's to set: `Workspace.SignalBehavior`
-decides whether a signal's handler runs inside the write or after the thread yields, and the
-streaming radii decide what a client has at all. A place file takes them, so they come from a
-Rojo project's `$properties`, and `ROJO_PROJECT` in `.env` lists the projects `bun run test` runs
-the whole suite under, one run of both realms each, in a place of its own name
-(`place.deferred.rbxl`), with a `projects: ...` line at the end and the worst exit code:
+Some of what the suite has to run under is not a script's to set: `Workspace.SignalBehavior` decides
+whether a signal's handler runs inside the write or after the thread yields, and the streaming radii
+decide what a client has at all. A place file takes them, so they come from a Rojo project's
+`$properties`, and `FLAMEWORK_TEST_PROJECT` in `.env` lists the projects `bun run test` runs the
+whole suite under, one run of both realms each, in a place of its own name (`place.deferred.rbxl`),
+with a `projects: ...` line at the end and the worst exit code:
 
 | Project | `Workspace` | Why |
 |---|---|---|
@@ -92,14 +92,14 @@ project's name; the `projects` section asserts that what each project sets is in
 
 The Rojo projects declare no `ReplicatedStorage.Assets` or `SoundService.Sounds`: those stand for
 what only a game's own place file holds, and come from `original.rbxl`, laid over each build
-before it runs (`ORIGINAL_PLACE`). That is what the `assets` section proves.
+before it runs (`FLAMEWORK_TEST_ORIGINAL_PLACE`). That is what the `assets` section proves.
 
 ## In the cloud
 
 `bun run test:cloud` publishes each build to the *testing place* as a Saved version and runs the
 server's sections in a real server (a Luau execution task has no client, so the client's sections
 and anything that needs `onRender` or `onPhysics` do not run there). The testing experience and
-place ids are in `flamework.config.json`'s `cloud` section. The key is not: put it in a
+place ids are in `flamework.config.json`'s `flameworkTest` section. The key is not: put it in a
 gitignored `.env.local` next to `flamework.config.json`,
 
 ```ini
@@ -107,9 +107,9 @@ ROBLOX_API_KEY=...
 ```
 
 with `universe-places:write` and `universe.place.luau-execution-session:read` and `:write` for the
-testing experience; `TESTING_UNIVERSE_ID` and `TESTING_PLACE_ID` there override the config's ids.
-The place must be closed in Studio while a version is published. The setup and every error are in
-[`docs/testing/place.md`](../../docs/testing/place.md#in-the-cloud).
+testing experience; `FLAMEWORK_TEST_UNIVERSE_ID` and `FLAMEWORK_TEST_PLACE_ID` there override the
+config's ids. The place must be closed in Studio while a version is published. The setup and every
+error are in [`docs/testing/place.md`](../../docs/testing/place.md#in-the-cloud).
 
 ## How the packages reach the place
 

@@ -16,13 +16,12 @@
 		"active": "${FLAMEWORK_SCOPES:-}"
 	},
 	"testing": {
-		"entry": "src/server/Core/main",
-		"parallel": 2
+		"entry": "src/server/Core/main"
 	},
-	"cloud": {
-		"testingUniverseId": "${TESTING_UNIVERSE_ID:-10765968722}",
-		"testingPlaceId": "${TESTING_PLACE_ID:-108973151455286}",
-		"apiKey": "${ROBLOX_API_KEY:-}",
-		"originalPlace": "${ORIGINAL_PLACE:-}"
+	"flameworkTest": {
+		"parallel": 2,
+		"universeId": "10765968722",
+		"placeId": "108973151455286",
+		"apiKey": "${ROBLOX_API_KEY:-}"
 	}
 }

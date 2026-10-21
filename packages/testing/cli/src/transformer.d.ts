@@ -2,24 +2,25 @@
 // typeRoots, and TypeScript would pull a declared transformer, `typescript` types and all, into
 // every place's program. This is the one function and the one shape the CLI uses from it.
 declare module "@flamework-experimental/transformer/out/util/projectConfig.js" {
-	export interface CloudConfig {
-		testingUniverseId?: string;
-		testingPlaceId?: string;
+	/** The `flameworkTest` section: the CLI's own settings. */
+	export interface FlameworkTestConfig {
+		failOnSkip?: boolean;
+		keepAwake?: boolean;
+		lockTimeout?: number;
+		lockHold?: number;
+		parallel?: number;
+		showWindows?: boolean;
+		universeId?: string;
+		placeId?: string;
 		apiKey?: string;
 		originalPlace?: string;
 	}
 
 	export interface LoadedProjectConfig {
 		project: {
-			cloud?: CloudConfig;
+			flameworkTest?: FlameworkTestConfig;
 			testing?: {
 				entry?: string;
-				keepAwake?: boolean;
-				failOnSkip?: boolean;
-				lockTimeout?: number;
-				lockHold?: number;
-				parallel?: number;
-				showWindows?: boolean;
 			};
 		};
 		configPath?: string;
@@ -28,7 +29,8 @@ declare module "@flamework-experimental/transformer/out/util/projectConfig.js" {
 
 	/**
 	 * Finds flamework.config.json from `projectDirectory` up to `rootDirectory`, substitutes its
-	 * `${NAME}` references from `.env`, `.env.local` and `processEnv`, validates it, and returns it.
+	 * `${NAME}` references from `.env`, `.env.local` and `processEnv`, validates it (refusing the
+	 * CLI's settings where they were before 2.0.0-beta.0), and returns it.
 	 */
 	export function loadProjectConfig(
 		projectDirectory: string,

@@ -234,35 +234,120 @@ describe("reading flamework.config.json", () => {
 		remove("flamework.config.json");
 	});
 
-	test("accepts testing.parallel, flamework-test's, as a whole number, 1 or more, from the environment too", () => {
-		const file = write("flamework.config.json", `{ "testing": { "parallel": 2 } }`);
-		expect(readProjectConfig(file)).toEqual({ testing: { parallel: 2 } });
+	test("accepts flameworkTest.parallel as a whole number, 1 or more, from the environment too", () => {
+		const file = write("flamework.config.json", `{ "flameworkTest": { "parallel": 2 } }`);
+		expect(readProjectConfig(file)).toEqual({ flameworkTest: { parallel: 2 } });
 
-		write("flamework.config.json", `{ "testing": { "parallel": "${"${PARALLEL:-1}"}" } }`);
-		expect(readProjectConfig(file, {})).toEqual({ testing: { parallel: 1 } });
-		expect(readProjectConfig(file, { PARALLEL: "4" })).toEqual({ testing: { parallel: 4 } });
-		expect(() => readProjectConfig(file, { PARALLEL: "lots" })).toThrow(/\/testing\/parallel.*not a number/);
+		write("flamework.config.json", `{ "flameworkTest": { "parallel": "${"${PARALLEL:-1}"}" } }`);
+		expect(readProjectConfig(file, {})).toEqual({ flameworkTest: { parallel: 1 } });
+		expect(readProjectConfig(file, { PARALLEL: "4" })).toEqual({ flameworkTest: { parallel: 4 } });
+		expect(() => readProjectConfig(file, { PARALLEL: "lots" })).toThrow(/\/flameworkTest\/parallel.*not a number/);
 
 		for (const bad of ["0", "1.5", "-2"]) {
-			write("flamework.config.json", `{ "testing": { "parallel": ${bad} } }`);
-			expect(() => readProjectConfig(file)).toThrow(/\/testing\/parallel must be (>= 1|integer)/);
+			write("flamework.config.json", `{ "flameworkTest": { "parallel": ${bad} } }`);
+			expect(() => readProjectConfig(file)).toThrow(/\/flameworkTest\/parallel must be (>= 1|integer)/);
 		}
 		remove("flamework.config.json");
 	});
 
-	test("accepts testing.showWindows, flamework-test's, as a boolean, from the environment too", () => {
-		const file = write("flamework.config.json", `{ "testing": { "showWindows": true } }`);
-		expect(readProjectConfig(file)).toEqual({ testing: { showWindows: true } });
+	test("accepts flameworkTest.showWindows as a boolean, from the environment too", () => {
+		const file = write("flamework.config.json", `{ "flameworkTest": { "showWindows": true } }`);
+		expect(readProjectConfig(file)).toEqual({ flameworkTest: { showWindows: true } });
 
-		write("flamework.config.json", `{ "testing": { "showWindows": "${"${SHOW:-false}"}" } }`);
-		expect(readProjectConfig(file, {})).toEqual({ testing: { showWindows: false } });
-		expect(readProjectConfig(file, { SHOW: "1" })).toEqual({ testing: { showWindows: true } });
-		expect(() => readProjectConfig(file, { SHOW: "sometimes" })).toThrow(/\/testing\/showWindows.*not a boolean/);
+		write("flamework.config.json", `{ "flameworkTest": { "showWindows": "${"${SHOW:-false}"}" } }`);
+		expect(readProjectConfig(file, {})).toEqual({ flameworkTest: { showWindows: false } });
+		expect(readProjectConfig(file, { SHOW: "1" })).toEqual({ flameworkTest: { showWindows: true } });
+		expect(() => readProjectConfig(file, { SHOW: "sometimes" })).toThrow(
+			/\/flameworkTest\/showWindows.*not a boolean/,
+		);
 
-		write("flamework.config.json", `{ "testing": { "showWindows": "yes" } }`);
-		expect(() => readProjectConfig(file)).toThrow(/\/testing\/showWindows.*not a boolean/);
-		write("flamework.config.json", `{ "testing": { "showWindows": 1 } }`);
-		expect(() => readProjectConfig(file)).toThrow(/\/testing\/showWindows must be boolean/);
+		write("flamework.config.json", `{ "flameworkTest": { "showWindows": "yes" } }`);
+		expect(() => readProjectConfig(file)).toThrow(/\/flameworkTest\/showWindows.*not a boolean/);
+		write("flamework.config.json", `{ "flameworkTest": { "showWindows": 1 } }`);
+		expect(() => readProjectConfig(file)).toThrow(/\/flameworkTest\/showWindows must be boolean/);
+		remove("flamework.config.json");
+	});
+
+	test("refuses flamework-test's keys where they were before, saying where each goes now", () => {
+		const file = write(
+			"flamework.config.json",
+			JSON.stringify({
+				testing: {
+					timeout: 5,
+					failOnSkip: true,
+					keepAwake: true,
+					lockTimeout: 60,
+					lockHold: 30,
+					parallel: 2,
+					showWindows: true,
+				},
+			}),
+		);
+		let message = "";
+		try {
+			readProjectConfig(file, {});
+		} catch (error) {
+			message = String(error);
+		}
+		expect(message).toContain('flamework-test\'s settings have a section of their own, "flameworkTest"');
+		for (const key of ["failOnSkip", "keepAwake", "lockTimeout", "lockHold", "parallel", "showWindows"]) {
+			expect(message).toContain(`move 'testing.${key}' to 'flameworkTest.${key}'`);
+		}
+		// `timeout` is the place's, one test's limit, and stays.
+		expect(message).not.toContain("testing.timeout");
+		remove("flamework.config.json");
+	});
+
+	test("refuses the cloud section, naming each key's new name, before its variables are read", () => {
+		const file = write(
+			"flamework.config.json",
+			JSON.stringify({
+				cloud: {
+					testingUniverseId: "1",
+					testingPlaceId: "2",
+					// Not set: the refusal comes first, rather than the variable's absence.
+					apiKey: "${MISSING_KEY_FOR_THE_REFUSAL}",
+					originalPlace: "original.rbxl",
+				},
+			}),
+		);
+		let message = "";
+		try {
+			readProjectConfig(file, {});
+		} catch (error) {
+			message = String(error);
+		}
+		expect(message).toContain("move 'cloud.testingUniverseId' to 'flameworkTest.universeId'");
+		expect(message).toContain("move 'cloud.testingPlaceId' to 'flameworkTest.placeId'");
+		expect(message).toContain("move 'cloud.apiKey' to 'flameworkTest.apiKey'");
+		expect(message).toContain("move 'cloud.originalPlace' to 'flameworkTest.originalPlace'");
+		expect(message).toContain("remove 'cloud': its keys are in 'flameworkTest' now");
+
+		write("flamework.config.json", `{ "cloud": {} }`);
+		expect(() => readProjectConfig(file, {})).toThrow(/remove 'cloud'/);
+		remove("flamework.config.json");
+	});
+
+	test("accepts the flameworkTest section, every key of it", () => {
+		const section = {
+			failOnSkip: true,
+			keepAwake: false,
+			lockTimeout: 60,
+			lockHold: 30,
+			parallel: 2,
+			showWindows: true,
+			universeId: "1",
+			placeId: "2",
+			apiKey: "key",
+			originalPlace: "original.rbxl",
+		};
+		const file = write("flamework.config.json", JSON.stringify({ flameworkTest: section }));
+		expect(readProjectConfig(file, {})).toEqual({ flameworkTest: section });
+
+		write("flamework.config.json", `{ "flameworkTest": { "testingPlaceId": "2" } }`);
+		expect(() => readProjectConfig(file, {})).toThrow(
+			/\/flameworkTest must NOT have additional properties 'testingPlaceId'/,
+		);
 		remove("flamework.config.json");
 	});
 
@@ -1032,19 +1117,11 @@ describe("runtime sections", () => {
 		expect(getRuntimeConfig({ transformer: { obfuscation: true } })).toBeUndefined();
 	});
 
-	test("leave out the testing keys only flamework-test reads, and keep the place's", () => {
+	test("leave out flamework-test's section, and keep the place's testing section whole", () => {
 		expect(
 			getRuntimeConfig({
-				testing: {
-					timeout: 5,
-					concurrency: 2,
-					keepAwake: true,
-					failOnSkip: true,
-					lockTimeout: 60,
-					lockHold: 30,
-					parallel: 2,
-					showWindows: true,
-				},
+				testing: { timeout: 5, concurrency: 2 },
+				flameworkTest: { keepAwake: true, failOnSkip: true, parallel: 2, placeId: "2" },
 			}),
 		).toEqual({
 			testing: { timeout: 5, concurrency: 2 },
@@ -1068,7 +1145,7 @@ describe("the fixture", () => {
 		const artifact = path.join(FIXTURE, "include", "flamework", "config.json");
 		expect(fs.existsSync(artifact)).toBe(true);
 		// `testing.entry` is a source path in the file and a tree path in the artifact, resolved the
-		// way a path macro is; `cloud` is read by the CLI only and never reaches the place.
+		// way a path macro is; `flameworkTest` is read by the CLI only and never reaches the place.
 		expect(JSON.parse(fs.readFileSync(artifact, "utf8"))).toEqual({
 			networking: { serialization: true },
 			components: { warningTimeout: 2, watchRenames: true },

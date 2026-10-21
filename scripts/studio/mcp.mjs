@@ -14,7 +14,7 @@ import os from "os";
 import path from "path";
 
 export function findStudioMcp() {
-	const fromEnv = process.env.STUDIO_MCP_EXE;
+	const fromEnv = process.env.FLAMEWORK_TEST_STUDIO_MCP_EXE;
 	if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
 	const versions = path.join(
 		process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"),
@@ -28,7 +28,8 @@ export function findStudioMcp() {
 				.filter((p) => fs.existsSync(p))
 				.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
 		: [];
-	if (candidates.length === 0) throw new Error(`StudioMCP.exe not found under ${versions}; set STUDIO_MCP_EXE`);
+	if (candidates.length === 0)
+		throw new Error(`StudioMCP.exe not found under ${versions}; set FLAMEWORK_TEST_STUDIO_MCP_EXE`);
 	return candidates[0];
 }
 

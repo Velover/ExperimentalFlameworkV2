@@ -75,15 +75,15 @@ the place.
    path. The runtime sections it declares reach the packages through `include/flamework/config.json`.
 5. The `assets` section expects `ReplicatedStorage.Assets` and `SoundService.Sounds`, which the
    place's project file deliberately does not declare: they stand for assets that exist only in the
-   original place, and come from `original.rbxl` laid over the build (`bun run original` makes
-   one, `bun run test` makes it when it is missing; `ORIGINAL_PLACE` in `.env` names it). Nothing
-   in the place waits for them any more (the game template it was cut from had two shared modules
-   that did, and stalled ignition without them), so without them only the `assets` cases fail. A
-   Rojo-served session needs them added by hand, or a patched place opened instead. A run writes
-   one per project in `ROJO_PROJECT`, named after it (`place.default.rbxl`, `place.deferred.rbxl`,
-   ...), and `flamework-test patch place.rbxl --project default.project.json` writes one without
-   running anything; then `flamework-test studio open place.default.rbxl`. Only with `ROJO_PROJECT`
-   empty is the patched file `place.patched.rbxl`.
+   original place, and come from `original.rbxl` laid over the build (`bun run original` makes one,
+   `bun run test` makes it when it is missing; `FLAMEWORK_TEST_ORIGINAL_PLACE` in `.env` names it).
+   Nothing in the place waits for them any more (the game template it was cut from had two shared
+   modules that did, and stalled ignition without them), so without them only the `assets` cases
+   fail. A Rojo-served session needs them added by hand, or a patched place opened instead. A run
+   writes one per project in `FLAMEWORK_TEST_PROJECT`, named after it (`place.default.rbxl`,
+   `place.deferred.rbxl`, ...), and `flamework-test patch place.rbxl --project default.project.json`
+   writes one without running anything; then `flamework-test studio open place.default.rbxl`. Only
+   with `FLAMEWORK_TEST_PROJECT` empty is the patched file `place.patched.rbxl`.
 
 ## Running the generalized tests
 
@@ -99,7 +99,7 @@ bun run test:place --parallel 2                             # two projects' wind
 ```
 
 which builds the packages and runs the whole suite in Studio under each of the four Rojo projects in
-the place's `ROJO_PROJECT` (default, immediate, deferred, streaming; see the place's
+the place's `FLAMEWORK_TEST_PROJECT` (default, immediate, deferred, streaming; see the place's
 [README](../../tests/place/README.md#one-suite-four-rojo-projects)). The root `bun run test` leaves
 it out, since it needs Studio.
 
@@ -133,9 +133,9 @@ lock's record with its own place file, for the next taker.
 
 `flamework-test test` opens its windows on a desktop of its own
 (`packages/testing/cli/src/desktop.ts`), so a run in this repository never shows a window or takes
-the focus, whatever else the machine is doing. `--show` opens them on the user's desktop, as before,
-and is the first thing to try when a hidden run misbehaves: a hidden window can show nothing to
-anyone.
+the focus, whatever else the machine is doing. `--show-windows` opens them on the user's desktop, as
+before, and is the first thing to try when a hidden run misbehaves: a hidden window can show nothing
+to anyone.
 
 - **The launch.** `CreateDesktopW` makes `WinSta0\flamework-test` (it opens the desktop when it
   exists already), and `CreateProcessW` starts Studio there, `STARTUPINFOW.lpDesktop` naming it and
@@ -163,15 +163,15 @@ anyone.
   next run closed it by its process and removed its `.rbxl.lock`), `test --keep` followed by `studio
   list`, `studio lock --check-window`, `studio exec`, `studio call screen_capture` (which captured
   the rendered scene) and `studio close`, and the whole suite with `--parallel 2`. No Roblox window
-  appeared on the user's desktop and the foreground never moved; with `--show`, the window appeared
-  and took the foreground mid-run, as it always has.
+  appeared on the user's desktop and the foreground never moved; with `--show-windows`, the window
+  appeared and took the foreground mid-run, as it always has.
 - **The desktop object** goes away by itself: the CLI keeps its handle until it exits (Studio has to
   attach to the desktop after the launch), and Windows removes a desktop once no handle and no
   thread of a process is left on it. After the last window had closed and the CLI had exited,
   `OpenDesktopW("flamework-test")` failed with error 2 (no such desktop). While it exists it takes
   some of the session's desktop heap, one desktop's worth, however many windows it holds.
 - **A window that never connects** may be held up by a dialog on the hidden desktop (a login, an
-  update, a crash report), which the error names, with `--show` to see it.
+  update, a crash report), which the error names, with `--show-windows` to see it.
 - **Signed out (2026-10-20, Studio 0.743).** A `--parallel 2` run launched two hidden windows in
   the same second, after Studio had sat closed for two hours. Both signed in by themselves at
   start-up (Studio's log, `%LOCALAPPDATA%\Roblox\logs\*_Studio_*_last.log`: `login (automatic)`);
@@ -189,21 +189,21 @@ anyone.
   ends the wait with `... is not signed in to Roblox ...` at the first look that shows it. Each log
   names its process (`UIThreadNotifier for process '<pid>'`) within its first second.
 - **A window listed under another name.** On 2026-10-07 hidden windows of `tests/place` (6 of 7 in
-  two `--parallel 2` runs, and two of another project's) registered with the MCP proxy as `Game`
-  and stayed so, while `game.Name` inside was the file's name; `--show` runs connected by name.
+  two `--parallel 2` runs, and two of another project's) registered with the MCP proxy as `Game` and
+  stayed so, while `game.Name` inside was the file's name; `--show-windows` runs connected by name.
   The proxy lists a new window with no name (`""`) as it registers, 6 to 15 seconds after the
-  launch, and names it 4 to 13 seconds later; the stale `Game` is that second step going wrong.
-  It did not come back on demand the same evening: 12 hidden launches by a probe script (one alone,
-  two at once, two while a third played, two under a 16-thread CPU load, the very `place.immediate`
-  and `place.deferred` files) and a whole `--parallel 2` run of the four projects all registered
-  `""` and then the file's name. So the run no longer depends on the name: a new, unclaimed window
-  listed under a name that names no place (neither a file's nor a cloud place's: `Game`, `Place1`;
-  no name at all past 30 seconds) is asked for `game.Name` and Workspace's `FlameworkTestLaunch`,
-  the random id the patch writes into the place for that one launch, and taken when that id is its
-  own. One that cannot answer yet, or is still loading its place, is asked again every 5 seconds
-  until the wait runs out, so a slow start is still found (see the testing README, How `test`
-  handles Studio windows). The wait has its own limit, `--connect-timeout` (180 seconds), where it
-  used the run's `--timeout` before (a 900-second run waited 15 minutes for a window that had
+  launch, and names it 4 to 13 seconds later; the stale `Game` is that second step going wrong. It
+  did not come back on demand the same evening: 12 hidden launches by a probe script (one alone, two
+  at once, two while a third played, two under a 16-thread CPU load, the very `place.immediate` and
+  `place.deferred` files) and a whole `--parallel 2` run of the four projects all registered `""`
+  and then the file's name. So the run no longer depends on the name: a new, unclaimed window listed
+  under a name that names no place (neither a file's nor a cloud place's: `Game`, `Place1`; no name
+  at all past 30 seconds) is asked for `game.Name` and Workspace's `FlameworkTestLaunch`, the random
+  id the patch writes into the place for that one launch, and taken when that id is its own. One
+  that cannot answer yet, or is still loading its place, is asked again every 5 seconds until the
+  wait runs out, so a slow start is still found (see the testing README, How `test` handles Studio
+  windows). The wait has its own limit, `--connect-timeout` (180 seconds), where it used the run's
+  `--timeout` (now `--run-timeout`) before (a 900-second run waited 15 minutes for a window that had
   connected as `Game`).
 - **`--keep`** leaves the window hidden: Windows moves no window between desktops, and a kept
   window is there to be driven through the MCP proxy, which reaches it as any other.

@@ -7,6 +7,55 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ### Upgrade notes
 
+- **flamework-test's settings are renamed, and the old names are refused.** Every setting now has
+  one name in three spellings: its flag, its key in a new `flameworkTest` section of
+  `flamework.config.json`, and its variable, `FLAMEWORK_TEST_` and the key in capitals
+  (`--lock-hold`, `"lockHold"`, `FLAMEWORK_TEST_LOCK_HOLD`). The API key keeps `ROBLOX_API_KEY`.
+  Each old name is refused with a message naming its new one, rather than read or ignored: an old
+  config key fails the build and every flamework-test command; an old variable, set anywhere the CLI
+  reads one (the shell, `.env`, `.env.local`), even empty, stops every command before it does
+  anything; an old flag or command is a usage error (exit 2).
+
+  | Was | Now |
+  |---|---|
+  | `"testing": { "failOnSkip", "keepAwake", "lockTimeout", "lockHold", "parallel", "showWindows" }` | `"flameworkTest": { ... }`, the same keys |
+  | `"cloud": { "testingUniverseId" }` | `"flameworkTest": { "universeId" }` |
+  | `"cloud": { "testingPlaceId" }` | `"flameworkTest": { "placeId" }` |
+  | `"cloud": { "apiKey" }` | `"flameworkTest": { "apiKey" }` |
+  | `"cloud": { "originalPlace" }` | `"flameworkTest": { "originalPlace" }` |
+  | `FAIL_ON_SKIP` | `FLAMEWORK_TEST_FAIL_ON_SKIP` |
+  | `KEEP_AWAKE` | `FLAMEWORK_TEST_KEEP_AWAKE` |
+  | `FLAMEWORK_TEST_SHOW` | `FLAMEWORK_TEST_SHOW_WINDOWS` |
+  | `ROJO_PROJECT` | `FLAMEWORK_TEST_PROJECT` |
+  | `ORIGINAL_PLACE` | `FLAMEWORK_TEST_ORIGINAL_PLACE` |
+  | `TESTING_UNIVERSE_ID` | `FLAMEWORK_TEST_UNIVERSE_ID` |
+  | `TESTING_PLACE_ID` | `FLAMEWORK_TEST_PLACE_ID` |
+  | `TESTING_PLACE_API_KEY` | `ROBLOX_API_KEY` (the alias is gone) |
+  | `LUNE_EXE` | `FLAMEWORK_TEST_LUNE_EXE` |
+  | `ROBLOX_STUDIO_EXE` | `FLAMEWORK_TEST_STUDIO_EXE` |
+  | `STUDIO_MCP_EXE` | `FLAMEWORK_TEST_STUDIO_MCP_EXE` |
+  | `--show` | `--show-windows` |
+  | `--hold` | `--lock-hold` |
+  | `--original` | `--original-place` |
+  | `--testing-universe` | `--universe-id` |
+  | `--testing-place` | `--place-id` |
+  | `--key` | `--api-key` |
+  | `--timeout` on `test`, `studio run`, `cloud run`, `cloud probe` | `--run-timeout` |
+  | `--timeout` on `studio exec`, `studio call` | `--call-timeout` |
+  | `--timeout` on `studio open` | `--connect-timeout` (seconds) |
+  | `--version <n>` on `cloud run`, `cloud probe` | `--place-version <n>`; `flamework-test --version` prints the CLI's version |
+  | `cloud test <file>` | `test <file> --cloud` |
+
+  Unchanged: `ROBLOX_API_KEY`, `FLAMEWORK_TEST_LOCK_TIMEOUT`, `FLAMEWORK_TEST_LOCK_HOLD`,
+  `FLAMEWORK_TEST_CONNECT_TIMEOUT`, `FLAMEWORK_TEST_PARALLEL`, `FLAMEWORK_TEST_STATE_DIR`, every
+  other flag, and the place's own `testing` section (`enabled`, `activeIn`, `inactiveIn`,
+  `autoRun`, `timeout`, `concurrency`, `entry`), whose `timeout` is one test's limit as before. To
+  upgrade, rename the keys in `flamework.config.json` (a `${TESTING_PLACE_ID:-...}` there becomes a
+  plain id, since `FLAMEWORK_TEST_PLACE_ID` overrides the key by itself), the variables in `.env`,
+  `.env.local` and CI settings, and the flags in package scripts. Upgrade the transformer with
+  testing: an older transformer refuses the `flameworkTest` section, and this one refuses the old
+  keys.
+
 - **A tagged instance moved out of ReplicatedStorage or ServerStorage, or into a whitelisted
   ancestor, now gets its component.** Every earlier release, v1 included, read the ancestor lists
   only when the tag was announced, and moving within the DataModel announces nothing, so such an
@@ -81,13 +130,24 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ### testing
 
+#### Changed
+
+- **The settings rename** (see the upgrade notes): the `flameworkTest` section, the
+  `FLAMEWORK_TEST_` variables, `--show-windows`, `--lock-hold`, `--original-place`,
+  `--universe-id`, `--place-id`, `--api-key`, `--place-version`, and one meaning per timeout
+  flag: `--run-timeout` (a run: each realm's in Studio, 120s by default; the task's in the cloud,
+  300s at most), `--call-timeout` (`studio exec`, `studio call`), `--connect-timeout` (the wait
+  for a launched window, the only wait of `studio open`). `test <file> --cloud` is the one cloud
+  test; `cloud test`, which ran the same thing, is refused (its `--dry-run`, `--code` and
+  `--script` are `cloud publish` followed by `cloud run`). The old names are refused, each naming
+  its new one, and the refusals are tested one by one.
+
 #### Added
 
 - **`--connect-timeout <seconds>` on `test` and `studio open`**, and
   `FLAMEWORK_TEST_CONNECT_TIMEOUT` after it: how long a launched Studio window is waited for on
-  the MCP proxy, 180 seconds by default. No config key: the config file's schema is the
-  transformer's. `studio open` still takes its `--timeout` for that wait when the flag is not
-  given.
+  the MCP proxy, 180 seconds by default. No config key.
+- **`flamework-test --version`** prints the CLI's own version (its package's).
 
 #### Fixed
 
@@ -112,14 +172,14 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   which the MCP proxy lists as "Game": told by the launch id its place carries`, and drives the
   window by its MCP id from then on: the Studio lock's record keeps the id and the listed name
   (`mcpName`), so `studio run`, `exec`, `list`, `lock --check-window` and `close` find it too.
-- **The wait for a launched window no longer uses the run's `--timeout`.** `test --timeout 900s`
-  waited 15 minutes for a window that had connected under another name; the wait is now
-  `--connect-timeout` (180 seconds by default). When it runs out, the error says how long it waited
-  and what set that (`--connect-timeout`, `FLAMEWORK_TEST_CONNECT_TIMEOUT`, or `studio open`'s
-  `--timeout`), and names every window that registered with the proxy meanwhile, with its id, the
-  name it was listed under, and what it answered when asked (`asked: game.Name "...", launch id
-  ...; not this launch's`) or why it was not asked; the window the run launched is closed again, as
-  before (`--keep` leaves it).
+- **The wait for a launched window no longer uses the run's `--timeout`** (now `--run-timeout`).
+  `test --timeout 900s` waited 15 minutes for a window that had connected under another name; the
+  wait is now `--connect-timeout` (180 seconds by default). When it runs out, the error says how
+  long it waited and what set that (`--connect-timeout` or `FLAMEWORK_TEST_CONNECT_TIMEOUT`), and
+  names every window that registered with the proxy meanwhile, with its id, the name it was listed
+  under, and what it answered when asked (`asked: game.Name "...", launch id ...; not this
+  launch's`) or why it was not asked; the window the run launched is closed again, as before
+  (`--keep` leaves it).
 - **`flamework-test test --parallel` no longer signs Studio out by launching its windows at once.**
   Two Studios started in the same second both sign in to Roblox at start-up, and when the sign-in
   is due a refresh (Studio closed for a while), one of them can fail (401 from
@@ -134,9 +194,21 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   process), and a window showing its login dialog on the hidden desktop ends the wait with `Studio
   started (PID n) but is not signed in to Roblox, so <file> never opened ...`, which says to sign
   in to Studio, instead of `never showed up on the MCP proxy` 3 minutes later. A shown window
-  (`--show`, `studio open`) says it once and is waited for, since the dialog can be answered there.
+  (`--show-windows`, `studio open`) says it once and is waited for, since the dialog can be answered
+  there.
 
 ### transformer
+
+#### Changed
+
+- **The config schema has a `flameworkTest` section** for flamework-test's settings (`failOnSkip`,
+  `keepAwake`, `lockTimeout`, `lockHold`, `parallel`, `showWindows`, `universeId`, `placeId`,
+  `apiKey`, `originalPlace`), read by that CLI only and never compiled into the place. The
+  `testing` section holds only what the place reads, so the transformer no longer strips CLI keys
+  from it (a new CLI setting is still added to the schema's `flameworkTest`, which allows no other
+  key). A file with the CLI's keys still in `testing`, or a `cloud` section, is refused with one
+  line per key naming where it goes (`move 'cloud.testingPlaceId' to 'flameworkTest.placeId'`),
+  before its variables are read.
 
 #### Added
 

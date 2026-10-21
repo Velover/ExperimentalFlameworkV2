@@ -190,10 +190,10 @@ describe("a launched Studio that is not signed in", () => {
 		expect(run.windows).toHaveLength(1);
 	});
 
-	test("shown (--show, studio open): said once, and waited for, since someone can sign in there", async () => {
+	test("shown (--show-windows, studio open): said once, and waited for, since someone can sign in there", async () => {
 		const states: Array<SignIn | undefined> = [undefined, "signed-out", "signed-out", "signed-in"];
 		const studio = signingStudio(states);
-		const run = await runCli(["test", "place.rbxl", "--show"], {
+		const run = await runCli(["test", "place.rbxl", "--show-windows"], {
 			files: { "place.rbxl": "built" },
 			studio: studio.fake,
 			onLaunch: studio.onLaunch,

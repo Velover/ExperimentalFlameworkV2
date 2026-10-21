@@ -236,21 +236,25 @@ describe("--keep-awake", () => {
 		expect(run.err).not.toContain("display");
 	});
 
-	test("KEEP_AWAKE and testing.keepAwake turn it on; the flag wins over both, the variable over the config", async () => {
+	test("FLAMEWORK_TEST_KEEP_AWAKE and flameworkTest.keepAwake turn it on; the flag wins over both, the variable over the config", async () => {
 		const on = (run: { executionStates: number[] }) => run.executionStates.length > 0;
 
-		expect(on(await testRun([], { env: { KEEP_AWAKE: "1" } }))).toBe(true);
+		expect(on(await testRun([], { env: { FLAMEWORK_TEST_KEEP_AWAKE: "1" } }))).toBe(true);
 		expect(on(await testRun([], { settings: { keepAwake: true } }))).toBe(true);
 		// From .env or .env.local, which the settings carry.
-		expect(on(await testRun([], { env: {}, settings: { env: { KEEP_AWAKE: "yes" } } }))).toBe(true);
-		expect(on(await testRun([], { env: { KEEP_AWAKE: "false" }, settings: { keepAwake: true } }))).toBe(false);
-		expect(on(await testRun(["--keep-awake=false"], { env: { KEEP_AWAKE: "on" } }))).toBe(false);
-		expect(on(await testRun(["--keep-awake"], { env: { KEEP_AWAKE: "0" } }))).toBe(true);
-		expect(on(await testRun([], { env: { KEEP_AWAKE: "" }, settings: { keepAwake: true } }))).toBe(false);
+		expect(on(await testRun([], { env: {}, settings: { env: { FLAMEWORK_TEST_KEEP_AWAKE: "yes" } } }))).toBe(true);
+		expect(
+			on(await testRun([], { env: { FLAMEWORK_TEST_KEEP_AWAKE: "false" }, settings: { keepAwake: true } })),
+		).toBe(false);
+		expect(on(await testRun(["--keep-awake=false"], { env: { FLAMEWORK_TEST_KEEP_AWAKE: "on" } }))).toBe(false);
+		expect(on(await testRun(["--keep-awake"], { env: { FLAMEWORK_TEST_KEEP_AWAKE: "0" } }))).toBe(true);
+		expect(on(await testRun([], { env: { FLAMEWORK_TEST_KEEP_AWAKE: "" }, settings: { keepAwake: true } }))).toBe(
+			false,
+		);
 
-		const misspelt = await testRun([], { env: { KEEP_AWAKE: "always" } });
+		const misspelt = await testRun([], { env: { FLAMEWORK_TEST_KEEP_AWAKE: "always" } });
 		expect(misspelt.code).toBe(2);
-		expect(misspelt.err).toContain('KEEP_AWAKE must be true or false (or 1 or 0), got "always"');
+		expect(misspelt.err).toContain('FLAMEWORK_TEST_KEEP_AWAKE must be true or false (or 1 or 0), got "always"');
 		expect(misspelt.launched).toHaveLength(0);
 	});
 
@@ -308,7 +312,7 @@ describe("--keep-awake", () => {
 		expect(run.out.match(/keep-awake does nothing on darwin/g)).toHaveLength(1);
 	});
 
-	test("not for the cloud: refused with --cloud, left alone by KEEP_AWAKE there, and no cloud command has it", async () => {
+	test("not for the cloud: refused with --cloud, left alone by FLAMEWORK_TEST_KEEP_AWAKE there, and no cloud command has it", async () => {
 		const refused = await runCli(["test", "place.rbxl", "--cloud", "--keep-awake"], {
 			files: { "place.rbxl": "built" },
 		});
@@ -321,14 +325,14 @@ describe("--keep-awake", () => {
 		const cloud = await runCli(["test", "place.rbxl", "--cloud"], {
 			responses: [json({ versionNumber: 9 }), ...happyPath([resultJson()])],
 			files: { "place.rbxl": "built" },
-			env: { ...ENV, KEEP_AWAKE: "true" },
+			env: { ...ENV, FLAMEWORK_TEST_KEEP_AWAKE: "true" },
 		});
 		expect(cloud.code).toBe(0);
 		expect(cloud.executionStates).toEqual([]);
 
 		for (const command of [
 			["cloud", "run"],
-			["cloud", "test", "place.rbxl"],
+			["cloud", "publish", "place.rbxl"],
 			["studio", "open"],
 			["studio", "exec"],
 		]) {

@@ -91,14 +91,14 @@ function findUnderVersions(
 	return candidates[0];
 }
 
-/** `StudioMCP.exe`, or `STUDIO_MCP_EXE`. */
+/** `StudioMCP.exe`, or `FLAMEWORK_TEST_STUDIO_MCP_EXE`. */
 export function findStudioMcp(env: Record<string, string | undefined> = process.env): string | undefined {
-	return findUnderVersions("StudioMCP.exe", env.STUDIO_MCP_EXE, env);
+	return findUnderVersions("StudioMCP.exe", env.FLAMEWORK_TEST_STUDIO_MCP_EXE, env);
 }
 
-/** `RobloxStudioBeta.exe`, or `ROBLOX_STUDIO_EXE`. */
+/** `RobloxStudioBeta.exe`, or `FLAMEWORK_TEST_STUDIO_EXE`. */
 export function findStudioExe(env: Record<string, string | undefined> = process.env): string | undefined {
-	return findUnderVersions("RobloxStudioBeta.exe", env.ROBLOX_STUDIO_EXE, env);
+	return findUnderVersions("RobloxStudioBeta.exe", env.FLAMEWORK_TEST_STUDIO_EXE, env);
 }
 
 // ------------------------------------------------------------- pure helpers

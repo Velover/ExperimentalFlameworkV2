@@ -8,7 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * The in-place suite in Roblox Studio: builds the packages, then runs `bun run test` in
  * tests/place, which compiles the place against those builds (workspace links, nothing copied),
  * builds it with Rojo and has `flamework-test` run both realms under every project in the place's
- * ROJO_PROJECT. Needs Roblox Studio with "MCP server" enabled, Rojo and Lune, so `bun run test`
+ * FLAMEWORK_TEST_PROJECT. Needs Roblox Studio with "MCP server" enabled, Rojo and Lune, so `bun run test`
  * leaves it out.
  *
  * Arguments go to `flamework-test test`, and paths in them are relative to tests/place:

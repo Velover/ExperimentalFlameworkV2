@@ -87,24 +87,28 @@ export class ShopTests implements OnStart {
 - `flamework-test test test.rbxl` opens the build in Roblox Studio, runs the server's sections and
   then the client's in one play session, prints a summary per realm, and closes its window. It
   needs Studio with "MCP server" on in its Assistant settings, Bun on the `PATH`, and Lune to lay
-  the build over an original place (`--original tests/place.rbxlx`).
+  the build over an original place (`--original-place tests/place.rbxlx`).
 - Flags: `--sections shop` (or `shop/<test name>`, comma-separated), `--realm server|client`,
   `--fail-on-skip` (a skip fails the run), `--keep-awake` (Windows: keeps the display on, since
-  while it sleeps RenderStepped stops and `onRender` tests fail), `--list`, `--keep`, `--timeout`,
-  `--concurrency 1` (concurrent tests one at a time).
+  while it sleeps RenderStepped stops and `onRender` tests fail), `--list`, `--keep`,
+  `--run-timeout` (each realm's run; one test's limit is `testing.timeout`), `--concurrency 1`
+  (concurrent tests one at a time). A setting has one name: its flag, its `flameworkTest` key in
+  `flamework.config.json` and its `FLAMEWORK_TEST_` variable (`--lock-hold`, `lockHold`,
+  `FLAMEWORK_TEST_LOCK_HOLD`); the names from before 2.0.0-beta.0 are refused, each naming the new
+  one.
 - `--parallel [n]` runs a run of several Rojo projects with that many windows side by side (each
   about 3 GB). Use `--parallel 2` for every run of several projects, except one that measures time
   (a benchmark, a timing-sensitive case: windows side by side compete for the CPU and skew the
-  timings) or needs a window's focus (input that needs a visible, focused window, `--show`). It is
-  no reason to run more projects than the change needs.
+  timings) or needs a window's focus (input that needs a visible, focused window, `--show-windows`).
+  It is no reason to run more projects than the change needs.
 - On Windows `test` opens Studio on a hidden desktop, so it never interrupts the user; `test --keep`
-  leaves the window there for the studio commands. Pass `--show` only when the user wants to watch,
-  or when a hidden window `never showed up on the MCP proxy` (a dialog may be waiting there).
+  leaves the window there for the studio commands. Pass `--show-windows` only when the user wants to
+  watch, or when a hidden window `never showed up on the MCP proxy` (a dialog may be waiting there).
 - A window the MCP proxy lists as `Game` (not its file's name) is still found: the run asks new,
   unclaimed windows listed under no place's name (`Game`, `Place1`, no name past 30 seconds) for
   `game.Name` and the launch id its patched place carries, again every 5 seconds while one cannot
-  say yet, and prints `connected: <file> (<id>), which the MCP proxy lists as "Game": ...`. The
-  wait for a window is `--connect-timeout <seconds>` (180 by default), not `--timeout`; its error
+  say yet, and prints `connected: <file> (<id>), which the MCP proxy lists as "Game": ...`. The wait
+  for a window is `--connect-timeout <seconds>` (180 by default), not `--run-timeout`; its error
   names every window that registered meanwhile and what each answered.
 - `--sections` is judged across both realms: an entry only one realm has is listed for the other
   as `not among the client's sections: ...` without failing, and an entry no realm has fails the
@@ -128,11 +132,11 @@ export class ShopTests implements OnStart {
   and `studio open` wait for the Studio lock while another project's window holds it, saying whose
   (300 seconds, `--lock-timeout`). Never close a window you did not open; `studio lock` shows the
   holder.
-- `flamework-test studio open [file]` opens a window of your own and prints
-  `studio_id=<id> pid=<pid>`. Then `studio list` (the windows, and which is yours), `studio tools
-  [name]` (Studio's MCP tools, read live), `studio call <tool> --studio <id> --args-file args.json`
-  (any tool; images are written to files whose paths it prints), and `studio close`, which frees the
-  lock. A window left unused for 15 minutes (`--hold <minutes>`) may be closed for another project.
+- `flamework-test studio open [file]` opens a window of your own and prints `studio_id=<id>
+  pid=<pid>`. Then `studio list` (the windows, and which is yours), `studio tools [name]` (Studio's
+  MCP tools, read live), `studio call <tool> --studio <id> --args-file args.json` (any tool; images
+  are written to files whose paths it prints), and `studio close`, which frees the lock. A window
+  left unused for 15 minutes (`--lock-hold <minutes>`) may be closed for another project.
 - `refusing to ... the Studio window ...`: it is not the window flamework-test opened for this
   project. `--any-window` acts on it anyway: on a window the user has open, only after asking.
   `` ... this project's Studio window ...: `test` is running in it `` (or `test --keep`, `studio

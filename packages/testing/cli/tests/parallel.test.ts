@@ -790,7 +790,7 @@ describe("--parallel: how many", () => {
 				undefined,
 				'FLAMEWORK_TEST_PARALLEL must be a whole number, 1 or more, got "two"',
 			],
-			[[], undefined, { parallel: 0 }, 'testing.parallel must be a whole number, 1 or more, got "0"'],
+			[[], undefined, { parallel: 0 }, 'flameworkTest.parallel must be a whole number, 1 or more, got "0"'],
 		] as const) {
 			const { run } = await runSideBySide(names, [...extra], {
 				...(env !== undefined ? { env } : {}),
@@ -803,7 +803,7 @@ describe("--parallel: how many", () => {
 		}
 	});
 
-	test("the flag comes first, then FLAMEWORK_TEST_PARALLEL, then testing.parallel; cut to the projects there are", async () => {
+	test("the flag comes first, then FLAMEWORK_TEST_PARALLEL, then flameworkTest.parallel; cut to the projects there are", async () => {
 		const names = ["a", "b", "c"];
 		const delay = { "place.a.rbxl": 10, "place.b.rbxl": 10, "place.c.rbxl": 10 };
 		const most = async (extra: string[], env?: Record<string, string>, settings?: Partial<CloudSettings>) =>
@@ -850,20 +850,20 @@ describe("--parallel: how many", () => {
 		);
 		expect(cloud.spawned).toHaveLength(0);
 
-		// FLAMEWORK_TEST_PARALLEL, even misspelt, and testing.parallel are not a cloud run's.
+		// FLAMEWORK_TEST_PARALLEL, even misspelt, and flameworkTest.parallel are not a cloud run's.
 		const ignored = await runCli(["test", "place.rbxl", "--cloud", ...projectFlag(names)], {
 			files: filesOf(names),
 			env: {
-				TESTING_PLACE_API_KEY: "k",
-				TESTING_UNIVERSE_ID: "1",
-				TESTING_PLACE_ID: "2",
+				ROBLOX_API_KEY: "k",
+				FLAMEWORK_TEST_UNIVERSE_ID: "1",
+				FLAMEWORK_TEST_PLACE_ID: "2",
 				FLAMEWORK_TEST_PARALLEL: "two",
 			},
 			settings: { parallel: 0 },
 			responses: [],
 		});
 		expect(ignored.err).not.toContain("FLAMEWORK_TEST_PARALLEL");
-		expect(ignored.err).not.toContain("testing.parallel");
+		expect(ignored.err).not.toContain("flameworkTest.parallel");
 
 		const keep = await runSideBySide(names, ["--keep", "--parallel", "2"]);
 		expect(keep.run.code).toBe(2);

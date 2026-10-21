@@ -154,47 +154,7 @@ export interface TestingRuntimeConfig {
 	 * game by itself. A string here; the artifact carries it resolved to a tree path.
 	 */
 	entry?: string;
-
-	/** `flamework-test` only: a skipped test fails the run. After `--fail-on-skip` and `FAIL_ON_SKIP`. */
-	failOnSkip?: boolean;
-
-	/** `flamework-test` only: a Studio run keeps the display on. After `--keep-awake` and `KEEP_AWAKE`. */
-	keepAwake?: boolean;
-
-	/**
-	 * `flamework-test` only: seconds a command that opens a Studio window waits for the Studio lock.
-	 * After `--lock-timeout` and `FLAMEWORK_TEST_LOCK_TIMEOUT`.
-	 */
-	lockTimeout?: number;
-
-	/**
-	 * `flamework-test` only: minutes a window it opened may sit unused before another project may
-	 * close it. After `--hold` and `FLAMEWORK_TEST_LOCK_HOLD`.
-	 */
-	lockHold?: number;
-
-	/**
-	 * `flamework-test` only: how many projects' Studio windows a `test` of several runs side by side.
-	 * After `--parallel` and `FLAMEWORK_TEST_PARALLEL`.
-	 */
-	parallel?: number;
-
-	/**
-	 * `flamework-test` only: a Studio `test` opens its windows where they can be seen, rather than on
-	 * a hidden desktop. After `--show` and `FLAMEWORK_TEST_SHOW`.
-	 */
-	showWindows?: boolean;
 }
-
-/** Keys of the `testing` section only `flamework-test` reads, left out of the place's config. */
-const CLI_ONLY_TESTING_KEYS = [
-	"failOnSkip",
-	"keepAwake",
-	"lockTimeout",
-	"lockHold",
-	"parallel",
-	"showWindows",
-] as const;
 
 /**
  * The sections the runtime packages read. Game projects get them written to
@@ -209,17 +169,32 @@ export interface RuntimeConfig {
 }
 
 /**
- * Where the `flamework-test` CLI (`@flamework-experimental/testing`) publishes the place and runs its tests. Read by
- * that CLI only: it is not a runtime section and never reaches the place.
+ * The settings of the `flamework-test` CLI (`@flamework-experimental/testing`): how it runs the tests
+ * in Studio, and where it publishes the place and runs them in the cloud. Read by that CLI only: it
+ * is not a runtime section and never reaches the place. Each key is the CLI's flag in camelCase
+ * (`lockHold`, `--lock-hold`), and its environment variable `FLAMEWORK_TEST_` and the key in
+ * capitals (`FLAMEWORK_TEST_LOCK_HOLD`); the flag comes first, then the variable, then the key.
  */
-export interface CloudConfig {
-	/** The experience the testing place is in; named so nothing confuses it with the original. */
-	testingUniverseId?: string;
+export interface FlameworkTestConfig {
+	/** A skipped test fails the run. */
+	failOnSkip?: boolean;
+	/** A Studio run keeps the display on. */
+	keepAwake?: boolean;
+	/** Seconds a command that opens a Studio window waits for the Studio lock. */
+	lockTimeout?: number;
+	/** Minutes a window it opened may sit unused before another project may close it. */
+	lockHold?: number;
+	/** How many projects' Studio windows a `test` of several runs side by side. */
+	parallel?: number;
+	/** A Studio `test` opens its windows where they can be seen, rather than on a hidden desktop. */
+	showWindows?: boolean;
+	/** The experience the testing place is in. */
+	universeId?: string;
 	/** The place tests are published to and run in. Never the original place. */
-	testingPlaceId?: string;
+	placeId?: string;
 	/** Usually `"${ROBLOX_API_KEY:-}"`, so that the key stays in the environment. */
 	apiKey?: string;
-	/** A copy of the original place the build is laid over before publishing, relative to the config file. */
+	/** A copy of the original place the build is laid over, relative to the config file. */
 	originalPlace?: string;
 }
 
@@ -228,7 +203,43 @@ export interface ProjectConfig extends RuntimeConfig {
 	$schema?: string;
 	transformer?: TransformerOptions;
 	serialization?: SerializationConfig;
-	cloud?: CloudConfig;
+	flameworkTest?: FlameworkTestConfig;
+}
+
+/** The keys of `testing` that `flamework-test` alone read before 2.0.0-beta.0, now in `flameworkTest` under the same names. */
+const MOVED_TESTING_KEYS = ["failOnSkip", "keepAwake", "lockTimeout", "lockHold", "parallel", "showWindows"];
+
+/** The keys of the top-level `cloud` section before 2.0.0-beta.0, and their names in `flameworkTest`. */
+const MOVED_CLOUD_KEYS: Readonly<Record<string, string>> = {
+	testingUniverseId: "universeId",
+	testingPlaceId: "placeId",
+	apiKey: "apiKey",
+	originalPlace: "originalPlace",
+};
+
+/**
+ * Where each `flamework-test` setting a config file still keeps in its old place now goes, one line
+ * each; empty when there is none. The old places are refused rather than read, so that a file
+ * written for an alpha says what to change instead of being half ignored.
+ */
+export function describeMovedKeys(config: unknown): string[] {
+	if (config === null || typeof config !== "object" || Array.isArray(config)) return [];
+	const { testing, cloud } = config as Record<string, unknown>;
+	const lines = new Array<string>();
+	if (testing !== null && typeof testing === "object" && !Array.isArray(testing)) {
+		for (const key of MOVED_TESTING_KEYS) {
+			if (key in testing) lines.push(`move 'testing.${key}' to 'flameworkTest.${key}'`);
+		}
+	}
+	if (cloud !== undefined) {
+		const keys = cloud !== null && typeof cloud === "object" && !Array.isArray(cloud) ? Object.keys(cloud) : [];
+		for (const key of keys) {
+			const moved = MOVED_CLOUD_KEYS[key];
+			if (moved !== undefined) lines.push(`move 'cloud.${key}' to 'flameworkTest.${moved}'`);
+		}
+		lines.push(`remove 'cloud': its keys are in 'flameworkTest' now`);
+	}
+	return lines;
 }
 
 export const RUNTIME_SECTIONS = ["core", "networking", "components", "scopes", "testing"] as const;
@@ -313,6 +324,14 @@ export function readProjectConfig(configPath: string, env: Env = loadEnv(path.di
 	if (error) {
 		throw new ProjectError(
 			`Failed to parse ${configPath}: ${ts.flattenDiagnosticMessageText(error.messageText, "\n")}`,
+		);
+	}
+
+	// Before the environment, so that an old key's own reference to a variable is not what fails.
+	const moved = describeMovedKeys(parsed);
+	if (moved.length > 0) {
+		throw new ProjectError(
+			`Invalid ${configPath}: flamework-test's settings have a section of their own, "flameworkTest":\n  ${moved.join("\n  ")}`,
 		);
 	}
 
@@ -559,13 +578,7 @@ export function getRuntimeConfig(project: ProjectConfig): RuntimeConfig | undefi
 	let any = false;
 
 	for (const section of RUNTIME_SECTIONS) {
-		let value = project[section];
-		if (section === "testing" && value !== undefined) {
-			const placeOnly: Record<string, unknown> = { ...value };
-			for (const key of CLI_ONLY_TESTING_KEYS) delete placeOnly[key];
-			value = placeOnly as never;
-		}
-
+		const value = project[section];
 		if (value !== undefined) {
 			runtime[section] = value as never;
 			any = true;

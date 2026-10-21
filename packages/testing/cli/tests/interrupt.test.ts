@@ -831,7 +831,7 @@ describe("Ctrl+C during a cloud run", () => {
 
 	test("an upload cut short may have made a version all the same, and no task is created after it", async () => {
 		const ctrlC = fakeCtrlC();
-		const run = await runCli(["cloud", "test", "place.rbxl", "--code", "return 1"], {
+		const run = await runCli(["test", "place.rbxl", "--cloud"], {
 			files: { "place.rbxl": "built" },
 			ctrlC,
 			onFetch: () => {

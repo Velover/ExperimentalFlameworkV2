@@ -78,7 +78,7 @@ describe("planPatch", () => {
 
 describe("patch", () => {
 	test("checks lune, plans from the project file, runs the task, and says where the result went", async () => {
-		const run = await runCli(["patch", "place.rbxl", "--original", "original.rbxl"], {
+		const run = await runCli(["patch", "place.rbxl", "--original-place", "original.rbxl"], {
 			files: { "place.rbxl": "built", "original.rbxl": "orig", "default.project.json": PROJECT },
 		});
 
@@ -100,7 +100,7 @@ describe("patch", () => {
 	});
 
 	test("the plan and the task go to a temp folder of the run's own, removed afterwards, so only the patched place lands in the project", async () => {
-		const run = await runCli(["patch", "place.rbxl", "--original", "original.rbxl"], {
+		const run = await runCli(["patch", "place.rbxl", "--original-place", "original.rbxl"], {
 			files: { "place.rbxl": "built", "original.rbxl": "orig", "default.project.json": PROJECT },
 		});
 
@@ -121,7 +121,7 @@ describe("patch", () => {
 	});
 
 	test("a patch's folder is removed even when the patch fails", async () => {
-		const failed = await runCli(["patch", "place.rbxl", "--original", "original.rbxl"], {
+		const failed = await runCli(["patch", "place.rbxl", "--original-place", "original.rbxl"], {
 			files: { "place.rbxl": "built", "original.rbxl": "orig", "default.project.json": PROJECT },
 			spawnCode: (command) => (command[1] === "run" ? 1 : 0),
 		});
@@ -159,7 +159,7 @@ describe("patch", () => {
 		});
 		expect(missing.code).toBe(1);
 		expect(missing.err).toContain("nowhere.project.json does not exist");
-		expect(missing.err).toContain("check --project or ROJO_PROJECT");
+		expect(missing.err).toContain("check --project or FLAMEWORK_TEST_PROJECT");
 		expect(missing.spawned.map((command) => command[1])).toEqual(["--version"]);
 	});
 
@@ -176,20 +176,22 @@ describe("patch", () => {
 
 		const fromEnv = await runCli(["cloud", "publish", "place.rbxl"], {
 			env: {
-				TESTING_PLACE_API_KEY: "k",
-				TESTING_UNIVERSE_ID: "1",
-				TESTING_PLACE_ID: "2",
-				ROJO_PROJECT: "a.project.json,b.project.json",
+				ROBLOX_API_KEY: "k",
+				FLAMEWORK_TEST_UNIVERSE_ID: "1",
+				FLAMEWORK_TEST_PLACE_ID: "2",
+				FLAMEWORK_TEST_PROJECT: "a.project.json,b.project.json",
 			},
 			files: { "place.rbxl": "built", "a.project.json": PROJECT, "b.project.json": PROJECT },
 		});
 		expect(fromEnv.code).toBe(2);
-		expect(fromEnv.err).toContain("cloud publish follows one project at a time, and ROJO_PROJECT names 2");
+		expect(fromEnv.err).toContain(
+			"cloud publish follows one project at a time, and FLAMEWORK_TEST_PROJECT names 2",
+		);
 		expect(fromEnv.calls).toHaveLength(0);
 	});
 
 	test("without lune the run stops before anything is uploaded, naming the cause", async () => {
-		const run = await runCli(["cloud", "test", "place.rbxl", "--original", "original.rbxl"], {
+		const run = await runCli(["test", "place.rbxl", "--cloud", "--original-place", "original.rbxl"], {
 			files: { "place.rbxl": "built", "original.rbxl": "orig", "default.project.json": PROJECT },
 			spawnCode: (command) => (command[1] === "--version" ? 127 : 0),
 		});
@@ -202,7 +204,7 @@ describe("patch", () => {
 
 	test("lune is given a timeout, checking it and patching alike, and one that hangs is stopped, saying so", async () => {
 		const files = { "place.rbxl": "built", "original.rbxl": "orig", "default.project.json": PROJECT };
-		const run = await runCli(["patch", "place.rbxl", "--original", "original.rbxl"], { files });
+		const run = await runCli(["patch", "place.rbxl", "--original-place", "original.rbxl"], { files });
 		expect(run.code).toBe(0);
 		expect(run.spawnTimeouts).toEqual([LUNE_VERSION_TIMEOUT_MS, PATCH_TIMEOUT_MS]);
 
@@ -211,7 +213,7 @@ describe("patch", () => {
 			if (command[1] === part) throw new ChildTimedOut(command, timeoutMs!);
 			return 0;
 		};
-		const version = await runCli(["test", "place.rbxl", "--original", "original.rbxl"], {
+		const version = await runCli(["test", "place.rbxl", "--original-place", "original.rbxl"], {
 			files,
 			spawnCode: hangs("--version"),
 		});
@@ -221,7 +223,7 @@ describe("patch", () => {
 		expect(version.launched).toHaveLength(0);
 		expect(version.machine.lock.owner).toBeUndefined();
 
-		const patching = await runCli(["test", "place.rbxl", "--original", "original.rbxl"], {
+		const patching = await runCli(["test", "place.rbxl", "--original-place", "original.rbxl"], {
 			files,
 			spawnCode: hangs("run"),
 		});
@@ -243,7 +245,7 @@ describe("patch", () => {
 	}, 30_000);
 
 	test("a missing original place says how to get one", async () => {
-		const run = await runCli(["patch", "place.rbxl", "--original", "nowhere.rbxl"], {
+		const run = await runCli(["patch", "place.rbxl", "--original-place", "nowhere.rbxl"], {
 			files: { "place.rbxl": "built", "default.project.json": PROJECT },
 		});
 		expect(run.code).toBe(1);
@@ -251,8 +253,8 @@ describe("patch", () => {
 		expect(run.err).toContain("Save to File");
 	});
 
-	test("publish --original uploads the patched place and records that file", async () => {
-		const run = await runCli(["cloud", "publish", "place.rbxl", "--original", "original.rbxl"], {
+	test("publish --original-place uploads the patched place and records that file", async () => {
+		const run = await runCli(["cloud", "publish", "place.rbxl", "--original-place", "original.rbxl"], {
 			files: {
 				"place.rbxl": "built",
 				"original.rbxl": "orig",
@@ -288,9 +290,14 @@ describe("patch", () => {
 });
 
 describe("turning the original off", () => {
-	test("an empty ORIGINAL_PLACE means no patch, even when the config names one", async () => {
+	test("an empty FLAMEWORK_TEST_ORIGINAL_PLACE means no patch, even when the config names one", async () => {
 		const run = await runCli(["cloud", "publish", "place.rbxl"], {
-			env: { TESTING_PLACE_API_KEY: "k", TESTING_UNIVERSE_ID: "1", TESTING_PLACE_ID: "2", ORIGINAL_PLACE: "" },
+			env: {
+				ROBLOX_API_KEY: "k",
+				FLAMEWORK_TEST_UNIVERSE_ID: "1",
+				FLAMEWORK_TEST_PLACE_ID: "2",
+				FLAMEWORK_TEST_ORIGINAL_PLACE: "",
+			},
 			settings: { originalPlace: "/cfg/original.rbxl" },
 			files: { "place.rbxl": "built" },
 			responses: [json({ versionNumber: 3 })],

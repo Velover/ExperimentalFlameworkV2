@@ -787,10 +787,10 @@ describe("studio commands", () => {
 		expect(() => parseArgs(["studio", "fly"])).toThrow(/unknown command: studio fly/);
 		expect(parseArgs(["studio", "open", "x.rbxl"])).toEqual({ command: "studio open", flags: { file: "x.rbxl" } });
 		expect(() => parseArgs(["studio", "run", "x.rbxl"])).toThrow(/unexpected argument/);
-		expect(() => parseArgs(["studio", "run", "--original", "o.rbxl"])).toThrow(/not a flag/);
-		expect(parseArgs(["patch", "p.rbxl", "--original", "o.rbxl", "--out", "t.rbxl"]).flags).toEqual({
+		expect(() => parseArgs(["studio", "run", "--original-place", "o.rbxl"])).toThrow(/not a flag/);
+		expect(parseArgs(["patch", "p.rbxl", "--original-place", "o.rbxl", "--out", "t.rbxl"]).flags).toEqual({
 			file: "p.rbxl",
-			original: "o.rbxl",
+			"original-place": "o.rbxl",
 			out: "t.rbxl",
 		});
 	});

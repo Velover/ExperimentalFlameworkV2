@@ -186,7 +186,7 @@ export interface Judgement {
 	realmOfSeveral?: boolean;
 	/** The filter entries that no realm matched, when `realmOfSeveral`. */
 	missed?: readonly string[];
-	/** A skipped test fails the run: `--fail-on-skip`, `FAIL_ON_SKIP` or `testing.failOnSkip`. */
+	/** A skipped test fails the run: `--fail-on-skip`, `FLAMEWORK_TEST_FAIL_ON_SKIP` or `flameworkTest.failOnSkip`. */
 	failOnSkip?: boolean;
 }
 

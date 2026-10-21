@@ -1,7 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 
-import { parseArgs, UsageError } from "../src/cli.ts";
-import { PLACE, SECRET, TASK_PATH, UNIVERSE, happyPath, json, resultJson, runCli, type Harness } from "./harness.ts";
+import { cliVersion, parseArgs, UsageError } from "../src/cli.ts";
+import { RENAMED_VARIABLES } from "../src/config.ts";
+import {
+	ENV,
+	PLACE,
+	SECRET,
+	TASK_PATH,
+	UNIVERSE,
+	happyPath,
+	json,
+	resultJson,
+	runCli,
+	type Harness,
+} from "./harness.ts";
 
 describe("argument parsing", () => {
 	test("test and cloud publish take the place file as an argument", () => {
@@ -18,15 +31,15 @@ describe("argument parsing", () => {
 	});
 
 	test("flags work before and after the command", () => {
-		expect(parseArgs(["cloud", "run", "--version", "4"])).toEqual({
+		expect(parseArgs(["cloud", "run", "--place-version", "4"])).toEqual({
 			command: "cloud run",
-			flags: { version: "4" },
+			flags: { "place-version": "4" },
 		});
-		expect(parseArgs(["--version", "4", "cloud", "run"])).toEqual({
+		expect(parseArgs(["--place-version", "4", "cloud", "run"])).toEqual({
 			command: "cloud run",
-			flags: { version: "4" },
+			flags: { "place-version": "4" },
 		});
-		expect(parseArgs(["--version=4", "cloud", "run"]).flags.version).toBe("4");
+		expect(parseArgs(["--place-version=4", "cloud", "run"]).flags["place-version"]).toBe("4");
 	});
 
 	test("--project collects every value, repeated or comma-separated", () => {
@@ -47,16 +60,14 @@ describe("argument parsing", () => {
 	test("unknown flags and commands are usage errors", () => {
 		expect(() => parseArgs(["cloud", "run", "--nope"])).toThrow(UsageError);
 		expect(() => parseArgs(["fly"])).toThrow(/unknown command/);
-		expect(() => parseArgs(["cloud", "run", "--version"])).toThrow(/needs a value/);
+		expect(() => parseArgs(["cloud", "run", "--place-version"])).toThrow(/needs a value/);
 		expect(() => parseArgs(["cloud", "run", "extra"])).toThrow(/unexpected argument/);
 	});
 
 	test("a flag from another command is rejected", () => {
 		expect(() => parseArgs(["cloud", "publish", "--sections", "a"])).toThrow(/not a flag of "cloud publish"/);
-		// but "cloud test" takes the flags of both phases, and "test" those of a Studio run
-		expect(parseArgs(["cloud", "test", "--sections", "a", "--published"]).flags.sections).toBe("a");
 		expect(parseArgs(["test", "--sections", "a", "--realm", "client", "--keep"]).flags.keep).toBe(true);
-		expect(() => parseArgs(["test", "--version", "4"])).toThrow(/not a flag of "test"/);
+		expect(() => parseArgs(["test", "--place-version", "4"])).toThrow(/not a flag of "test"/);
 	});
 
 	test("an unknown flag exits 2 and prints the usage", async () => {
@@ -82,7 +93,15 @@ describe("argument parsing", () => {
 
 describe("dry run", () => {
 	test("prints the request and the script, never the key", async () => {
-		const run = await runCli(["cloud", "run", "--dry-run", "--version", "4", "--sections", "economy,shop/buys"]);
+		const run = await runCli([
+			"cloud",
+			"run",
+			"--dry-run",
+			"--place-version",
+			"4",
+			"--sections",
+			"economy,shop/buys",
+		]);
 
 		expect(run.code).toBe(0);
 		expect(run.calls).toHaveLength(0);
@@ -97,7 +116,7 @@ describe("dry run", () => {
 		expect(run.all).not.toContain(SECRET);
 	});
 
-	test("without --version the url is unversioned", async () => {
+	test("without --place-version the url is unversioned", async () => {
 		const run = await runCli(["cloud", "run", "--dry-run"]);
 		expect(run.out).toContain(`/places/${PLACE}/luau-execution-session-tasks`);
 		expect(run.out).toContain(".run(nil, nil)");
@@ -241,17 +260,17 @@ describe("run", () => {
 
 	test("a missing key is reported without a stack", async () => {
 		const run = await runCli(["cloud", "run"], {
-			env: { TESTING_UNIVERSE_ID: UNIVERSE, TESTING_PLACE_ID: PLACE },
+			env: { FLAMEWORK_TEST_UNIVERSE_ID: UNIVERSE, FLAMEWORK_TEST_PLACE_ID: PLACE },
 		});
 		expect(run.code).toBe(1);
 		expect(run.err).toContain("no Open Cloud API key");
-		expect(run.err).toContain("--key");
+		expect(run.err).toContain("--api-key");
 	});
 });
 
-describe("test", () => {
+describe("test --cloud", () => {
 	test("uploads the place Rojo built, then runs against the version it made", async () => {
-		const run = await runCli(["cloud", "test", "dist/place.rbxl"], {
+		const run = await runCli(["test", "dist/place.rbxl", "--cloud"], {
 			responses: [json({ versionNumber: 9 }), ...happyPath([resultJson()])],
 			files: { "dist/place.rbxl": "binary" },
 		});
@@ -264,7 +283,7 @@ describe("test", () => {
 	});
 
 	test("without the file it is a usage error that names the rojo command", async () => {
-		const run = await runCli(["cloud", "test"]);
+		const run = await runCli(["test", "--cloud"]);
 		expect(run.code).toBe(2);
 		expect(run.err).toContain("rojo build -o place.rbxl && flamework-test test place.rbxl");
 		expect(run.calls).toHaveLength(0);
@@ -279,13 +298,13 @@ describe("publish", () => {
 		expect(run.calls).toHaveLength(0);
 	});
 
-	test("--key, then the shell, then .env supply the key", async () => {
+	test("--api-key, then the shell, then .env supply the key", async () => {
 		const upload = () => [json({ versionNumber: 5 })];
 		const files = { "build/place.rbxl": "binary" };
-		const ids = { TESTING_UNIVERSE_ID: UNIVERSE, TESTING_PLACE_ID: PLACE };
+		const ids = { FLAMEWORK_TEST_UNIVERSE_ID: UNIVERSE, FLAMEWORK_TEST_PLACE_ID: PLACE };
 		const keyOf = (run: Harness) => (run.calls[0]!.init.headers as Record<string, string>)["x-api-key"];
 
-		const flag = await runCli(["cloud", "publish", "build/place.rbxl", "--key", "flag-key"], {
+		const flag = await runCli(["cloud", "publish", "build/place.rbxl", "--api-key", "flag-key"], {
 			env: ids,
 			responses: upload(),
 			files,
@@ -384,5 +403,130 @@ describe("probe", () => {
 		expect(run.out).toMatch(/isServer\s+true/);
 		expect(run.out).toMatch(/heartbeatsPerSecond\s+60/);
 		expect(JSON.parse(run.calls[0]!.init.body as string).script).toContain("Heartbeat");
+	});
+});
+
+describe("the names of before 2.0.0-beta.0 are refused, each naming its new one", () => {
+	test("a renamed flag, wherever it stands, before the command or after", () => {
+		for (const [argv, said] of [
+			[["test", "p.rbxl", "--show"], "--show is now --show-windows"],
+			[["--show", "test", "p.rbxl"], "--show is now --show-windows"],
+			[["test", "p.rbxl", "--keep", "--hold", "5"], "--hold is now --lock-hold"],
+			[["studio", "open", "--hold=5"], "--hold is now --lock-hold"],
+			[["patch", "p.rbxl", "--original", "o.rbxl"], "--original is now --original-place"],
+			[["cloud", "run", "--testing-universe", "1"], "--testing-universe is now --universe-id"],
+			[["--testing-place", "2", "cloud", "run"], "--testing-place is now --place-id"],
+			[["cloud", "publish", "p.rbxl", "--key", "k"], "--key is now --api-key"],
+		] as const) {
+			expect(() => parseArgs([...argv])).toThrow(said);
+		}
+	});
+
+	test("--timeout names the flag for what it meant in each command", () => {
+		const run =
+			"--run-timeout (how long a run may take; one test's limit is testing.timeout in flamework.config.json)";
+		const call = "--call-timeout (how long the call to Studio may take)";
+		for (const [argv, now] of [
+			[["test", "p.rbxl", "--timeout", "60s"], run],
+			// Its value is taken as its value, not as the command.
+			[["--timeout", "60s", "test", "p.rbxl"], run],
+			[["studio", "run", "--timeout", "60s"], run],
+			[["cloud", "run", "--timeout=60s"], run],
+			[["cloud", "probe", "--timeout", "60s"], run],
+			[["studio", "exec", "--code", "return 1", "--timeout", "5s"], call],
+			[["studio", "call", "get_studio_state", "--timeout", "5s"], call],
+			[["studio", "open", "--timeout", "30s"], "--connect-timeout <seconds> (how long the window is waited for)"],
+			[
+				["--timeout", "5s"],
+				"--run-timeout (test, studio run, cloud run, cloud probe), --call-timeout (studio exec, studio call) or --connect-timeout (studio open)",
+			],
+		] as const) {
+			expect(() => parseArgs([...argv])).toThrow(`--timeout is now ${now}`);
+		}
+		// The new ones parse, each where it belongs.
+		expect(parseArgs(["test", "p.rbxl", "--run-timeout", "60s"]).flags["run-timeout"]).toBe("60s");
+		expect(parseArgs(["studio", "call", "x", "--call-timeout", "5s"]).flags["call-timeout"]).toBe("5s");
+		expect(() => parseArgs(["studio", "open", "--run-timeout", "5s"])).toThrow(/not a flag of "studio open"/);
+		expect(() => parseArgs(["test", "p.rbxl", "--call-timeout", "5s"])).toThrow(/not a flag of "test"/);
+	});
+
+	test("--version <n> is --place-version <n>, and --version alone prints flamework-test's own version", async () => {
+		const moved =
+			"--version <n> is now --place-version <n>: the place version a cloud run runs; --version alone prints flamework-test's own version";
+		expect(() => parseArgs(["cloud", "run", "--version", "4"])).toThrow(moved);
+		expect(() => parseArgs(["--version=4", "cloud", "run"])).toThrow(moved);
+		expect(() => parseArgs(["cloud", "run", "--version"])).toThrow(
+			"--version prints flamework-test's own version, with no command; the place version a cloud run runs is --place-version <n>",
+		);
+
+		const version = (await Bun.file(join(import.meta.dir, "..", "..", "package.json")).json()) as {
+			version: string;
+		};
+		const run = await runCli(["--version"]);
+		expect(run.code).toBe(0);
+		expect(run.out).toBe(version.version);
+		expect(cliVersion()).toBe(version.version);
+	});
+
+	test("cloud test is refused, naming test --cloud, and nothing is uploaded", async () => {
+		expect(() => parseArgs(["cloud", "test", "p.rbxl"])).toThrow(
+			"cloud test was removed: run flamework-test test <file> --cloud, which publishes the file and runs its tests",
+		);
+		const run = await runCli(["cloud", "test", "dist/place.rbxl"], { files: { "dist/place.rbxl": "binary" } });
+		expect(run.code).toBe(2);
+		expect(run.err).toContain("error: cloud test was removed");
+		expect(run.calls).toHaveLength(0);
+	});
+
+	test("a renamed flag exits 2, prints the usage, and opens nothing", async () => {
+		const run = await runCli(["test", "place.rbxl", "--show"], { files: { "place.rbxl": "built" } });
+		expect(run.code).toBe(2);
+		expect(run.err).toContain("error: --show is now --show-windows");
+		expect(run.err).toContain("Usage:");
+		expect(run.launched).toHaveLength(0);
+	});
+
+	test("an old environment variable, from the shell or from .env, stops every command before it does anything", async () => {
+		for (const [old, renamed] of Object.entries(RENAMED_VARIABLES)) {
+			const shell = await runCli(["cloud", "run"], {
+				env: { ...ENV, [old]: "1" },
+				responses: happyPath([resultJson()]),
+			});
+			expect(shell.code).toBe(1);
+			expect(shell.err).toContain(
+				`error: flamework-test's environment variables were renamed: ${old} is now ${renamed}`,
+			);
+			expect(shell.err).toContain("nothing was run");
+			expect(shell.calls).toHaveLength(0);
+		}
+
+		// An empty one too, as `ORIGINAL_PLACE=` turned the original off; and one from .env, for a
+		// command that reads no setting at all.
+		const empty = await runCli(["cloud", "run"], { env: { ...ENV, ORIGINAL_PLACE: "" } });
+		expect(empty.code).toBe(1);
+		expect(empty.err).toContain("ORIGINAL_PLACE is now FLAMEWORK_TEST_ORIGINAL_PLACE");
+		const dotenv = await runCli(["studio", "list"], { settings: { env: { ROJO_PROJECT: "a.project.json" } } });
+		expect(dotenv.code).toBe(1);
+		expect(dotenv.err).toContain("ROJO_PROJECT is now FLAMEWORK_TEST_PROJECT");
+		expect(dotenv.studioCalls).toHaveLength(0);
+
+		// Several at once are named together.
+		const several = await runCli(["test", "place.rbxl"], {
+			env: { FAIL_ON_SKIP: "1", KEEP_AWAKE: "1" },
+			files: { "place.rbxl": "built" },
+		});
+		expect(several.err).toContain(
+			"FAIL_ON_SKIP is now FLAMEWORK_TEST_FAIL_ON_SKIP; KEEP_AWAKE is now FLAMEWORK_TEST_KEEP_AWAKE",
+		);
+		expect(several.launched).toHaveLength(0);
+	});
+
+	test("the API key's one name is ROBLOX_API_KEY: the TESTING_PLACE_API_KEY alias is gone", async () => {
+		const ids = { FLAMEWORK_TEST_UNIVERSE_ID: UNIVERSE, FLAMEWORK_TEST_PLACE_ID: PLACE };
+		const alias = await runCli(["cloud", "run"], { env: { ...ids, TESTING_PLACE_API_KEY: SECRET } });
+		expect(alias.code).toBe(1);
+		expect(alias.err).toContain("TESTING_PLACE_API_KEY is now ROBLOX_API_KEY");
+		expect(alias.err).not.toContain(SECRET);
+		expect(alias.calls).toHaveLength(0);
 	});
 });

@@ -73,7 +73,7 @@ describe("a test's windows on the hidden desktop", () => {
 		expect(run.code).toBe(0);
 		expect(run.launchOptions).toEqual([{ hidden: true }]);
 		expect(run.out).toContain(
-			"opening place.rbxl in Studio, on the hidden desktop (--show shows it); waiting for it to connect...",
+			"opening place.rbxl in Studio, on the hidden desktop (--show-windows shows it); waiting for it to connect...",
 		);
 		expect(record!.windows).toMatchObject([{ placeFile: THIS_FILE, studioPid: 4001, hidden: true }]);
 		// Before the launch, a window left from an earlier build of the file; after the run, its own.
@@ -101,28 +101,36 @@ describe("a test's windows on the hidden desktop", () => {
 		expect(linux.all).not.toContain("hidden");
 	});
 
-	test("--show, FLAMEWORK_TEST_SHOW and testing.showWindows show it: the flag first, then the variable, then the key", async () => {
+	test("--show-windows, FLAMEWORK_TEST_SHOW_WINDOWS and flameworkTest.showWindows show it: the flag first, then the variable, then the key", async () => {
 		expect(hidden(await testRun([]))).toBe(true);
-		expect(hidden(await testRun(["--show"]))).toBe(false);
-		expect(hidden(await testRun([], { env: { FLAMEWORK_TEST_SHOW: "1" } }))).toBe(false);
+		expect(hidden(await testRun(["--show-windows"]))).toBe(false);
+		expect(hidden(await testRun([], { env: { FLAMEWORK_TEST_SHOW_WINDOWS: "1" } }))).toBe(false);
 		expect(hidden(await testRun([], { settings: { showWindows: true } }))).toBe(false);
 		// From .env or .env.local, which the settings carry.
-		expect(hidden(await testRun([], { env: {}, settings: { env: { FLAMEWORK_TEST_SHOW: "yes" } } }))).toBe(false);
+		expect(hidden(await testRun([], { env: {}, settings: { env: { FLAMEWORK_TEST_SHOW_WINDOWS: "yes" } } }))).toBe(
+			false,
+		);
 		expect(
-			hidden(await testRun([], { env: { FLAMEWORK_TEST_SHOW: "false" }, settings: { showWindows: true } })),
+			hidden(
+				await testRun([], { env: { FLAMEWORK_TEST_SHOW_WINDOWS: "false" }, settings: { showWindows: true } }),
+			),
 		).toBe(true);
-		expect(hidden(await testRun(["--show=false"], { env: { FLAMEWORK_TEST_SHOW: "on" } }))).toBe(true);
-		expect(hidden(await testRun(["--show"], { env: { FLAMEWORK_TEST_SHOW: "0" } }))).toBe(false);
-		expect(hidden(await testRun([], { env: { FLAMEWORK_TEST_SHOW: "" }, settings: { showWindows: true } }))).toBe(
+		expect(hidden(await testRun(["--show-windows=false"], { env: { FLAMEWORK_TEST_SHOW_WINDOWS: "on" } }))).toBe(
 			true,
 		);
+		expect(hidden(await testRun(["--show-windows"], { env: { FLAMEWORK_TEST_SHOW_WINDOWS: "0" } }))).toBe(false);
+		expect(
+			hidden(await testRun([], { env: { FLAMEWORK_TEST_SHOW_WINDOWS: "" }, settings: { showWindows: true } })),
+		).toBe(true);
 
-		const shown = await testRun(["--show"]);
+		const shown = await testRun(["--show-windows"]);
 		expect(shown.out).toContain("opening place.rbxl in Studio; waiting for it to connect...");
 
-		const misspelt = await testRun([], { env: { FLAMEWORK_TEST_SHOW: "sometimes" } });
+		const misspelt = await testRun([], { env: { FLAMEWORK_TEST_SHOW_WINDOWS: "sometimes" } });
 		expect(misspelt.code).toBe(2);
-		expect(misspelt.err).toContain('FLAMEWORK_TEST_SHOW must be true or false (or 1 or 0), got "sometimes"');
+		expect(misspelt.err).toContain(
+			'FLAMEWORK_TEST_SHOW_WINDOWS must be true or false (or 1 or 0), got "sometimes"',
+		);
 		expect(misspelt.launched).toHaveLength(0);
 	});
 
@@ -147,45 +155,49 @@ describe("a test's windows on the hidden desktop", () => {
 		expect(run.launchOptions).toEqual([{ hidden: true }, { hidden: true }]);
 	});
 
-	test("not for the cloud: --show is refused there, the variable and key are left alone, and no other command has it", async () => {
-		const refused = await runCli(["test", "place.rbxl", "--cloud", "--show"], { files: { "place.rbxl": "built" } });
+	test("not for the cloud: --show-windows is refused there, the variable and key are left alone, and no other command has it", async () => {
+		const refused = await runCli(["test", "place.rbxl", "--cloud", "--show-windows"], {
+			files: { "place.rbxl": "built" },
+		});
 		expect(refused.code).toBe(2);
-		expect(refused.err).toContain("--show is for Studio runs: a cloud run opens no window on this machine to show");
+		expect(refused.err).toContain(
+			"--show-windows is for Studio runs: a cloud run opens no window on this machine to show",
+		);
 		expect(refused.calls).toHaveLength(0);
 
 		const cloud = await runCli(["test", "place.rbxl", "--cloud"], {
 			responses: [json({ versionNumber: 9 }), ...happyPath([resultJson()])],
 			files: { "place.rbxl": "built" },
-			env: { ...ENV, FLAMEWORK_TEST_SHOW: "sometimes" },
+			env: { ...ENV, FLAMEWORK_TEST_SHOW_WINDOWS: "sometimes" },
 		});
 		expect(cloud.code).toBe(0);
 
 		for (const command of [
 			["studio", "open"],
 			["studio", "run"],
-			["cloud", "test", "place.rbxl"],
+			["cloud", "run"],
 		]) {
-			expect(() => parseArgs([...command, "--show"])).toThrow(/--show is not a flag of/);
+			expect(() => parseArgs([...command, "--show-windows"])).toThrow(/--show-windows is not a flag of/);
 		}
 	});
 });
 
 describe("what a hidden window needs said", () => {
-	test("one that never connects may be showing a dialog nobody sees: the error says so and points to --show", async () => {
+	test("one that never connects may be showing a dialog nobody sees: the error says so and points to --show-windows", async () => {
 		const run = await testRun([], {}, studio({ listing: false }));
 		expect(run.code).toBe(1);
 		expect(run.err).toContain("error: Studio started (PID 4001) but place.rbxl never showed up on the MCP proxy");
 		expect(run.err).toContain(
-			"it opened on the hidden desktop, where nobody sees it: it may be showing a dialog there that nobody can answer (a login, an update, a crash report), so run again with --show to see it",
+			"it opened on the hidden desktop, where nobody sees it: it may be showing a dialog there that nobody can answer (a login, an update, a crash report), so run again with --show-windows to see it",
 		);
 		expect(run.err).toContain("the window this run opened is closed again");
 		expect(run.closeTargets).toContain("pid 4001 place.rbxl");
 
 		// Shown, the window speaks for itself: the hint is the MCP setting's alone.
-		const shown = await testRun(["--show"], {}, studio({ listing: false }));
+		const shown = await testRun(["--show-windows"], {}, studio({ listing: false }));
 		expect(shown.code).toBe(1);
 		expect(shown.err).toContain('Studio\'s "MCP server" setting is probably off');
-		expect(shown.err).not.toContain("--show");
+		expect(shown.err).not.toContain("--show-windows");
 		expect(shown.err).not.toContain("hidden desktop");
 	});
 
@@ -223,14 +235,14 @@ describe("what a hidden window needs said", () => {
 		expect(close.out).toContain("the Studio lock is free");
 		expect(machine.windows).toEqual([]);
 
-		// --show --keep: a window to look at, which says nothing of a hidden desktop.
-		const shown = await testRun(["--keep", "--show"]);
+		// --show-windows --keep: a window to look at, which says nothing of a hidden desktop.
+		const shown = await testRun(["--keep", "--show-windows"]);
 		expect(shown.code).toBe(0);
 		expect(shown.out).not.toContain("hidden desktop");
 		expect(shown.machine.lock.owner!.windows[0]!.hidden).toBeUndefined();
 	});
 
-	test("a launch the hidden desktop refuses fails the run, with --show as the way out, and frees the lock", async () => {
+	test("a launch the hidden desktop refuses fails the run, with --show-windows as the way out, and frees the lock", async () => {
 		const run = await testRun([], {
 			refuseLaunch: (command, how) =>
 				how?.hidden === true
@@ -241,7 +253,7 @@ describe("what a hidden window needs said", () => {
 		expect(run.err).toContain(
 			"error: could not start C:/Roblox/RobloxStudioBeta.exe on the hidden desktop flamework-test (CreateProcessW: error 5)",
 		);
-		expect(run.err).toContain("run again with --show to open Studio on your desktop instead");
+		expect(run.err).toContain("run again with --show-windows to open Studio on your desktop instead");
 		expect(run.machine.lock.owner).toBeUndefined();
 		expect(run.windows).toEqual([]);
 	});

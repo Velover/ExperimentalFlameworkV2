@@ -8,5 +8,5 @@ sourcemap.json
 *.tsbuildinfo
 *.rbxl
 *.rbxl.lock
-# .env holds only build settings (FLAMEWORK_SCOPES, ORIGINAL_PLACE, ROJO_PROJECT) and is tracked; secrets go in .env.local.
+# .env holds only build settings (FLAMEWORK_SCOPES, FLAMEWORK_TEST_ORIGINAL_PLACE, FLAMEWORK_TEST_PROJECT) and is tracked; secrets go in .env.local.
 .env.local

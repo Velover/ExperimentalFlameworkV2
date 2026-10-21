@@ -29,9 +29,9 @@ export const UNIVERSE = "10765968722";
 export const PLACE = "108973151455286";
 
 export const ENV = {
-	TESTING_PLACE_API_KEY: SECRET,
-	TESTING_UNIVERSE_ID: UNIVERSE,
-	TESTING_PLACE_ID: PLACE,
+	ROBLOX_API_KEY: SECRET,
+	FLAMEWORK_TEST_UNIVERSE_ID: UNIVERSE,
+	FLAMEWORK_TEST_PLACE_ID: PLACE,
 };
 
 /** The directory every run's relative paths resolve against. */
@@ -382,7 +382,7 @@ export async function runCli(
 		projectRoot?: (cwd: string) => string;
 		/**
 		 * `false`: no fake proxy, so the CLI looks for the real StudioMCP.exe where `env` points
-		 * (LOCALAPPDATA, STUDIO_MCP_EXE). Only for a run that must not find one.
+		 * (LOCALAPPDATA, FLAMEWORK_TEST_STUDIO_MCP_EXE). Only for a run that must not find one.
 		 */
 		proxy?: false;
 		/**

@@ -416,11 +416,11 @@ describe("a launched window the MCP proxy lists under another name", () => {
 		const run = await runWith(
 			proxy,
 			machine,
-			["test", "place.rbxl", ...projectFlag(["deferred"]), "--timeout", "900s", "--connect-timeout", "60"],
+			["test", "place.rbxl", ...projectFlag(["deferred"]), "--run-timeout", "900s", "--connect-timeout", "60"],
 			["deferred"],
 		);
 		expect(run.code).toBe(1);
-		// The run's --timeout is its realms', not the connect wait's.
+		// The run's --run-timeout is its realms', not the connect wait's.
 		expect(machine.time.now - startedAt).toBeLessThan(120_000);
 		const message = run.err.split("\n").find((line) => line.startsWith("error: Studio started"))!;
 		expect(message).toContain(
@@ -467,7 +467,7 @@ describe("a launched window the MCP proxy lists under another name", () => {
 			const waited = await runWith(
 				nothing,
 				quiet,
-				["test", "place.rbxl", ...projectFlag(["deferred"]), "--timeout", "900s"],
+				["test", "place.rbxl", ...projectFlag(["deferred"]), "--run-timeout", "900s"],
 				["deferred"],
 				{ env },
 			);
@@ -750,10 +750,19 @@ describe("--connect-timeout", () => {
 		expect(word.launched).toHaveLength(0);
 	});
 
-	test("studio open's wait is its --timeout when --connect-timeout is not given, and the error names the flag that set it", async () => {
-		for (const [flags, said] of [
-			[["--timeout", "30s"], "within 30s (--timeout)"],
-			[["--timeout", "30s", "--connect-timeout", "20"], "within 20s (--connect-timeout)"],
+	test("studio open's wait is --connect-timeout, and the error names what set it; its old --timeout is refused", async () => {
+		const old = await runCli(["studio", "open", "place.rbxl", "--timeout", "30s"], {
+			files: { "place.rbxl": "built" },
+		});
+		expect(old.code).toBe(2);
+		expect(old.err).toContain(
+			"error: --timeout is now --connect-timeout <seconds> (how long the window is waited for)",
+		);
+		expect(old.launched).toHaveLength(0);
+
+		for (const [flags, env, said] of [
+			[["--connect-timeout", "20"], {}, "within 20s (--connect-timeout)"],
+			[[], { FLAMEWORK_TEST_CONNECT_TIMEOUT: "25" }, "within 25s (FLAMEWORK_TEST_CONNECT_TIMEOUT)"],
 		] as const) {
 			const machine = fakeMachine();
 			const proxy = proxyOn(machine);
@@ -761,6 +770,7 @@ describe("--connect-timeout", () => {
 			const from = machine.time.now;
 			const run = await runCli(["studio", "open", "place.rbxl", ...flags], {
 				machine,
+				env,
 				files: { "place.rbxl": "built" },
 				studio: proxy.fake,
 				onLaunch: proxy.onLaunch,

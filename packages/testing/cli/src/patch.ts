@@ -43,7 +43,7 @@ export interface RojoProject {
 
 /**
  * A Rojo project a run follows: the file, the name the run and its patched place are labelled
- * with, and whether someone chose it (`--project`, `ROJO_PROJECT`) or it is the default standing
+ * with, and whether someone chose it (`--project`, `FLAMEWORK_TEST_PROJECT`) or it is the default standing
  * in. A chosen project has its properties applied even when there is no original to patch; the
  * default is only followed when there is one, so a plain run needs no Lune.
  */

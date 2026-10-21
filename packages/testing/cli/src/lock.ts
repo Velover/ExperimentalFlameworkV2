@@ -55,7 +55,7 @@ export interface LockWindow {
 	 */
 	mcpName?: string;
 	/**
-	 * Studio was launched on the hidden desktop (`test` without `--show`), where nobody sees it:
+	 * Studio was launched on the hidden desktop (`test` without `--show-windows`), where nobody sees it:
 	 * it is found and closed by its process, as every window flamework-test opened is.
 	 */
 	hidden?: boolean;

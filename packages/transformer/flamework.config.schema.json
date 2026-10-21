@@ -2,7 +2,7 @@
 	"$schema": "http://json-schema.org/draft-07/schema#",
 	"$id": "flamework.config.schema.json",
 	"title": "Flamework project configuration",
-	"description": "One file for every Flamework package, read from flamework.config.json next to (or above) your tsconfig.json. The transformer section is read at build time and is the only place transformer options go: the tsconfig entry takes none. The serialization section is read at build time too. The other sections are compiled into include/flamework/config.json for the runtime packages. Every option says its default; leave an option out to keep the default. Any string may reference the environment as ${NAME} or ${NAME:-fallback} ($$ for a literal dollar), read from .env and .env.local next to this file with the process environment on top; a string where a boolean, number or list is expected is converted.",
+	"description": "One file for every Flamework package, read from flamework.config.json next to (or above) your tsconfig.json. The transformer section is read at build time and is the only place transformer options go: the tsconfig entry takes none. The serialization section is read at build time too. The flameworkTest section is read by the flamework-test CLI only. The other sections are compiled into include/flamework/config.json for the runtime packages. Every option says its default; leave an option out to keep the default. Any string may reference the environment as ${NAME} or ${NAME:-fallback} ($$ for a literal dollar), read from .env and .env.local next to this file with the process environment on top; a string where a boolean, number or list is expected is converted.",
 	"type": "object",
 	"additionalProperties": false,
 	"properties": {
@@ -203,7 +203,7 @@
 				"timeout": {
 					"type": "number",
 					"minimum": 0,
-					"description": "Seconds a single test may take before it is cancelled and counted as failed. Default: 30.",
+					"description": "Seconds a single test may take before it is cancelled and counted as failed. A whole run's limit is flamework-test's --run-timeout, not this. Default: 30.",
 					"default": 30
 				},
 				"concurrency": {
@@ -215,62 +215,62 @@
 				"entry": {
 					"type": "string",
 					"description": "Cloud runs only. The source path of a ModuleScript exporting `ignite()`, for example \"src/server/main\": an Open Cloud Luau execution task runs none of the place's Scripts, so the runner requires this module and ignites the game itself before invoking the bindable. Studio runs need none, the place runs itself. Compiled into the artifact as a tree path. Default: none, and a cloud run refuses to start without it."
-				},
+				}
+			}
+		},
+		"flameworkTest": {
+			"type": "object",
+			"additionalProperties": false,
+			"description": "Settings of the flamework-test CLI (@flamework-experimental/testing): how it runs the tests in Roblox Studio on this machine, and the testing place it publishes to and runs in for a cloud run. Read by that CLI only; never compiled into the place. Each key has a flag of the same name (lockHold, --lock-hold) and an environment variable FLAMEWORK_TEST_ and the name in capitals (FLAMEWORK_TEST_LOCK_HOLD); the flag comes first, then the variable, then this key. The API key's variable is ROBLOX_API_KEY. Keep the key in the environment: \"apiKey\": \"${ROBLOX_API_KEY:-}\".",
+			"properties": {
 				"failOnSkip": {
 					"type": "boolean",
 					"default": false,
-					"description": "flamework-test only: a skipped test fails the run, for CI that must run everything. --fail-on-skip and FAIL_ON_SKIP come first. Never compiled into the place. Default: false."
+					"description": "A skipped test fails the run, for CI that must run everything. --fail-on-skip and FLAMEWORK_TEST_FAIL_ON_SKIP come first. Default: false."
 				},
 				"keepAwake": {
 					"type": "boolean",
 					"default": false,
-					"description": "flamework-test only: a Studio run (test, studio run) asks Windows to keep the display on while it lasts; RenderStepped stops while the display sleeps, which fails onRender tests in unattended runs. --keep-awake and KEEP_AWAKE come first. Not for cloud runs. Never compiled into the place. Default: false."
+					"description": "A Studio run (test, studio run) asks Windows to keep the display on while it lasts; RenderStepped stops while the display sleeps, which fails onRender tests in unattended runs. --keep-awake and FLAMEWORK_TEST_KEEP_AWAKE come first. Not for cloud runs. Default: false."
 				},
 				"lockTimeout": {
 					"type": "number",
 					"minimum": 0,
 					"default": 300,
-					"description": "flamework-test only: seconds a command that opens a Studio window (test, studio open) waits for the Studio lock while another project's flamework-test run or window holds it; 0 does not wait. One flamework-test command uses Studio at a time on the machine. --lock-timeout and FLAMEWORK_TEST_LOCK_TIMEOUT come first. Never compiled into the place. Default: 300."
+					"description": "Seconds a command that opens a Studio window (test, studio open) waits for the Studio lock while another project's flamework-test run or window holds it; 0 does not wait. One flamework-test command uses Studio at a time on the machine. --lock-timeout and FLAMEWORK_TEST_LOCK_TIMEOUT come first. Default: 300."
 				},
 				"lockHold": {
 					"type": "number",
 					"minimum": 1,
 					"default": 15,
-					"description": "flamework-test only: minutes a Studio window flamework-test opened may sit unused before another project's command may close it and take the Studio lock; one at least. Every flamework-test command that uses the window renews it. --hold (studio open, test --keep) and FLAMEWORK_TEST_LOCK_HOLD come first. Never compiled into the place. Default: 15."
+					"description": "Minutes a Studio window flamework-test opened may sit unused before another project's command may close it and take the Studio lock; one at least. Every flamework-test command that uses the window renews it. --lock-hold (studio open, test --keep) and FLAMEWORK_TEST_LOCK_HOLD come first. Default: 15."
 				},
 				"parallel": {
 					"type": "integer",
 					"minimum": 1,
 					"default": 1,
-					"description": "flamework-test only: how many projects' Studio windows a test of several Rojo projects (--project, ROJO_PROJECT) runs side by side, each project's lines still printed together in project order; 1 runs them one after another. At most 4 at once, and no more than there are projects: each window takes about 3 GB with its play session. Not for cloud runs. --parallel and FLAMEWORK_TEST_PARALLEL come first. Never compiled into the place. Default: 1."
+					"description": "How many projects' Studio windows a test of several Rojo projects (--project, FLAMEWORK_TEST_PROJECT) runs side by side, each project's lines still printed together in project order; 1 runs them one after another. At most 4 at once, and no more than there are projects: each window takes about 3 GB with its play session. Not for cloud runs. --parallel and FLAMEWORK_TEST_PARALLEL come first. Default: 1."
 				},
 				"showWindows": {
 					"type": "boolean",
 					"default": false,
-					"description": "flamework-test only: a Studio test opens its windows on the user's desktop, where they can be seen, instead of on a hidden desktop of their own, where a run never shows a window or takes the focus (Windows; elsewhere nothing is hidden). studio open always shows its window. --show and FLAMEWORK_TEST_SHOW come first. Not for cloud runs. Never compiled into the place. Default: false."
-				}
-			}
-		},
-		"cloud": {
-			"type": "object",
-			"additionalProperties": false,
-			"description": "Where the flamework-test CLI (@flamework-experimental/testing) publishes the build and runs its tests: a testing place, never the original. Read by that CLI only; never compiled into the place. Keep the key in the environment: \"apiKey\": \"${ROBLOX_API_KEY:-}\".",
-			"properties": {
-				"testingUniverseId": {
-					"type": "string",
-					"description": "The testing experience's universe id, from the Creator Dashboard URL (game.GameId in Studio). Default: none. --testing-universe and TESTING_UNIVERSE_ID come first."
+					"description": "A Studio test opens its windows on the user's desktop, where they can be seen, instead of on a hidden desktop of their own, where a run never shows a window or takes the focus (Windows; elsewhere nothing is hidden). studio open always shows its window. --show-windows and FLAMEWORK_TEST_SHOW_WINDOWS come first. Not for cloud runs. Default: false."
 				},
-				"testingPlaceId": {
+				"universeId": {
 					"type": "string",
-					"description": "The place to publish to, run tests in, and open in Studio. Never the original place. Default: none. --testing-place and TESTING_PLACE_ID come first."
+					"description": "The testing experience's universe id, from the Creator Dashboard URL (game.GameId in Studio). Never the original game's. --universe-id and FLAMEWORK_TEST_UNIVERSE_ID come first. Default: none."
+				},
+				"placeId": {
+					"type": "string",
+					"description": "The testing place: the place a cloud run publishes to and runs in, and studio open opens. Never the original place. --place-id and FLAMEWORK_TEST_PLACE_ID come first. Default: none."
 				},
 				"apiKey": {
 					"type": "string",
-					"description": "An Open Cloud API key with universe-places:write and universe.place.luau-execution-session:read and :write for the testing experience. Reference the environment, \"${ROBLOX_API_KEY:-}\", so the key is never in the file. Default: none. --key and ROBLOX_API_KEY come first."
+					"description": "An Open Cloud API key with universe-places:write and universe.place.luau-execution-session:read and :write for the testing experience. Reference the environment, \"${ROBLOX_API_KEY:-}\", so the key is never in the file. --api-key and ROBLOX_API_KEY come first. Default: none."
 				},
 				"originalPlace": {
 					"type": "string",
-					"description": "A copy of the original place (File > Save to File in Studio), relative to this file. When set, the CLI lays the Rojo build over a copy of it before publishing, following the project file, so the tests see assets that exist only in the original. Needs lune. Default: none. --original and ORIGINAL_PLACE come first."
+					"description": "A copy of the original place (File > Save to File in Studio), relative to this file. When set, the CLI lays the Rojo build over a copy of it before a run or a publish, following the project file, so the tests see assets that exist only in the original. Needs lune. --original-place and FLAMEWORK_TEST_ORIGINAL_PLACE come first. Default: none."
 				}
 			}
 		}

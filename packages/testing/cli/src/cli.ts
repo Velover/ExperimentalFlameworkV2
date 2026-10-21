@@ -12,6 +12,7 @@
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -29,7 +30,7 @@ import {
 	type OpenCloudClient,
 	type VersionType,
 } from "./openCloud.ts";
-import { findProjectRoot, loadCloudSettings, type CloudSettings } from "./config.ts";
+import { describeRenamedVariables, findProjectRoot, loadCloudSettings, type CloudSettings } from "./config.ts";
 import { launchOnDesktop } from "./desktop.ts";
 import {
 	describeSignal,
@@ -123,7 +124,7 @@ export const DEFAULT_TIMEOUT = "120s";
 export const PROBE_TIMEOUT = "60s";
 /**
  * How long a Studio window is waited for after launching it, to show up on the MCP proxy, in
- * seconds; the run's own `--timeout` is not this. A hidden window registered 6 to 15 seconds after
+ * seconds; the run's own `--run-timeout` is not this. A hidden window registered 6 to 15 seconds after
  * its launch here, and had its name 14 to 25 seconds after it (measured 2026-10-07, Studio
  * 0.741, warm); a cold start with plugins to load can take a minute or more. `--connect-timeout`
  * and FLAMEWORK_TEST_CONNECT_TIMEOUT change it.
@@ -197,15 +198,15 @@ export const QUEUE_SLACK_MS = 300_000;
  * to ride out another agent's test run (one to three minutes), short enough that a wait and a run
  * of its own fit in the ten minutes an agent's tool call allows at most, so the agent reads the
  * message saying what holds the lock rather than being cut off. `--lock-timeout`,
- * FLAMEWORK_TEST_LOCK_TIMEOUT and `testing.lockTimeout` change it; 0 does not wait.
+ * FLAMEWORK_TEST_LOCK_TIMEOUT and `flameworkTest.lockTimeout` change it; 0 does not wait.
  */
 export const LOCK_TIMEOUT_SECONDS = 300;
 /**
  * How long a window flamework-test opened may sit unused before another project may close it and
  * take the Studio lock, in minutes. Longer than an agent's pause between two commands in its
  * window (reading a result, changing code, rebuilding), short enough that a forgotten window frees
- * Studio within a quarter of an hour. A running `test` keeps its window in use. `--hold`,
- * FLAMEWORK_TEST_LOCK_HOLD and `testing.lockHold` change it.
+ * Studio within a quarter of an hour. A running `test` keeps its window in use. `--lock-hold`,
+ * FLAMEWORK_TEST_LOCK_HOLD and `flameworkTest.lockHold` change it.
  */
 export const LOCK_HOLD_MINUTES = 15;
 /** The shortest hold, in minutes: twice the heartbeat, so a lease never lapses between two renewals. */
@@ -250,16 +251,21 @@ type FlagKind = "string" | "boolean" | "list" | "count";
 /** What `count` flags stand for when given without a number. */
 const COUNT_DEFAULTS: Record<string, string> = { parallel: String(PARALLEL_DEFAULT) };
 
+/**
+ * Every flag. A flag that has a config key has the key's name (`--lock-hold`, `lockHold`), and its
+ * environment variable is `FLAMEWORK_TEST_` and the name in capitals (`FLAMEWORK_TEST_LOCK_HOLD`).
+ */
 const FLAGS: Record<string, FlagKind> = {
 	file: "string",
 	published: "boolean",
-	original: "string",
+	"original-place": "string",
 	project: "list",
 	out: "string",
-	version: "string",
+	"place-version": "string",
 	sections: "string",
 	list: "boolean",
-	timeout: "string",
+	"run-timeout": "string",
+	"call-timeout": "string",
 	concurrency: "string",
 	parallel: "count",
 	code: "string",
@@ -271,37 +277,81 @@ const FLAGS: Record<string, FlagKind> = {
 	json: "boolean",
 	"fail-on-skip": "boolean",
 	"keep-awake": "boolean",
-	show: "boolean",
-	"testing-universe": "string",
-	"testing-place": "string",
-	key: "string",
+	"show-windows": "boolean",
+	"universe-id": "string",
+	"place-id": "string",
+	"api-key": "string",
 	studio: "string",
 	"lock-timeout": "string",
 	"connect-timeout": "string",
-	hold: "string",
+	"lock-hold": "string",
 	"any-window": "boolean",
 	"args-file": "string",
 	force: "boolean",
 	"check-window": "boolean",
+	version: "boolean",
 	help: "boolean",
 };
 
-const COMMON_FLAGS = ["testing-universe", "testing-place", "key", "help"];
+/**
+ * The flags renamed before 2.0.0-beta.0: refused, naming the new one, never read. What each took,
+ * so that its value is not taken for the command, and its new name; `--timeout` had a meaning per
+ * command, and so has a new name per command.
+ */
+const RENAMED_FLAGS: Record<string, { kind: FlagKind; now: (command: string | undefined) => string }> = {
+	show: { kind: "boolean", now: () => "--show-windows" },
+	hold: { kind: "string", now: () => "--lock-hold" },
+	original: { kind: "string", now: () => "--original-place" },
+	"testing-universe": { kind: "string", now: () => "--universe-id" },
+	"testing-place": { kind: "string", now: () => "--place-id" },
+	key: { kind: "string", now: () => "--api-key" },
+	timeout: { kind: "string", now: (command) => timeoutFlagOf(command) },
+};
+
+/** What `--timeout` is called now: one name for each thing it meant. */
+function timeoutFlagOf(command: string | undefined): string {
+	switch (command) {
+		case "test":
+		case "studio run":
+		case "cloud run":
+		case "cloud probe":
+			return "--run-timeout (how long a run may take; one test's limit is testing.timeout in flamework.config.json)";
+		case "studio exec":
+		case "studio call":
+			return "--call-timeout (how long the call to Studio may take)";
+		case "studio open":
+			return "--connect-timeout <seconds> (how long the window is waited for)";
+		default:
+			return "--run-timeout (test, studio run, cloud run, cloud probe), --call-timeout (studio exec, studio call) or --connect-timeout (studio open)";
+	}
+}
+
+/** What `--version` with a value says: it is the CLI's version now, and the place version has a name of its own. */
+const PLACE_VERSION_MOVED =
+	"--version <n> is now --place-version <n>: the place version a cloud run runs; --version alone prints flamework-test's own version";
+
+/** Commands removed before 2.0.0-beta.0, and what to run instead. */
+const REMOVED_COMMANDS: Record<string, string> = {
+	"cloud test":
+		"cloud test was removed: run flamework-test test <file> --cloud, which publishes the file and runs its tests",
+};
+
+const COMMON_FLAGS = ["universe-id", "place-id", "api-key", "help"];
 /** `studio` commands may name their window; every other way of finding it is automatic. */
 const STUDIO_FLAGS = ["studio"];
 /** What a command that changes a window takes: its window, and leave to act on one flamework-test did not open for this project. */
 const CHANGING_FLAGS = ["studio", "any-window"];
 /** Commands that open a Studio window, and so take the Studio lock and wait for the window to connect. */
-const LOCK_FLAGS = ["lock-timeout", "hold", "connect-timeout"];
+const LOCK_FLAGS = ["lock-timeout", "lock-hold", "connect-timeout"];
 /** Commands that take a file as a positional argument as well as `--file`. */
-const FILE_COMMANDS = ["test", "patch", "studio open", "cloud publish", "cloud test"];
-const PATCH_FLAGS = ["original", "project"];
+const FILE_COMMANDS = ["test", "patch", "studio open", "cloud publish"];
+const PATCH_FLAGS = ["original-place", "project"];
 const PUBLISH_FLAGS = ["file", "published", ...PATCH_FLAGS];
 const RUN_FLAGS = [
-	"version",
+	"place-version",
 	"sections",
 	"list",
-	"timeout",
+	"run-timeout",
 	"concurrency",
 	"code",
 	"script",
@@ -309,7 +359,7 @@ const RUN_FLAGS = [
 	"json",
 	"fail-on-skip",
 ];
-const REPORT_FLAGS = ["sections", "list", "json", "timeout", "concurrency", "fail-on-skip"];
+const REPORT_FLAGS = ["sections", "list", "json", "run-timeout", "concurrency", "fail-on-skip"];
 
 const COMMANDS: Record<string, string[]> = {
 	test: [
@@ -317,7 +367,7 @@ const COMMANDS: Record<string, string[]> = {
 		"realm",
 		"keep",
 		"keep-awake",
-		"show",
+		"show-windows",
 		"cloud",
 		"parallel",
 		...PATCH_FLAGS,
@@ -326,46 +376,49 @@ const COMMANDS: Record<string, string[]> = {
 		...LOCK_FLAGS,
 	],
 	patch: ["file", "out", ...PATCH_FLAGS],
-	"studio open": ["file", "timeout", "json", ...LOCK_FLAGS],
+	"studio open": ["file", "json", ...LOCK_FLAGS],
 	"studio close": CHANGING_FLAGS,
 	"studio status": STUDIO_FLAGS,
 	"studio play": CHANGING_FLAGS,
 	"studio stop": CHANGING_FLAGS,
-	"studio exec": ["code", "script", "realm", "timeout", ...CHANGING_FLAGS],
+	"studio exec": ["code", "script", "realm", "call-timeout", ...CHANGING_FLAGS],
 	"studio run": ["realm", "keep", "keep-awake", ...REPORT_FLAGS, ...CHANGING_FLAGS],
 	"studio list": ["json"],
 	"studio tools": ["json"],
-	"studio call": ["args-file", "out", "json", "timeout", ...CHANGING_FLAGS],
+	"studio call": ["args-file", "out", "json", "call-timeout", ...CHANGING_FLAGS],
 	"studio lock": ["json", "check-window"],
 	"studio unlock": ["force"],
 	"cloud publish": PUBLISH_FLAGS,
 	"cloud run": RUN_FLAGS,
-	"cloud test": [...PUBLISH_FLAGS, ...RUN_FLAGS],
-	"cloud probe": ["version", "timeout", "json", "dry-run"],
+	"cloud probe": ["place-version", "run-timeout", "json", "dry-run"],
 	help: [],
 };
 
 const GROUPS: Record<string, string> = {
 	studio: "open, close, status, play, stop, exec, run, list, tools, call, lock, unlock",
-	cloud: "publish, run, test, probe",
+	cloud: "publish, run, probe",
 };
 
 export interface Flags {
 	file?: string;
 	published?: boolean;
-	original?: string;
+	"original-place"?: string;
 	/** Every `--project` given, in order. */
 	project?: string[];
 	out?: string;
-	version?: string;
+	/** The version of the testing place a cloud run runs. */
+	"place-version"?: string;
 	sections?: string;
 	list?: boolean;
-	timeout?: string;
+	/** How long a run may take: each realm's in Studio, the task's in the cloud. */
+	"run-timeout"?: string;
+	/** How long a call to Studio may take: `studio exec`, `studio call`. */
+	"call-timeout"?: string;
 	/** The most concurrent tests that run at once, over the place's `testing.concurrency`. */
 	concurrency?: string;
 	/**
 	 * How many projects' Studio windows a `test` of several runs side by side: the value given, or
-	 * "2" for a bare `--parallel`; after it, FLAMEWORK_TEST_PARALLEL and testing.parallel.
+	 * "2" for a bare `--parallel`; after it, FLAMEWORK_TEST_PARALLEL and flameworkTest.parallel.
 	 */
 	parallel?: string;
 	code?: string;
@@ -375,25 +428,25 @@ export interface Flags {
 	cloud?: boolean;
 	"dry-run"?: boolean;
 	json?: boolean;
-	/** A skipped test fails the run; a run resolves it from FAIL_ON_SKIP and testing.failOnSkip too. */
+	/** A skipped test fails the run; a run resolves it from FLAMEWORK_TEST_FAIL_ON_SKIP and flameworkTest.failOnSkip too. */
 	"fail-on-skip"?: boolean;
-	/** A Studio run keeps the display on; after it, KEEP_AWAKE and testing.keepAwake. */
+	/** A Studio run keeps the display on; after it, FLAMEWORK_TEST_KEEP_AWAKE and flameworkTest.keepAwake. */
 	"keep-awake"?: boolean;
 	/**
 	 * A Studio `test` opens its windows where they can be seen, rather than on the hidden desktop;
-	 * after it, FLAMEWORK_TEST_SHOW and testing.showWindows.
+	 * after it, FLAMEWORK_TEST_SHOW_WINDOWS and flameworkTest.showWindows.
 	 */
-	show?: boolean;
-	"testing-universe"?: string;
-	"testing-place"?: string;
-	key?: string;
+	"show-windows"?: boolean;
+	"universe-id"?: string;
+	"place-id"?: string;
+	"api-key"?: string;
 	studio?: string;
-	/** Seconds a command that opens a window waits for the Studio lock; after it, FLAMEWORK_TEST_LOCK_TIMEOUT and testing.lockTimeout. */
+	/** Seconds a command that opens a window waits for the Studio lock; after it, FLAMEWORK_TEST_LOCK_TIMEOUT and flameworkTest.lockTimeout. */
 	"lock-timeout"?: string;
 	/** Seconds a command that opens a window waits for it to show up on the MCP proxy; after it, FLAMEWORK_TEST_CONNECT_TIMEOUT. */
 	"connect-timeout"?: string;
-	/** Minutes the window a command leaves open may sit unused; after it, FLAMEWORK_TEST_LOCK_HOLD and testing.lockHold. */
-	hold?: string;
+	/** Minutes the window a command leaves open may sit unused; after it, FLAMEWORK_TEST_LOCK_HOLD and flameworkTest.lockHold. */
+	"lock-hold"?: string;
 	/** Acts on a window flamework-test did not open for this project. */
 	"any-window"?: boolean;
 	/** `studio call`: the tool's arguments, as JSON in a file. */
@@ -402,6 +455,8 @@ export interface Flags {
 	force?: boolean;
 	/** `studio lock`: asks the MCP proxy whether the holder's window is on it. */
 	"check-window"?: boolean;
+	/** Prints flamework-test's own version; with no command only. */
+	version?: boolean;
 	help?: boolean;
 	/** `studio tools <name>`, `studio call <name>`: the tool, a positional argument. */
 	tool?: string;
@@ -435,12 +490,14 @@ export interface ParsedArgs {
 
 /**
  * Flags may appear before or after the command. `studio` and `cloud` commands are two words;
- * `test`, `patch`, `studio open`, `cloud publish` and `cloud test` accept a file as the next
- * positional, the same as `--file`.
+ * `test`, `patch`, `studio open` and `cloud publish` accept a file as the next positional, the
+ * same as `--file`.
  */
 export function parseArgs(argv: string[]): ParsedArgs {
 	const flags: Flags = {};
 	const positionals: string[] = [];
+	/** Old flags given, refused once the command is known: `--timeout`'s new name depends on it. */
+	const renamed: string[] = [];
 
 	for (let i = 0; i < argv.length; i += 1) {
 		const arg = argv[i]!;
@@ -459,8 +516,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
 				name = name.slice(0, eq);
 			}
 
-			const kind = FLAGS[name];
+			// `--version 4`, `--version=4`: the place version, as it was before 2.0.0-beta.0.
+			if (name === "version" && (value !== undefined || /^\d+$/.test(argv[i + 1] ?? ""))) {
+				throw new UsageError(PLACE_VERSION_MOVED);
+			}
+			const old = RENAMED_FLAGS[name];
+			const kind = FLAGS[name] ?? old?.kind;
 			if (kind === undefined) throw new UsageError(`unknown flag: --${name}`);
+			if (old !== undefined) renamed.push(name);
 
 			if (kind === "boolean") {
 				if (value !== undefined && value !== "true" && value !== "false") {
@@ -510,6 +573,17 @@ export function parseArgs(argv: string[]): ParsedArgs {
 			throw new UsageError(`${command} needs a subcommand: ${GROUPS[command]}`);
 		}
 		command = `${command} ${sub}`;
+	}
+
+	// The names of before 2.0.0-beta.0 are refused, each naming what took its place.
+	const removed = command !== undefined ? REMOVED_COMMANDS[command] : undefined;
+	if (removed !== undefined) throw new UsageError(removed);
+	const [old] = renamed;
+	if (old !== undefined) throw new UsageError(`--${old} is now ${RENAMED_FLAGS[old]!.now(command)}`);
+	if (flags.version === true && command !== undefined) {
+		throw new UsageError(
+			"--version prints flamework-test's own version, with no command; the place version a cloud run runs is --place-version <n>",
+		);
 	}
 
 	if (command !== undefined) {
@@ -563,9 +637,11 @@ default, or a testing place in the cloud
 
 Usage:
   flamework-test <command> [file] [flags]     (flags may come before the command)
+  flamework-test --version                    print flamework-test's own version
 
   test <file>     open the place Rojo built in Roblox Studio, run the tests in a play session on
-                  the server and the client, report, and close it again
+                  the server and the client, report, and close it again; with --cloud, publish it
+                  to the testing place and run the server's tests there instead
   patch <file>    lay the build over a copy of the original place and write the result
 
 Studio (needs "MCP server" enabled in Studio's Assistant settings):
@@ -591,70 +667,65 @@ close, play, stop, exec, run and call act only on the window flamework-test open
 project; --any-window acts on another, and needs the user's go-ahead for a window they have open.
 
 Cloud (a testing place and an Open Cloud key; the server's tests only):
+  test <file> --cloud   publish the file, then run its tests: the two steps below in one
   cloud publish <file>  upload the place Rojo built to the testing place as a new version
   cloud run             run the tests in that version through Open Cloud and report the results
-  cloud test <file>     publish the file, then run  (the same as: test <file> --cloud)
   cloud probe           report what the execution sandbox looks like from the inside
 
 Flags:
   test       --realm server|client|both  which realm's tests; default both
-             --show                  open Studio where it can be seen; by default a run opens its
+             --show-windows          open Studio where it can be seen; by default a run opens its
                                      windows on a hidden desktop of their own, so no window pops
                                      up or takes the focus (Windows; elsewhere nothing is hidden)
-                                     (default: $FLAMEWORK_TEST_SHOW, else testing.showWindows; off)
              --keep                  leave Studio and the play session open afterwards: hidden
-                                     unless --show, driven by the studio commands
+                                     unless --show-windows, driven by the studio commands
              --cloud                 run in the cloud instead of Studio
-             --original <place.rbxl> patch a copy of this place with the build first, and run that
-                                     (needs lune; default: $ORIGINAL_PLACE, cloud.originalPlace)
+             --original-place <place.rbxl>  patch a copy of this place with the build first, and
+                                     run that (needs lune)
              --project <path>        the Rojo project the run follows: its $properties are set on the
                                      place (Workspace.SignalBehavior, the streaming radii: what no
                                      script can set) and the patch follows its tree; repeatable or
                                      comma-separated, one run per project, named after the file
-                                     (getProject() in a test); needs lune. Default: $ROJO_PROJECT,
-                                     else ${DEFAULT_PROJECT}, followed only when an original is patched
+                                     (getProject() in a test); needs lune. Default:
+                                     $FLAMEWORK_TEST_PROJECT, else ${DEFAULT_PROJECT}, followed only
+                                     when an original is patched
              --sections <a,b>        only these sections ("economy", "economy/buys")
              --list                  list the tests instead of running them
              --json                  print the raw result JSON instead of a summary
-             --timeout <120s>        per run
+             --run-timeout <120s>    how long each realm's run may take (with --cloud: the task's,
+                                     max 300s); one test's own limit is testing.timeout in
+                                     flamework.config.json, 30 seconds by default
              --concurrency <n>       the most concurrent tests (test.concurrent) that run at once,
                                      over the place's testing.concurrency (4 by default); 1 runs
                                      every test alone
              --fail-on-skip          a skipped test fails the run, for CI that must run everything
-                                     (default: $FAIL_ON_SKIP, else testing.failOnSkip; off)
              --keep-awake            keep the display on while the run lasts: RenderStepped stops
                                      while it sleeps, which fails onRender tests in a run nobody
-                                     watches; Windows only, not with --cloud (default: $KEEP_AWAKE,
-                                     else testing.keepAwake; off)
+                                     watches; Windows only, not with --cloud
              --parallel [n]          run up to n projects' Studio windows side by side (no number: 2;
                                      at most ${PARALLEL_MOST}, and no more than there are projects), each
                                      project's lines printed together, in project order; each window
-                                     takes about 3 GB. Not with --cloud (default:
-                                     $FLAMEWORK_TEST_PARALLEL, else testing.parallel, else 1: one
-                                     after another)
+                                     takes about 3 GB. Not with --cloud (default: 1, one after another)
              --lock-timeout <seconds>  how long to wait for the Studio lock; 0 does not wait
-                                     (default: $FLAMEWORK_TEST_LOCK_TIMEOUT, else
-                                     testing.lockTimeout, else ${LOCK_TIMEOUT_SECONDS})
+                                     (default: ${LOCK_TIMEOUT_SECONDS})
              --connect-timeout <seconds>  how long to wait for a window Studio opened to show up on
-                                     the MCP proxy; --timeout is the run's, not this (default:
-                                     $FLAMEWORK_TEST_CONNECT_TIMEOUT, else ${CONNECT_TIMEOUT_SECONDS})
-             --hold <minutes>        with --keep: how long the window may sit unused before another
-                                     project may close it, ${LOCK_HOLD_LEAST_MINUTES} or more (default:
-                                     $FLAMEWORK_TEST_LOCK_HOLD, else testing.lockHold, else ${LOCK_HOLD_MINUTES})
+                                     the MCP proxy (default: ${CONNECT_TIMEOUT_SECONDS})
+             --lock-hold <minutes>   with --keep: how long the window may sit unused before another
+                                     project may close it, ${LOCK_HOLD_LEAST_MINUTES} or more (default: ${LOCK_HOLD_MINUTES})
   patch      --out <path>            where the patched place goes; default <file>.patched.rbxl, or
                                      <file>.<project>.rbxl under a chosen --project (one project)
   studio run --realm server|client|both   default server
              --keep                  leave the play session running afterwards
-             --sections, --list, --json, --timeout, --concurrency, --fail-on-skip,
+             --sections, --list, --json, --run-timeout, --concurrency, --fail-on-skip,
              --keep-awake            as for test
   studio exec --realm edit|server|client  default edit
-  studio open --json                 print the window as JSON;  --lock-timeout, --hold,
-                                     --connect-timeout  as for test; without --connect-timeout,
-                                     --timeout is the wait for the window
+             --call-timeout <120s>   how long the Luau may take
+  studio open --json                 print the window as JSON;  --lock-timeout, --lock-hold,
+                                     --connect-timeout  as for test
   studio call --args-file <file>     the tool's arguments as JSON in a file (no shell quoting)
              --out <dir>             where image answers (screen_capture) are written; default
                                      <temp>/flamework-test/captures
-             --json                  print the tool's raw answer;  --timeout <120s>
+             --json                  print the tool's raw answer;  --call-timeout <120s>
                                      a tool that takes no studio_id (but list_roblox_studios) is
                                      sent only with --any-window: which window it acts on is unknown
   studio list, tools, lock  --json   as JSON
@@ -666,47 +737,54 @@ Flags:
              --any-window            act on a window flamework-test did not open for this project
                                      (close, play, stop, exec, run, call); ask the user first
   cloud publish --published          publish live instead of uploading a Saved version
-             --original, --project   as for test (one project: one version is published)
-  cloud run  --version <n>           default: ${VERSION_FILE}, else the current version
+             --original-place, --project   as for test (one project: one version is published)
+  cloud run  --place-version <n>     default: ${VERSION_FILE}, else the current version
              --code "<luau>"         run this Luau instead of the test shim
              --script <file>         run this Luau file instead of the test shim
              --dry-run               print the request that would be sent, then stop
-             --sections, --list, --json, --timeout, --concurrency, --fail-on-skip   as for test
-                                     (timeout: the task's, max 300s)
-  common     --testing-universe <id> default: $TESTING_UNIVERSE_ID, else cloud.testingUniverseId
-             --testing-place <id>    default: $TESTING_PLACE_ID, else cloud.testingPlaceId
-             --key <apiKey>          default: $ROBLOX_API_KEY, else cloud.apiKey; prefer the
-                                     environment, a flag lands in the shell history
+             --sections, --list, --json, --run-timeout, --concurrency, --fail-on-skip   as for test
+  common     --universe-id <id>      the testing experience's universe id
+             --place-id <id>         the testing place's id (never the original place's)
+             --api-key <apiKey>      the Open Cloud key; prefer the environment, a flag lands in the
+                                     shell history
              -h, --help
 
-Settings come from flags, then the shell environment, then .env and .env.local next to the
-nearest flamework.config.json, then that file's "cloud" section (and the "testing" keys below),
-which may itself use \${NAME}:
-  "cloud": { "testingUniverseId": "...", "testingPlaceId": "...", "apiKey": "\${ROBLOX_API_KEY:-}",
-             "originalPlace": "places/original.rbxl" }
+Settings: a flag first, then its environment variable (the shell, then .env and .env.local next to
+the nearest flamework.config.json), then that file's "flameworkTest" section, which may itself use
+\${NAME}. A flag, its key and its variable share one name: --lock-hold, "lockHold",
+FLAMEWORK_TEST_LOCK_HOLD. The keys, with their flags:
+  "flameworkTest": {
+    "failOnSkip": false,      --fail-on-skip         "keepAwake": false,     --keep-awake
+    "showWindows": false,     --show-windows         "parallel": 1,          --parallel
+    "lockTimeout": 300,       --lock-timeout         "lockHold": 15,         --lock-hold
+    "universeId": "...",      --universe-id          "placeId": "...",       --place-id
+    "apiKey": "\${ROBLOX_API_KEY:-}",   --api-key
+    "originalPlace": "places/original.rbxl",  --original-place  (relative to the file)
+  }
+--fail-on-skip=false, --keep-awake=false and --show-windows=false turn a setting off for one run.
 A cloud run also needs "testing": { "entry": "src/server/main" }, the ModuleScript that ignites
 the game: a cloud task runs none of the place's Scripts, so the runner has to. Studio needs nothing.
-"testing": { "failOnSkip": true, "keepAwake": true } turns those two on; --fail-on-skip=false and
---keep-awake=false turn them off for one run. "testing": { "lockTimeout": 300, "lockHold": 15 } sets
-the Studio lock's wait (seconds) and hold (minutes); "testing": { "parallel": 2 } runs two projects'
-windows at once; "testing": { "showWindows": true } opens a test's windows where they can be seen.
 
 Environment (the shell, .env or .env.local):
   ROBLOX_API_KEY                          Open Cloud key: universe-places:write and
-  (or TESTING_PLACE_API_KEY)              universe.place.luau-execution-session:read/:write
-  TESTING_UNIVERSE_ID, TESTING_PLACE_ID   the testing experience and the place inside it
-  ORIGINAL_PLACE                          a copy of the original place, for --original
-  ROJO_PROJECT                            the project(s) a run follows, comma-separated, for --project
-  FAIL_ON_SKIP, KEEP_AWAKE                true or false (1 or 0), for --fail-on-skip and --keep-awake
+                                          universe.place.luau-execution-session:read/:write
+  FLAMEWORK_TEST_UNIVERSE_ID, FLAMEWORK_TEST_PLACE_ID   the testing experience and its place
+  FLAMEWORK_TEST_ORIGINAL_PLACE           a copy of the original place, for --original-place
+  FLAMEWORK_TEST_PROJECT                  the project(s) a run follows, comma-separated, for --project
+  FLAMEWORK_TEST_FAIL_ON_SKIP, FLAMEWORK_TEST_KEEP_AWAKE, FLAMEWORK_TEST_SHOW_WINDOWS
+                                          true or false (1 or 0), for their flags
   FLAMEWORK_TEST_LOCK_TIMEOUT             seconds, for --lock-timeout
-  FLAMEWORK_TEST_LOCK_HOLD                minutes, for --hold
+  FLAMEWORK_TEST_LOCK_HOLD                minutes, for --lock-hold
   FLAMEWORK_TEST_CONNECT_TIMEOUT          seconds, for --connect-timeout
   FLAMEWORK_TEST_PARALLEL                 windows at once, for --parallel
-  FLAMEWORK_TEST_SHOW                     true or false (1 or 0), for --show
   FLAMEWORK_TEST_STATE_DIR                where the Studio lock lives; every project must agree on it,
                                           so set it in the shell, never in a project's .env (Bun loads
                                           the .env of the folder a command runs in, which moves it)
-  LUNE_EXE, ROBLOX_STUDIO_EXE, STUDIO_MCP_EXE   overrides for the tools this finds by itself
+  FLAMEWORK_TEST_LUNE_EXE, FLAMEWORK_TEST_STUDIO_EXE, FLAMEWORK_TEST_STUDIO_MCP_EXE
+                                          lune, Roblox Studio and its MCP proxy, when not found by
+                                          themselves
+The names of before 2.0.0-beta.0 (FAIL_ON_SKIP, ROJO_PROJECT, TESTING_PLACE_ID, --timeout,
+--show, cloud test, the "cloud" section, ...) are refused, each naming its new one.
 
 Examples:
   rojo build -o place.rbxl && flamework-test test place.rbxl
@@ -1005,7 +1083,7 @@ function resolveDeps(deps: CliDeps, interruption: Interruption): Io {
 			if (exe === undefined) {
 				throw new CliError(
 					"StudioMCP.exe, Roblox Studio's MCP proxy, was not found under Roblox Studio's versions folder (%LOCALAPPDATA%\\Roblox\\Versions), so no Studio window can be driven from here",
-					"install Roblox Studio on this machine (the proxy ships with it), or set STUDIO_MCP_EXE to the file's path; to run the tests without Studio, use the cloud: flamework-test test <file> --cloud",
+					"install Roblox Studio on this machine (the proxy ships with it), or set FLAMEWORK_TEST_STUDIO_MCP_EXE to the file's path; to run the tests without Studio, use the cloud: flamework-test test <file> --cloud",
 				);
 			}
 			return await connectStudio(exe);
@@ -1154,7 +1232,7 @@ const FALSE_WORDS = ["", "0", "false", "no", "off"];
  * A yes-or-no setting, from the first of: the flag (`--fail-on-skip`, or `--fail-on-skip=false` to
  * turn off for one run what the others turn on), the variable from the shell, else from `.env` or
  * `.env.local` (`1`, `true`, `yes`, `on`, or `0`, `false`, `no`, `off`; empty is off, as an empty
- * `ROJO_PROJECT` is none), the config file's key; else off. Anything else in the variable is refused.
+ * `FLAMEWORK_TEST_PROJECT` is none), the config file's key; else off. Anything else in the variable is refused.
  */
 function booleanSetting(flag: boolean | undefined, variable: string, configured: boolean | undefined, io: Io): boolean {
 	if (flag !== undefined) return flag;
@@ -1168,30 +1246,30 @@ function booleanSetting(flag: boolean | undefined, variable: string, configured:
 	return configured ?? false;
 }
 
-/** Whether a skipped test fails the run: `--fail-on-skip`, `FAIL_ON_SKIP`, `testing.failOnSkip`. */
+/** Whether a skipped test fails the run: `--fail-on-skip`, `FLAMEWORK_TEST_FAIL_ON_SKIP`, `flameworkTest.failOnSkip`. */
 function failOnSkipOf(flags: Flags, io: Io): boolean {
-	return booleanSetting(flags["fail-on-skip"], "FAIL_ON_SKIP", settingsOf(io).failOnSkip, io);
+	return booleanSetting(flags["fail-on-skip"], "FLAMEWORK_TEST_FAIL_ON_SKIP", settingsOf(io).failOnSkip, io);
 }
 
-/** Whether a Studio run keeps the display on: `--keep-awake`, `KEEP_AWAKE`, `testing.keepAwake`. */
+/** Whether a Studio run keeps the display on: `--keep-awake`, `FLAMEWORK_TEST_KEEP_AWAKE`, `flameworkTest.keepAwake`. */
 function keepAwakeOf(flags: Flags, io: Io): boolean {
-	return booleanSetting(flags["keep-awake"], "KEEP_AWAKE", settingsOf(io).keepAwake, io);
+	return booleanSetting(flags["keep-awake"], "FLAMEWORK_TEST_KEEP_AWAKE", settingsOf(io).keepAwake, io);
 }
 
 /**
- * Whether a Studio `test` opens its windows where they can be seen: `--show`, `FLAMEWORK_TEST_SHOW`,
- * `testing.showWindows`; else on the hidden desktop.
+ * Whether a Studio `test` opens its windows where they can be seen: `--show-windows`,
+ * `FLAMEWORK_TEST_SHOW_WINDOWS`, `flameworkTest.showWindows`; else on the hidden desktop.
  */
 function showOf(flags: Flags, io: Io): boolean {
-	return booleanSetting(flags.show, "FLAMEWORK_TEST_SHOW", settingsOf(io).showWindows, io);
+	return booleanSetting(flags["show-windows"], "FLAMEWORK_TEST_SHOW_WINDOWS", settingsOf(io).showWindows, io);
 }
 
 /**
  * Whether a Studio `test` opens its windows on the hidden desktop: on Windows, unless shown (see
- * {@link showOf}, resolved into `flags.show` by the run). Anywhere else nothing is hidden.
+ * {@link showOf}, resolved into `flags["show-windows"]` by the run). Anywhere else nothing is hidden.
  */
 function hiddenOf(flags: Flags, io: Io): boolean {
-	return io.platform === "win32" && flags.show !== true;
+	return io.platform === "win32" && flags["show-windows"] !== true;
 }
 
 /**
@@ -1225,7 +1303,7 @@ function numberSetting(
 	if (flag !== undefined) return parse(flag, `--${flagName}`);
 	const value = envOf(io, variable);
 	if (value !== undefined && value.trim() !== "") return parse(value, variable);
-	if (configured !== undefined) return check(configured, `testing.${options.key}`);
+	if (configured !== undefined) return check(configured, `flameworkTest.${options.key}`);
 	return fallback;
 }
 
@@ -1245,14 +1323,14 @@ function lockTimeoutOf(flags: Flags, io: Io): number {
 }
 
 /**
- * How long, in minutes, the window a command opens may sit unused: `--hold`, the variable, the
+ * How long, in minutes, the window a command opens may sit unused: `--lock-hold`, the variable, the
  * config key, 15. One minute at least, twice the lease's heartbeat, so that a window in use never
  * lapses between two renewals.
  */
 function holdOf(flags: Flags, io: Io): number {
 	return numberSetting(
-		flags.hold,
-		"hold",
+		flags["lock-hold"],
+		"lock-hold",
 		"FLAMEWORK_TEST_LOCK_HOLD",
 		settingsOf(io).lockHold,
 		LOCK_HOLD_MINUTES,
@@ -1264,19 +1342,14 @@ function holdOf(flags: Flags, io: Io): number {
 /**
  * How long, in milliseconds, a command that launches Studio waits for its window to show up on the
  * MCP proxy: `--connect-timeout`, FLAMEWORK_TEST_CONNECT_TIMEOUT, 180 seconds. Never the run's own
- * `--timeout`, which `test` gives each realm's run (a run of 15 minutes waited 15 minutes for a
- * window that had connected under another name). `studio open`, whose only wait this is, still
- * takes its `--timeout` for it. No config key: the config file's schema is the transformer's.
+ * `--run-timeout`, which `test` gives each realm's run (a run of 15 minutes waited 15 minutes for a
+ * window that had connected under another name). No config key.
  * `from`: what set it, as the error names it when the wait runs out.
  */
 function connectTimeoutOf(
 	flags: Flags,
 	io: Io,
-	command: "test" | "studio open",
-): { ms: number; from: "--connect-timeout" | "--timeout" | "FLAMEWORK_TEST_CONNECT_TIMEOUT" } {
-	if (flags["connect-timeout"] === undefined && command === "studio open" && flags.timeout !== undefined) {
-		return { ms: parseDurationMs(flags.timeout, CONNECT_TIMEOUT_SECONDS * 1000), from: "--timeout" };
-	}
+): { ms: number; from: "--connect-timeout" | "FLAMEWORK_TEST_CONNECT_TIMEOUT" } {
 	const variable = envOf(io, "FLAMEWORK_TEST_CONNECT_TIMEOUT");
 	const seconds = numberSetting(
 		flags["connect-timeout"],
@@ -1308,7 +1381,7 @@ function concurrencyOf(flags: Flags): number | undefined {
 
 /**
  * How many projects' Studio windows a `test` runs side by side: `--parallel [n]`, else
- * FLAMEWORK_TEST_PARALLEL (shell, `.env`, `.env.local`), else `testing.parallel`, else 1. A whole
+ * FLAMEWORK_TEST_PARALLEL (shell, `.env`, `.env.local`), else `flameworkTest.parallel`, else 1. A whole
  * number, 1 or more, refused otherwise before anything opens; cut down to the projects there are,
  * and to {@link PARALLEL_MOST}, saying so. A cloud run never reads the variable or the key.
  */
@@ -1331,8 +1404,8 @@ function parallelOf(flags: Flags, io: Io, projects: number): number {
 		asked = wanted(variable, "FLAMEWORK_TEST_PARALLEL");
 		from = "FLAMEWORK_TEST_PARALLEL";
 	} else if (configured !== undefined) {
-		asked = wanted(String(configured), "testing.parallel");
-		from = "testing.parallel";
+		asked = wanted(String(configured), "flameworkTest.parallel");
+		from = "flameworkTest.parallel";
 	}
 	if (asked > PARALLEL_MOST && projects > PARALLEL_MOST) {
 		io.error(
@@ -1368,12 +1441,11 @@ async function withKeepAwake<T>(on: boolean, io: Io, body: () => Promise<T>): Pr
 }
 
 function makeClient(flags: Flags, io: Io): OpenCloudClient {
-	const apiKey =
-		flags.key ?? envOf(io, "ROBLOX_API_KEY") ?? envOf(io, "TESTING_PLACE_API_KEY") ?? settingsOf(io).apiKey ?? "";
+	const apiKey = flags["api-key"] ?? envOf(io, "ROBLOX_API_KEY") ?? settingsOf(io).apiKey ?? "";
 	if (!apiKey) {
 		throw new CliError(
 			"no Open Cloud API key",
-			"put ROBLOX_API_KEY in .env.local next to flamework.config.json (never in a committed file), or pass --key",
+			"put ROBLOX_API_KEY in .env.local next to flamework.config.json (never in a committed file), or pass --api-key",
 		);
 	}
 	const { universeId, placeId } = resolveIds(flags, io);
@@ -1392,18 +1464,18 @@ function makeClient(flags: Flags, io: Io): OpenCloudClient {
  * named with `--studio`, or the only local-file window, needs none.
  */
 function testingPlaceIdIfAny(flags: Flags, io: Io): string | undefined {
-	return flags["testing-place"] ?? envOf(io, "TESTING_PLACE_ID") ?? settingsOf(io).testingPlaceId;
+	return flags["place-id"] ?? envOf(io, "FLAMEWORK_TEST_PLACE_ID") ?? settingsOf(io).placeId;
 }
 
 /** The testing place: never the original, which is why every name here says so. */
 function resolveIds(flags: Flags, io: Io): { universeId: string; placeId: string } {
 	const settings = settingsOf(io);
-	const universeId = flags["testing-universe"] ?? envOf(io, "TESTING_UNIVERSE_ID") ?? settings.testingUniverseId;
-	const placeId = flags["testing-place"] ?? envOf(io, "TESTING_PLACE_ID") ?? settings.testingPlaceId;
+	const universeId = flags["universe-id"] ?? envOf(io, "FLAMEWORK_TEST_UNIVERSE_ID") ?? settings.universeId;
+	const placeId = flags["place-id"] ?? envOf(io, "FLAMEWORK_TEST_PLACE_ID") ?? settings.placeId;
 	if (universeId === undefined || placeId === undefined) {
 		throw new CliError(
 			"no testing universe and place to use",
-			'put TESTING_UNIVERSE_ID and TESTING_PLACE_ID in .env, give flamework.config.json a "cloud" section with "testingUniverseId" and "testingPlaceId", or pass --testing-universe and --testing-place',
+			'put FLAMEWORK_TEST_UNIVERSE_ID and FLAMEWORK_TEST_PLACE_ID in .env, give flamework.config.json a "flameworkTest" section with "universeId" and "placeId", or pass --universe-id and --place-id',
 		);
 	}
 	if (universeId === placeId) {
@@ -1426,21 +1498,21 @@ function placeFileOf(flags: Flags, command: string): string {
 	return flags.file;
 }
 
-/** The original place to patch, when one was named anywhere; an empty name is none, so `ORIGINAL_PLACE=` turns it off. */
+/** The original place to patch, when one was named anywhere; an empty name is none, so `FLAMEWORK_TEST_ORIGINAL_PLACE=` turns it off. */
 function originalPlaceOf(flags: Flags, io: Io): string | undefined {
-	const named = flags.original ?? envOf(io, "ORIGINAL_PLACE");
+	const named = flags["original-place"] ?? envOf(io, "FLAMEWORK_TEST_ORIGINAL_PLACE");
 	if (named !== undefined) return named === "" ? undefined : resolve(io.cwd, named);
 	return settingsOf(io).originalPlace;
 }
 
 /**
- * The projects a run follows, in order: `--project`, else `ROJO_PROJECT` (comma-separated; empty
+ * The projects a run follows, in order: `--project`, else `FLAMEWORK_TEST_PROJECT` (comma-separated; empty
  * turns it off), else the default project, unchosen: followed only when an original is patched.
  * Runs, files and the place's attribute are named after the project file, so two files of the
  * same name are refused.
  */
 function projectsOf(flags: Flags, io: Io): ProjectChoice[] {
-	const named = flags.project ?? splitList(envOf(io, "ROJO_PROJECT"));
+	const named = flags.project ?? splitList(envOf(io, "FLAMEWORK_TEST_PROJECT"));
 	if (named.length === 0) {
 		return [{ path: resolve(io.cwd, DEFAULT_PROJECT), name: projectNameOf(DEFAULT_PROJECT), chosen: false }];
 	}
@@ -1461,7 +1533,7 @@ function projectsOf(flags: Flags, io: Io): ProjectChoice[] {
 function singleProjectOf(flags: Flags, io: Io, command: string): ProjectChoice {
 	const projects = projectsOf(flags, io);
 	if (projects.length > 1) {
-		const source = flags.project !== undefined ? "--project" : "ROJO_PROJECT";
+		const source = flags.project !== undefined ? "--project" : "FLAMEWORK_TEST_PROJECT";
 		throw new UsageError(
 			`${command} follows one project at a time, and ${source} names ${projects.length}; ${source === "--project" ? "give one" : "pass --project <file>"}`,
 		);
@@ -1469,9 +1541,9 @@ function singleProjectOf(flags: Flags, io: Io, command: string): ProjectChoice {
 	return projects[0]!;
 }
 
-/** `lune`, or `LUNE_EXE`; checked before anything is opened or uploaded, since the patch cannot run without it. */
+/** `lune`, or `FLAMEWORK_TEST_LUNE_EXE`; checked before anything is opened or uploaded, since the patch cannot run without it. */
 async function requireLune(io: Io, what: string): Promise<string> {
-	const exe = envOf(io, "LUNE_EXE") ?? "lune";
+	const exe = envOf(io, "FLAMEWORK_TEST_LUNE_EXE") ?? "lune";
 	let code: number;
 	try {
 		code = await io.spawn([exe, "--version"], io.cwd, LUNE_VERSION_TIMEOUT_MS);
@@ -1480,7 +1552,7 @@ async function requireLune(io: Io, what: string): Promise<string> {
 		if (error instanceof ChildTimedOut) {
 			throw new CliError(
 				`\`${exe} --version\` did not answer within ${span(LUNE_VERSION_TIMEOUT_MS)}, and was stopped, so lune could not be checked`,
-				"check that `lune --version` answers in this shell, or set LUNE_EXE; nothing was run or uploaded",
+				"check that `lune --version` answers in this shell, or set FLAMEWORK_TEST_LUNE_EXE; nothing was run or uploaded",
 			);
 		}
 		code = -1;
@@ -1488,7 +1560,7 @@ async function requireLune(io: Io, what: string): Promise<string> {
 	if (code !== 0) {
 		throw new CliError(
 			`lune is needed to ${what}, and it was not found`,
-			"install it (rokit or aftman: `lune`), or set LUNE_EXE; nothing was run or uploaded",
+			"install it (rokit or aftman: `lune`), or set FLAMEWORK_TEST_LUNE_EXE; nothing was run or uploaded",
 		);
 	}
 	return exe;
@@ -1500,7 +1572,7 @@ async function readProject(project: ProjectChoice, io: Io): Promise<RojoProject>
 		throw new CliError(
 			`the Rojo project ${project.path} does not exist`,
 			project.chosen
-				? "a run follows the project file for the properties to set and what the build replaces; check --project or ROJO_PROJECT"
+				? "a run follows the project file for the properties to set and what the build replaces; check --project or FLAMEWORK_TEST_PROJECT"
 				: "the patch follows the project file to know what the build replaces; pass --project",
 		);
 	}
@@ -1545,7 +1617,7 @@ async function patchPlace(
 	if (original !== undefined && !(await io.exists(original))) {
 		throw new CliError(
 			`the original place ${original} does not exist`,
-			"save a copy of the original place from Studio (File > Save to File) and point --original or cloud.originalPlace at it",
+			"save a copy of the original place from Studio (File > Save to File) and point --original-place or flameworkTest.originalPlace at it",
 		);
 	}
 
@@ -1655,7 +1727,7 @@ async function cmdPatch(flags: Flags, io: Io): Promise<number> {
 	const original = originalPlaceOf(flags, io);
 	if (original === undefined && !project.chosen) {
 		throw new UsageError(
-			"patch needs the original place (--original <place.rbxl>, ORIGINAL_PLACE, or cloud.originalPlace), or a project whose properties to set on the build (--project <file>)",
+			"patch needs the original place (--original-place <place.rbxl>, FLAMEWORK_TEST_ORIGINAL_PLACE, or flameworkTest.originalPlace), or a project whose properties to set on the build (--project <file>)",
 		);
 	}
 	await patchPlace(built, original, project, flags, io);
@@ -1700,12 +1772,12 @@ interface VersionChoice {
 }
 
 async function resolveVersion(flags: Flags, io: Io, useVersionFile: boolean): Promise<VersionChoice> {
-	if (flags.version !== undefined) {
-		const parsed = Number(flags.version);
+	if (flags["place-version"] !== undefined) {
+		const parsed = Number(flags["place-version"]);
 		if (!Number.isInteger(parsed) || parsed <= 0) {
-			throw new UsageError(`--version must be a positive integer, got "${flags.version}"`);
+			throw new UsageError(`--place-version must be a positive integer, got "${flags["place-version"]}"`);
 		}
-		return { version: parsed, source: "--version" };
+		return { version: parsed, source: "--place-version" };
 	}
 
 	if (useVersionFile) {
@@ -1789,8 +1861,8 @@ async function rawScript(flags: Flags, io: Io): Promise<{ script: string; label:
 async function cmdRun(flags: Flags, io: Io, kind: "run" | "probe" = "run"): Promise<number> {
 	const { script, scriptKind, label } = await buildScript(flags, io, kind);
 	if (scriptKind === "shim") flags = withRunSettings(flags, io);
-	const { version, source } = await resolveVersion(flags, io, kind === "run" && flags.version === undefined);
-	const timeout = flags.timeout ?? (kind === "probe" ? PROBE_TIMEOUT : DEFAULT_TIMEOUT);
+	const { version, source } = await resolveVersion(flags, io, kind === "run" && flags["place-version"] === undefined);
+	const timeout = flags["run-timeout"] ?? (kind === "probe" ? PROBE_TIMEOUT : DEFAULT_TIMEOUT);
 
 	if (flags["dry-run"]) {
 		printDryRun(flags, io, { script, label, version, source, timeout });
@@ -1957,11 +2029,6 @@ function printDryRun(
 	io.log("--- script ---");
 	io.log(info.script.replace(/\n$/, ""));
 	io.log("--- end script ---");
-}
-
-/** `cloud test <file>` is `test <file> --cloud`: the same runs, one per project. */
-async function cmdCloudTest(flags: Flags, io: Io): Promise<number> {
-	return await cmdTest({ ...flags, cloud: true }, io);
 }
 
 /** One project's cloud run: publish the place made under it, then run the server's tests in it. */
@@ -2592,7 +2659,7 @@ function closedWindowError(entry: ClosedWindowRecord): CliError {
 				: "by `flamework-test studio unlock --force`";
 	return new CliError(
 		`the Studio ${words.window} flamework-test opened for this project (${named}) ${entry.windows.length > 1 ? "were" : "was"} closed at ${entry.closedAt} by flamework-test for ${entry.by.project} (${entry.by.command}), ${why}`,
-		`${again}${entry.reason === "expired" ? " (--hold <minutes> keeps a window longer)" : ""}`,
+		`${again}${entry.reason === "expired" ? " (--lock-hold <minutes> keeps a window longer)" : ""}`,
 	);
 }
 
@@ -2841,7 +2908,7 @@ async function noWindow(
 		if (launched.length > 0) {
 			const words = windowWord(launched.length);
 			const hidden = launched.some((window) => window.hidden === true)
-				? `. Opened on the hidden desktop, ${words.it} may be showing a dialog nobody can see there (a login, an update): close ${words.it}, and run with --show to see the next`
+				? `. Opened on the hidden desktop, ${words.it} may be showing a dialog nobody can see there (a login, an update): close ${words.it}, and run with --show-windows to see the next`
 				: "";
 			return new CliError(
 				`the Studio ${words.window} flamework-test opened for this project (${describeProcesses(launched)}) ${launched.length === 1 ? "is" : "are"} open but not on the MCP proxy`,
@@ -3005,7 +3072,7 @@ function requireStudioExe(io: Io): string {
 	if (exe === undefined) {
 		throw new CliError(
 			"RobloxStudioBeta.exe was not found under Roblox Studio's versions folder",
-			"is Roblox Studio installed on this machine? Set ROBLOX_STUDIO_EXE to point at it otherwise, or run in the cloud: flamework-test test <file> --cloud",
+			"is Roblox Studio installed on this machine? Set FLAMEWORK_TEST_STUDIO_EXE to point at it otherwise, or run in the cloud: flamework-test test <file> --cloud",
 		);
 	}
 	return exe;
@@ -3072,8 +3139,8 @@ function describeSeen(seen: readonly SeenWindow[]): string {
  * A window flamework-test launched that never showed up on the proxy. What the hint says of the
  * window: left `open` (`--keep`), `closed` again, or nothing (`unstated`) when that close failed
  * and has said so itself. A window on the hidden desktop may be held up by a dialog nobody can see,
- * which `--show` shows. `waited`: how long the wait was, what set that (`from`: `--connect-timeout`,
- * its variable, or `studio open`'s `--timeout`), and every window that registered with the proxy
+ * which `--show-windows` shows. `waited`: how long the wait was, what set that (`from`:
+ * `--connect-timeout` or its variable), and every window that registered with the proxy
  * meanwhile with what the run made of each, so a window listed under a name the run did not expect
  * ("Game") is named.
  * Written for whoever reads it next, an AI agent as often as a person.
@@ -3086,7 +3153,7 @@ function neverConnected(
 	waited?: { ms: number; from: string; seen: readonly SeenWindow[] },
 ): CliError {
 	const advice = hidden
-		? 'it opened on the hidden desktop, where nobody sees it: it may be showing a dialog there that nobody can answer (a login, an update, a crash report), so run again with --show to see it. Showing none, Studio\'s "MCP server" setting is probably off, and a window with it off is never listed: ask the user to enable "MCP server" in Studio\'s Assistant settings'
+		? 'it opened on the hidden desktop, where nobody sees it: it may be showing a dialog there that nobody can answer (a login, an update, a crash report), so run again with --show-windows to see it. Showing none, Studio\'s "MCP server" setting is probably off, and a window with it off is never listed: ask the user to enable "MCP server" in Studio\'s Assistant settings'
 		: 'Studio\'s "MCP server" setting is probably off, and a window with it off is never listed: ask the user to enable "MCP server" in Studio\'s Assistant settings, then run this again';
 	const meanwhile =
 		waited === undefined
@@ -3597,7 +3664,7 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 	const json = flags.json === true;
 	const say = (line: string) => (json ? io.error(line) : io.log(line));
 	const holdMinutes = holdOf(flags, io);
-	const connectTimeout = connectTimeoutOf(flags, io, "studio open");
+	const connectTimeout = connectTimeoutOf(flags, io);
 
 	let launch: { file: string } | { placeId: string; universeId: string };
 	let place: LockPlace;
@@ -3728,7 +3795,7 @@ async function cmdStudioOpen(flags: Flags, io: Io): Promise<number> {
 				io.log(connectedLine);
 				io.log(windowLine(studio.id, pid));
 				io.log(
-					`it holds the Studio lock until \`flamework-test studio close\`, or until it has sat unused for ${holdMinutes} min (--hold)`,
+					`it holds the Studio lock until \`flamework-test studio close\`, or until it has sat unused for ${holdMinutes} min (--lock-hold)`,
 				);
 			}
 			return 0;
@@ -4044,7 +4111,7 @@ async function cmdStudioExec(flags: Flags, io: Io): Promise<number> {
 			answer = await client.call(
 				"execute_luau",
 				{ studio_id: studio.id, datamodel_type: dataModel, code: raw.script },
-				parseDurationMs(flags.timeout ?? DEFAULT_TIMEOUT, 120_000),
+				parseDurationMs(flags["call-timeout"] ?? DEFAULT_TIMEOUT, 120_000),
 			);
 		} catch (error) {
 			rethrowInterrupted(error);
@@ -4146,7 +4213,7 @@ async function runRealms(
 			const realm = dataModel.toLowerCase();
 			await activity();
 			io.log(`running the ${realm}'s tests in ${placeNameOf(studio.name)}...`);
-			const timeout = flags.timeout ?? DEFAULT_TIMEOUT;
+			const timeout = flags["run-timeout"] ?? DEFAULT_TIMEOUT;
 
 			let answer: string;
 			try {
@@ -4161,7 +4228,7 @@ async function runRealms(
 				if (/timed out/.test(String(error))) {
 					// Every test has `testing.timeout` of its own, so a realm that does not answer is
 					// stuck somewhere the runner cannot see: the last test that reported places it.
-					io.error(`the ${realm}'s run did not finish within ${timeout} (--timeout)`);
+					io.error(`the ${realm}'s run did not finish within ${timeout} (--run-timeout)`);
 					io.progress(`the ${realm}'s run did not finish within ${timeout}`);
 					io.error(await describeHangingTest(client, studio, dataModel, mayOverlap));
 				} else {
@@ -4574,7 +4641,7 @@ async function cmdStudioCall(flags: Flags, io: Io): Promise<number> {
 			`studio_id is given twice, and differently: --studio ${flags.studio} and "studio_id": "${given}"`,
 		);
 	}
-	const timeoutMs = parseDurationMs(flags.timeout ?? DEFAULT_TIMEOUT, 120_000);
+	const timeoutMs = parseDurationMs(flags["call-timeout"] ?? DEFAULT_TIMEOUT, 120_000);
 	const dir = flags.out !== undefined ? resolve(io.cwd, flags.out) : capturesDir();
 
 	// Only a refusal of the sandbox's: an error that merely names require (one of something that is
@@ -4865,12 +4932,12 @@ async function cmdTest(flags: Flags, io: Io): Promise<number> {
 	if (flags.cloud && flags["keep-awake"] === true) {
 		throw new UsageError("--keep-awake is for Studio runs: a cloud run has no display on this machine to keep on");
 	}
-	if (flags.cloud && flags.show === true) {
-		throw new UsageError("--show is for Studio runs: a cloud run opens no window on this machine to show");
+	if (flags.cloud && flags["show-windows"] === true) {
+		throw new UsageError("--show-windows is for Studio runs: a cloud run opens no window on this machine to show");
 	}
-	if (flags.cloud && (flags["lock-timeout"] !== undefined || flags.hold !== undefined)) {
+	if (flags.cloud && (flags["lock-timeout"] !== undefined || flags["lock-hold"] !== undefined)) {
 		throw new UsageError(
-			`--${flags.hold !== undefined ? "hold" : "lock-timeout"} is for Studio runs: a cloud run opens no Studio window and takes no lock`,
+			`--${flags["lock-hold"] !== undefined ? "lock-hold" : "lock-timeout"} is for Studio runs: a cloud run opens no Studio window and takes no lock`,
 		);
 	}
 	if (flags.cloud && flags["connect-timeout"] !== undefined) {
@@ -4881,18 +4948,18 @@ async function cmdTest(flags: Flags, io: Io): Promise<number> {
 			"--parallel is for Studio runs: the cloud runs of several projects publish to the one testing place, so they run one after another",
 		);
 	}
-	if (!flags.cloud && flags.hold !== undefined && flags.keep !== true) {
+	if (!flags.cloud && flags["lock-hold"] !== undefined && flags.keep !== true) {
 		throw new UsageError(
-			"--hold is for a window left open: flamework-test test <file> --keep --hold <minutes>, or studio open --hold <minutes>",
+			"--lock-hold is for a window left open: flamework-test test <file> --keep --lock-hold <minutes>, or studio open --lock-hold <minutes>",
 		);
 	}
 	if (flags.cloud) {
-		placeFileOf(flags, "cloud test");
+		placeFileOf(flags, "test");
 		requireCloudEntry(io);
 	}
 
 	flags = withRunSettings(flags, io);
-	// KEEP_AWAKE and testing.keepAwake are for the Studio runs: a cloud run leaves them alone.
+	// FLAMEWORK_TEST_KEEP_AWAKE and flameworkTest.keepAwake are for the Studio runs: a cloud run leaves them alone.
 	const keepAwake = flags.cloud !== true && keepAwakeOf(flags, io);
 	const projects = projectsOf(flags, io);
 	if (flags.cloud === true) return await withKeepAwake(keepAwake, io, () => testProjects(flags, io, projects));
@@ -4902,11 +4969,11 @@ async function cmdTest(flags: Flags, io: Io): Promise<number> {
 			"--keep leaves a Studio window open, and flamework-test keeps one window open at a time: keep one project's (--project <file> --keep)",
 		);
 	}
-	// Misspelt settings are refused before anything is patched or opened; FLAMEWORK_TEST_SHOW and
-	// testing.showWindows are read into the flag here, as the cloud run leaves them alone.
+	// Misspelt settings are refused before anything is patched or opened; FLAMEWORK_TEST_SHOW_WINDOWS
+	// and flameworkTest.showWindows are read into the flag here, as the cloud run leaves them alone.
 	lockTimeoutOf(flags, io);
-	connectTimeoutOf(flags, io, "test");
-	flags = { ...flags, show: showOf(flags, io) };
+	connectTimeoutOf(flags, io);
+	flags = { ...flags, "show-windows": showOf(flags, io) };
 	const parallel = parallelOf(flags, io, projects.length);
 	const lock = new LazyStudioLock(io, flags, {
 		command: flags.keep === true ? "test --keep" : parallel > 1 ? `test --parallel ${parallel}` : "test",
@@ -5262,7 +5329,7 @@ async function studioTestProject(flags: Flags, io: Io, project: ProjectChoice, l
  * MCP proxy, which reaches it there as anywhere.
  */
 export const KEPT_HIDDEN =
-	"it is on the hidden desktop, where nobody sees it: the studio commands drive it (exec, run, call screen_capture), and `flamework-test studio close` closes it; to look at a kept window, run with --show --keep";
+	"it is on the hidden desktop, where nobody sees it: the studio commands drive it (exec, run, call screen_capture), and `flamework-test studio close` closes it; to look at a kept window, run with --show-windows --keep";
 
 /** One project's window: opened, run on both realms, and closed again (unless `--keep`). */
 async function studioTestWindow(
@@ -5339,7 +5406,7 @@ async function studioTestWindow(
 				if (!hidden || error instanceof Interrupted) throw error;
 				throw new CliError(
 					error instanceof Error ? error.message : String(error),
-					"run again with --show to open Studio on your desktop instead",
+					"run again with --show-windows to open Studio on your desktop instead",
 				);
 			}
 			launched = true;
@@ -5349,11 +5416,11 @@ async function studioTestWindow(
 				? io.interruption.hold(`${window}, which --keep leaves open`)
 				: io.interruption.hold(window, `closed ${window}`);
 			io.log(
-				`opening ${label} in Studio${hidden ? ", on the hidden desktop (--show shows it)" : ""}; waiting for it to connect...`,
+				`opening ${label} in Studio${hidden ? ", on the hidden desktop (--show-windows shows it)" : ""}; waiting for it to connect...`,
 			);
 			io.progress(`opening ${name} in Studio (PID ${pid ?? "unknown"}${hidden ? ", hidden" : ""})`);
 
-			const connectTimeout = connectTimeoutOf(flags, io, "test");
+			const connectTimeout = connectTimeoutOf(flags, io);
 			const signIn = signInWatch(io, { pid, at: launchedAt, hidden, what: label, say: io.log }, myTurn.done);
 			const found = await findLaunchedWindow(
 				client,
@@ -5406,7 +5473,7 @@ async function studioTestWindow(
 			io.log("Studio left open (--keep)");
 			io.log(windowLine(studio.id, pid));
 			io.log(
-				`it holds the Studio lock until \`flamework-test studio close\`, or until it has sat unused for ${slot.lock.owner.holdMinutes} min (--hold)`,
+				`it holds the Studio lock until \`flamework-test studio close\`, or until it has sat unused for ${slot.lock.owner.holdMinutes} min (--lock-hold)`,
 			);
 			if (hidden) io.log(KEPT_HIDDEN);
 			return code;
@@ -5443,6 +5510,11 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
 			return 2;
 		}
 		throw error;
+	}
+
+	if (parsed.flags.version === true) {
+		io.log(cliVersion());
+		return 0;
 	}
 
 	// `studio call <tool> --help` is `studio tools <tool>`: the tool's own description and arguments.
@@ -5487,8 +5559,29 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
 	}
 }
 
+/** This flamework-test's version: its package's, which ships the CLI as source beside it. */
+export function cliVersion(): string {
+	const path = join(import.meta.dir, "..", "..", "package.json");
+	return (JSON.parse(readFileSync(path, "utf8")) as { version: string }).version;
+}
+
+/**
+ * Refuses a run while an environment variable flamework-test read before 2.0.0-beta.0 is set, in
+ * the shell, `.env` or `.env.local`, naming each one's new name: one read no more would otherwise
+ * turn its setting off without a word. Every command checks, before it does anything.
+ */
+function refuseRenamedVariables(io: Io): void {
+	const lines = describeRenamedVariables(io.env, settingsOf(io).env);
+	if (lines.length === 0) return;
+	throw new CliError(
+		`flamework-test's environment variables were renamed: ${lines.join("; ")}`,
+		"rename them where they are set (the shell, .env or .env.local next to flamework.config.json, a CI's settings), and any ${NAME} reference to them in flamework.config.json; nothing was run",
+	);
+}
+
 async function runCommand(command: string, flags: Flags, io: Io): Promise<number> {
 	try {
+		refuseRenamedVariables(io);
 		switch (command) {
 			case "test":
 				return await cmdTest(flags, io);
@@ -5524,8 +5617,6 @@ async function runCommand(command: string, flags: Flags, io: Io): Promise<number
 				return await cmdRun(flags, io, "run");
 			case "cloud probe":
 				return await cmdRun(flags, io, "probe");
-			case "cloud test":
-				return await cmdCloudTest(flags, io);
 			default:
 				io.error(`error: unknown command: ${command}`);
 				io.error("");
