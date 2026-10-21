@@ -2,6 +2,7 @@ import ts from "typescript";
 import { Diagnostics } from "../../../classes/diagnostics";
 import { TransformState } from "../../../classes/transformState";
 import { f } from "../../../util/factory";
+import { hashEnvValue } from "../../../util/env";
 
 /**
  * Inlines an environment variable: `Flamework.env("NAME")` becomes the variable's value as a
@@ -31,6 +32,13 @@ export function buildEnvIntrinsic(state: TransformState, node: ts.Node, nameType
 		fallback = fallbackType.value;
 	}
 
-	const value = state.env[nameType.value] ?? fallback;
+	// Recorded for a later incremental build, which keeps this file's output while it is unchanged.
+	const variable = state.env[nameType.value];
+	const file = ts.getParseTreeNode(node)?.getSourceFile();
+	if (file !== undefined) {
+		state.buildInfo.addEnvInput(state.getFileId(file), nameType.value, hashEnvValue(variable));
+	}
+
+	const value = variable ?? fallback;
 	return value === undefined ? f.nil() : f.string(value);
 }

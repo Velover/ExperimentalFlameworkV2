@@ -121,6 +121,21 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   `1` (read from a DataStore or from JSON, or passed through an `as any`) changes meaning: `0`
   arrives as `true`. Convert it before sending (`value === 1`), or turn the type checks on
   (`"types": true`), which raise for it instead.
+- **`include/flamework/` now goes into the include folder roblox-ts uses.** The transformer put it
+  in `include/` beside `package.json` unless the command line said `--i` or `--includePath`.
+  roblox-ts puts its runtime in `include/` beside `tsconfig.json`, or where `-i` (also `--i`),
+  `--includePath` or the tsconfig's `rbxts.includePath` says, and the runtime finds `flamework/`
+  next to it. A project whose
+  `tsconfig.json` is beside `package.json` and that sets none of these sees no change. A place whose
+  `tsconfig.json` is in a subfolder now gets the folder in its own `include/`; delete the
+  `include/flamework/` the old transformer left beside `package.json`.
+- **An incremental build stops when Flamework's options changed since the last build.** A new
+  `idGenerationMode` or `obfuscation`, another value of a code-shaping option (the `transformer` or
+  `serialization` section, or `networking.serialization`), or a new value of a variable that
+  `Flamework.env` inlines now stops an incremental build with `Flamework's inputs changed since
+  flamework.build was written`, naming what changed and the tsbuildinfo to delete. Such a build
+  recompiled only the files that changed and gave a class two ids. Delete the tsbuildinfo once, and
+  the next build compiles every file. Plain builds and watchers are not affected.
 
 ### components
 
@@ -380,6 +395,40 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 #### Fixed
 
+- **A build that fails writes none of Flamework's artifacts.** roblox-ts writes nothing when a build
+  has an error, its own or a transformer's, but the transformer still wrote
+  `include/flamework/*.json` and `flamework.build`: `globs.json` could name a module whose Luau was
+  never written, and a watcher's next rebuild read the table of the pass that failed. They are now
+  written only once roblox-ts has written the build's Luau (it calls the program's
+  `emitBuildInfo()` then, and only then), and after its clean of stale outputs. The next build that
+  succeeds writes them as a clean build would. The empty-glob and path warnings are no longer
+  printed for a build that fails.
+- **Flamework's artifacts are written whole.** Each goes to a temporary `.tmp` file beside it and is
+  renamed over the old one, so Rojo never syncs half of a JSON file and a later build never reads
+  half of `flamework.build`.
+- **The include folder, the Rojo project and the tsconfig are the ones roblox-ts uses.** The
+  transformer read them from the command line on its own: it looked for `--i` where roblox-ts's
+  alias is `-i` (so `rbxtsc -i custom/include` wrote `include/flamework/` to `./include`), missed
+  `--includePath=x` and `--include-path x`, ignored the tsconfig's `rbxts.includePath` and
+  `rbxts.rojo`, and put the include folder beside `package.json` where roblox-ts puts it beside
+  `tsconfig.json`. It now follows roblox-ts: the command line over the tsconfig's `rbxts` block
+  (through `extends`, as roblox-ts releases after 3.0.0 read it), then the defaults, in every form
+  roblox-ts's parser takes, `--i x` included. A transformer plugin cannot read roblox-ts's resolved
+  options, so this mirrors roblox-ts's code. A game whose include folder is inside `outDir` gets a
+  warning: roblox-ts's clean removes `include/flamework/` there, and a failed build does not
+  write it back.
+- **A watcher reads a nested Rojo project file again when it changes.** The transformer kept its
+  Rojo resolver while the top project file was unchanged, so after an edit to a project file a
+  `$path` leads to, roblox-ts recompiled every file against the new tree while path macros,
+  `include/flamework/paths.json` and the Rojo paths in `globs.json` came from the old one. The
+  resolver is now kept only while every project file it read is unchanged.
+- **An incremental build whose Flamework inputs changed stops instead of mixing ids.** A new
+  `idGenerationMode` or `obfuscation` dropped the id table while the files the build did not
+  recompile kept their ids, so one class had two, and the build said every identifier was
+  regenerated. Another code-shaping option, or a new value of a variable `Flamework.env` inlined,
+  left the same mix. `flamework.build` now records these inputs, and a build that reuses it stops,
+  naming what changed and the tsbuildinfo to delete. roblox-ts picks the files to recompile before
+  it loads the transformer, so the transformer cannot start a full recompile itself.
 - `@flamework-experimental/transformer`'s `files` no longer lists an `index.d.ts`, which the package
   never had.
 - **`createSerializer` reads `version` under a computed key**: `{ ["version"]: 3 }`, or `[KEY]` for

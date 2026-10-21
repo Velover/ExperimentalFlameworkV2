@@ -7,6 +7,7 @@ import { isPathDescendantOf } from "../util/functions/isPathDescendantOf";
 import { describeSchemaErrors, validateSchema } from "../util/schema";
 import { PKG_VERSION } from "../util/constants";
 import { ProjectError } from "./diagnostics";
+import { writeFileAtomic } from "../util/functions/writeFileAtomic";
 
 /** One use of a glob in a file, kept so that a glob matching nothing can be reported where it is written. */
 export interface GlobUse {
@@ -64,6 +65,19 @@ export interface FlameworkBuildInfo {
 	metadata?: FlameworkMetadata;
 	stringHashes?: { [key: string]: string };
 	identifiers: { [key: string]: string };
+
+	/**
+	 * What the emitted code was built from besides the sources, so that a build that reuses this
+	 * table can tell whether the files it does not recompile still agree with the ones it does (see
+	 * `TransformState.refuseChangedInputs`).
+	 */
+	inputs?: {
+		/** A hash of the options in flamework.config.json that shape the emitted code. */
+		config?: string;
+
+		/** Per file, each variable `Flamework.env` inlined there, with a hash of its value (`unset` when it had none). */
+		env?: Record<string, Record<string, string>>;
+	};
 }
 
 /**
@@ -192,7 +206,7 @@ export class BuildInfo {
 	 * Saves the build info to a file.
 	 */
 	save() {
-		fs.writeFileSync(this.buildInfoPath, JSON.stringify(this.buildInfo, undefined, "\t"));
+		writeFileAtomic(this.buildInfoPath, JSON.stringify(this.buildInfo, undefined, "\t"));
 	}
 
 	/**
@@ -444,25 +458,46 @@ export class BuildInfo {
 	/**
 	 * Records the mode identifiers are generated in. An identifier, once generated, is answered from
 	 * the table without looking at the mode again, so a build info written in another mode would
-	 * hand out a mix. When the mode differs from the recorded one the table is dropped and every id
-	 * is generated afresh; the previous mode is returned so that the caller can say so.
-	 *
-	 * A build info from before the mode was recorded keeps its table: there is no telling what
-	 * mode it was made in, and dropping ids without cause is worse than keeping them.
+	 * hand out a mix: a build that reuses one refuses it before this is called (see
+	 * `TransformState.refuseChangedInputs`).
 	 */
-	setIdGenerationMode(mode: string): string | undefined {
-		const previous = this.buildInfo.idGenerationMode;
+	setIdGenerationMode(mode: string) {
 		this.buildInfo.idGenerationMode = mode;
-
-		if (previous !== undefined && previous !== mode) {
-			this.buildInfo.identifiers = {};
-			this.identifiersLookup.clear();
-			return previous;
-		}
 	}
 
 	/** The mode the identifiers in the table were generated in, if it was recorded. */
 	getIdGenerationMode() {
 		return this.buildInfo.idGenerationMode;
+	}
+
+	/** The hash of the code-shaping options the table's build used, if it was recorded. */
+	getConfigInput() {
+		return this.buildInfo.inputs?.config;
+	}
+
+	setConfigInput(hash: string) {
+		this.buildInfo.inputs ??= {};
+		this.buildInfo.inputs.config = hash;
+	}
+
+	/** Every variable `Flamework.env` inlined, per file, with the hash of the value it inlined. */
+	getEnvInputs(): Readonly<Record<string, Readonly<Record<string, string>>>> {
+		return this.buildInfo.inputs?.env ?? {};
+	}
+
+	/** Records that `Flamework.env` inlined `name` in the file `origin`, with the hash of its value. */
+	addEnvInput(origin: string, name: string, hash: string) {
+		this.buildInfo.inputs ??= {};
+		this.buildInfo.inputs.env ??= {};
+		this.buildInfo.inputs.env[origin] ??= {};
+		this.buildInfo.inputs.env[origin][name] = hash;
+	}
+
+	/** Removes the variables recorded for this file, which is about to be compiled again. */
+	invalidateEnvInputs(origin: string) {
+		const env = this.buildInfo.inputs?.env;
+		if (env) {
+			delete env[origin];
+		}
 	}
 }

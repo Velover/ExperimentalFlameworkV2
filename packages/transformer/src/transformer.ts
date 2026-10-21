@@ -12,6 +12,7 @@ import { explainRenamed } from "./util/functions/explainRenamed";
 import { PKG_VERSION } from "./util/constants";
 import { getTsBuildInfoPath } from "./util/functions/isCleanBuildDirectory";
 import { ProjectError } from "./classes/diagnostics";
+import { whenBuildCommits } from "./util/functions/whenBuildCommits";
 
 // TypeScript 5.9 stopped exporting its own `isDiagnosticWithLocation`; this is the same check.
 function isDiagnosticWithLocation(diagnostic: ts.Diagnostic): diagnostic is ts.DiagnosticWithLocation {
@@ -63,6 +64,9 @@ export default function (program: ts.Program, entry?: TransformerEntry) {
 			process.exit(1);
 		}
 
+		// The artifacts are written once roblox-ts has committed the build (`whenBuildCommits`), and on
+		// the next turn of the event loop, after everything roblox-ts writes and cleans for it.
+		whenBuildCommits(program, () => state.commit());
 		setTimeout(() => state.saveArtifacts());
 		return (file: ts.SourceFile) => {
 			if (!ts.isSourceFile(file)) {

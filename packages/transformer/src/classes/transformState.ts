@@ -1,6 +1,5 @@
 import ts from "typescript";
 import fs from "fs";
-import crypto from "crypto";
 import path from "path";
 import chalk from "chalk";
 import Hashids from "hashids";
@@ -25,13 +24,16 @@ import { createPluginHost, type PluginHost } from "../transformations/plugins/pl
 import { tryResolveTS } from "../util/functions/tryResolve";
 import {
 	addSchemaReference,
+	fingerprintEmitConfig,
 	fingerprintProjectConfig,
 	getRuntimeConfig,
 	loadProjectConfig,
 	ProjectConfig,
 	TransformerEntry,
 } from "../util/projectConfig";
-import type { Env } from "../util/env";
+import { hashEnvValue, type Env } from "../util/env";
+import { hashRojoFile, readRojoProject } from "../util/functions/readRojoProject";
+import { writeFileAtomic } from "../util/functions/writeFileAtomic";
 import { Diagnostics, ProjectError } from "./diagnostics";
 import { LocalBudget } from "../util/luauLimits";
 import { FLAMEWORK_SCOPE, CORE_PACKAGE, TRANSFORMER_PACKAGE } from "../util/packages";
@@ -190,6 +192,18 @@ export class TransformState {
 	 */
 	private buildInfoReused = false;
 
+	/**
+	 * Whether this compilation started from the `flamework.build` on disk: an incremental build's,
+	 * or any watcher rebuild's. Its table was made for the files this compilation does not recompile.
+	 */
+	private buildInfoRead = false;
+
+	/**
+	 * Whether roblox-ts has committed this build: written its Luau, which it does only when nothing
+	 * failed. The artifacts are written only then (see `whenBuildCommits`).
+	 */
+	public committed = false;
+
 	private setupBuildInfo() {
 		// A full build does not reuse the previous flamework.build, so it does not read it either: one
 		// that cannot be used (cut short by an interrupted write, a merge conflict) is replaced, not
@@ -209,8 +223,9 @@ export class TransformState {
 				process.exit(1);
 			}
 			baseBuildInfo = new BuildInfo(path.join(this.currentDirectory, "flamework.build"));
-		} else if (Cache.isInitialCompile) {
-			this.buildInfoReused = true;
+		} else {
+			this.buildInfoRead = true;
+			if (Cache.isInitialCompile) this.buildInfoReused = true;
 		}
 		this.buildInfo = baseBuildInfo;
 
@@ -266,34 +281,27 @@ export class TransformState {
 	private setupRojo() {
 		this.pathTranslator = createPathTranslator(this.program);
 
-		const rojoArgvIndex = process.argv.findIndex((v) => v === "--rojo");
-		const rojoArg = rojoArgvIndex !== -1 ? process.argv[rojoArgvIndex + 1] : undefined;
+		// The Rojo project roblox-ts reads: `--rojo`, else the tsconfig's `rbxts.rojo`, else the one
+		// found beside the tsconfig (see `parseCommandLine`).
+		const rojoConfig = this.parsedCommandLine.rojoConfigPath;
+		if (rojoConfig === undefined) return;
 
-		let rojoConfig: string | undefined;
-		if (rojoArg && rojoArg !== "") {
-			rojoConfig = path.resolve(rojoArg);
-		} else {
-			rojoConfig = RojoResolver.findRojoConfigFilePath(this.currentDirectory).path;
+		// roblox-ts reads its Rojo project again for every compilation. Reading it takes as long as
+		// walking every `$path` folder, so a watcher keeps the last resolver while every project
+		// file it read, nested ones included, is unchanged.
+		const cached = Cache.rojo;
+		if (
+			cached !== undefined &&
+			arePathsEqual(cached.configPath, rojoConfig) &&
+			cached.files.every((file) => hashRojoFile(file.path) === file.sum)
+		) {
+			this.rojoResolver = cached.resolver;
+			return;
 		}
 
-		if (rojoConfig !== undefined) {
-			const rojoContents = fs.readFileSync(rojoConfig, { encoding: "ascii" });
-			const sum = crypto.createHash("md5").update(rojoContents).digest("hex");
-
-			if (sum === Cache.rojoSum) {
-				this.rojoResolver = Cache.rojoResolver;
-			} else {
-				this.rojoResolver = RojoResolver.fromPath(rojoConfig);
-				Cache.rojoSum = sum;
-				Cache.rojoResolver = this.rojoResolver;
-			}
-		}
-	}
-
-	private getIncludePath() {
-		const includeArgvIndex = process.argv.findIndex((v) => v === "--i" || v === "--includePath");
-		const includePath = includeArgvIndex !== -1 ? process.argv[includeArgvIndex + 1] : undefined;
-		return path.resolve(includePath || path.join(this.rootDirectory, "include"));
+		const { resolver, files } = readRojoProject(rojoConfig);
+		Cache.rojo = { configPath: rojoConfig, resolver, files };
+		this.rojoResolver = resolver;
 	}
 
 	/**
@@ -495,12 +503,19 @@ export class TransformState {
 		this.rootDirectory = directory;
 		assert(packageJson.name);
 
+		// The first compilation of the process, whether or not it succeeds: `Cache.isInitialCompile`
+		// stays set until one does, so a watcher whose first build fails would repeat these.
+		const firstCompilation = !Cache.compilationStarted;
+		Cache.compilationStarted = true;
+
 		// Before the config is read, so the watcher's first read already sees the line and a later
 		// read finds nothing changed. A game only: a scoped package is built as a package, by
 		// roblox-ts and by Flamework alike, and its own config file is left as its author wrote it.
-		const schemaReference = addSchemaReference(this.currentDirectory, this.rootDirectory, entry, {
-			isGame: !packageJson.name.startsWith("@"),
-		});
+		const schemaReference = firstCompilation
+			? addSchemaReference(this.currentDirectory, this.rootDirectory, entry, {
+					isGame: !packageJson.name.startsWith("@"),
+				})
+			: undefined;
 		if (schemaReference !== undefined) {
 			const file = path.relative(this.currentDirectory, schemaReference.configPath) || schemaReference.configPath;
 			Logger.info(
@@ -536,17 +551,15 @@ export class TransformState {
 
 		this.config.idGenerationMode ??= this.config.obfuscation ? "obfuscated" : "full";
 
-		const previousMode = this.buildInfo.setIdGenerationMode(this.config.idGenerationMode);
-		if (previousMode !== undefined) {
-			Logger.info(
-				`idGenerationMode changed from '${previousMode}' to '${this.config.idGenerationMode}'; every identifier is regenerated`,
-			);
-		}
+		const configInput = fingerprintEmitConfig(effective);
+		if (this.buildInfoRead) this.refuseChangedInputs(configInput);
+		this.buildInfo.setConfigInput(configInput);
+		this.buildInfo.setIdGenerationMode(this.config.idGenerationMode);
 
 		// Obfuscation is only worth something if a release's ids differ from the last release's.
 		// A plain build recreates flamework.build, and with it the salt and the build seed, so
 		// that holds on its own; these are the two ways of undoing it.
-		if (this.config.obfuscation && Cache.isInitialCompile) {
+		if (this.config.obfuscation && firstCompilation) {
 			if (this.config.salt !== undefined) {
 				Logger.warn(
 					"transformer.salt is set with obfuscation on",
@@ -565,7 +578,24 @@ export class TransformState {
 
 		this.packageName = packageJson.name;
 		this.isGame = !this.packageName.startsWith("@");
-		this.includeDirectory = this.getIncludePath();
+		this.includeDirectory = this.parsedCommandLine.includePath;
+
+		// roblox-ts cleans `outDir` of files without a source: 3.0.0 before a plain build or a
+		// watcher's first one compiles, later releases after every build that succeeds. The artifacts
+		// are written again only once a build succeeds.
+		const outDir = this.options.outDir;
+		if (
+			firstCompilation &&
+			this.isGame &&
+			outDir !== undefined &&
+			isPathDescendantOf(this.includeDirectory, outDir)
+		) {
+			const include = path.relative(this.currentDirectory, this.includeDirectory).replace(/\\/g, "/") || ".";
+			Logger.warn(
+				`The include folder ${include} is inside outDir, which roblox-ts cleans of files that have no source`,
+				"include/flamework (globs.json, paths.json, config.json) is written again only after a build that succeeds, so a build that fails can leave the place without it. Move the include folder outside outDir.",
+			);
+		}
 
 		if (!this.isGame) this.config.hashPrefix ??= this.packageName;
 		this.buildInfo.setIdentifierPrefix(this.config.hashPrefix);
@@ -574,16 +604,91 @@ export class TransformState {
 			throw new ProjectError(`The hashPrefix $ is used internally by Flamework`);
 		}
 
+		this.pluginHost = createPluginHost(this);
+	}
+
+	/**
+	 * Refuses a `flamework.build` whose table was made from other inputs than this build's. Its ids
+	 * and the code of the files this build does not recompile came from those inputs, while the files
+	 * it does recompile would follow the new ones: a class would get a second id, and a variable two
+	 * values. roblox-ts chooses which files to recompile before it loads the transformer, and
+	 * nothing in these inputs is part of what it compares, so a full recompile cannot be started from
+	 * here; the build stops and says how to get one.
+	 *
+	 * The inputs are the id generation mode, the code-shaping options of flamework.config.json
+	 * (`fingerprintEmitConfig`) and every variable `Flamework.env` inlined. A table written before
+	 * they were recorded is taken as it is, as before. One from another version of Flamework is left
+	 * to the version check, which says so.
+	 */
+	private refuseChangedInputs(configInput: string) {
+		if (this.buildInfo.getFlameworkVersion() !== PKG_VERSION) return;
+
+		const changes = new Array<string>();
+		const recordedMode = this.buildInfo.getIdGenerationMode();
+		const recordedConfig = this.buildInfo.getConfigInput();
+		if (recordedMode !== undefined && recordedMode !== this.config.idGenerationMode) {
+			changes.push(`idGenerationMode is '${this.config.idGenerationMode}', and was '${recordedMode}'`);
+		} else if (recordedConfig !== undefined && recordedConfig !== configInput) {
+			changes.push(
+				"an option in flamework.config.json that shapes the emitted code changed (the transformer or serialization section, or networking.serialization)",
+			);
+		}
+
+		const variables = new Set<string>();
+		for (const uses of Object.values(this.buildInfo.getEnvInputs())) {
+			for (const [name, hash] of Object.entries(uses)) {
+				if (hashEnvValue(this.env[name]) !== hash) variables.add(name);
+			}
+		}
+		if (variables.size > 0) {
+			const names = [...variables].sort().join(", ");
+			changes.push(
+				`the value of ${variables.size === 1 ? "the variable" : "the variables"} ${names}, which Flamework.env inlines, changed`,
+			);
+		}
+
+		if (changes.length === 0) return;
+
+		const remedy =
+			getTsBuildInfoPath(this.options) !== undefined
+				? `This is an incremental build, which recompiles only the files that changed, so the others would keep what the old inputs emitted. Delete ${buildInfoFileName(this.currentDirectory, this.options)} and build again: the next build compiles every file.`
+				: "This watcher reads flamework.build on every rebuild, and another build has rewritten it since. Restart the watcher: its first build compiles every file.";
+		throw new ProjectError(
+			[`Flamework's inputs changed since flamework.build was written: ${changes.join("; ")}.`, remedy].join("\n"),
+		);
+	}
+
+	/**
+	 * Called once roblox-ts has written this build's Luau. Until a build of the process is committed,
+	 * the next one starts from nothing, as the first does.
+	 */
+	commit() {
+		this.committed = true;
 		Cache.isInitialCompile = false;
 
-		this.pluginHost = createPluginHost(this);
+		// A file deleted under a watcher or between incremental builds is never compiled again, so
+		// what `Flamework.env` inlined in it is dropped here, or a later change of that variable
+		// would refuse a build that no longer uses it.
+		const files = new Set(this.program.getSourceFiles().map((file) => this.getFileId(file)));
+		for (const origin of Object.keys(this.buildInfo.getEnvInputs())) {
+			if (!files.has(origin)) this.buildInfo.invalidateEnvInputs(origin);
+		}
 	}
 
 	getFileId(file: ts.SourceFile) {
 		return path.relative(this.rootDirectory, file.fileName).replace(/\\/g, "/");
 	}
 
+	/**
+	 * Writes `include/flamework/*.json` and `flamework.build`, once roblox-ts has committed the build
+	 * and finished with it: after its Luau, its tsbuildinfo, its copied assets and its clean of stale
+	 * outputs, which after roblox-ts 3.0.0 runs after the build and would remove these files if they
+	 * were written before it. A build that failed writes nothing, so the JSON never names a module
+	 * whose Luau was not written, and the next build that succeeds writes them as a clean one would.
+	 */
 	saveArtifacts() {
+		if (!this.committed) return;
+
 		const start = new Date().getTime();
 
 		this.calculateGlobs(this.buildInfo.getMetadata("globs")?.paths);
@@ -646,14 +751,14 @@ export class TransformState {
 			const metadataExists = fs.existsSync(metadataPath);
 
 			if (!metadataExists && writtenFiles.size > 0) {
-				fs.mkdirSync(metadataPath);
+				fs.mkdirSync(metadataPath, { recursive: true });
 			}
 
 			for (const file of files) {
 				const filePath = path.join(metadataPath, file);
 				const contents = writtenFiles.get(file);
 				if (contents) {
-					fs.writeFileSync(filePath, contents);
+					writeFileAtomic(filePath, contents);
 				} else if (fs.existsSync(filePath)) {
 					fs.rmSync(filePath);
 				}

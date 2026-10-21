@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { ProjectError } from "../classes/diagnostics";
@@ -58,6 +59,14 @@ function parseEnvValue(rest: string): string {
 
 	const comment = rest.search(/\s#/);
 	return (comment === -1 ? rest : rest.slice(0, comment)).trim();
+}
+
+/**
+ * What flamework.build records of a variable `Flamework.env` inlined: a hash of its value, or
+ * `unset`. The value itself is not kept there, though the emitted Luau holds it.
+ */
+export function hashEnvValue(value: string | undefined) {
+	return value === undefined ? "unset" : crypto.createHash("sha1").update(value).digest("hex");
 }
 
 /**

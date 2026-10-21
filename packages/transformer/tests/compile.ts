@@ -24,6 +24,19 @@ for (const leftover of [
 	// versionCheck.test.ts's packages.
 	"src/versionProbe",
 	"src/versionProbeOther",
+	// buildArtifacts.test.ts's probes.
+	"src/glob/artifactProbe.ts",
+	"src/glob/artifactProbeNull.ts",
+	".flamework.build.999999.tmp",
+	"tsconfig.options-probe.json",
+	"options-probe-base",
+	"probe-include",
+	"probe.project.json",
+	"rojo-probe.project.json",
+	"rojo-probe",
+	"tsconfig.inputs-probe.json",
+	"inputs-probe.tsbuildinfo",
+	"src/inputsProbe.ts",
 ]) {
 	fs.rmSync(path.join(FIXTURE, leftover), { recursive: true, force: true });
 }

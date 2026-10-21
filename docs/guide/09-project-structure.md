@@ -257,8 +257,9 @@ change halfway would leave the output disagreeing with itself.
 Under `rbxtsc -w`, a change to `flamework.config.json`, `.env` or `.env.local` is noticed on the
 next rebuild and reported: `flamework.config.json or .env changed since the watcher started`. The
 watcher keeps using the values it started with until you restart it. A plain build reads everything
-fresh. Changing `idGenerationMode` or `obfuscation` also regenerates every identifier, which the
-next plain build does on its own.
+fresh. An incremental build that finds `idGenerationMode`, `obfuscation`, another option that
+shapes the emitted code, or a variable `Flamework.env` inlines changed since its tsbuildinfo was
+written stops, and names the tsbuildinfo to delete; the next build then compiles every file.
 
 ## What to commit
 
@@ -381,6 +382,13 @@ in every roblox-ts template.
   `services`.
 - **The entry point should be the only file that ignites.** A second `ignite()` elsewhere builds a
   second, unrelated container, and dependencies will not resolve across them.
+- **Keep the include folder outside `out`.** `include/flamework/` (globs, paths, the runtime
+  config) goes in the folder roblox-ts copies its runtime to: `include/` beside `tsconfig.json`,
+  or where `-i`/`--includePath` or the tsconfig's `rbxts.includePath` puts it. roblox-ts cleans
+  `out` of files that have no source, those included, and the transformer writes them again only
+  after a build that succeeds. With `-i out/include`, a build that fails can leave the place
+  without `globs.json` until the next one succeeds, and Rojo sees the files removed and added on
+  builds that do succeed. The build warns about this layout.
 
 ## Guard deduplication
 

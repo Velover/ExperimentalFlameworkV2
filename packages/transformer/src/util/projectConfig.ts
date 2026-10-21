@@ -598,6 +598,36 @@ export function getRuntimeConfig(project: ProjectConfig): RuntimeConfig | undefi
  * stays in force and the watcher says to restart.
  */
 export function fingerprintProjectConfig(loaded: LoadedProjectConfig): string {
+	return hashStable({
+		config: loaded.config,
+		project: loaded.project,
+		configPath: loaded.configPath,
+		env: loaded.env,
+	});
+}
+
+/**
+ * A hash of the options in the config file that shape the code the transformer emits into each
+ * file: the whole `transformer` section (ids, obfuscation, salt, prefix, optimizations, plugins),
+ * the `serialization` section (the checks compiled into serializers) and
+ * `networking.serialization` (how calls are packed). The runtime sections reach the place through
+ * `include/flamework/config.json`, which every build writes whole, so they are left out. An option
+ * that comes to shape the emitted code has to be added here.
+ *
+ * flamework.build records it, and a build that reuses that file refuses another (see
+ * `TransformState.refuseChangedInputs`): the files it does not recompile were emitted with the
+ * recorded options.
+ */
+export function fingerprintEmitConfig(loaded: LoadedProjectConfig): string {
+	return hashStable({
+		transformer: loaded.config,
+		serialization: loaded.project.serialization,
+		networkingSerialization: loaded.project.networking?.serialization,
+	});
+}
+
+/** A hash of a JSON value that does not depend on the order of its keys. */
+function hashStable(value: unknown): string {
 	const stable = (value: unknown): unknown => {
 		if (Array.isArray(value)) {
 			return value.map(stable);
@@ -614,10 +644,9 @@ export function fingerprintProjectConfig(loaded: LoadedProjectConfig): string {
 		return value;
 	};
 
-	const snapshot = { config: loaded.config, project: loaded.project, configPath: loaded.configPath, env: loaded.env };
 	return crypto
 		.createHash("sha1")
-		.update(JSON.stringify(stable(snapshot)))
+		.update(JSON.stringify(stable(value)) ?? "")
 		.digest("hex");
 }
 

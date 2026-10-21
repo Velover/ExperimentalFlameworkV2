@@ -155,8 +155,11 @@ that `LoadedProjectConfig` and its `fingerprintProjectConfig` (options, file, an
 environment, since `Flamework.env` reads variables the file never names). A later state reads
 again, and a different fingerprint prints the restart warning while the first read stays in force,
 so that files which do not recompile never disagree with the ones that do. The build info records
-`idGenerationMode` and drops its identifier table when the mode changes, since an identifier once
-generated is answered from the table without looking at the mode again.
+`idGenerationMode`, a hash of the code-shaping options (`fingerprintEmitConfig`) and, per file, a
+hash of each variable `Flamework.env` inlined (`inputs`). A build that reuses the table refuses one
+recorded from other inputs (`refuseChangedInputs`), since the files it does not recompile keep what
+those inputs emitted. Artifacts are written only after roblox-ts calls `program.emitBuildInfo()`
+(`whenBuildCommits`), i.e. only for a build without errors.
 
 Before the process's first read, a game's build gives its config file a `$schema` line
 (`addSchemaReference`). With no file, it creates one holding only that line, but only when the

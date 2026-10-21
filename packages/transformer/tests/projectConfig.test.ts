@@ -525,25 +525,33 @@ describe("the watcher's fingerprint", () => {
 		remove("places/a/.env");
 	});
 
-	test("drop the identifier table when idGenerationMode changes", () => {
+	test("record the inputs a build that reuses the table compares against", () => {
+		// A build that reuses flamework.build refuses one made from other inputs (see
+		// buildArtifacts.test.ts); the table itself only records them.
 		const info = new BuildInfo(path.join(root, "flamework.build"));
 		info.addIdentifier("pkg:file@Class", "pkg:file@Class");
 
-		expect(info.setIdGenerationMode("full")).toBeUndefined();
+		info.setIdGenerationMode("full");
+		info.setIdGenerationMode("obfuscated");
+		expect(info.getIdGenerationMode()).toBe("obfuscated");
 		expect(info.getIdentifierFromInternal("pkg:file@Class")).toBe("pkg:file@Class");
 
-		expect(info.setIdGenerationMode("obfuscated")).toBe("full");
-		expect(info.getIdentifierFromInternal("pkg:file@Class")).toBeUndefined();
-		expect(info.getIdGenerationMode()).toBe("obfuscated");
+		info.setConfigInput("abc");
+		expect(info.getConfigInput()).toBe("abc");
 
-		// A table from before the mode was recorded is kept.
+		info.addEnvInput("src/a.ts", "NAME", "hash");
+		info.addEnvInput("src/b.ts", "OTHER", "unset");
+		info.invalidateEnvInputs("src/a.ts");
+		expect(info.getEnvInputs()).toEqual({ "src/b.ts": { OTHER: "unset" } });
+
+		// A table from before the inputs were recorded has none to compare.
 		const older = new BuildInfo(path.join(root, "flamework.build"), {
 			version: 1,
 			flameworkVersion: "0",
 			identifiers: { "pkg:file@Class": "x" },
 		});
-		expect(older.setIdGenerationMode("obfuscated")).toBeUndefined();
-		expect(older.getIdentifierFromInternal("pkg:file@Class")).toBe("x");
+		expect(older.getConfigInput()).toBeUndefined();
+		expect(older.getEnvInputs()).toEqual({});
 	});
 
 	test("refuse a flamework.build that cannot be used, saying why and then what to do", () => {

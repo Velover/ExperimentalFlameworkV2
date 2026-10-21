@@ -700,12 +700,11 @@ Edge cases found and deliberately left alone, because the fix would cost more th
   a function provider returning nil, in a module with left-out registrations, is said to be
   registered by nothing. An id nothing has loaded gets the list of every left-out registration. In
   the Lune harness, the scope override in force at the builder call decides.
-- **transformer, the empty-glob warning:** it is a logger line, not a TypeScript diagnostic, so it has
-  no code frame and, in watch mode, prints after "Found 0 errors". A glob that matches only files
-  outside the Rojo tree, or only empty folders, registers nothing without a warning. Several empty
-  globs in one chain warn in reverse source order. The warnings also print on a build that fails with
-  type errors. An element-access call of a glob macro (`builder["registerProvidersGlob"](...)`) is
-  not recognised as a macro at all.
+- **transformer, the empty-glob warning:** it is a logger line, not a TypeScript diagnostic, so it
+  has no code frame and, in watch mode, prints after "Found 0 errors". A glob that matches only
+  files outside the Rojo tree, or only empty folders, registers nothing without a warning. Several
+  empty globs in one chain warn in reverse source order. An element-access call of a glob macro
+  (`builder["registerProvidersGlob"](...)`) is not recognised as a macro at all.
 - **transformer:** a computed, key-obfuscated networking handler member passed directly to a macro
   (`pass(server[name])`) is a compile error ("must be accessed directly"), as the same expression is
   anywhere else. Callsite uuids depend on the source file's line endings, so one commit checked out
@@ -713,15 +712,14 @@ Edge cases found and deliberately left alone, because the fix would cost more th
 - **transformer, config file and `$schema` line:** a place whose tsconfig is below the package root
   and that has no config file gets no file and no `$schema` line (by design: a created file there
   would hide a shared root one). Once a root place's first build creates the root file, a place
-  below with no file of its own reads `.env` from the root instead of its own folder. A place below
-  the root with a runtime section writes `include/flamework/config.json` under the package root's
-  `include`, and fails with ENOENT when that folder is missing. The line-adding edit keeps the file
-  valid but is naive in rare shapes: an unquoted `$schema` key gets a second, quoted one; a symlinked
-  config is written through to its target with a path relative to the link; non-UTF-8 bytes become
-  U+FFFD; with CR-only line endings the line lands on the brace line; a first line that opens a
-  multi-line block comment is skipped. `flamework-test` ignores a tsconfig entry's `configFile`, and
-  `rbxtsc --type package` on an unscoped project counts as a game. A killed transformer test run
-  can leave `compileProbe`'s `src/<name>.ts` probe files in the fixture.
+  below with no file of its own reads `.env` from the root instead of its own folder. The
+  line-adding edit keeps the file valid but is naive in rare shapes: an unquoted `$schema` key gets
+  a second, quoted one; a symlinked config is written through to its target with a path relative to
+  the link; non-UTF-8 bytes become U+FFFD; with CR-only line endings the line lands on the brace
+  line; a first line that opens a multi-line block comment is skipped. `flamework-test` ignores a
+  tsconfig entry's `configFile`, and `rbxtsc --type package` on an unscoped project counts as a
+  game. A killed transformer test run can leave `compileProbe`'s `src/<name>.ts` probe files in the
+  fixture.
 - **typings:** `@rbxts/types` 1.0.955 has 14 errors of its own under a plain `tsc` without
   `skipLibCheck`. The test-harness hooks are hidden from the typings but still exported by core's and
   testing's Luau. The transformer's `ComponentsRuntimeConfig` type lacks `attributeWarningTimeout`,
@@ -816,5 +814,43 @@ Edge cases found and deliberately left alone, because the fix would cost more th
       kept, and the outer types of the chain still print `never`.
     - A union of two members of the same width (`(Implicit.u8 | OwnStrict8)[]`) keeps a second
       tag branch that is never taken.
-  - An incremental build keeps the width checks, and the packing of `networking.serialization`, of
-    the files it does not recompile after the config changes. Change either with a plain build.
+- **transformer, watch mode and incremental builds** (what a user does about the config is in guide
+  09, "Watching"):
+  - roblox-ts recompiles a changed file and every file that imports it, directly or not. An edit to
+    a global declaration (a global `.d.ts`, `declare global`) recompiles none of the files that use
+    it, so their guards, serializers and roblox-ts's own lowering (`.size()`, `#`) stay as they were
+    until those files change or the watcher restarts.
+  - The same for a module augmentation (`declare module "./b"`) in a file the user of the type does
+    not import.
+  - `flamework.config.json` and `.env` are not watched: an edit starts no rebuild, and the watcher
+    keeps the values it started with until it restarts.
+  - Deleting or renaming the only file that calls a glob macro leaves its glob in `flamework.build`,
+    so `globs.json` keeps a key that a clean build would not have. Nothing reads it.
+  - With `short`, `tiny` or `obfuscated` ids, a watcher numbers a new class after the table's count
+    and keeps the entries of deleted ones, so its ids differ from a clean build's; they stay
+    consistent within the watcher.
+  - Two projects with Flamework, built through project references by one `rbxtsc`, share one
+    process cache: the second uses the first's config, and both write the same `flamework.build`.
+    Only the root project's include folder and Rojo project are followed.
+  - A Flamework package linked or installed while a watcher runs is not read until it restarts: its
+    classes get fallback ids.
+  - An edit inside `node_modules` (a `bun install`, a linked package rebuilt by its own watcher)
+    starts no rebuild; the next edit picks it up. Edits that overlap a build get a rebuild of their
+    own. A compiler option that changes only emit, changed with a tsbuildinfo present, recompiles
+    nothing.
+  - A Rojo project file added under a `$path` folder (a new `default.project.json`) is noticed only
+    once a project file the resolver read changes, or the watcher restarts.
+  - With the include folder inside `outDir` (`-i out/include`), roblox-ts's clean deletes
+    `include/flamework/` and the transformer writes it again a moment later, so Rojo sees the files
+    removed and added: roblox-ts gives a plugin no way to keep its files. After roblox-ts 3.0.0 the
+    clean runs after every build that succeeds. In 3.0.0 it runs before compiling, at a plain build
+    and at a watcher's first build (not its rebuilds), so a build there that fails leaves the place
+    without the whole `include/flamework/` folder until the next good one. The build warns about
+    this layout, and guide 09 says to keep the include folder outside `outDir`.
+  - The transformer learns that a build succeeded from roblox-ts's call of `program.emitBuildInfo()`
+    on the program it was given. A roblox-ts that stopped making that call, or gave transformers
+    another program (a checker backend's `getPluginProgram`), would get no artifacts at all.
+  - A build killed between writing an artifact's temporary file and renaming it leaves
+    `.<name>.<pid>.tmp` beside it (`.flamework.build.<pid>.tmp` at the project root, which no
+    `.gitignore` the template ships covers). The next build that writes the same file removes it,
+    once that process is gone.

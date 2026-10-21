@@ -10,6 +10,7 @@ import { LUAU_MAX_LOCALS, sureImportLocals, sureLocalsOf, sureMainChunkLocals } 
 export function transformFile(state: TransformState, file: ts.SourceFile): ts.SourceFile {
 	state.buildInfo.invalidateGlobs(state.getFileId(file));
 	state.buildInfo.invalidatePathUses(state.getFileId(file));
+	state.buildInfo.invalidateEnvInputs(state.getFileId(file));
 
 	// What a root statement hoisted lands ahead of the next one that succeeds. When the last root
 	// statement of the previous file failed, what it hoisted is that file's, and must not open this one.

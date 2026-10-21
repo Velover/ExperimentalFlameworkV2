@@ -102,6 +102,23 @@
 						"type": "string"
 					}
 				},
+				"inputs": {
+					"type": "object",
+					"properties": {
+						"config": {
+							"type": "string"
+						},
+						"env": {
+							"type": "object",
+							"additionalProperties": {
+								"type": "object",
+								"additionalProperties": {
+									"type": "string"
+								}
+							}
+						}
+					}
+				},
 				"metadata": {
 					"type": "object",
 					"properties": {
