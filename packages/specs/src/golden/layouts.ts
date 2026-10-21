@@ -1784,18 +1784,16 @@ interface Stack {
 
 /** Declared the same in both directions, so each realm sends and receives every member. */
 interface GoldenEvents {
-	goldenMove: Networking.SerializedReliable<
-		(position: Vector3, speed: Serialization.u8, mode: "walk" | "run") => void
-	>;
-	goldenChat: Networking.SerializedReliable<(text: string, target?: Instance) => void>;
-	goldenInventory: Networking.SerializedReliable<(stacks: Stack[], counts: Map<string, number>) => void>;
-	goldenPing: Networking.SerializedReliable<() => void>;
-	goldenRest: Networking.SerializedReliable<(...args: [number, ...string[]]) => void>;
+	goldenMove: Networking.Serialized<(position: Vector3, speed: Serialization.u8, mode: "walk" | "run") => void>;
+	goldenChat: Networking.Serialized<(text: string, target?: Instance) => void>;
+	goldenInventory: Networking.Serialized<(stacks: Stack[], counts: Map<string, number>) => void>;
+	goldenPing: Networking.Serialized<() => void>;
+	goldenRest: Networking.Serialized<(...args: [number, ...string[]]) => void>;
 	goldenTick: Networking.SerializedUnreliable<(frame: Serialization.u32, value: number | string) => void>;
 	/** A plain member: packed only with networking.serialization on. */
 	goldenPlain(position: Vector3, speed: Serialization.u8, mode: "walk" | "run"): void;
 	/** A raw member: never packed. */
-	goldenRaw: Networking.RawReliable<(value: number, text: string) => void>;
+	goldenRaw: Networking.Raw<(value: number, text: string) => void>;
 }
 
 interface GoldenFunctions {

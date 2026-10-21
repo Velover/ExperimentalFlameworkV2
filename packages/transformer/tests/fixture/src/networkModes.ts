@@ -14,29 +14,29 @@ interface Item {
 
 interface ServerEvents {
 	plainPing(value: number): void;
-	serializedPing: Networking.SerializedReliable<(value: number) => void>;
+	serializedPing: Networking.Serialized<(value: number) => void>;
 	/** An Instance travels next to the buffer, in the blob list. */
-	serializedPlace: Networking.SerializedReliable<(items: Item[], where: Instance) => void>;
+	serializedPlace: Networking.Serialized<(items: Item[], where: Instance) => void>;
 	/** Carries nothing, so it sends nothing. */
-	serializedBump: Networking.SerializedReliable<() => void>;
-	rawPing: Networking.RawReliable<(value: number) => void>;
+	serializedBump: Networking.Serialized<() => void>;
+	rawPing: Networking.Raw<(value: number) => void>;
 
 	/** Unreliable: the alias and both nesting orders. */
 	serializedMove: Networking.SerializedUnreliable<(value: number) => void>;
 	unreliableSerialized: Networking.Unreliable<Networking.Serialized<(value: number) => void>>;
-	serializedUnreliable: Networking.SerializedReliable<Networking.Unreliable<(value: number) => void>>;
+	serializedUnreliable: Networking.Serialized<Networking.Unreliable<(value: number) => void>>;
 
 	/** Second members packed like `plainPing`, `serializedPing` and `rawPing`, for targets that may be either. */
 	plainPingToo(value: number): void;
-	serializedPingToo: Networking.SerializedReliable<(value: number) => void>;
-	rawPingToo: Networking.RawReliable<(value: number) => void>;
+	serializedPingToo: Networking.Serialized<(value: number) => void>;
+	rawPingToo: Networking.Raw<(value: number) => void>;
 
 	/** An argument list with an element after its rest. */
 	restList(...args: [number, ...string[], boolean]): void;
 }
 
 interface ClientEvents {
-	serializedPong: Networking.SerializedReliable<(items: Item[]) => void>;
+	serializedPong: Networking.Serialized<(items: Item[]) => void>;
 }
 
 interface ServerFunctions {

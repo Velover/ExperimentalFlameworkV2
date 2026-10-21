@@ -12,14 +12,14 @@ interface ClientToServerEvents {
 		 */
 		StreamInLinkTarget(near: boolean): void;
 		/** Declared raw: travels as a plain value, guards still apply. */
-		RawPing: Networking.RawReliable<(nonce: number) => void>;
+		RawPing: Networking.Raw<(nonce: number) => void>;
 	};
 }
 
 interface ServerToClientEvents {
 	FwTest: {
 		Pong(nonce: number): void;
-		RawPong: Networking.RawReliable<(nonce: number) => void>;
+		RawPong: Networking.Raw<(nonce: number) => void>;
 	};
 }
 

@@ -34,11 +34,11 @@ declare const __harness: {
  * in place, so theirs name the event.
  */
 interface GeneratedEvents {
-	gcPlace: Networking.SerializedReliable<(origin: GridCoord) => void>;
-	gcHoles: Networking.SerializedReliable<(values: defined[]) => void>;
-	gcNames: Networking.SerializedReliable<(names: string[]) => void>;
-	gcTagged: Networking.SerializedReliable<(entry: [string, ...number[]]) => void>;
-	gcMany: Networking.SerializedReliable<(...values: number[]) => void>;
+	gcPlace: Networking.Serialized<(origin: GridCoord) => void>;
+	gcHoles: Networking.Serialized<(values: defined[]) => void>;
+	gcNames: Networking.Serialized<(names: string[]) => void>;
+	gcTagged: Networking.Serialized<(entry: [string, ...number[]]) => void>;
+	gcMany: Networking.Serialized<(...values: number[]) => void>;
 }
 
 const GeneratedNetwork = Networking.createEvent<GeneratedEvents, GeneratedEvents>();

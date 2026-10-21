@@ -110,19 +110,19 @@ interface Item {
 }
 
 interface ModeServerEvents {
-	serializedReport: Networking.SerializedReliable<(items: Item[], where: Instance) => void>;
-	serializedBump: Networking.SerializedReliable<() => void>;
+	serializedReport: Networking.Serialized<(items: Item[], where: Instance) => void>;
+	serializedBump: Networking.Serialized<() => void>;
 	serializedMove: Networking.SerializedUnreliable<(value: number) => void>;
 	serializedStep: Networking.Unreliable<Networking.Serialized<(items: Item[]) => void>>;
 
 	/** Its types can hold an Instance, which a call may leave out (an empty blob list stays off the wire). */
-	serializedMark: Networking.SerializedReliable<(label: string, where?: Instance) => void>;
+	serializedMark: Networking.Serialized<(label: string, where?: Instance) => void>;
 }
 
 interface ModeClientEvents {
-	serializedPush: Networking.SerializedReliable<(items: Item[], where: Instance) => void>;
+	serializedPush: Networking.Serialized<(items: Item[], where: Instance) => void>;
 	serializedTick: Networking.Serialized<Networking.Unreliable<(value: number) => void>>;
-	serializedMarked: Networking.SerializedReliable<(label: string, where?: Instance) => void>;
+	serializedMarked: Networking.Serialized<(label: string, where?: Instance) => void>;
 }
 
 interface ModeServerFunctions {

@@ -21,7 +21,7 @@ interface ClientEvents {
 	tick: Networking.Unreliable<(value: number) => void>;
 
 	/** Declared raw: its arguments travel as they are whether or not the project serializes. */
-	raw: Networking.RawReliable<(value: number) => void>;
+	raw: Networking.Raw<(value: number) => void>;
 
 	stats: { report(value: number): void };
 }

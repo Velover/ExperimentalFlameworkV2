@@ -68,10 +68,10 @@ since v1.
   `deserialize` refuses a buffer of another version or of a changed layout, and
   `Serialization.versionOf(buf)` picks the serializer of an old buffer's version (guide 07,
   "Versions").
-- To pack one heavy member with the switch off, mark it: `Networking.SerializedReliable<...>` or
-  `SerializedUnreliable<...>` for an event, `Networking.Serialized<...>` for a function (`Raw*`
-  does the opposite). The build refuses a call that may reach members packed differently, such as
-  a helper returning either a `Serialized` member or a plain one.
+- To pack one heavy member with the switch off, mark it: `Networking.Serialized<...>` (an event or
+  a function) or `Networking.SerializedUnreliable<...>` (an unreliable event); `Raw` and
+  `RawUnreliable` do the opposite. The build refuses a call that may reach members packed
+  differently, such as a helper returning either a `Serialized` member or a plain one.
 - Anything that holds one of several members' senders (a variable, parameter, field, array,
   `Record` or `Map`) must be typed as all of them: `let send: typeof Events.setA |
   typeof Events.setB = ...`. Each sender's type names its member, so `let send = Events.setA`

@@ -47,6 +47,47 @@ export function getNetworkMode(member: ts.Type | undefined, node: ts.Node, name?
 	return "plain";
 }
 
+/** The markers dropped before beta, each with the marker that replaces it: the same type. */
+const REMOVED_MARKERS = new Map([
+	["SerializedReliable", "Serialized"],
+	["RawReliable", "Raw"],
+]);
+
+/**
+ * TypeScript's error for `Networking.SerializedReliable` or `Networking.RawReliable`, which were dropped
+ * before beta, as one that names the marker replacing it; `undefined` for any other diagnostic.
+ * TypeScript's own asks "Did you mean 'SerializedUnreliable'?", which would make the event unreliable.
+ * Only TypeScript's "no exported member" errors are looked at, so a build without one pays nothing.
+ */
+export function explainRemovedNetworkMarker(
+	state: TransformState,
+	file: ts.SourceFile,
+	diagnostic: ts.DiagnosticWithLocation,
+): ts.DiagnosticWithLocation | undefined {
+	// 2694: has no exported member 'X'. 2724: has no exported member named 'X'. Did you mean 'Y'?
+	if (diagnostic.code !== 2694 && diagnostic.code !== 2724) return undefined;
+
+	const name = ts.getTokenAtPosition(file, diagnostic.start);
+	if (!ts.isIdentifier(name) || !ts.isQualifiedName(name.parent) || name.parent.right !== name) return undefined;
+
+	const replacement = REMOVED_MARKERS.get(name.text);
+	if (replacement === undefined) return undefined;
+
+	// Only networking's namespace, however it was imported or renamed.
+	let namespace = state.typeChecker.getSymbolAtLocation(name.parent.left);
+	if (namespace && namespace.flags & ts.SymbolFlags.Alias) namespace = state.typeChecker.getAliasedSymbol(namespace);
+	const exports = namespace?.exports;
+	if (!exports?.has("Serialized" as ts.__String) || !exports.has("RawUnreliable" as ts.__String)) return undefined;
+
+	const written = name.parent.left.getText(file);
+	return Diagnostics.createDiagnostic(
+		name.parent,
+		ts.DiagnosticCategory.Error,
+		`'${written}.${name.text}' was removed before beta. It was the same type as '${written}.${replacement}', which replaces it.`,
+		`Write '${written}.${replacement}<...>'. '${replacement}Unreliable' would make the event unreliable.`,
+	);
+}
+
 /** Whether a member in this mode is packed into a buffer, given the project's `networking.serialization`. */
 export function isPackedMode(state: TransformState, mode: NetworkMode): boolean {
 	if (mode === "raw") return false;

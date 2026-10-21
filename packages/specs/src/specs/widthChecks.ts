@@ -59,17 +59,17 @@ interface Everything {
 
 /** Declared in both directions, so one spec body covers both realms. */
 interface WidthEvents {
-	widthArgs: Networking.SerializedReliable<
+	widthArgs: Networking.Serialized<
 		(
 			id: Serialization.Implicit.u16,
 			delta: Serialization.Implicit.i8,
 			label: Serialization.Implicit.string8,
 		) => void
 	>;
-	widthNested: Networking.SerializedReliable<
+	widthNested: Networking.Serialized<
 		(entry: { pos: { x: Serialization.Implicit.i16 } }, list: Serialization.Implicit.u8[]) => void
 	>;
-	widthEvery: Networking.SerializedReliable<
+	widthEvery: Networking.Serialized<
 		(
 			u8: Serialization.Implicit.u8,
 			i8: Serialization.Implicit.i8,
@@ -87,8 +87,8 @@ interface WidthEvents {
 			buffer32: Serialization.Implicit.buffer32,
 		) => void
 	>;
-	widthUnion: Networking.SerializedReliable<(pick: Serialization.Implicit.u16 | string) => void>;
-	widthWide: Networking.SerializedReliable<
+	widthUnion: Networking.Serialized<(pick: Serialization.Implicit.u16 | string) => void>;
+	widthWide: Networking.Serialized<
 		(at: Serialization.Implicit.u64, delta: Serialization.Implicit.i64, id: Serialization.u64) => void
 	>;
 }

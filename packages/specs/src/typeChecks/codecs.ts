@@ -69,8 +69,8 @@ export const plasticOrWood = Flamework.createSerializer<Enum.Material.Plastic | 
 export const plasticOrNumber = Flamework.createSerializer<Enum.Material.Plastic | Enum.Material.Wood | number>();
 
 interface TypeEvents {
-	typeMove: Networking.SerializedReliable<(id: number, entity: Entity, flag: boolean) => void>;
-	typeMany: Networking.SerializedReliable<(label: string, ...values: number[]) => void>;
+	typeMove: Networking.Serialized<(id: number, entity: Entity, flag: boolean) => void>;
+	typeMany: Networking.Serialized<(label: string, ...values: number[]) => void>;
 }
 
 interface TypeFunctions {

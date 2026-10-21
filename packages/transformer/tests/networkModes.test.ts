@@ -211,7 +211,7 @@ ${uses}
 		);
 
 	test("refuses Raw with Serialized", () => {
-		const result = probe("both: Networking.RawReliable<Networking.SerializedReliable<(value: number) => void>>;");
+		const result = probe("both: Networking.Raw<Networking.Serialized<(value: number) => void>>;");
 		expect(result.status).not.toBe(0);
 		expect(result.output).toContain("The networking member 'both' is declared both Raw and Serialized");
 		expect(result.output).toContain("Keep one of the two markers.");
@@ -250,6 +250,36 @@ export const server = functions.createServer({});
 		);
 		expect(result.status).not.toBe(0);
 		expect(result.output).toContain("The networking member 'both' is declared both Raw and Serialized");
+	});
+});
+
+describe("markers dropped before beta", () => {
+	test("names the marker that replaces SerializedReliable and RawReliable, not TypeScript's guess", () => {
+		const result = compileProbe(
+			"removedMarkers",
+			`import { Networking } from "@flamework-experimental/networking";
+import { Networking as Net } from "@flamework-experimental/networking";
+
+interface ProbeServerEvents {
+	saved: Networking.SerializedReliable<(value: number) => void>;
+	chat: Net.RawReliable<(text: string) => void>;
+}
+
+export const events = Networking.createEvent<ProbeServerEvents, {}>();
+`,
+		);
+		expect(result.status).not.toBe(0);
+		expect(result.output).toContain(
+			"'Networking.SerializedReliable' was removed before beta. It was the same type as 'Networking.Serialized', which replaces it.",
+		);
+		expect(result.output).toContain(
+			"Write 'Networking.Serialized<...>'. 'SerializedUnreliable' would make the event unreliable.",
+		);
+		expect(result.output).toContain(
+			"'Net.RawReliable' was removed before beta. It was the same type as 'Net.Raw', which replaces it.",
+		);
+		// TypeScript's own error suggests the unreliable marker.
+		expect(result.output).not.toContain("Did you mean");
 	});
 });
 
@@ -332,14 +362,14 @@ describe("targets that may be several members", () => {
 
 interface ProbeServerEvents {
 	plainPing(value: number): void;
-	serializedPing: Networking.SerializedReliable<(value: number) => void>;
-	rawPing: Networking.RawReliable<(value: number) => void>;
+	serializedPing: Networking.Serialized<(value: number) => void>;
+	rawPing: Networking.Raw<(value: number) => void>;
 	wide(value: number | string): void;
 }
 
 interface ProbeClientEvents {
 	plainPong(value: number): void;
-	serializedPong: Networking.SerializedReliable<(value: number) => void>;
+	serializedPong: Networking.Serialized<(value: number) => void>;
 }
 
 interface ProbeFunctions {
@@ -549,8 +579,8 @@ describe("targets whose members lay their values out differently", () => {
 
 interface LayoutServerEvents {
 	textFirst(value: string | number): void;
-	numberFirst: Networking.SerializedReliable<(value: number | string) => void>;
-	textFirstToo: Networking.SerializedReliable<(value: string | number) => void>;
+	numberFirst: Networking.Serialized<(value: number | string) => void>;
+	textFirstToo: Networking.Serialized<(value: string | number) => void>;
 }
 
 interface LayoutFunctions {

@@ -16,7 +16,7 @@ import { SignalConnection } from "../util/signal";
 import { Modding } from "@flamework-experimental/core";
 
 /**
- * A sender declared `Networking.RawReliable` / `RawUnreliable`: its arguments travel as they are.
+ * A sender declared `Networking.Raw` / `RawUnreliable`: its arguments travel as they are.
  * Without the hidden marker below, no call site packs them and the peer runs no decoder.
  */
 export interface RawServerSender<I extends unknown[], M = "raw"> {

@@ -395,9 +395,10 @@ most one frame of delay.
 Zap, Blink and ByteNet all batch per frame, which suggests the gain is real for this kind of traffic.
 
 **How a game would ask for it** (to decide; it should be explicit):
-- a marker per member, in the family of `Raw` and `Serialized`:
-  `Networking.BatchedReliable<Fn>` / `Networking.BatchedUnreliable<Fn>`. Every fire of that member
-  goes through the batch, and the wire format stays fixed per member;
+- a marker per member, composable like `Raw`, `Serialized` and `Unreliable`: `Networking.Batched<Fn>`,
+  with `Unreliable<Batched<Fn>>` for an unreliable one, not a `BatchedReliable`/`BatchedUnreliable`
+  family (`SerializedReliable` and `RawReliable` were dropped before beta for that reason). Every
+  fire of that member goes through the batch, and the wire format stays fixed per member;
 - or a method at the call site, `Events.shot.queue(...)` next to `.fire(...)`. One member can then be
   sent either way, but the receiver has to accept both forms.
 

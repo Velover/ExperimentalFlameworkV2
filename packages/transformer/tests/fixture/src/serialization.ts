@@ -126,7 +126,7 @@ interface ServerEvents {
 	/** Fired with a literal, which is what packing at the call site has to survive. */
 	toggle(on: boolean): void;
 	/** Declared raw: its arguments travel as they are. */
-	rawPing: Networking.RawReliable<(value: number) => void>;
+	rawPing: Networking.Raw<(value: number) => void>;
 	/**
 	 * One anonymous union spelled two ways: TypeScript keeps one type for both, and each side has to
 	 * number its members as written where the value is reached. Sent from `spelling.ts`.

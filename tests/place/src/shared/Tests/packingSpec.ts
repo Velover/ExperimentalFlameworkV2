@@ -18,26 +18,26 @@ export interface PackedItem {
 export type PackingRequest = "invokeClient" | "hostile" | "maybeDown" | "maybeInvokeClient";
 
 export interface PackingServerEvents {
-	serializedUp: Networking.SerializedReliable<(items: PackedItem[], where: Instance) => void>;
+	serializedUp: Networking.Serialized<(items: PackedItem[], where: Instance) => void>;
 	serializedUpUnreliable: Networking.SerializedUnreliable<(value: number) => void>;
 	serializedStepUp: Networking.Unreliable<Networking.Serialized<(items: PackedItem[]) => void>>;
-	serializedBumpUp: Networking.SerializedReliable<() => void>;
+	serializedBumpUp: Networking.Serialized<() => void>;
 
 	/**
 	 * Can carry an Instance or leave it out. The blob list goes on the wire only when it holds
 	 * something, so a message without one is the buffer alone.
 	 */
-	serializedMaybeUp: Networking.SerializedReliable<(label: string, where?: Instance) => void>;
+	serializedMaybeUp: Networking.Serialized<(label: string, where?: Instance) => void>;
 	packingAsk(request: PackingRequest): void;
 }
 
 export interface PackingClientEvents {
-	serializedDown: Networking.SerializedReliable<(items: PackedItem[], where: Instance) => void>;
+	serializedDown: Networking.Serialized<(items: PackedItem[], where: Instance) => void>;
 	serializedDownUnreliable: Networking.Serialized<Networking.Unreliable<(value: number) => void>>;
 	serializedStepDown: Networking.SerializedUnreliable<(items: PackedItem[]) => void>;
 
 	/** `serializedMaybeUp` the other way: sent with `fire`, `broadcast` and `except` when asked (`maybeDown`). */
-	serializedMaybeDown: Networking.SerializedReliable<(label: string, where?: Instance) => void>;
+	serializedMaybeDown: Networking.Serialized<(label: string, where?: Instance) => void>;
 
 	/** The server's answer to `serializedBumpUp`: how many arguments the message carried on the wire. */
 	serializedBumped(argumentsOnWire: number): void;

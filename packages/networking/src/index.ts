@@ -15,9 +15,8 @@ import type { Modding } from "@flamework-experimental/core";
 
 export namespace Networking {
 	/**
-	 * Creates a new event based off the supplied types.
-	 * @param serverMiddleware Middleware for server events
-	 * @param clientMiddleware Middleware for client events
+	 * Creates a new event based off the supplied types. Middleware goes in the `createServer` and
+	 * `createClient` configs.
 	 * @metadata macro
 	 */
 	export function createEvent<S, C>(name?: Modding.Caller.Uuid): GlobalEvent<S, C> {
@@ -25,9 +24,8 @@ export namespace Networking {
 	}
 
 	/**
-	 * Creates a new function event based off the supplied types.
-	 * @param serverMiddleware Middleware for server events
-	 * @param clientMiddleware Middleware for client events
+	 * Creates a new function event based off the supplied types. Middleware goes in the `createServer`
+	 * and `createClient` configs.
 	 * @metadata macro
 	 */
 	export function createFunction<S, C>(name?: Modding.Caller.Uuid): GlobalFunction<S, C> {
@@ -47,39 +45,35 @@ export namespace Networking {
 	export type Unreliable<T> = NetworkUnreliable<T>;
 
 	/**
-	 * Sends this event's arguments as they are, bypassing `networking.serialization` for this event
-	 * alone. The generated guards still run on what arrives.
-	 */
-	export type RawReliable<T> = NetworkRaw<T>;
-
-	/**
-	 * An unreliable event whose arguments bypass serialization; see {@link RawReliable}.
-	 */
-	export type RawUnreliable<T> = NetworkUnreliable<NetworkRaw<T>>;
-
-	/**
-	 * A function whose requests and results bypass serialization; see {@link RawReliable}.
+	 * Sends this event's arguments, or this function's requests and results, as they are, bypassing
+	 * `networking.serialization` for this member alone. The generated guards still run on what
+	 * arrives.
+	 *
+	 * `Unreliable<Raw<T>>` and `Raw<Unreliable<T>>` are the same as `RawUnreliable<T>`.
+	 * It cannot be combined with `Serialized`.
 	 */
 	export type Raw<T> = NetworkRaw<T>;
 
 	/**
-	 * Packs this event's arguments into a buffer even when `networking.serialization` is off, exactly
-	 * as the switch would. With the switch on, it changes nothing.
+	 * An unreliable event whose arguments bypass serialization: `Unreliable<Raw<T>>`; see {@link Raw}.
+	 */
+	export type RawUnreliable<T> = NetworkUnreliable<NetworkRaw<T>>;
+
+	/**
+	 * Packs this event's arguments, or this function's requests and results, into a buffer even when
+	 * `networking.serialization` is off, exactly as the switch would. With the switch on, it changes
+	 * nothing.
 	 *
 	 * `Unreliable<Serialized<T>>` and `Serialized<Unreliable<T>>` are the same as `SerializedUnreliable<T>`.
 	 * It cannot be combined with `Raw`.
 	 */
-	export type SerializedReliable<T> = NetworkSerialized<T>;
+	export type Serialized<T> = NetworkSerialized<T>;
 
 	/**
-	 * An unreliable event whose arguments are packed into a buffer; see {@link SerializedReliable}.
+	 * An unreliable event whose arguments are packed into a buffer: `Unreliable<Serialized<T>>`; see
+	 * {@link Serialized}.
 	 */
 	export type SerializedUnreliable<T> = NetworkUnreliable<NetworkSerialized<T>>;
-
-	/**
-	 * A function whose requests and results are packed into a buffer; see {@link SerializedReliable}.
-	 */
-	export type Serialized<T> = NetworkSerialized<T>;
 
 	/**
 	 * What a middleware factory receives as its second argument: the event or function's `name`,
@@ -93,7 +87,7 @@ export namespace Networking {
 	export type EventMiddleware<I extends readonly unknown[] = unknown[]> = _EventMiddleware<I>;
 
 	/**
-	 * A function that generates an event middleware.
+	 * A function that generates a function middleware.
 	 */
 	export type FunctionMiddleware<I extends readonly unknown[] = unknown[], O = void> = _FunctionMiddleware<I, O>;
 

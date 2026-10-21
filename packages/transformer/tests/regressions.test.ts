@@ -888,8 +888,8 @@ interface Hidden {
 interface ProbeServerEvents {
 	items(items: Item[]): void;
 	hidden(items: Hidden[]): void;
-	serializedItems: Networking.SerializedReliable<(items: Item[]) => void>;
-	serializedHidden: Networking.SerializedReliable<(items: Hidden[]) => void>;
+	serializedItems: Networking.Serialized<(items: Item[]) => void>;
+	serializedHidden: Networking.Serialized<(items: Hidden[]) => void>;
 	pair(count: number, items: Item[]): void;
 	optional(items?: Item[]): void;
 	tuple(values: [number?]): void;
@@ -904,7 +904,7 @@ interface ProbeServerEvents {
 
 interface ProbeClientEvents {
 	items(items: Item[]): void;
-	serializedItems: Networking.SerializedReliable<(items: Item[]) => void>;
+	serializedItems: Networking.Serialized<(items: Item[]) => void>;
 }
 
 interface ProbeServerFunctions {

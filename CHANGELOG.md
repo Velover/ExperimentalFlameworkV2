@@ -7,6 +7,19 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 ### Upgrade notes
 
+- **`Networking.SerializedReliable` and `Networking.RawReliable` are gone.** They were the same
+  types as `Networking.Serialized` and `Networking.Raw`, which now name the marker for events and
+  functions alike. Rename them; nothing changes on the wire.
+
+  | Was | Now |
+  |---|---|
+  | `Networking.SerializedReliable<T>` | `Networking.Serialized<T>` |
+  | `Networking.RawReliable<T>` | `Networking.Raw<T>` |
+
+  Not `SerializedUnreliable` or `RawUnreliable`, which TypeScript's own error suggests: they make
+  the event unreliable. The build names the right one (unless `noSemanticDiagnostics` is on, which
+  leaves TypeScript's own message).
+
 - **flamework-test's settings are renamed, and the old names are refused.** Every setting now has
   one name in three spellings: its flag, its key in a new `flameworkTest` section of
   `flamework.config.json`, and its variable, `FLAMEWORK_TEST_` and the key in capitals
@@ -128,6 +141,22 @@ Notable changes to the `@flamework-experimental` packages. The format follows
   fraction, fails `serialization.checks` as a value too big for any width does. Needs the
   transformer of the same release.
 
+### networking
+
+#### Removed
+
+- **`Networking.SerializedReliable<T>` and `Networking.RawReliable<T>`,** the second spellings of
+  `Networking.Serialized<T>` and `Networking.Raw<T>` (see the upgrade notes). The markers left are
+  `Unreliable`, `Raw` and `Serialized`, which compose in either order, and the shorthands
+  `RawUnreliable` and `SerializedUnreliable`. A later marker, such as batching, comes as one more
+  composable marker rather than a family of combined names.
+
+#### Fixed
+
+- The documentation comments of `createEvent` and `createFunction` no longer name
+  `serverMiddleware` and `clientMiddleware` parameters, which do not exist, and
+  `FunctionMiddleware`'s says it generates a function middleware.
+
 ### testing
 
 #### Changed
@@ -212,6 +241,12 @@ Notable changes to the `@flamework-experimental` packages. The format follows
 
 #### Added
 
+- **A build error that names the replacement of a dropped networking marker:**
+  `'Networking.SerializedReliable' was removed before beta. It was the same type as
+  'Networking.Serialized', which replaces it.`, in place of TypeScript's "no exported member" error,
+  whose "Did you mean 'SerializedUnreliable'?" would make the event unreliable. The same for
+  `RawReliable`. Only TypeScript's "no exported member" errors are looked at, so a build without
+  one costs nothing more.
 - **The `u64` and `i64` widths** (see core), with their implicit twins. `buffer` has no 64-bit call,
   so each is two 32-bit writes: `buffer.writeu32(buf, o, n % 2^32)`, then
   `buffer.writeu32(buf, o + 4, math.floor(n / 2^32))` (`writei32` for an `i64`), and read back as

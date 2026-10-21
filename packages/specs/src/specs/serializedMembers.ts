@@ -18,16 +18,16 @@ interface Item {
 
 /** Declared in both directions, so one spec body covers both realms. */
 interface Bidirectional {
-	serializedItems: Networking.SerializedReliable<(items: Item[]) => void>;
-	serializedPlace: Networking.SerializedReliable<(items: Item[], where: Instance) => void>;
-	serializedBump: Networking.SerializedReliable<() => void>;
+	serializedItems: Networking.Serialized<(items: Item[]) => void>;
+	serializedPlace: Networking.Serialized<(items: Item[], where: Instance) => void>;
+	serializedBump: Networking.Serialized<() => void>;
 	serializedMove: Networking.SerializedUnreliable<(items: Item[]) => void>;
 
 	/** A guard that the decoded values have to pass, and middleware that records what it is given. */
-	serializedPart: Networking.SerializedReliable<(part: Part, label: string) => void>;
+	serializedPart: Networking.Serialized<(part: Part, label: string) => void>;
 
 	/** Its types can hold an Instance, which a call may leave out; middleware records what it is given. */
-	serializedMaybe: Networking.SerializedReliable<(label: string, where?: Instance) => void>;
+	serializedMaybe: Networking.Serialized<(label: string, where?: Instance) => void>;
 
 	/** A plain member whose argument is a tuple with a rest element. */
 	tagged(entry: [number, ...string[]]): void;
@@ -39,7 +39,7 @@ interface Bidirectional {
 	restLastArgs(...args: [number, ...string[]]): void;
 	restFirstArgs(...args: [...string[], boolean]): void;
 	restMiddleArgs(...args: [number, ...string[], boolean]): void;
-	serializedRestMiddleArgs: Networking.SerializedReliable<(...args: [number, ...string[], boolean]) => void>;
+	serializedRestMiddleArgs: Networking.Serialized<(...args: [number, ...string[], boolean]) => void>;
 }
 
 interface BidirectionalFunctions {

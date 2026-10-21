@@ -141,7 +141,7 @@ interface RecursiveServerEvents {
 	/** Serialized when the project serializes: the guard runs on what the decoder read. */
 	recursiveTree(tree: Tree): void;
 	/** As it is: the guard runs on the table that arrived. */
-	recursiveRawTree: Networking.RawReliable<(tree: Tree) => void>;
+	recursiveRawTree: Networking.Raw<(tree: Tree) => void>;
 }
 
 interface RecursiveClientEvents {

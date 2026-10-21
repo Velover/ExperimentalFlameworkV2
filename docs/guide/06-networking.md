@@ -674,23 +674,23 @@ it. So a hole near the end can still shorten the list, without an error.
 
 ### Opting in and out per event
 
-A marker on a member overrides the switch for that member alone. The plain name is for functions;
-the `Reliable` and `Unreliable` forms are for events.
+A marker on a member overrides the switch for that member alone. `Raw` and `Serialized` work on
+events and functions; the `Unreliable` forms are for events.
 
 | Markers | Values travel |
 |---|---|
-| `Raw`, `RawReliable`, `RawUnreliable` | As they are, whatever the switch says. |
-| `Serialized`, `SerializedReliable`, `SerializedUnreliable` | Packed, whatever the switch says. |
+| `Raw`, `RawUnreliable` | As they are, whatever the switch says. |
+| `Serialized`, `SerializedUnreliable` | Packed, whatever the switch says. |
 
 ```ts
 interface ServerEvents {
     // Packed, even with networking.serialization off.
-    saveBuild: Networking.SerializedReliable<(build: BuildData) => void>;
+    saveBuild: Networking.Serialized<(build: BuildData) => void>;
 }
 
 interface ClientEvents {
     position: Networking.RawUnreliable<(position: Vector3) => void>;
-    chat: Networking.RawReliable<(text: string) => void>;
+    chat: Networking.Raw<(text: string) => void>;
     // An unreliable event that is packed. These three spellings are one type:
     snapshot: Networking.SerializedUnreliable<(state: State) => void>;
     // snapshot: Networking.Unreliable<Networking.Serialized<(state: State) => void>>;

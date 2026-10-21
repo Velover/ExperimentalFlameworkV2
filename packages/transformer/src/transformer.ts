@@ -7,6 +7,7 @@ import { Logger } from "./classes/logger";
 import { f } from "./util/factory";
 import chalk from "chalk";
 import { emitTypescriptMismatch } from "./util/functions/emitTypescriptMismatch";
+import { explainRemovedNetworkMarker } from "./util/functions/networkMode";
 import { PKG_VERSION } from "./util/constants";
 import { getTsBuildInfoPath } from "./util/functions/isCleanBuildDirectory";
 import { ProjectError } from "./classes/diagnostics";
@@ -74,7 +75,9 @@ export default function (program: ts.Program, entry?: TransformerEntry) {
 					if (preEmitDiagnostics.some((x) => x.category === ts.DiagnosticCategory.Error)) {
 						preEmitDiagnostics
 							.filter(isDiagnosticWithLocation)
-							.forEach((diag) => context.addDiagnostic(diag));
+							.forEach((diag) =>
+								context.addDiagnostic(explainRemovedNetworkMarker(state, originalFile, diag) ?? diag),
+							);
 						return file;
 					}
 				} else {

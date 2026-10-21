@@ -81,8 +81,8 @@ export const treeOrMapSerializer = Flamework.createSerializer<Tree | Map<string,
 interface RecursiveServerEvents {
 	/** Packed by the project's switch. */
 	plantTree(tree: Tree): void;
-	rawTree: Networking.RawReliable<(tree: Tree) => void>;
-	serializedTree: Networking.SerializedReliable<(tree: Tree) => void>;
+	rawTree: Networking.Raw<(tree: Tree) => void>;
+	serializedTree: Networking.Serialized<(tree: Tree) => void>;
 }
 
 interface RecursiveClientEvents {

@@ -1,4 +1,3 @@
-import { NetworkingFunctionError } from "../function/errors";
 import {
 	FunctionParameters,
 	FunctionReturn,
@@ -319,43 +318,6 @@ export interface GlobalFunction<S, C> {
 		key: K,
 		callback: FunctionNetworkingEvents[K],
 	): SignalConnection;
-}
-
-export interface FunctionConfiguration {
-	/**
-	 * Disables input validation and return validation on the server, allowing any value to pass.
-	 * Defaults to `false`
-	 */
-	disableServerGuards: boolean;
-
-	/**
-	 * Disables input validation and return validation on the client, allowing any value to pass.
-	 * Defaults to `false`
-	 */
-	disableClientGuards: boolean;
-
-	/**
-	 * The default timeout for requests from the server to the client.
-	 * Defaults to `10`
-	 */
-	defaultServerTimeout: number;
-
-	/**
-	 * The default timeout for requests from the client to the server.
-	 * Defaults to `30`
-	 */
-	defaultClientTimeout: number;
-
-	/**
-	 * Emit a warning whenever a guard fails.
-	 * Defaults to `RunService.IsStudio()`
-	 */
-	warnOnInvalidGuards: boolean;
-}
-
-export interface RequestInfo {
-	nextId: number;
-	requests: Map<number, (value: unknown, rejection?: NetworkingFunctionError) => void>;
 }
 
 export type FunctionNamespaces<T> = ExcludeMembers<T, Callback>;

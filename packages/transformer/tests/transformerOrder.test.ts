@@ -34,7 +34,7 @@ interface ${name}Item {
 interface ServerEvents {}
 
 interface ClientEvents {
-	${name}Update: Networking.SerializedReliable<(items: ${name}Item[]) => void>;
+	${name}Update: Networking.Serialized<(items: ${name}Item[]) => void>;
 }
 
 const ${name}Events = Networking.createEvent<ServerEvents, ClientEvents>();
